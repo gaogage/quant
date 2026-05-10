@@ -1,0 +1,16 @@
+[package]
+name = "quant-common"
+description = "Quant system shared types, errors, and utilities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
