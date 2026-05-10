@@ -26,3 +26,19 @@ pub struct TushareData<T> {
     pub fields: Vec<String>,
     pub items: Vec<T>,
 }
+
+impl TushareData<Vec<serde_json::Value>> {
+    /// 将行数组转为 Vec<Map>，用 fields 做 key
+    pub fn to_maps(&self) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        self.items
+            .iter()
+            .map(|row| {
+                self.fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.clone(), row.get(i).cloned().unwrap_or(serde_json::Value::Null)))
+                    .collect::<serde_json::Map<_, _>>()
+            })
+            .collect()
+    }
+}

@@ -19,3 +19,4 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 uuid.workspace = true
 dotenv.workspace = true
 chrono.workspace = true
+sqlx.workspace = true

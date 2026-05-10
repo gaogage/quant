@@ -18,3 +18,4 @@ sqlx.workspace = true
 dotenv.workspace = true
 rust_decimal.workspace = true
 governor.workspace = true
+uuid.workspace = true

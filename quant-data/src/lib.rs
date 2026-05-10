@@ -8,3 +8,6 @@ pub mod model {
     pub mod tushare_dto;
     pub mod entities;
 }
+pub mod db;
+pub mod repository;
+pub mod sync;
