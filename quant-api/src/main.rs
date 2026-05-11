@@ -3,7 +3,6 @@
 use axum::{http::Request, response::IntoResponse, routing::{get, post}, Json, Router};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Instant;
 use tower_http::trace::TraceLayer;
 use tracing::{info, info_span, Span};
 use tracing_subscriber::EnvFilter;
@@ -31,7 +30,7 @@ async fn main() {
     let db = quant_data::db::pool_from_env().await.expect("数据库连接失败");
     info!("数据库已连接");
 
-    // Tushare 客户端
+    // Tushare Pro 客户端
     let tushare = quant_data::tushare::client::TushareClient::from_env()
         .expect("Tushare 客户端初始化失败");
     info!("Tushare 客户端已初始化");
@@ -53,13 +52,25 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         // 回测
-        .route("/api/v1/quant/backtests", post(routes::create_backtest))
-        .route("/api/v1/quant/backtests/{id}", get(routes::get_backtest))
-        .route("/api/v1/quant/backtests/{id}/report", get(routes::get_report))
+        .route("/api/v1/quant/backtests/run", post(routes::backtest::run_backtest))
+        .route("/api/v1/quant/backtests/run-factor", post(routes::backtest::run_factor_backtest))
         // 数据同步
         .route("/api/v1/quant/data/sync/stock-basic", post(routes::sync::sync_stock_basic))
         .route("/api/v1/quant/data/sync/daily", post(routes::sync::sync_daily))
+        .route("/api/v1/quant/data/sync/adj-factor", post(routes::sync::sync_adj_factor))
+        .route("/api/v1/quant/data/sync/index-daily", post(routes::sync::sync_index_daily))
+        .route("/api/v1/quant/data/sync/trade-cal", post(routes::sync::sync_trade_cal))
+        .route("/api/v1/quant/data/quality-check", post(routes::sync::quality_check))
         .route("/api/v1/quant/data/stats", get(routes::sync::data_stats))
+        .route("/api/v1/quant/data/sync/financial", post(routes::sync::sync_financial))
+        // 因子
+        .route("/api/v1/quant/factors/list", get(routes::factors::list_factors))
+        .route("/api/v1/quant/factors/compute", post(routes::factors::compute_factor))
+        .route("/api/v1/quant/factors/evaluate", post(routes::factors::evaluate_factor))
+        .route("/api/v1/quant/factors/sync", post(routes::factors::sync_factor_values))
+        .route("/api/v1/quant/factors/batch-sync", post(routes::factors::batch_sync_factors))
+        .route("/api/v1/quant/factors/evaluate-all", post(routes::factors::evaluate_all_factors))
+        .route("/api/v1/quant/factors/combine", post(routes::factors::combine_factors))
         .layer(trace_layer)
         .with_state(state);
 

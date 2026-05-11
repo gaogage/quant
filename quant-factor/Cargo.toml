@@ -1,6 +1,6 @@
 [package]
-name = "quant-backtest"
-description = "Multi-asset backtest engine with A-share rules and benchmark tracking"
+name = "quant-factor"
+description = "Quant factor framework: definition, computation, standardization, and evaluation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,11 +15,8 @@ tracing.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
 sqlx.workspace = true
-uuid.workspace = true
 tokio.workspace = true
-[[test]]
-name = "integration_test"
-path = "/tmp/test_runner.rs"
-[[test]]
-name = "perf"
-path = "/tmp/test_perf.rs"
+ndarray.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

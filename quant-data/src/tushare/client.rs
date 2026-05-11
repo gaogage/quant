@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use super::super::model::tushare_dto::{TushareRequest, TushareResponse};
 
@@ -150,19 +150,28 @@ impl TushareClient {
         self.call_api::<Vec<serde_json::Value>>("stock_basic", params, &[]).await
     }
 
-    /// 获取日线行情
-    pub async fn daily(
+    /// 获取日线行情（批量，支持逗号分隔多只股票，支持分页）
+    pub async fn daily_batch(
         &self,
-        ts_code: &str,
+        ts_codes: &[String],
         start_date: Option<&str>,
         end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
-        let mut params = vec![("ts_code", ts_code)];
-        if let Some(sd) = start_date {
-            params.push(("start_date", sd));
-        }
-        if let Some(ed) = end_date {
-            params.push(("end_date", ed));
+        let codes = ts_codes.join(",");
+        let mut owned: Vec<String> = vec![codes];
+        // Pre-push limit/offset so references stay valid
+        if let Some(l) = limit { owned.push(l.to_string()); }
+        if let Some(o) = offset { owned.push(o.to_string()); }
+        
+        let mut params: Vec<(&str, &str)> = vec![("ts_code", owned[0].as_str())];
+        if let Some(sd) = start_date { params.push(("start_date", sd)); }
+        if let Some(ed) = end_date { params.push(("end_date", ed)); }
+        if limit.is_some() { params.push(("limit", owned[1].as_str())); }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 2 } else { 1 };
+            params.push(("offset", owned[idx].as_str()));
         }
         self.call_api::<Vec<serde_json::Value>>("daily", params, &[]).await
     }
@@ -216,5 +225,37 @@ impl TushareClient {
             params.push(("end_date", ed));
         }
         self.call_api::<Vec<serde_json::Value>>("index_daily", params, &[]).await
+    }
+
+    // ─── 财务数据 ────────────────────────────────────────────
+
+    /// 利润表
+    pub async fn income(
+        &self, ts_code: &str, start_date: Option<&str>, end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params = vec![("ts_code", ts_code)];
+        if let Some(s) = start_date { params.push(("start_date", s)); }
+        if let Some(e) = end_date { params.push(("end_date", e)); }
+        self.call_api::<Vec<serde_json::Value>>("income", params, &[]).await
+    }
+
+    /// 资产负债表
+    pub async fn balancesheet(
+        &self, ts_code: &str, start_date: Option<&str>, end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params = vec![("ts_code", ts_code)];
+        if let Some(s) = start_date { params.push(("start_date", s)); }
+        if let Some(e) = end_date { params.push(("end_date", e)); }
+        self.call_api::<Vec<serde_json::Value>>("balancesheet", params, &[]).await
+    }
+
+    /// 财务指标
+    pub async fn fina_indicator(
+        &self, ts_code: &str, start_date: Option<&str>, end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params = vec![("ts_code", ts_code)];
+        if let Some(s) = start_date { params.push(("start_date", s)); }
+        if let Some(e) = end_date { params.push(("end_date", e)); }
+        self.call_api::<Vec<serde_json::Value>>("fina_indicator", params, &[]).await
     }
 }

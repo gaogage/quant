@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use tracing::{debug, info};
 
-use crate::model::entities::{MarketStock, MarketStockDailyBar, MarketTradeCalendar};
+use crate::model::entities::{MarketStock, MarketStockDailyBar, MarketTradeCalendar, MarketAdjustmentFactor};
 
 // ─── market_stock ────────────────────────────────────────────────
 
@@ -158,6 +158,65 @@ pub async fn bulk_upsert_calendars(
     }
     info!("批量 upsert {} 条交易日历", count);
     Ok(count)
+}
+
+// ─── market_adjustment_factor ────────────────────────────────────
+
+pub async fn upsert_adj_factors_batch(
+    pool: &PgPool,
+    factors: &[MarketAdjustmentFactor],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    let mut count = 0;
+    for f in factors {
+        sqlx::query(
+            r#"INSERT INTO market_adjustment_factor (symbol, trade_date, adj_factor, source, data_version_id)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (symbol, trade_date) DO UPDATE SET
+                 adj_factor = EXCLUDED.adj_factor,
+                 source = EXCLUDED.source,
+                 data_version_id = EXCLUDED.data_version_id"#,
+        )
+        .bind(&f.symbol)
+        .bind(f.trade_date)
+        .bind(f.adj_factor)
+        .bind(source)
+        .bind(data_version_id)
+        .execute(pool)
+        .await?;
+        count += 1;
+    }
+    info!("批量 upsert {} 条复权因子", count);
+    Ok(count)
+}
+
+// ─── data_version ─────────────────────────────────────────────────
+
+/// 创建数据版本记录（同步开始前调用）
+pub async fn create_data_version(
+    pool: &PgPool,
+    dv_id: &str,
+    name: &str,
+    source: &str,
+    tables: &[&str],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash)
+           VALUES ($1, $2, $3, $4, $5, $6, '')
+           ON CONFLICT (data_version_id) DO NOTHING"#,
+    )
+    .bind(dv_id)
+    .bind(name)
+    .bind(source)
+    .bind(start_date)
+    .bind(end_date)
+    .bind(tables)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // ─── data_sync_task ──────────────────────────────────────────────

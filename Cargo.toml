@@ -5,6 +5,7 @@ members = [
     "quant-data",
     "quant-backtest",
     "quant-api",
+    "quant-factor",
 ]
 
 [workspace.package]
@@ -58,3 +59,4 @@ governor = "0.7"
 quant-common = { path = "quant-common" }
 quant-data = { path = "quant-data" }
 quant-backtest = { path = "quant-backtest" }
+quant-factor = { path = "quant-factor" }
