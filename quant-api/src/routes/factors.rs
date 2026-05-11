@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use quant_factor::factors::price_volume::*;
+use quant_factor::neutralize::NeutralizeConfig;
 use quant_factor::*;
 
 use crate::AppState;
@@ -407,6 +408,13 @@ pub async fn batch_sync_factors(
             "momentum" => MomentumFactor::new(period).compute(&input),
             "volatility" => VolatilityFactor::new(period).compute(&input),
             "turnover" => TurnoverFactor::new(period).compute(&input),
+            "rsi" => RSIFactor::new(period).compute(&input),
+            "bb_position" => BBandPositionFactor::new(period).compute(&input),
+            "atr" => ATRFactor::new(period).compute(&input),
+            "amplitude" => AmplitudeFactor::new(period).compute(&input),
+            "vol_price_corr" => VolPriceCorrFactor::new(period).compute(&input),
+            "skewness" => SkewnessFactor::new(period).compute(&input),
+            "max_drawdown" => MaxDrawdownFactor::new(period).compute(&input),
             _ => break,
         };
 
@@ -476,6 +484,13 @@ pub struct EvaluateAllRequest {
     pub symbols: Option<Vec<String>>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    /// Enable industry/size neutralization before evaluation
+    #[serde(default)]
+    pub neutralize: Option<bool>,
+    #[serde(default)]
+    pub neutralize_industry: Option<bool>,
+    #[serde(default)]
+    pub neutralize_size: Option<bool>,
 }
 
 fn default_horizon() -> i16 { 1 }
@@ -486,6 +501,39 @@ pub async fn evaluate_all_factors(
 ) -> impl IntoResponse {
     let end_d = req.end_date.as_deref().unwrap_or("20250509");
     let start_d = req.start_date.as_deref().unwrap_or("20230101");
+
+    // Optional neutralization config
+    let do_neutralize = req.neutralize.unwrap_or(false);
+    let do_ind = req.neutralize_industry.unwrap_or(true);
+    let do_sz = req.neutralize_size.unwrap_or(false);
+
+    // Pre-load industry map + size proxy (once, reused for all factors)
+    let neut_config: Option<NeutralizeConfig> = if do_neutralize {
+        let ind_rows = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT symbol, industry FROM market_stock WHERE list_status = 'L'"
+        ).fetch_all(&state.db).await.ok().unwrap_or_default();
+        let industries: HashMap<String, String> = ind_rows.into_iter()
+            .filter_map(|(s, i)| i.filter(|i| !i.is_empty()).map(|i| (s, i)))
+            .collect();
+
+        let mut size_proxy: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+        if do_sz {
+            let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+                "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
+                 WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0
+                 ORDER BY symbol, trade_date"
+            ).bind(start_d).bind(end_d).fetch_all(&state.db).await;
+            if let Ok(rows) = amt_rows {
+                for (sym, date, amt) in rows {
+                    if let Some(a) = amt {
+                        let a_val: f64 = a.try_into().unwrap_or(0.0);
+                        if a_val > 0.0 { size_proxy.entry(sym).or_default().push((date, a_val)); }
+                    }
+                }
+            }
+        }
+        Some(NeutralizeConfig { industries, size_proxy })
+    } else { None };
 
     // Get all factor versions
     let all_factors: Vec<(String, String)> = match sqlx::query_as::<_, (String, String)>(
@@ -547,6 +595,15 @@ pub async fn evaluate_all_factors(
                 symbol_count: 0, date_count: 0, coverage_ratio: 0.0,
                 mean: f64::NAN, std: f64::NAN, min: f64::NAN, max: f64::NAN,
             },
+        };
+
+        // Optional: neutralize before evaluation
+        let output = if let Some(ref cfg) = neut_config {
+            use quant_factor::neutralize::neutralize;
+            let (neut, _res) = neutralize(&output, cfg, do_ind, do_sz);
+            neut
+        } else {
+            output
         };
 
         let evaluation = evaluate(&output, &forward_returns, 5);
@@ -627,6 +684,27 @@ fn parse_factor(name: &str) -> Option<(&'static str, usize)> {
     } else if let Some(rest) = name.strip_prefix("turn_") {
         let period: usize = rest.trim_end_matches('d').parse().ok()?;
         Some(("turnover", period))
+    } else if let Some(rest) = name.strip_prefix("rsi_") {
+        let period: usize = rest.trim_end_matches('d').parse().ok()?;
+        Some(("rsi", period))
+    } else if let Some(rest) = name.strip_prefix("bb_pos_") {
+        let period: usize = rest.trim_end_matches('d').parse().ok()?;
+        Some(("bb_position", period))
+    } else if let Some(rest) = name.strip_prefix("atr_") {
+        let period: usize = rest.trim_end_matches('d').parse().ok()?;
+        Some(("atr", period))
+    } else if let Some(rest) = name.strip_prefix("amp_") {
+        let period: usize = rest.trim_end_matches('d').parse().ok()?;
+        Some(("amplitude", period))
+    } else if let Some(rest) = name.strip_prefix("vp_corr_") {
+        let period: usize = rest.trim_end_matches('d').parse().ok()?;
+        Some(("vol_price_corr", period))
+    } else if let Some(rest) = name.strip_prefix("skew_") {
+        let period: usize = rest.trim_end_matches('d').parse().ok()?;
+        Some(("skewness", period))
+    } else if let Some(rest) = name.strip_prefix("maxdd_") {
+        let period: usize = rest.trim_end_matches('d').parse().ok()?;
+        Some(("max_drawdown", period))
     } else {
         None
     }
@@ -678,4 +756,147 @@ async fn load_bars(
     }
 
     Ok(result)
+}
+
+// ─── Factor Neutralization ─────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct NeutralizeRequest {
+    pub factor: String,
+    pub start_date: String,
+    pub end_date: String,
+    #[serde(default)]
+    pub do_industry: bool,
+    #[serde(default)]
+    pub do_size: bool,
+}
+
+pub async fn neutralize_factors(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<NeutralizeRequest>,
+) -> impl IntoResponse {
+    use quant_factor::neutralize::{neutralize, NeutralizeConfig};
+
+    // 1. Load factor values
+    let rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+        "SELECT symbol, trade_date, raw_value FROM factor_value
+         WHERE factor_code = $1 AND factor_version = '1.0.0'
+           AND trade_date >= $2::date AND trade_date <= $3::date
+         ORDER BY trade_date, symbol"
+    )
+    .bind(&req.factor)
+    .bind(&req.start_date)
+    .bind(&req.end_date)
+    .fetch_all(&state.db)
+    .await;
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => return Json(json!({"code":1,"message":format!("load factor: {}",e)})),
+    };
+
+    let values: Vec<FactorValue> = rows.into_iter()
+        .filter_map(|(sym, date, raw)| raw.map(|r| FactorValue {
+            symbol: sym, date, value: r.try_into().unwrap_or(f64::NAN),
+        }))
+        .collect();
+
+    if values.is_empty() {
+        return Json(json!({"code":1,"message":"no factor values found"}));
+    }
+
+    let output = FactorOutput {
+        name: req.factor.clone(),
+        values,
+        metadata: FactorMetadata {
+            factor_name: req.factor.clone(),
+            category: FactorCategory::PriceVolume,
+            version: "1.0.0".into(),
+            params: json!({}),
+            computed_at: chrono::Utc::now(),
+            symbol_count: 0, date_count: 0, coverage_ratio: 0.0,
+            mean: 0.0, std: 0.0, min: 0.0, max: 0.0,
+        },
+    };
+
+    // 2. Load industry map
+    let ind_rows = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT symbol, industry FROM market_stock WHERE list_status = 'L'"
+    ).fetch_all(&state.db).await;
+
+    let industries: HashMap<String, String> = match ind_rows {
+        Ok(r) => r.into_iter()
+            .filter_map(|(s, i)| i.filter(|i| !i.is_empty()).map(|i| (s, i)))
+            .collect(),
+        Err(e) => return Json(json!({"code":1,"message":format!("load industries: {}",e)})),
+    };
+
+    // 3. Load size proxy (log daily amount)
+    let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+        "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
+         WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0
+         ORDER BY symbol, trade_date"
+    )
+    .bind(&req.start_date)
+    .bind(&req.end_date)
+    .fetch_all(&state.db)
+    .await;
+
+    let mut size_proxy: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+    if let Ok(rows) = amt_rows {
+        for (sym, date, amt) in rows {
+            if let Some(a) = amt {
+                let a_val: f64 = a.try_into().unwrap_or(0.0);
+                if a_val > 0.0 {
+                    size_proxy.entry(sym).or_default().push((date, a_val));
+                }
+            }
+        }
+    }
+
+    let config = NeutralizeConfig { industries, size_proxy };
+
+    // 4. Neutralize
+    let (neut_output, result) = neutralize(&output, &config, req.do_industry, req.do_size);
+
+    // 5. Save neutralized values (back to original factor's neutralized_value column)
+    let mut saved = 0usize;
+    for chunk in neut_output.values.chunks(500) {
+        let mut tx = match state.db.begin().await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for fv in chunk {
+            if !fv.value.is_finite() { continue; }
+            let res = sqlx::query(
+                "UPDATE factor_value SET neutralized_value = $4
+                 WHERE factor_code = $1 AND factor_version = '1.0.0'
+                   AND symbol = $2 AND trade_date = $3"
+            )
+            .bind(&req.factor)  // original factor name
+            .bind(&fv.symbol)
+            .bind(fv.date)
+            .bind(fv.value)
+            .execute(&mut *tx)
+            .await;
+            if let Ok(r) = res {
+                saved += r.rows_affected() as usize;
+            }
+        }
+        let _ = tx.commit().await;
+    }
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "factor_name": neut_output.name,
+            "original_count": result.original_count,
+            "neutralized_count": result.neutralized_count,
+            "saved": saved,
+            "industry_neutral": result.industry_neutral,
+            "size_neutral": result.size_neutral,
+            "sample_values": &neut_output.values[..neut_output.values.len().min(5)]
+                .iter().map(|v| json!({"symbol":v.symbol,"date":v.date,"value":v.value})).collect::<Vec<_>>(),
+        }
+    }))
 }

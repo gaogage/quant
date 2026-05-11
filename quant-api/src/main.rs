@@ -71,6 +71,7 @@ async fn main() {
         .route("/api/v1/quant/factors/batch-sync", post(routes::factors::batch_sync_factors))
         .route("/api/v1/quant/factors/evaluate-all", post(routes::factors::evaluate_all_factors))
         .route("/api/v1/quant/factors/combine", post(routes::factors::combine_factors))
+        .route("/api/v1/quant/factors/neutralize", post(routes::factors::neutralize_factors))
         .layer(trace_layer)
         .with_state(state);
 

@@ -11,6 +11,7 @@ pub mod standardize;
 pub mod evaluate;
 pub mod combine;
 pub mod batch;
+pub mod neutralize;
 pub mod factors {
     pub mod price_volume;
 }

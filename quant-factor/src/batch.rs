@@ -84,6 +84,13 @@ pub async fn batch_compute_factors(
             "momentum" => MomentumFactor::new(period).compute(&input),
             "volatility" => VolatilityFactor::new(period).compute(&input),
             "turnover" => TurnoverFactor::new(period).compute(&input),
+            "rsi" => RSIFactor::new(period).compute(&input),
+            "bb_position" => BBandPositionFactor::new(period).compute(&input),
+            "atr" => ATRFactor::new(period).compute(&input),
+            "amplitude" => AmplitudeFactor::new(period).compute(&input),
+            "vol_price_corr" => VolPriceCorrFactor::new(period).compute(&input),
+            "skewness" => SkewnessFactor::new(period).compute(&input),
+            "max_drawdown" => MaxDrawdownFactor::new(period).compute(&input),
             _ => {
                 errors.push(format!("Unknown factor: {}", config.factor));
                 break;
@@ -130,6 +137,20 @@ fn parse_factor(name: &str) -> (&'static str, usize) {
         ("volatility", rest.trim_end_matches('d').parse().unwrap_or(20))
     } else if let Some(rest) = name.strip_prefix("turn_") {
         ("turnover", rest.trim_end_matches('d').parse().unwrap_or(20))
+    } else if let Some(rest) = name.strip_prefix("rsi_") {
+        ("rsi", rest.trim_end_matches('d').parse().unwrap_or(14))
+    } else if let Some(rest) = name.strip_prefix("bb_pos_") {
+        ("bb_position", rest.trim_end_matches('d').parse().unwrap_or(20))
+    } else if let Some(rest) = name.strip_prefix("atr_") {
+        ("atr", rest.trim_end_matches('d').parse().unwrap_or(14))
+    } else if let Some(rest) = name.strip_prefix("amp_") {
+        ("amplitude", rest.trim_end_matches('d').parse().unwrap_or(20))
+    } else if let Some(rest) = name.strip_prefix("vp_corr_") {
+        ("vol_price_corr", rest.trim_end_matches('d').parse().unwrap_or(20))
+    } else if let Some(rest) = name.strip_prefix("skew_") {
+        ("skewness", rest.trim_end_matches('d').parse().unwrap_or(20))
+    } else if let Some(rest) = name.strip_prefix("maxdd_") {
+        ("max_drawdown", rest.trim_end_matches('d').parse().unwrap_or(20))
     } else {
         ("momentum", 20) // default fallback
     }
