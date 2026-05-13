@@ -24,7 +24,7 @@ pub async fn sync_stock_basic(
     Json(req): Json<SyncStockBasicReq>,
 ) -> impl IntoResponse {
     let dv_id = req.data_version_id.unwrap_or_else(|| {
-        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S").to_string()
+        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
     });
     info!(data_version_id = %dv_id, "开始同步 A 股基本信息");
     match quant_data::sync::sync_stock_basic(&state.db, &state.tushare, &dv_id).await {
@@ -48,7 +48,7 @@ pub async fn sync_daily(
     Json(req): Json<SyncDailyReq>,
 ) -> impl IntoResponse {
     let dv_id = req.data_version_id.unwrap_or_else(|| {
-        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S").to_string()
+        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
     });
     info!(data_version_id = %dv_id, symbols = req.symbols.len(), "同步日线");
     match quant_data::sync::sync_daily_bars(
@@ -74,7 +74,7 @@ pub async fn sync_adj_factor(
     Json(req): Json<SyncAdjFactorReq>,
 ) -> impl IntoResponse {
     let dv_id = req.data_version_id.unwrap_or_else(|| {
-        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S").to_string()
+        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
     });
     info!(data_version_id = %dv_id, symbols = req.symbols.len(), "同步复权因子");
     match quant_data::sync::sync_adj_factor(
@@ -83,6 +83,36 @@ pub async fn sync_adj_factor(
         Ok(count) => Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "completed", "count": count}})),
         Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
     }
+}
+
+/// POST /api/v1/quant/data/sync/adj-factor/background
+///
+/// 大批量后台同步复权因子，立即返回 task_id。
+pub async fn sync_adj_factor_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncAdjFactorReq>,
+) -> impl IntoResponse {
+    let dv_id = req.data_version_id.unwrap_or_else(|| {
+        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
+    });
+    info!(data_version_id = %dv_id, symbols = req.symbols.len(), "后台同步复权因子");
+
+    let state = state.clone();
+    let symbols = req.symbols.clone();
+    let start = req.start_date.clone();
+    let end = req.end_date.clone();
+    let task_id = dv_id.clone();
+
+    tokio::spawn(async move {
+        match quant_data::sync::sync_adj_factor(
+            &state.db, &state.tushare, &symbols, &start, &end, &task_id,
+        ).await {
+            Ok(count) => info!(task_id = %task_id, count = count, "后台同步复权因子完成"),
+            Err(e) => tracing::error!(task_id = %task_id, error = %e.to_string(), "后台同步复权因子失败"),
+        }
+    });
+
+    Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "running"}}))
 }
 
 /// POST /api/v1/quant/data/sync/index-daily
@@ -100,7 +130,7 @@ pub async fn sync_index_daily(
     Json(req): Json<SyncIndexDailyReq>,
 ) -> impl IntoResponse {
     let dv_id = req.data_version_id.unwrap_or_else(|| {
-        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S").to_string()
+        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
     });
     info!(data_version_id = %dv_id, indexes = req.index_codes.len(), "同步指数日线");
     match quant_data::sync::sync_index_daily(
@@ -164,6 +194,77 @@ pub async fn data_stats(
         "stock_count": stock_count, "bar_count": bar_count, "adj_factor_count": adj_count,
         "fin_statement_count": fin_stmt, "fin_indicator_count": fin_ind
     }}))
+}
+
+/// POST /api/v1/quant/data/sync/daily/background
+///
+/// 大批量后台同步日线行情，立即返回 task_id。
+/// 通过 GET /api/v1/quant/data/sync/tasks/:task_id 查询进度。
+pub async fn sync_daily_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncDailyReq>,
+) -> impl IntoResponse {
+    let dv_id = req.data_version_id.unwrap_or_else(|| {
+        chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
+    });
+    info!(data_version_id = %dv_id, symbols = req.symbols.len(), "后台同步日线");
+
+    let state = state.clone();
+    let symbols = req.symbols.clone();
+    let start = req.start_date.clone();
+    let end = req.end_date.clone();
+    let task_id = dv_id.clone();
+
+    tokio::spawn(async move {
+        match quant_data::sync::sync_daily_bars(
+            &state.db, &state.tushare, &symbols, &start, &end, &task_id,
+        )
+        .await
+        {
+            Ok(count) => {
+                info!(task_id = %task_id, count = count, "后台同步日线完成");
+            }
+            Err(e) => {
+                tracing::error!(task_id = %task_id, error = %e.to_string(), "后台同步日线失败");
+            }
+        }
+    });
+
+    Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "running"}}))
+}
+
+/// GET /api/v1/quant/data/sync/tasks/:task_id
+///
+/// 查询数据同步任务状态（同步/后台均适用）。
+pub async fn sync_task_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let row: Option<(String, String, Option<i32>, Option<i32>, Option<i32>, Option<i32>)> =
+        sqlx::query_as(
+            "SELECT task_type, status, total_count, success_count, failed_count, progress
+             FROM data_sync_task WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+    match row {
+        Some((task_type, status, total, success, failed, progress)) => {
+            Json(json!({"code": 0, "data": {
+                "task_id": task_id,
+                "task_type": task_type,
+                "status": status,
+                "total": total,
+                "success": success,
+                "failed": failed,
+                "progress": progress,
+            }}))
+        }
+        None => Json(json!({"code": 1, "message": "task not found"})),
+    }
 }
 
 /// POST /api/v1/quant/data/sync/financial

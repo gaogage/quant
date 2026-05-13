@@ -55,9 +55,13 @@ impl BacktestMetrics {
 
         // 年化
         let years = n as f64 / 252.0;
-        let final_ratio_val: f64 = nav[n - 1].to_f64().unwrap_or(0.0);
-        let annual_return_pct = if years > 0.0 && final_ratio_val > 0.0 {
-            let ar = final_ratio_val.powf(1.0 / years) - 1.0;
+        let final_ratio = if initial_capital.is_zero() {
+            0.0
+        } else {
+            nav[n - 1].to_f64().unwrap_or(0.0) / initial_capital.to_f64().unwrap_or(1.0)
+        };
+        let annual_return_pct = if years > 0.0 && final_ratio > 0.0 {
+            let ar = final_ratio.powf(1.0 / years) - 1.0;
             Decimal::from_f64(ar).unwrap_or_default()
         } else {
             Decimal::zero()

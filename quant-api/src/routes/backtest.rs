@@ -141,6 +141,12 @@ pub struct RunFactorBacktestReq {
     /// Rebalance frequency: "daily", "weekly", "monthly" (or integer trading days)
     #[serde(default = "default_rebalance")]
     pub rebalance: String,
+    /// Entry delay in trading days: 0=enter next day, N=wait N days after signal
+    #[serde(default = "default_entry_delay")]
+    pub entry_delay: usize,
+    /// Minimum daily trading amount in CNY (e.g. 50000000 = 50M). 0 = no filter.
+    #[serde(default)]
+    pub min_amount: f64,
     #[serde(default = "default_max_pct")]
     pub max_position_pct: f64,
     pub benchmark: Option<String>,
@@ -154,6 +160,7 @@ pub struct RunFactorBacktestReq {
 fn default_combo_version() -> String { "1.0.0".into() }
 fn default_top_n() -> usize { 20 }
 fn default_rebalance() -> String { "monthly".into() }
+fn default_entry_delay() -> usize { 0 }
 fn default_max_pct() -> f64 { 0.10 }
 fn default_capital() -> f64 { 1_000_000.0 }
 
@@ -178,6 +185,8 @@ pub async fn run_factor_backtest(
         version: req.version.clone(),
         top_n: req.top_n,
         rebalance_freq_days: reb_freq,
+        entry_delay_days: req.entry_delay,
+        min_daily_amount_cny: if req.min_amount > 0.0 { Some(req.min_amount) } else { None },
         max_position_pct: Decimal::from_f64(req.max_position_pct).unwrap(),
     };
 
@@ -220,6 +229,7 @@ pub async fn run_factor_backtest(
                         "combo": req.combo_name,
                         "top_n": req.top_n,
                         "rebalance": req.rebalance,
+                        "entry_delay": req.entry_delay,
                         "signals_count": signals.len(),
                     },
                     "metrics": {

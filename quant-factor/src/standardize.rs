@@ -52,18 +52,28 @@ pub fn standardize(output: &FactorOutput, method: StandardizeMethod) -> FactorOu
                 }
             }
             StandardizeMethod::Winsorized(sigma) => {
-                let (mean, std) = mean_std(&raw);
-                if std > 0.0 {
-                    let lower = mean - sigma * std;
-                    let upper = mean + sigma * std;
-                    let clipped: Vec<f64> = raw.iter()
-                        .map(|&x| x.clamp(lower, upper))
-                        .collect();
-                    let (cm, cs) = mean_std(&clipped);
-                    if cs > 0.0 {
-                        for (pos, &i) in indices.iter().enumerate() {
-                            new_values[i].value = (clipped[pos] - cm) / cs;
-                        }
+                // Iterative Winsorize: clip at ±Nσ, recompute mean/std from
+                // cleaned distribution, repeat until stable (no new clips).
+                // Handles multiple extreme outliers that would otherwise
+                // keep inflating the clipping window after a fixed pass count.
+                let mut current = raw.clone();
+                for _pass in 0..10 {
+                    let (m, s) = mean_std(&current);
+                    if s <= 0.0 { break; }
+                    let lower = m - sigma * s;
+                    let upper = m + sigma * s;
+                    let mut clipped = false;
+                    for x in &mut current {
+                        let old = *x;
+                        *x = x.clamp(lower, upper);
+                        if old != *x { clipped = true; }
+                    }
+                    if !clipped { break; }  // converged
+                }
+                let (cm, cs) = mean_std(&current);
+                if cs > 0.0 {
+                    for (pos, &i) in indices.iter().enumerate() {
+                        new_values[i].value = (current[pos] - cm) / cs;
                     }
                 }
             }
@@ -213,5 +223,55 @@ mod tests {
         // sorted: B=1(0), E=2(1), C=3(2), D=4(3), A=5(4) → ranks: [1.0, 0.0, 0.5, 0.75, 0.25]
         assert!((vals[0] - 1.0).abs() < 0.01); // A: rank 4/4 = 1.0
         assert!((vals[1] - 0.0).abs() < 0.01); // B: rank 0/4 = 0.0
+    }
+
+    #[test]
+    fn test_winsorized_clips_extreme() {
+        // Normal values + one extreme outlier → should be clipped to ≤ 5σ after re-zscore
+        let output = make_output("test", vec![
+            (1.0, "A"), (2.0, "B"), (3.0, "C"), (4.0, "D"),
+            (100.0, "E"), // extreme outlier — should be winsorized
+        ]);
+        let result = standardize(&output, StandardizeMethod::Winsorized(3.0));
+        let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
+        eprintln!("winsorized values: {:?}", vals);
+        // All values should be within [-5, 5] after winsorize+re-zscore
+        for v in &vals {
+            assert!(v.abs() < 5.0, "value {} exceeds 5σ after winsorize", v);
+        }
+    }
+
+    #[test]
+    fn test_winsorized_extreme_outlier() {
+        // Simulate a realistic cross-section: 4999 normal + 1 127σ outlier
+        let mut values: Vec<(f64, &str)> = (0..4999)
+            .map(|i| (i as f64 * 0.001 - 2.5, "N")) // spread from -2.5 to 2.5
+            .collect();
+        values.push((127.0, "OUTLIER"));
+        
+        let output = make_output("large", values);
+        let result = standardize(&output, StandardizeMethod::Winsorized(5.0));
+        let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
+        let outlier_val = vals.last().unwrap();
+        eprintln!("outlier after winsorize(5): {}", outlier_val);
+        assert!(outlier_val.abs() <= 6.0, "127σ outlier should be clipped near 5σ, got {}", outlier_val);
+    }
+
+    #[test]
+    fn test_winsorized_double_outlier() {
+        // Two extreme outliers on same date — iterative Winsorize should converge
+        let mut values: Vec<(f64, &str)> = (0..2998)
+            .map(|i| (i as f64 * 0.001 - 1.5, "N"))
+            .collect();
+        values.push((774.0, "OUTLIER1"));
+        values.push((550.0, "OUTLIER2"));
+        let output = make_output("double", values);
+        let result = standardize(&output, StandardizeMethod::Winsorized(5.0));
+        let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
+        let o1 = vals[vals.len() - 2];
+        let o2 = vals[vals.len() - 1];
+        eprintln!("double outliers: {} and {}", o1, o2);
+        assert!(o1.abs() <= 6.0, "outlier1 {} > 6σ", o1);
+        assert!(o2.abs() <= 6.0, "outlier2 {} > 6σ", o2);
     }
 }

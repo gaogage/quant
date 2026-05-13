@@ -384,6 +384,62 @@ impl BacktestEngine {
             &nav, &bm_nav, self.config.initial_capital,
         );
         metrics.num_trades = self.portfolio.trades.len();
+
+        // Compute win_rate from trade P&L (FIFO matched buy-sell pairs per symbol)
+        // Buy queue: (quantity, cost, commission)
+        let mut buy_queue: HashMap<String, Vec<(Decimal, Decimal, Decimal)>> = HashMap::new();
+        let mut winning_trades: usize = 0;
+        let mut completed_trades: usize = 0;
+        for trade in &self.portfolio.trades {
+            if trade.side == super::portfolio::TradeSide::Buy {
+                buy_queue.entry(trade.symbol.clone())
+                    .or_default()
+                    .push((trade.quantity, trade.amount, trade.commission));
+            } else {
+                let mut remaining = trade.quantity;
+                let mut sell_gross = trade.amount;
+                let mut sell_comm = trade.commission;
+                let mut sell_tax = trade.tax;
+                if let Some(queue) = buy_queue.get_mut(&trade.symbol) {
+                    while !remaining.is_zero() && !queue.is_empty() {
+                        let (bought_qty, bought_cost, bought_comm) = queue[0];
+                        let matched_qty = if remaining >= bought_qty { bought_qty } else { remaining };
+                        // Proportional allocation
+                        let cost_basis = if bought_qty.is_zero() { Decimal::zero() }
+                            else { bought_cost * matched_qty / bought_qty };
+                        let buy_comm = if bought_qty.is_zero() { Decimal::zero() }
+                            else { bought_comm * matched_qty / bought_qty };
+                        let sell_gross_alloc = if trade.quantity.is_zero() { Decimal::zero() }
+                            else { sell_gross * matched_qty / trade.quantity };
+                        let sell_comm_alloc = if trade.quantity.is_zero() { Decimal::zero() }
+                            else { sell_comm * matched_qty / trade.quantity };
+                        let sell_tax_alloc = if trade.quantity.is_zero() { Decimal::zero() }
+                            else { sell_tax * matched_qty / trade.quantity };
+                        // P&L = sell net - buy total
+                        let pnl = sell_gross_alloc - sell_comm_alloc - sell_tax_alloc
+                                - cost_basis - buy_comm;
+                        if pnl > Decimal::zero() { winning_trades += 1; }
+                        completed_trades += 1;
+                        if remaining >= bought_qty {
+                            queue.remove(0);
+                            remaining -= bought_qty;
+                            sell_gross -= sell_gross_alloc;
+                            sell_comm -= sell_comm_alloc;
+                            sell_tax -= sell_tax_alloc;
+                        } else {
+                            queue[0] = (bought_qty - matched_qty, bought_cost - cost_basis, bought_comm - buy_comm);
+                            remaining = Decimal::zero();
+                        }
+                    }
+                }
+            }
+        }
+        metrics.win_rate_pct = if completed_trades > 0 {
+            Decimal::from(winning_trades) / Decimal::from(completed_trades)
+        } else {
+            Decimal::zero()
+        };
+
         metrics.calmar_ratio = if metrics.max_drawdown_pct.is_zero() {
             Decimal::zero()
         } else {

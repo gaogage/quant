@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::info;
 
 use quant_factor::factors::price_volume::*;
 use quant_factor::neutralize::NeutralizeConfig;
@@ -429,6 +430,7 @@ pub async fn batch_sync_factors(
                 }
                 _ => StandardizeMethod::ZScore,
             };
+            tracing::info!(factor=%req.factor, method=%m, sigma=?method, "foreground standardize");
             output = standardize(&output, method);
         }
 
@@ -470,6 +472,169 @@ pub async fn batch_sync_factors(
             "standardized": is_std,
         }
     }))
+}
+
+/// POST /api/v1/quant/factors/batch-sync/background
+///
+/// 后台批量计算单个因子，立即返回 task_id。
+/// 通过 GET /api/v1/quant/data/sync/tasks/:task_id 查询进度。
+pub async fn batch_sync_factors_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BatchSyncRequest>,
+) -> impl IntoResponse {
+    let task_id = chrono::Utc::now().format("fs-%Y%m%d-%H%M%S%3f").to_string();
+    let factor_name = req.factor.clone();
+    let version = req.version.clone();
+    let start = req.start_date.clone();
+    let end = req.end_date.clone();
+    let std_method = req.standardize.clone();
+    let chunk_size = req.chunk_size;
+
+    info!(task_id = %task_id, factor = %factor_name, "后台计算因子");
+
+    // Create sync task record for status tracking
+    let _ = sqlx::query(
+        "INSERT INTO data_sync_task (task_id, task_type, source, status) VALUES ($1, $2, 'factor', 'running')"
+    )
+    .bind(&task_id)
+    .bind(&format!("factor:{}", factor_name))
+    .execute(&state.db)
+    .await;
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let fname = factor_name.clone();
+
+    tokio::spawn(async move {
+        let result: Result<serde_json::Value, String> = async {
+            let all_syms: Vec<String> = sqlx::query_scalar(
+                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
+            ).fetch_all(&state.db).await.map_err(|e| e.to_string())?;
+
+            let (ftype, period) = parse_factor(&fname)
+                .ok_or_else(|| format!("unknown factor: {}", fname))?;
+
+            let start_d = start.as_deref().unwrap_or("20160101");
+            let end_d = end.as_deref().unwrap_or("20260511");
+            let is_std = std_method.is_some();
+            let mut total_vals = 0usize;
+            let mut inserted = 0usize;
+            let mut errors: Vec<String> = Vec::new();
+
+            for chunk in all_syms.chunks(chunk_size) {
+                let syms: Vec<String> = chunk.iter().map(|s| s.clone()).collect();
+                let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+
+                // Batch-load all bars for this chunk in ONE query
+                let all_rows: Vec<(String, NaiveDate, Decimal, Decimal, Decimal, Decimal, Option<Decimal>, Option<Decimal>, Decimal, Decimal)> =
+                    sqlx::query_as("SELECT symbol, trade_date, open, high, low, close, pre_close, pct_change, volume, amount
+                        FROM market_stock_daily_bar WHERE symbol = ANY($1) AND trade_date >= $2::date AND trade_date <= $3::date ORDER BY symbol, trade_date ASC")
+                    .bind(&sym_refs).bind(start_d).bind(end_d)
+                    .fetch_all(&state.db).await
+                    .map_err(|e| format!("batch query failed ({} symbols, {} - {}): {}", sym_refs.len(), start_d, end_d, e))?;
+
+                // Group by symbol
+                let mut bars_map: HashMap<String, Vec<DailyBar>> = HashMap::new();
+                for (sym, d, o, h, l, c, pc, cp, v, a) in all_rows {
+                    if let (Some(pc_val), Some(cp_val)) = (pc, cp) {
+                        bars_map.entry(sym.clone()).or_default().push(DailyBar {
+                            symbol: sym, trade_date: d, open: o, high: h, low: l,
+                            close: c, pre_close: Some(pc_val), change_pct: Some(cp_val),
+                            volume: v, amount: a,
+                        });
+                    } else {
+                        bars_map.entry(sym.clone()).or_default().push(DailyBar {
+                            symbol: sym, trade_date: d, open: o, high: h, low: l,
+                            close: c, pre_close: pc, change_pct: cp,
+                            volume: v, amount: a,
+                        });
+                    }
+                }
+                // Filter symbols with insufficient data
+                bars_map.retain(|_, bars| bars.len() > period + 1);
+
+                if bars_map.is_empty() { continue; }
+
+                let input = FactorInput { bars: bars_map, trade_dates: vec![] };
+                let mut output = match ftype {
+                    "momentum" => MomentumFactor::new(period).compute(&input),
+                    "volatility" => VolatilityFactor::new(period).compute(&input),
+                    "turnover" => TurnoverFactor::new(period).compute(&input),
+                    "rsi" => RSIFactor::new(period).compute(&input),
+                    "bb_position" => BBandPositionFactor::new(period).compute(&input),
+                    "atr" => ATRFactor::new(period).compute(&input),
+                    "amplitude" => AmplitudeFactor::new(period).compute(&input),
+                    "vol_price_corr" => VolPriceCorrFactor::new(period).compute(&input),
+                    "skewness" => SkewnessFactor::new(period).compute(&input),
+                    "max_drawdown" => MaxDrawdownFactor::new(period).compute(&input),
+                    _ => { errors.push(format!("Unknown factor: {}", ftype)); break; }
+                };
+
+                if let Some(ref m) = std_method {
+                    let method = match m.as_str() {
+                        "zscore" => StandardizeMethod::ZScore,
+                        "rank" => StandardizeMethod::Rank,
+                        s if s.starts_with("winsorized_") => {
+                            let sigma: f64 = s.trim_start_matches("winsorized_").parse().unwrap_or(3.0);
+                            StandardizeMethod::Winsorized(sigma)
+                        }
+                        _ => StandardizeMethod::ZScore,
+                    };
+                    output = standardize(&output, method);
+                }
+
+                total_vals += output.values.len();
+
+                for fv in &output.values {
+                    match sqlx::query(
+                        "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value)
+                         VALUES ($1,$2,$3,$4,$5,$6)
+                         ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                           raw_value=EXCLUDED.raw_value, normalized_value=EXCLUDED.normalized_value, created_at=NOW()"
+                    )
+                    .bind(&output.name).bind(&version).bind(&fv.symbol).bind(fv.date)
+                    .bind(fv.value).bind(if is_std { Some(fv.value) } else { None::<f64> })
+                    .execute(&state.db).await
+                    {
+                        Ok(_) => inserted += 1,
+                        Err(e) => errors.push(format!("{}: {}", fv.symbol, e)),
+                    }
+                }
+            }
+
+            let factor_output_name = format!("{}_{}d{}", ftype, period, if is_std { "_std" } else { "" });
+            Ok(serde_json::json!({
+                "factor_name": factor_output_name, "version": version,
+                "total_values": total_vals, "inserted": inserted,
+                "error_count": errors.len()
+            }))
+        }.await;
+
+        match result {
+            Ok(data) => {
+                info!(task_id = %tid, "后台计算因子完成");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task SET status='completed', total_count=$1, success_count=$2, failed_count=$3, progress=100, completed_at=now() WHERE task_id=$4"
+                )
+                .bind(data["total_values"].as_i64().unwrap_or(0) as i32)
+                .bind(data["inserted"].as_i64().unwrap_or(0) as i32)
+                .bind(data["error_count"].as_i64().unwrap_or(0) as i32)
+                .bind(&tid)
+                .execute(&state.db).await;
+            }
+            Err(e) => {
+                tracing::error!(task_id = %tid, error = %e, "后台计算因子失败");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task SET status='failed', error_message=$2, progress=0, completed_at=now() WHERE task_id=$1"
+                )
+                .bind(&tid)
+                .bind(&e)
+                .execute(&state.db).await;
+            }
+        }
+    });
+
+    Json(json!({"code": 0, "data": {"task_id": task_id, "status": "running", "factor": factor_name}}))
 }
 
 // ─── Evaluate all factors (from DB) ────────────────────────
@@ -613,6 +778,212 @@ pub async fn evaluate_all_factors(
     Json(json!({"code":0,"data":{"evaluations":results,"count":results.len()}}))
 }
 
+/// POST /api/v1/quant/factors/evaluate-all/background
+///
+/// 后台评估所有因子 IC/ICIR，立即返回 task_id。
+pub async fn evaluate_all_factors_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EvaluateAllRequest>,
+) -> impl IntoResponse {
+    let task_id = chrono::Utc::now().format("ev-%Y%m%d-%H%M%S%3f").to_string();
+    let start_d = req.start_date.clone();
+    let end_d = req.end_date.clone();
+    let do_neutralize = req.neutralize.unwrap_or(false);
+    let do_ind = req.neutralize_industry.unwrap_or(true);
+    let do_sz = req.neutralize_size.unwrap_or(false);
+    let horizon = req.horizon as usize;
+
+    info!(task_id = %task_id, horizon = horizon, "后台评估所有因子");
+
+    let _ = sqlx::query(
+        "INSERT INTO data_sync_task (task_id, task_type, source, status) VALUES ($1, 'evaluate_all', 'factor', 'running')"
+    ).bind(&task_id).execute(&state.db).await;
+
+    let state = state.clone();
+    let tid = task_id.clone();
+
+    tokio::spawn(async move {
+        let result: Result<usize, String> = async {
+            let start = start_d.as_deref().unwrap_or("20160101");
+            let end = end_d.as_deref().unwrap_or("20260511");
+            let do_neut = do_neutralize;
+            let di = do_ind;
+            let ds = do_sz;
+
+            let neut_config: Option<NeutralizeConfig> = if do_neut {
+                let ind_rows = sqlx::query_as::<_, (String, Option<String>)>(
+                    "SELECT symbol, industry FROM market_stock WHERE list_status = 'L'"
+                ).fetch_all(&state.db).await.ok().unwrap_or_default();
+                let industries: HashMap<String, String> = ind_rows.into_iter()
+                    .filter_map(|(s, i)| i.filter(|i| !i.is_empty()).map(|i| (s, i)))
+                    .collect();
+                let mut size_proxy: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+                if ds {
+                    let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+                        "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
+                         WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0 ORDER BY symbol, trade_date"
+                    ).bind(start).bind(end).fetch_all(&state.db).await;
+                    if let Ok(rows) = amt_rows {
+                        for (sym, date, amt) in rows {
+                            if let Some(a) = amt {
+                                let a_val: f64 = a.try_into().unwrap_or(0.0);
+                                if a_val > 0.0 { size_proxy.entry(sym).or_default().push((date, a_val)); }
+                            }
+                        }
+                    }
+                }
+                Some(NeutralizeConfig { industries, size_proxy })
+            } else { None };
+
+            let all_factors: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+                "SELECT DISTINCT factor_code, factor_version FROM factor_value ORDER BY factor_code"
+            ).fetch_all(&state.db).await.map_err(|e| e.to_string())?;
+
+            // Load forward returns ONCE for all factors — support multi-horizon
+            // Load close prices grouped by symbol, compute N-day forward return
+            let fwd_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+                "SELECT symbol, trade_date, close FROM market_stock_daily_bar
+                 WHERE trade_date >= $1::date AND trade_date <= $2::date
+                   AND close > 0
+                 ORDER BY symbol, trade_date"
+            ).bind(start).bind(end).fetch_all(&state.db).await
+              .map_err(|e| format!("Failed to load forward returns: {}", e))?;
+
+            info!(fwd_rows = fwd_rows.len(), horizon = horizon, "Loaded close prices");
+
+            // Group close prices by symbol: symbol -> [(date, close)]
+            let mut close_by_sym: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+            for (sym, date, close) in &fwd_rows {
+                if let Some(c) = close {
+                    let cf: f64 = (*c).try_into().unwrap_or(0.0);
+                    if cf > 0.0 {
+                        close_by_sym.entry(sym.clone()).or_default().push((*date, cf));
+                    }
+                }
+            }
+
+            // Build N-day forward returns: date T -> (close_T+N - close_T) / close_T
+            let mut fwd_map: HashMap<NaiveDate, HashMap<String, f64>> = HashMap::new();
+            for (sym, prices) in &close_by_sym {
+                for i in 0..prices.len().saturating_sub(horizon) {
+                    let (date, close_t) = prices[i];
+                    let (_date_n, close_n) = prices[i + horizon];
+                    let ret = (close_n - close_t) / close_t;
+                    fwd_map.entry(date).or_default().insert(sym.clone(), ret);
+                }
+            }
+            info!(fwd_dates = fwd_map.len(), "Forward return map built");
+
+            let mut count = 0usize;
+            for (code, ver) in &all_factors {
+                info!(factor = %code, version = %ver, "Evaluating factor");
+
+                let fv_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+                    "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
+                     FROM factor_value WHERE factor_code=$1 AND factor_version=$2
+                     AND trade_date >= $3::date AND trade_date <= $4::date ORDER BY symbol, trade_date"
+                ).bind(code).bind(ver).bind(start).bind(end)
+                  .fetch_all(&state.db).await.unwrap_or_default();
+
+                info!(factor = %code, fv_rows = fv_rows.len(), "Factor values loaded");
+
+                if fv_rows.len() < 100 { continue; }
+
+                let mut values_map: HashMap<NaiveDate, Vec<(String, f64)>> = HashMap::new();
+                for (sym, date, val) in &fv_rows {
+                    if let Some(v) = val {
+                        let vf: f64 = (*v).try_into().unwrap_or(0.0);
+                        values_map.entry(*date).or_default().push((sym.clone(), vf));
+                    }
+                }
+
+                let mut output = FactorOutput {
+                    name: code.clone(),
+                    values: vec![],
+                    metadata: FactorMetadata {
+                        factor_name: code.clone(),
+                        category: FactorCategory::PriceVolume,
+                        version: ver.clone(),
+                        params: json!({}),
+                        computed_at: chrono::Utc::now(),
+                        symbol_count: 0,
+                        date_count: 0,
+                        coverage_ratio: 0.0,
+                        mean: 0.0, std: 0.0, min: 0.0, max: 0.0,
+                    },
+                };
+                let mut forward_returns: HashMap<(String, NaiveDate), f64> = HashMap::new();
+                let dates: Vec<NaiveDate> = {
+                    let mut ds: Vec<NaiveDate> = values_map.keys().copied().collect();
+                    ds.sort(); ds
+                };
+                for &date in &dates {
+                    if let (Some(vals), Some(fwds)) = (values_map.get(&date), fwd_map.get(&date)) {
+                        for (sym, val) in vals {
+                            let fv = FactorValue { symbol: sym.clone(), date, value: *val };
+                            output.values.push(fv);
+                            if let Some(fwd) = fwds.get(sym) {
+                                forward_returns.insert((sym.clone(), date), *fwd);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(ref cfg) = neut_config {
+                    use quant_factor::neutralize::neutralize;
+                    let (neut, _) = neutralize(&output, cfg, di, ds);
+                    output = neut;
+                }
+
+                let evaluation = evaluate(&output, &forward_returns, 5);
+                let ic_json = serde_json::to_value(&evaluation.ic_series).unwrap_or(json!([]));
+                let qr_json = serde_json::to_value(&evaluation.quantile_returns).unwrap_or(json!([]));
+                let insert_result = sqlx::query(
+                    "INSERT INTO factor_evaluation (factor_code, factor_version, horizon, start_date, end_date,
+                     mean_ic, ic_ir, mean_rank_ic, rank_ic_ir, ic_series, rank_ic_series,
+                     quantile_spread, quantile_returns, period_count, symbol_count, total_pairs)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,0,0)
+                     ON CONFLICT (factor_code, factor_version, horizon, start_date, end_date) DO UPDATE SET
+                     mean_ic=EXCLUDED.mean_ic, ic_ir=EXCLUDED.ic_ir,
+                     mean_rank_ic=EXCLUDED.mean_rank_ic, rank_ic_ir=EXCLUDED.rank_ic_ir,
+                     ic_series=EXCLUDED.ic_series, rank_ic_series=EXCLUDED.rank_ic_series,
+                     quantile_spread=EXCLUDED.quantile_spread, quantile_returns=EXCLUDED.quantile_returns,
+                     period_count=EXCLUDED.period_count"
+                )
+                .bind(code).bind(ver)
+                .bind(horizon as i32)
+                .bind(evaluation.date_range.0).bind(evaluation.date_range.1)
+                .bind(evaluation.mean_ic).bind(evaluation.ic_ir)
+                .bind(evaluation.mean_rank_ic).bind(evaluation.rank_ic_ir)
+                .bind(&ic_json).bind(&ic_json)
+                .bind(evaluation.quantile_spread).bind(&qr_json)
+                .bind(evaluation.period_count as i32)
+                .execute(&state.db).await;
+                if let Err(ref e) = insert_result {
+                    tracing::error!(factor = %code, error = %e, "Failed to insert evaluation");
+                }
+                count += 1;
+            }
+            Ok(count)
+        }.await;
+
+        match result {
+            Ok(count) => {
+                info!(task_id = %tid, count = count, "后台评估完成");
+                let _ = sqlx::query("UPDATE data_sync_task SET status='completed', total_count=$1, progress=100, completed_at=now() WHERE task_id=$2")
+                    .bind(count as i32).bind(&tid).execute(&state.db).await;
+            }
+            Err(e) => {
+                tracing::error!(task_id = %tid, error = %e, "后台评估失败");
+                let _ = sqlx::query("UPDATE data_sync_task SET status='failed', completed_at=now() WHERE task_id=$1")
+                    .bind(&tid).execute(&state.db).await;
+            }
+        }
+    });
+
+    Json(json!({"code": 0, "data": {"task_id": task_id, "status": "running"}}))
+}
+
 // ─── Combine factors ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -623,6 +994,8 @@ pub struct CombineFactorsRequest {
     pub factors: Vec<FactorRef>,
     #[serde(default = "default_combine_method")]
     pub method: String,
+    #[serde(default = "default_horizon")]
+    pub horizon: i16,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
 }
@@ -649,7 +1022,7 @@ pub async fn combine_factors(
         _ => CombineMethod::IcirWeighted,
     };
 
-    let weights = match compute_weights(&state.db, &factors, method, 1).await {
+    let weights = match compute_weights(&state.db, &factors, method, req.horizon).await {
         Ok(w) => w,
         Err(e) => return Json(json!({"code":1,"message":e})),
     };
@@ -675,6 +1048,7 @@ pub async fn combine_factors(
 
 /// Parse factor string like "mom_20d" → ("momentum", 20) or "turn_5d" → ("turnover", 5)
 fn parse_factor(name: &str) -> Option<(&'static str, usize)> {
+    let name = name.strip_suffix("_std").unwrap_or(name);
     if let Some(rest) = name.strip_prefix("mom_") {
         let period: usize = rest.trim_end_matches('d').parse().ok()?;
         Some(("momentum", period))

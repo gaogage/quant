@@ -96,7 +96,7 @@ pub async fn sync_daily_bars(
     end: &str,
     dv_id: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let task_id = Uuid::new_v4().to_string();
+    let task_id = dv_id.to_string();
     repository::create_sync_task(pool, &task_id, "daily", "running").await?;
 
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
@@ -277,7 +277,7 @@ pub async fn sync_adj_factor(
     end: &str,
     dv_id: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let task_id = Uuid::new_v4().to_string();
+    let task_id = dv_id.to_string();
     repository::create_sync_task(pool, &task_id, "adj_factor", "running").await?;
 
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;

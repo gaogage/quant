@@ -7,13 +7,13 @@ use tracing::info;
 /// 创建 PostgreSQL 连接池
 pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .min_connections(2)
+        .max_connections(20)
+        .min_connections(4)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(database_url)
         .await?;
 
-    info!("数据库连接池已创建 (max=10, min=2)");
+    info!("数据库连接池已创建 (max=20, min=4)");
     Ok(pool)
 }
 
