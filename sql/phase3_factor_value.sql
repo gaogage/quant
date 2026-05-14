@@ -1,3 +1,4 @@
+-- PROTOTYPE ONLY: superseded by docs/projects/quant/tasks/quant/sql/001_initial_schema.sql
 -- Factor value persistence (Phase 3)
 -- TimescaleDB hypertable for storing computed factor values
 

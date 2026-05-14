@@ -43,8 +43,16 @@ pub struct BatchResult {
 /// The `save_fn` callback is called per chunk to persist values.
 pub async fn batch_compute_factors(
     config: BatchConfig,
-    bar_loader: Arc<dyn Fn(&[String], NaiveDate, NaiveDate) -> Result<HashMap<String, Vec<DailyBar>>, String> + Send + Sync>,
-    save_fn: Arc<dyn Fn(&str, &str, &[(String, NaiveDate, f64, bool)]) -> Result<usize, String> + Send + Sync>,
+    bar_loader: Arc<
+        dyn Fn(&[String], NaiveDate, NaiveDate) -> Result<HashMap<String, Vec<DailyBar>>, String>
+            + Send
+            + Sync,
+    >,
+    save_fn: Arc<
+        dyn Fn(&str, &str, &[(String, NaiveDate, f64, bool)]) -> Result<usize, String>
+            + Send
+            + Sync,
+    >,
 ) -> BatchResult {
     let mut total_values = 0usize;
     let mut inserted = 0usize;
@@ -53,7 +61,7 @@ pub async fn batch_compute_factors(
     let (factor_type, period) = parse_factor(&config.factor);
     let n_chunks = (config.symbols.len() + config.chunk_size - 1) / config.chunk_size;
 
-    // We only use Mutex to avoid full Arc<Mutex<>> on the loader; 
+    // We only use Mutex to avoid full Arc<Mutex<>> on the loader;
     // actually bar_loader is Arc<Fn> so we can call it concurrently.
     for (chunk_idx, chunk) in config.symbols.chunks(config.chunk_size).enumerate() {
         let syms: Vec<String> = chunk.to_vec();
@@ -77,7 +85,10 @@ pub async fn batch_compute_factors(
             continue;
         }
 
-        let input = FactorInput { bars, trade_dates: vec![] };
+        let input = FactorInput {
+            bars,
+            trade_dates: vec![],
+        };
 
         // Compute factor
         let mut output = match factor_type {
@@ -106,7 +117,9 @@ pub async fn batch_compute_factors(
         total_values += output.values.len();
 
         // Build save rows: (symbol, date, value, is_standardized)
-        let rows: Vec<(String, NaiveDate, f64, bool)> = output.values.iter()
+        let rows: Vec<(String, NaiveDate, f64, bool)> = output
+            .values
+            .iter()
             .map(|fv| (fv.symbol.clone(), fv.date, fv.value, is_std))
             .collect();
 
@@ -117,10 +130,15 @@ pub async fn batch_compute_factors(
     }
 
     BatchResult {
-        factor_name: format!("{}_{}d{}", 
-            factor_type, 
+        factor_name: format!(
+            "{}_{}d{}",
+            factor_type,
             period,
-            if config.standardize.is_some() { "_std" } else { "" }
+            if config.standardize.is_some() {
+                "_std"
+            } else {
+                ""
+            }
         ),
         version: config.version,
         total_values,
@@ -134,23 +152,38 @@ fn parse_factor(name: &str) -> (&'static str, usize) {
     if let Some(rest) = name.strip_prefix("mom_") {
         ("momentum", rest.trim_end_matches('d').parse().unwrap_or(20))
     } else if let Some(rest) = name.strip_prefix("vol_") {
-        ("volatility", rest.trim_end_matches('d').parse().unwrap_or(20))
+        (
+            "volatility",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
     } else if let Some(rest) = name.strip_prefix("turn_") {
         ("turnover", rest.trim_end_matches('d').parse().unwrap_or(20))
     } else if let Some(rest) = name.strip_prefix("rsi_") {
         ("rsi", rest.trim_end_matches('d').parse().unwrap_or(14))
     } else if let Some(rest) = name.strip_prefix("bb_pos_") {
-        ("bb_position", rest.trim_end_matches('d').parse().unwrap_or(20))
+        (
+            "bb_position",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
     } else if let Some(rest) = name.strip_prefix("atr_") {
         ("atr", rest.trim_end_matches('d').parse().unwrap_or(14))
     } else if let Some(rest) = name.strip_prefix("amp_") {
-        ("amplitude", rest.trim_end_matches('d').parse().unwrap_or(20))
+        (
+            "amplitude",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
     } else if let Some(rest) = name.strip_prefix("vp_corr_") {
-        ("vol_price_corr", rest.trim_end_matches('d').parse().unwrap_or(20))
+        (
+            "vol_price_corr",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
     } else if let Some(rest) = name.strip_prefix("skew_") {
         ("skewness", rest.trim_end_matches('d').parse().unwrap_or(20))
     } else if let Some(rest) = name.strip_prefix("maxdd_") {
-        ("max_drawdown", rest.trim_end_matches('d').parse().unwrap_or(20))
+        (
+            "max_drawdown",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
     } else {
         ("momentum", 20) // default fallback
     }

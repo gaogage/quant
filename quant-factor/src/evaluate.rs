@@ -27,6 +27,12 @@ pub fn evaluate(
         if !fv.value.is_finite() {
             continue;
         }
+        if fv
+            .available_at
+            .is_some_and(|available_at| available_at > fv.date)
+        {
+            continue;
+        }
         if let Some(&fw_ret) = forward_returns.get(&(fv.symbol.clone(), fv.date)) {
             if fw_ret.is_finite() {
                 aligned.push((fv.symbol.clone(), fv.date, fv.value, fw_ret));
@@ -55,7 +61,10 @@ pub fn evaluate(
     // Group by date for cross-sectional IC
     let mut by_date: BTreeMap<chrono::NaiveDate, Vec<(f64, f64)>> = BTreeMap::new();
     for (_, date, factor_val, fw_ret) in &aligned {
-        by_date.entry(*date).or_default().push((*factor_val, *fw_ret));
+        by_date
+            .entry(*date)
+            .or_default()
+            .push((*factor_val, *fw_ret));
     }
 
     let mut ic_series = Vec::new();
@@ -97,13 +106,18 @@ pub fn evaluate(
 
     for q in 0..n_quantiles {
         let start = q * chunk_size;
-        let end = if q == n_quantiles - 1 { total } else { (q + 1) * chunk_size };
+        let end = if q == n_quantiles - 1 {
+            total
+        } else {
+            (q + 1) * chunk_size
+        };
         let slice = &sorted[start..end];
         let rets: Vec<f64> = slice.iter().map(|(_, _, _, r)| *r).collect();
         quantile_returns[q] = mean_of(&rets);
     }
 
-    let quantile_spread = quantile_returns.last().unwrap_or(&0.0) - quantile_returns.first().unwrap_or(&0.0);
+    let quantile_spread =
+        quantile_returns.last().unwrap_or(&0.0) - quantile_returns.first().unwrap_or(&0.0);
 
     FactorEvaluation {
         factor_name: factor.name.clone(),
@@ -114,7 +128,11 @@ pub fn evaluate(
         mean_ic,
         ic_ir: if ic_std > 0.0 { mean_ic / ic_std } else { 0.0 },
         mean_rank_ic,
-        rank_ic_ir: if rank_ic_std > 0.0 { mean_rank_ic / rank_ic_std } else { 0.0 },
+        rank_ic_ir: if rank_ic_std > 0.0 {
+            mean_rank_ic / rank_ic_std
+        } else {
+            0.0
+        },
         ic_series,
         quantile_spread,
         quantile_returns,
@@ -180,7 +198,8 @@ fn std_of(values: &[f64]) -> f64 {
         return 0.0;
     }
     let mean = mean_of(values);
-    let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    let variance =
+        values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
     variance.sqrt()
 }
 
@@ -212,5 +231,83 @@ mod tests {
         let rank_rs = to_ranks(&rs);
         let corr = pearson_corr(&rank_fs, &rank_rs).unwrap();
         assert!((corr - 1.0).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod pit_tests {
+    use super::*;
+    use crate::types::{FactorCategory, FactorMetadata, FactorOutput, FactorValue};
+    use chrono::{NaiveDate, Utc};
+    use std::collections::HashMap;
+
+    fn factor_value(
+        symbol: &str,
+        date: &str,
+        value: f64,
+        available_at: Option<&str>,
+    ) -> FactorValue {
+        FactorValue {
+            symbol: symbol.to_string(),
+            date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            value,
+            available_at: available_at.map(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap()),
+        }
+    }
+
+    fn output(values: Vec<FactorValue>) -> FactorOutput {
+        FactorOutput {
+            name: "pit_factor".into(),
+            values,
+            metadata: FactorMetadata {
+                factor_name: "pit_factor".into(),
+                category: FactorCategory::Fundamental,
+                version: "1.0.0".into(),
+                params: serde_json::json!({}),
+                computed_at: Utc::now(),
+                symbol_count: 0,
+                date_count: 0,
+                coverage_ratio: 0.0,
+                mean: 0.0,
+                std: 0.0,
+                min: 0.0,
+                max: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn evaluate_excludes_values_unavailable_on_factor_date() {
+        let factor = output(vec![
+            factor_value("A", "2024-01-02", 1.0, Some("2024-01-02")),
+            factor_value("B", "2024-01-02", 2.0, Some("2024-01-03")),
+            factor_value("C", "2024-01-02", 3.0, Some("2024-01-02")),
+        ]);
+        let mut returns = HashMap::new();
+        returns.insert(
+            (
+                "A".to_string(),
+                NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            ),
+            0.01,
+        );
+        returns.insert(
+            (
+                "B".to_string(),
+                NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            ),
+            0.02,
+        );
+        returns.insert(
+            (
+                "C".to_string(),
+                NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            ),
+            0.03,
+        );
+
+        let evaluation = evaluate(&factor, &returns, 2);
+
+        assert_eq!(evaluation.period_count, 0);
     }
 }

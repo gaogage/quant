@@ -1,6 +1,10 @@
 //! Factor API routes — compute, standardize, and evaluate factors
 
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, Query, State},
+    response::IntoResponse,
+    Json,
+};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -46,7 +50,9 @@ pub struct EvaluateFactorRequest {
     pub n_quantiles: usize,
 }
 
-fn default_n_quantiles() -> usize { 5 }
+fn default_n_quantiles() -> usize {
+    5
+}
 
 #[derive(Debug, Deserialize)]
 pub struct BatchSyncRequest {
@@ -60,8 +66,199 @@ pub struct BatchSyncRequest {
     pub chunk_size: usize,
 }
 
-fn default_version() -> String { "1.0.0".to_string() }
-fn default_chunk_size() -> usize { 100 }
+fn default_version() -> String {
+    "1.0.0".to_string()
+}
+fn default_chunk_size() -> usize {
+    100
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterFactorDefinitionRequest {
+    pub factor_code: String,
+    pub version: String,
+    pub name: String,
+    pub category: String,
+    pub frequency: Option<String>,
+    pub dependencies: Option<serde_json::Value>,
+    pub parameters: Option<serde_json::Value>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug)]
+struct FactorDefinitionInput {
+    factor_code: String,
+    version: String,
+    name: String,
+    category: String,
+    frequency: String,
+    dependencies: serde_json::Value,
+    parameters: serde_json::Value,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListFactorDefinitionsQuery {
+    pub factor_code: Option<String>,
+    pub version: Option<String>,
+    pub category: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct FactorDefinitionRecord {
+    factor_id: i64,
+    factor_code: String,
+    version: String,
+    name: String,
+    category: String,
+    frequency: String,
+    dependencies: serde_json::Value,
+    parameters: serde_json::Value,
+    status: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+type FactorDefinitionRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    serde_json::Value,
+    Option<serde_json::Value>,
+    String,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+);
+
+impl RegisterFactorDefinitionRequest {
+    fn into_definition(self) -> Result<FactorDefinitionInput, String> {
+        let dependencies = self.dependencies.unwrap_or_else(|| json!([]));
+        if !dependencies.is_array() {
+            return Err("dependencies must be a JSON array".to_string());
+        }
+
+        Ok(FactorDefinitionInput {
+            factor_code: trim_required(self.factor_code, "factor_code")?,
+            version: trim_required(self.version, "version")?,
+            name: trim_required(self.name, "name")?,
+            category: trim_required(self.category, "category")?,
+            frequency: trim_optional(self.frequency, "daily"),
+            dependencies,
+            parameters: self.parameters.unwrap_or_else(|| json!({})),
+            status: trim_optional(self.status, "active"),
+        })
+    }
+}
+
+fn trim_required(value: String, field: &str) -> Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err(format!("{} is required", field))
+    } else {
+        Ok(value)
+    }
+}
+
+fn trim_optional(value: Option<String>, default_value: &str) -> String {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| default_value.to_string())
+}
+
+fn normalize_filter(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn normalize_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(100).clamp(1, 500)
+}
+
+fn factor_definition_from_row(row: FactorDefinitionRow) -> FactorDefinitionRecord {
+    FactorDefinitionRecord {
+        factor_id: row.0,
+        factor_code: row.1,
+        version: row.2,
+        name: row.3,
+        category: row.4,
+        frequency: row.5,
+        dependencies: row.6,
+        parameters: row.7.unwrap_or_else(|| json!({})),
+        status: row.8,
+        created_at: row.9,
+        updated_at: row.10,
+    }
+}
+
+async fn upsert_factor_definition_input(
+    db: &sqlx::PgPool,
+    input: &FactorDefinitionInput,
+) -> Result<FactorDefinitionRecord, sqlx::Error> {
+    let row = sqlx::query_as::<_, FactorDefinitionRow>(
+        "INSERT INTO factor_definition
+           (factor_code, version, name, category, frequency, dependencies, parameters, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (factor_code, version) DO UPDATE SET
+           name = EXCLUDED.name,
+           category = EXCLUDED.category,
+           frequency = EXCLUDED.frequency,
+           dependencies = EXCLUDED.dependencies,
+           parameters = EXCLUDED.parameters,
+           status = EXCLUDED.status,
+           updated_at = NOW()
+         RETURNING factor_id, factor_code, version, name, category, frequency,
+           dependencies, parameters, status, created_at, updated_at",
+    )
+    .bind(&input.factor_code)
+    .bind(&input.version)
+    .bind(&input.name)
+    .bind(&input.category)
+    .bind(&input.frequency)
+    .bind(&input.dependencies)
+    .bind(&input.parameters)
+    .bind(&input.status)
+    .fetch_one(db)
+    .await?;
+
+    Ok(factor_definition_from_row(row))
+}
+
+async fn upsert_factor_definition(
+    db: &sqlx::PgPool,
+    output: &FactorOutput,
+    version: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO factor_definition
+           (factor_code, version, name, category, frequency, dependencies, parameters, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+         ON CONFLICT (factor_code, version) DO UPDATE SET
+           name = EXCLUDED.name,
+           category = EXCLUDED.category,
+           frequency = EXCLUDED.frequency,
+           dependencies = EXCLUDED.dependencies,
+           parameters = EXCLUDED.parameters,
+           status = EXCLUDED.status,
+           updated_at = NOW()",
+    )
+    .bind(&output.name)
+    .bind(version)
+    .bind(&output.metadata.factor_name)
+    .bind(output.metadata.category.to_string())
+    .bind("daily")
+    .bind(json!(["market_stock_daily_bar"]))
+    .bind(&output.metadata.params)
+    .execute(db)
+    .await?;
+    Ok(())
+}
 
 // ─── Handlers ─────────────────────────────────────────────────────
 
@@ -114,6 +311,83 @@ pub async fn list_factors() -> impl IntoResponse {
     Json(json!({"code": 0, "data": {"factors": factors}}))
 }
 
+pub async fn list_factor_definitions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListFactorDefinitionsQuery>,
+) -> impl IntoResponse {
+    let factor_code = normalize_filter(query.factor_code);
+    let version = normalize_filter(query.version);
+    let category = normalize_filter(query.category);
+    let status = normalize_filter(query.status);
+    let limit = normalize_limit(query.limit);
+
+    let rows = sqlx::query_as::<_, FactorDefinitionRow>(
+        "SELECT factor_id, factor_code, version, name, category, frequency,
+           dependencies, parameters, status, created_at, updated_at
+         FROM factor_definition
+         WHERE ($1::text IS NULL OR factor_code = $1)
+           AND ($2::text IS NULL OR version = $2)
+           AND ($3::text IS NULL OR category = $3)
+           AND ($4::text IS NULL OR status = $4)
+         ORDER BY updated_at DESC, factor_code ASC, version ASC
+         LIMIT $5",
+    )
+    .bind(factor_code.as_deref())
+    .bind(version.as_deref())
+    .bind(category.as_deref())
+    .bind(status.as_deref())
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await;
+
+    match rows {
+        Ok(rows) => Json(json!({
+            "code": 0,
+            "data": {
+                "definitions": rows.into_iter().map(factor_definition_from_row).collect::<Vec<_>>()
+            }
+        })),
+        Err(error) => Json(json!({"code": 1, "message": format!("Failed to list factor definitions: {}", error)})),
+    }
+}
+
+pub async fn get_factor_definition(
+    State(state): State<Arc<AppState>>,
+    Path((factor_code, version)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let row = sqlx::query_as::<_, FactorDefinitionRow>(
+        "SELECT factor_id, factor_code, version, name, category, frequency,
+           dependencies, parameters, status, created_at, updated_at
+         FROM factor_definition
+         WHERE factor_code = $1 AND version = $2",
+    )
+    .bind(&factor_code)
+    .bind(&version)
+    .fetch_optional(&state.db)
+    .await;
+
+    match row {
+        Ok(Some(row)) => Json(json!({"code": 0, "data": factor_definition_from_row(row)})),
+        Ok(None) => Json(json!({"code": 1, "message": format!("factor definition not found: {}@{}", factor_code, version)})),
+        Err(error) => Json(json!({"code": 1, "message": format!("Failed to get factor definition: {}", error)})),
+    }
+}
+
+pub async fn register_factor_definition(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterFactorDefinitionRequest>,
+) -> impl IntoResponse {
+    let input = match req.into_definition() {
+        Ok(input) => input,
+        Err(message) => return Json(json!({"code": 1, "message": message})),
+    };
+
+    match upsert_factor_definition_input(&state.db, &input).await {
+        Ok(definition) => Json(json!({"code": 0, "data": definition})),
+        Err(error) => Json(json!({"code": 1, "message": format!("Failed to upsert factor definition: {}", error)})),
+    }
+}
+
 pub async fn compute_factor(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ComputeFactorRequest>,
@@ -127,7 +401,10 @@ pub async fn compute_factor(
     };
 
     // Determine symbols (as Vec<String> for load_bars)
-    let default_symbols = ["000001.SZ", "000002.SZ", "000300.SH"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let default_symbols = ["000001.SZ", "000002.SZ", "000300.SH"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
     let symbols = req.symbols.as_ref().unwrap_or(&default_symbols);
 
     // Determine date range
@@ -142,7 +419,10 @@ pub async fn compute_factor(
         }
     };
 
-    let input = FactorInput { bars, trade_dates: vec![] };
+    let input = FactorInput {
+        bars,
+        trade_dates: vec![],
+    };
 
     // Compute factor
     let mut output = match factor_name {
@@ -167,13 +447,17 @@ pub async fn compute_factor(
     }
 
     // Convert to JSON-friendly format
-    let values: Vec<serde_json::Value> = output.values.iter().map(|fv| {
-        json!({
-            "symbol": fv.symbol,
-            "date": fv.date.format("%Y%m%d").to_string(),
-            "value": fv.value,
+    let values: Vec<serde_json::Value> = output
+        .values
+        .iter()
+        .map(|fv| {
+            json!({
+                "symbol": fv.symbol,
+                "date": fv.date.format("%Y%m%d").to_string(),
+                "value": fv.value,
+            })
         })
-    }).collect();
+        .collect();
 
     Json(json!({
         "code": 0,
@@ -197,7 +481,10 @@ pub async fn evaluate_factor(
         }
     };
 
-    let default_symbols = ["000001.SZ", "000002.SZ", "000300.SH"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let default_symbols = ["000001.SZ", "000002.SZ", "000300.SH"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
     let symbols = req.symbols.as_ref().unwrap_or(&default_symbols);
     let end_date = req.end_date.as_deref().unwrap_or("20250509");
     let start_date = req.start_date.as_deref().unwrap_or("20240101");
@@ -209,7 +496,10 @@ pub async fn evaluate_factor(
         }
     };
 
-    let input = FactorInput { bars: bars.clone(), trade_dates: vec![] };
+    let input = FactorInput {
+        bars: bars.clone(),
+        trade_dates: vec![],
+    };
 
     let output = match factor_name {
         "momentum" => MomentumFactor::new(period).compute(&input),
@@ -225,7 +515,10 @@ pub async fn evaluate_factor(
             let close_t: f64 = sym_bars[i].close.try_into().unwrap_or(f64::NAN);
             let close_t1: f64 = sym_bars[i + 1].close.try_into().unwrap_or(f64::NAN);
             if close_t > 0.0 {
-                forward_returns.insert((sym.clone(), sym_bars[i].trade_date), (close_t1 - close_t) / close_t);
+                forward_returns.insert(
+                    (sym.clone(), sym_bars[i].trade_date),
+                    (close_t1 - close_t) / close_t,
+                );
             }
         }
     }
@@ -251,6 +544,89 @@ pub struct SyncFactorRequest {
     pub standardize: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SyncFinancialFactorRequest {
+    pub factor: String,
+    #[serde(default = "default_version")]
+    pub version: String,
+    pub symbols: Option<Vec<String>>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug)]
+struct FinancialIndicatorRow {
+    symbol: String,
+    ann_date: NaiveDate,
+    end_date: NaiveDate,
+    value: Decimal,
+}
+
+impl FinancialIndicatorRow {
+    fn to_factor_value(&self) -> FinancialFactorValue {
+        let value: f64 = self.value.try_into().unwrap_or(f64::NAN);
+        FinancialFactorValue {
+            symbol: self.symbol.clone(),
+            date: self.ann_date,
+            available_at: self.ann_date,
+            report_end_date: self.end_date,
+            value,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FinancialFactorValue {
+    symbol: String,
+    date: NaiveDate,
+    available_at: NaiveDate,
+    report_end_date: NaiveDate,
+    value: f64,
+}
+
+struct FinancialFactorSpec {
+    code: &'static str,
+    source_column: &'static str,
+    name: &'static str,
+    category: &'static str,
+}
+
+fn parse_financial_factor(name: &str) -> Option<FinancialFactorSpec> {
+    match name {
+        "roe" | "roe_ttm" => Some(FinancialFactorSpec {
+            code: "fin_roe",
+            source_column: "roe",
+            name: "roe",
+            category: "fundamental",
+        }),
+        "roa" | "roa_ttm" => Some(FinancialFactorSpec {
+            code: "fin_roa",
+            source_column: "roa",
+            name: "roa",
+            category: "fundamental",
+        }),
+        "gross_margin" => Some(FinancialFactorSpec {
+            code: "fin_gross_margin",
+            source_column: "gross_margin",
+            name: "gross_margin",
+            category: "fundamental",
+        }),
+        "netprofit_margin" => Some(FinancialFactorSpec {
+            code: "fin_netprofit_margin",
+            source_column: "netprofit_margin",
+            name: "netprofit_margin",
+            category: "fundamental",
+        }),
+        "debt_to_assets" => Some(FinancialFactorSpec {
+            code: "fin_debt_to_assets",
+            source_column: "debt_to_assets",
+            name: "debt_to_assets",
+            category: "fundamental",
+        }),
+        _ => None,
+    }
+}
+
 pub async fn sync_factor_values(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncFactorRequest>,
@@ -266,20 +642,30 @@ pub async fn sync_factor_values(
     // Reuse compute_factor logic by calling the inner function directly
     let (factor_name, period) = match parse_factor(&req.factor) {
         Some(f) => f,
-        None => return Json(json!({"code": 1, "message": format!("Unknown factor: {}", req.factor)})),
+        None => {
+            return Json(json!({"code": 1, "message": format!("Unknown factor: {}", req.factor)}))
+        }
     };
 
-    let default_symbols = ["000001.SZ", "000002.SZ", "000300.SH"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let default_symbols = ["000001.SZ", "000002.SZ", "000300.SH"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
     let symbols = compute_req.symbols.as_ref().unwrap_or(&default_symbols);
     let end_date = compute_req.end_date.as_deref().unwrap_or("20250509");
     let start_date = compute_req.start_date.as_deref().unwrap_or("20240101");
 
     let bars = match load_bars(&state.db, symbols, start_date, end_date, period + 1).await {
         Ok(b) => b,
-        Err(e) => return Json(json!({"code": 1, "message": format!("Failed to load bars: {}", e)})),
+        Err(e) => {
+            return Json(json!({"code": 1, "message": format!("Failed to load bars: {}", e)}))
+        }
     };
 
-    let input = FactorInput { bars, trade_dates: vec![] };
+    let input = FactorInput {
+        bars,
+        trade_dates: vec![],
+    };
     let mut output = match factor_name {
         "momentum" => MomentumFactor::new(period).compute(&input),
         "volatility" => VolatilityFactor::new(period).compute(&input),
@@ -294,7 +680,9 @@ pub async fn sync_factor_values(
             s if s.starts_with("winsorized_") => Some(s.to_string()),
             _ => None,
         }
-    } else { None };
+    } else {
+        None
+    };
 
     if let Some(ref m) = std_method {
         let method = match m.as_str() {
@@ -309,15 +697,22 @@ pub async fn sync_factor_values(
         output = standardize(&output, method);
     }
 
+    if let Err(error) = upsert_factor_definition(&state.db, &output, &req.version).await {
+        return Json(json!({"code": 1, "message": format!("Failed to upsert factor definition: {}", error)}));
+    }
+
     // Persist to DB
     let mut inserted = 0u64;
     for fv in &output.values {
+        let available_at = fv.available_at.unwrap_or(fv.date);
         let result = sqlx::query(
-            "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO factor_value
+               (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
                raw_value = EXCLUDED.raw_value,
                normalized_value = EXCLUDED.normalized_value,
+               available_at = EXCLUDED.available_at,
                created_at = NOW()"
         )
         .bind(&output.name)
@@ -326,12 +721,18 @@ pub async fn sync_factor_values(
         .bind(fv.date)
         .bind(fv.value)
         .bind(if std_method.is_some() { Some(fv.value) } else { None::<f64> })
+        .bind(available_at)
         .execute(&state.db)
         .await;
 
         match result {
             Ok(_) => inserted += 1,
-            Err(e) => tracing::warn!("Failed to insert factor value for {} {}: {}", fv.symbol, fv.date, e),
+            Err(e) => tracing::warn!(
+                "Failed to insert factor value for {} {}: {}",
+                fv.symbol,
+                fv.date,
+                e
+            ),
         }
     }
 
@@ -343,6 +744,138 @@ pub async fn sync_factor_values(
             "total_values": output.values.len(),
             "inserted": inserted,
             "standardized": std_method.is_some(),
+        }
+    }))
+}
+
+pub async fn sync_financial_factor_values(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncFinancialFactorRequest>,
+) -> impl IntoResponse {
+    let spec = match parse_financial_factor(&req.factor) {
+        Some(spec) => spec,
+        None => return Json(json!({"code": 1, "message": format!("Unknown financial factor: {}", req.factor)})),
+    };
+
+    let start_d = req.start_date.as_deref().unwrap_or("20100101");
+    let end_d = req.end_date.as_deref().unwrap_or("20261231");
+    let symbols = req.symbols.unwrap_or_default();
+    let symbol_filter = if symbols.is_empty() {
+        None
+    } else {
+        Some(symbols)
+    };
+
+    let rows = match sqlx::query_as::<_, (String, NaiveDate, NaiveDate, Decimal)>(
+        &format!(
+            "SELECT ts_code, ann_date, end_date, {column}
+             FROM market_financial_indicator
+             WHERE {column} IS NOT NULL
+               AND ann_date >= $1::date
+               AND ann_date <= $2::date
+               AND ($3::text[] IS NULL OR ts_code = ANY($3))
+             ORDER BY ann_date, ts_code",
+            column = spec.source_column
+        ),
+    )
+    .bind(start_d)
+    .bind(end_d)
+    .bind(symbol_filter.as_deref())
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": format!("Failed to load financial factor source: {}", error)}));
+        }
+    };
+
+    let factor_values = rows
+        .into_iter()
+        .map(|(symbol, ann_date, end_date, value)| FinancialIndicatorRow {
+            symbol,
+            ann_date,
+            end_date,
+            value,
+        })
+        .map(|row| row.to_factor_value())
+        .filter(|fv| fv.value.is_finite())
+        .collect::<Vec<_>>();
+
+    let definition = FactorDefinitionInput {
+        factor_code: spec.code.to_string(),
+        version: req.version.clone(),
+        name: spec.name.to_string(),
+        category: spec.category.to_string(),
+        frequency: "quarterly_report".to_string(),
+        dependencies: json!(["market_financial_indicator"]),
+        parameters: json!({
+            "source_column": spec.source_column,
+            "pit_date": "ann_date",
+            "report_period_column": "end_date",
+        }),
+        status: "active".to_string(),
+    };
+
+    if let Err(error) = upsert_factor_definition_input(&state.db, &definition).await {
+        return Json(json!({"code": 1, "message": format!("Failed to upsert factor definition: {}", error)}));
+    }
+
+    let mut inserted = 0u64;
+    let mut min_trade_date: Option<NaiveDate> = None;
+    let mut max_trade_date: Option<NaiveDate> = None;
+    let mut max_report_end_date: Option<NaiveDate> = None;
+
+    for fv in &factor_values {
+        let result = sqlx::query(
+            "INSERT INTO factor_value
+               (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+             VALUES ($1, $2, $3, $4, $5, NULL, $6)
+             ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+               raw_value = EXCLUDED.raw_value,
+               normalized_value = EXCLUDED.normalized_value,
+               available_at = EXCLUDED.available_at,
+               created_at = NOW()",
+        )
+        .bind(spec.code)
+        .bind(&req.version)
+        .bind(&fv.symbol)
+        .bind(fv.date)
+        .bind(fv.value)
+        .bind(fv.available_at)
+        .execute(&state.db)
+        .await;
+
+        match result {
+            Ok(_) => {
+                inserted += 1;
+                min_trade_date = Some(min_trade_date.map_or(fv.date, |date| date.min(fv.date)));
+                max_trade_date = Some(max_trade_date.map_or(fv.date, |date| date.max(fv.date)));
+                max_report_end_date = Some(max_report_end_date.map_or(fv.report_end_date, |date| date.max(fv.report_end_date)));
+            }
+            Err(error) => tracing::warn!(
+                factor = spec.code,
+                symbol = %fv.symbol,
+                date = %fv.date,
+                "Failed to insert financial factor value: {}",
+                error
+            ),
+        }
+    }
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "factor_name": spec.code,
+            "version": req.version,
+            "source_column": spec.source_column,
+            "total_values": factor_values.len(),
+            "inserted": inserted,
+            "pit_date": "ann_date",
+            "report_period_column": "end_date",
+            "min_trade_date": min_trade_date.map(|date| date.to_string()),
+            "max_trade_date": max_trade_date.map(|date| date.to_string()),
+            "max_report_end_date": max_report_end_date.map(|date| date.to_string()),
         }
     }))
 }
@@ -360,8 +893,11 @@ pub async fn batch_sync_factors(
 
     // Load symbol list
     let all_syms: Vec<String> = match sqlx::query_scalar(
-        "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
-    ).fetch_all(&state.db).await {
+        "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
         Ok(v) => v,
         Err(e) => return Json(json!({"code":1,"message":format!("{}",e)})),
     };
@@ -389,20 +925,38 @@ pub async fn batch_sync_factors(
 
             match rows {
                 Ok(r) if r.len() > period + 1 => {
-                    let bars: Vec<DailyBar> = r.into_iter().map(|(s, d, o, h, l, c, pc, cp, v, a)| DailyBar {
-                        symbol: s, trade_date: d, open: o, high: h, low: l,
-                        close: c, pre_close: pc, change_pct: cp, volume: v, amount: a,
-                    }).collect();
+                    let bars: Vec<DailyBar> = r
+                        .into_iter()
+                        .map(|(s, d, o, h, l, c, pc, cp, v, a)| DailyBar {
+                            symbol: s,
+                            trade_date: d,
+                            open: o,
+                            high: h,
+                            low: l,
+                            close: c,
+                            pre_close: pc,
+                            change_pct: cp,
+                            volume: v,
+                            amount: a,
+                        })
+                        .collect();
                     bars_map.insert(sym.to_string(), bars);
                 }
                 Ok(_) => {}
-                Err(e) => { errors.push(format!("{}/{}: {}", sym, "load", e)); }
+                Err(e) => {
+                    errors.push(format!("{}/{}: {}", sym, "load", e));
+                }
             }
         }
 
-        if bars_map.is_empty() { continue; }
+        if bars_map.is_empty() {
+            continue;
+        }
 
-        let input = FactorInput { bars: bars_map, trade_dates: vec![] };
+        let input = FactorInput {
+            bars: bars_map,
+            trade_dates: vec![],
+        };
 
         // Compute
         let mut output = match ftype {
@@ -434,18 +988,29 @@ pub async fn batch_sync_factors(
             output = standardize(&output, method);
         }
 
+        if let Err(e) = upsert_factor_definition(&state.db, &output, &req.version).await {
+            errors.push(format!("factor_definition/{}: {}", output.name, e));
+            continue;
+        }
+
         total_vals += output.values.len();
 
         // Persist
         for fv in &output.values {
+            let available_at = fv.available_at.unwrap_or(fv.date);
             match sqlx::query(
-                "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value)
-                 VALUES ($1,$2,$3,$4,$5,$6)
+                "INSERT INTO factor_value
+                   (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7)
                  ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
-                   raw_value=EXCLUDED.raw_value, normalized_value=EXCLUDED.normalized_value, created_at=NOW()"
+                   raw_value=EXCLUDED.raw_value,
+                   normalized_value=EXCLUDED.normalized_value,
+                   available_at=EXCLUDED.available_at,
+                   created_at=NOW()"
             )
             .bind(&output.name).bind(&req.version).bind(&fv.symbol).bind(fv.date)
             .bind(fv.value).bind(if is_std { Some(fv.value) } else { None::<f64> })
+            .bind(available_at)
             .execute(&state.db).await
             {
                 Ok(_) => inserted += 1,
@@ -454,10 +1019,7 @@ pub async fn batch_sync_factors(
         }
     }
 
-    let factor_output_name = format!("{}_{}d{}",
-        ftype, period,
-        if is_std { "_std" } else { "" }
-    );
+    let factor_output_name = format!("{}_{}d{}", ftype, period, if is_std { "_std" } else { "" });
 
     Json(json!({
         "code": 0,
@@ -583,17 +1145,28 @@ pub async fn batch_sync_factors_background(
                     output = standardize(&output, method);
                 }
 
+                if let Err(e) = upsert_factor_definition(&state.db, &output, &version).await {
+                    errors.push(format!("factor_definition/{}: {}", output.name, e));
+                    continue;
+                }
+
                 total_vals += output.values.len();
 
                 for fv in &output.values {
+                    let available_at = fv.available_at.unwrap_or(fv.date);
                     match sqlx::query(
-                        "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value)
-                         VALUES ($1,$2,$3,$4,$5,$6)
+                        "INSERT INTO factor_value
+                           (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7)
                          ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
-                           raw_value=EXCLUDED.raw_value, normalized_value=EXCLUDED.normalized_value, created_at=NOW()"
+                           raw_value=EXCLUDED.raw_value,
+                           normalized_value=EXCLUDED.normalized_value,
+                           available_at=EXCLUDED.available_at,
+                           created_at=NOW()"
                     )
                     .bind(&output.name).bind(&version).bind(&fv.symbol).bind(fv.date)
                     .bind(fv.value).bind(if is_std { Some(fv.value) } else { None::<f64> })
+                    .bind(available_at)
                     .execute(&state.db).await
                     {
                         Ok(_) => inserted += 1,
@@ -634,7 +1207,9 @@ pub async fn batch_sync_factors_background(
         }
     });
 
-    Json(json!({"code": 0, "data": {"task_id": task_id, "status": "running", "factor": factor_name}}))
+    Json(
+        json!({"code": 0, "data": {"task_id": task_id, "status": "running", "factor": factor_name}}),
+    )
 }
 
 // ─── Evaluate all factors (from DB) ────────────────────────
@@ -658,7 +1233,9 @@ pub struct EvaluateAllRequest {
     pub neutralize_size: Option<bool>,
 }
 
-fn default_horizon() -> i16 { 1 }
+fn default_horizon() -> i16 {
+    1
+}
 
 pub async fn evaluate_all_factors(
     State(state): State<Arc<AppState>>,
@@ -675,9 +1252,14 @@ pub async fn evaluate_all_factors(
     // Pre-load industry map + size proxy (once, reused for all factors)
     let neut_config: Option<NeutralizeConfig> = if do_neutralize {
         let ind_rows = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT symbol, industry FROM market_stock WHERE list_status = 'L'"
-        ).fetch_all(&state.db).await.ok().unwrap_or_default();
-        let industries: HashMap<String, String> = ind_rows.into_iter()
+            "SELECT symbol, industry FROM market_stock WHERE list_status = 'L'",
+        )
+        .fetch_all(&state.db)
+        .await
+        .ok()
+        .unwrap_or_default();
+        let industries: HashMap<String, String> = ind_rows
+            .into_iter()
             .filter_map(|(s, i)| i.filter(|i| !i.is_empty()).map(|i| (s, i)))
             .collect();
 
@@ -686,24 +1268,38 @@ pub async fn evaluate_all_factors(
             let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
                 "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
                  WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0
-                 ORDER BY symbol, trade_date"
-            ).bind(start_d).bind(end_d).fetch_all(&state.db).await;
+                 ORDER BY symbol, trade_date",
+            )
+            .bind(start_d)
+            .bind(end_d)
+            .fetch_all(&state.db)
+            .await;
             if let Ok(rows) = amt_rows {
                 for (sym, date, amt) in rows {
                     if let Some(a) = amt {
                         let a_val: f64 = a.try_into().unwrap_or(0.0);
-                        if a_val > 0.0 { size_proxy.entry(sym).or_default().push((date, a_val)); }
+                        if a_val > 0.0 {
+                            size_proxy.entry(sym).or_default().push((date, a_val));
+                        }
                     }
                 }
             }
         }
-        Some(NeutralizeConfig { industries, size_proxy })
-    } else { None };
+        Some(NeutralizeConfig {
+            industries,
+            size_proxy,
+        })
+    } else {
+        None
+    };
 
     // Get all factor versions
     let all_factors: Vec<(String, String)> = match sqlx::query_as::<_, (String, String)>(
-        "SELECT DISTINCT factor_code, factor_version FROM factor_value ORDER BY factor_code"
-    ).fetch_all(&state.db).await {
+        "SELECT DISTINCT factor_code, factor_version FROM factor_value ORDER BY factor_code",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
         Ok(v) => v,
         Err(e) => return Json(json!({"code":1,"message":format!("{}",e)})),
     };
@@ -712,53 +1308,91 @@ pub async fn evaluate_all_factors(
 
     for (code, ver) in &all_factors {
         // Load factor values
-        let fv_rows = sqlx::query_as::<_, (String, chrono::NaiveDate, Option<rust_decimal::Decimal>)>(
-            "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
+        let fv_rows =
+            sqlx::query_as::<_, (String, chrono::NaiveDate, Option<rust_decimal::Decimal>)>(
+                "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
              FROM factor_value
              WHERE factor_code=$1 AND factor_version=$2
                AND trade_date>=$3::date AND trade_date<=$4::date
-             ORDER BY trade_date, symbol"
-        ).bind(code).bind(ver).bind(start_d).bind(end_d).fetch_all(&state.db).await;
+             ORDER BY trade_date, symbol",
+            )
+            .bind(code)
+            .bind(ver)
+            .bind(start_d)
+            .bind(end_d)
+            .fetch_all(&state.db)
+            .await;
 
         let fv_rows = match fv_rows {
             Ok(r) => r,
-            Err(e) => { results.push(json!({"factor":code,"version":ver,"error":e.to_string()})); continue; }
+            Err(e) => {
+                results.push(json!({"factor":code,"version":ver,"error":e.to_string()}));
+                continue;
+            }
         };
 
         // Build forward returns
-        let symbols: Vec<String> = fv_rows.iter().map(|(s,_,_)| s.clone()).collect::<std::collections::HashSet<_>>().into_iter().collect();
+        let symbols: Vec<String> = fv_rows
+            .iter()
+            .map(|(s, _, _)| s.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
         let bars = match load_bars(&state.db, &symbols, start_d, end_d, 2).await {
             Ok(b) => b,
-            Err(e) => { results.push(json!({"factor":code,"version":ver,"error":e.to_string()})); continue; }
+            Err(e) => {
+                results.push(json!({"factor":code,"version":ver,"error":e.to_string()}));
+                continue;
+            }
         };
 
         let mut forward_returns: HashMap<(String, chrono::NaiveDate), f64> = HashMap::new();
         for (sym, sym_bars) in &bars {
-            for i in 0..sym_bars.len()-1 {
+            for i in 0..sym_bars.len() - 1 {
                 let c: f64 = sym_bars[i].close.try_into().unwrap_or(f64::NAN);
-                let c1: f64 = sym_bars[i+1].close.try_into().unwrap_or(f64::NAN);
-                if c > 0.0 { forward_returns.insert((sym.clone(), sym_bars[i].trade_date), (c1-c)/c); }
+                let c1: f64 = sym_bars[i + 1].close.try_into().unwrap_or(f64::NAN);
+                if c > 0.0 {
+                    forward_returns.insert((sym.clone(), sym_bars[i].trade_date), (c1 - c) / c);
+                }
             }
         }
 
         // Create FactorOutput
-        let values: Vec<FactorValue> = fv_rows.iter()
-            .filter_map(|(sym, date, val)| val.and_then(|v| {
-                use rust_decimal::prelude::ToPrimitive;
-                v.to_f64().map(|fv| FactorValue { symbol: sym.clone(), date: *date, value: fv })
-            })).collect();
+        let values: Vec<FactorValue> = fv_rows
+            .iter()
+            .filter_map(|(sym, date, val)| {
+                val.and_then(|v| {
+                    use rust_decimal::prelude::ToPrimitive;
+                    v.to_f64().map(|fv| FactorValue {
+                        symbol: sym.clone(),
+                        date: *date,
+                        value: fv,
+                        available_at: None,
+                    })
+                })
+            })
+            .collect();
 
-        if values.len() < 100 { continue; }
+        if values.len() < 100 {
+            continue;
+        }
 
         let output = FactorOutput {
             name: code.clone(),
             values,
             metadata: FactorMetadata {
-                factor_name: code.clone(), category: FactorCategory::PriceVolume,
-                version: ver.clone(), params: serde_json::json!({}),
+                factor_name: code.clone(),
+                category: FactorCategory::PriceVolume,
+                version: ver.clone(),
+                params: serde_json::json!({}),
                 computed_at: chrono::Utc::now(),
-                symbol_count: 0, date_count: 0, coverage_ratio: 0.0,
-                mean: f64::NAN, std: f64::NAN, min: f64::NAN, max: f64::NAN,
+                symbol_count: 0,
+                date_count: 0,
+                coverage_ratio: 0.0,
+                mean: f64::NAN,
+                std: f64::NAN,
+                min: f64::NAN,
+                max: f64::NAN,
             },
         };
 
@@ -772,7 +1406,9 @@ pub async fn evaluate_all_factors(
         };
 
         let evaluation = evaluate(&output, &forward_returns, 5);
-        results.push(serde_json::to_value(&evaluation).unwrap_or(json!({"error":"serialization failed"})));
+        results.push(
+            serde_json::to_value(&evaluation).unwrap_or(json!({"error":"serialization failed"})),
+        );
     }
 
     Json(json!({"code":0,"data":{"evaluations":results,"count":results.len()}}))
@@ -920,7 +1556,7 @@ pub async fn evaluate_all_factors_background(
                 for &date in &dates {
                     if let (Some(vals), Some(fwds)) = (values_map.get(&date), fwd_map.get(&date)) {
                         for (sym, val) in vals {
-                            let fv = FactorValue { symbol: sym.clone(), date, value: *val };
+                            let fv = FactorValue { symbol: sym.clone(), date, value: *val, available_at: None };
                             output.values.push(fv);
                             if let Some(fwd) = fwds.get(sym) {
                                 forward_returns.insert((sym.clone(), date), *fwd);
@@ -1007,13 +1643,17 @@ pub struct FactorRef {
     pub factor_version: String,
 }
 
-fn default_combine_method() -> String { "icir_weighted".to_string() }
+fn default_combine_method() -> String {
+    "icir_weighted".to_string()
+}
 
 pub async fn combine_factors(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CombineFactorsRequest>,
 ) -> impl IntoResponse {
-    let factors: Vec<(String, String)> = req.factors.iter()
+    let factors: Vec<(String, String)> = req
+        .factors
+        .iter()
         .map(|f| (f.factor_code.clone(), f.factor_version.clone()))
         .collect();
 
@@ -1027,21 +1667,36 @@ pub async fn combine_factors(
         Err(e) => return Json(json!({"code":1,"message":e})),
     };
 
-    let sd = req.start_date.as_ref().and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
-    let ed = req.end_date.as_ref().and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
+    let sd = req
+        .start_date
+        .as_ref()
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
+    let ed = req
+        .end_date
+        .as_ref()
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
 
-    let inserted = match combine_and_persist(&state.db, &req.combo_name, &req.version, &weights, sd, ed).await {
-        Ok(n) => n,
-        Err(e) => return Json(json!({"code":1,"message":e})),
-    };
+    let inserted =
+        match combine_and_persist(&state.db, &req.combo_name, &req.version, &weights, sd, ed).await
+        {
+            Ok(n) => n,
+            Err(e) => return Json(json!({"code":1,"message":e})),
+        };
 
-    let weights_json: Vec<serde_json::Value> = weights.iter().map(|w| json!({
-        "factor_code": w.factor_code,
-        "factor_version": w.factor_version,
-        "weight": w.weight,
-    })).collect();
+    let weights_json: Vec<serde_json::Value> = weights
+        .iter()
+        .map(|w| {
+            json!({
+                "factor_code": w.factor_code,
+                "factor_version": w.factor_version,
+                "weight": w.weight,
+            })
+        })
+        .collect();
 
-    Json(json!({"code":0,"data":{"combo_name":req.combo_name,"version":req.version,"weights":weights_json,"inserted":inserted}}))
+    Json(
+        json!({"code":0,"data":{"combo_name":req.combo_name,"version":req.version,"weights":weights_json,"inserted":inserted}}),
+    )
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -1108,11 +1763,17 @@ async fn load_bars(
         .await?;
 
         if rows.len() < min_records {
-            tracing::warn!("{} only has {} records (need {})", sym, rows.len(), min_records);
+            tracing::warn!(
+                "{} only has {} records (need {})",
+                sym,
+                rows.len(),
+                min_records
+            );
         }
 
-        let bars: Vec<DailyBar> = rows.into_iter().map(|(s, d, o, h, l, c, pc, cp, v, a)| {
-            DailyBar {
+        let bars: Vec<DailyBar> = rows
+            .into_iter()
+            .map(|(s, d, o, h, l, c, pc, cp, v, a)| DailyBar {
                 symbol: s,
                 trade_date: d,
                 open: o,
@@ -1123,8 +1784,8 @@ async fn load_bars(
                 change_pct: cp,
                 volume: v,
                 amount: a,
-            }
-        }).collect();
+            })
+            .collect();
 
         result.insert(sym.to_string(), bars);
     }
@@ -1156,7 +1817,7 @@ pub async fn neutralize_factors(
         "SELECT symbol, trade_date, raw_value FROM factor_value
          WHERE factor_code = $1 AND factor_version = '1.0.0'
            AND trade_date >= $2::date AND trade_date <= $3::date
-         ORDER BY trade_date, symbol"
+         ORDER BY trade_date, symbol",
     )
     .bind(&req.factor)
     .bind(&req.start_date)
@@ -1169,10 +1830,16 @@ pub async fn neutralize_factors(
         Err(e) => return Json(json!({"code":1,"message":format!("load factor: {}",e)})),
     };
 
-    let values: Vec<FactorValue> = rows.into_iter()
-        .filter_map(|(sym, date, raw)| raw.map(|r| FactorValue {
-            symbol: sym, date, value: r.try_into().unwrap_or(f64::NAN),
-        }))
+    let values: Vec<FactorValue> = rows
+        .into_iter()
+        .filter_map(|(sym, date, raw)| {
+            raw.map(|r| FactorValue {
+                symbol: sym,
+                date,
+                value: r.try_into().unwrap_or(f64::NAN),
+                available_at: None,
+            })
+        })
         .collect();
 
     if values.is_empty() {
@@ -1188,18 +1855,26 @@ pub async fn neutralize_factors(
             version: "1.0.0".into(),
             params: json!({}),
             computed_at: chrono::Utc::now(),
-            symbol_count: 0, date_count: 0, coverage_ratio: 0.0,
-            mean: 0.0, std: 0.0, min: 0.0, max: 0.0,
+            symbol_count: 0,
+            date_count: 0,
+            coverage_ratio: 0.0,
+            mean: 0.0,
+            std: 0.0,
+            min: 0.0,
+            max: 0.0,
         },
     };
 
     // 2. Load industry map
     let ind_rows = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT symbol, industry FROM market_stock WHERE list_status = 'L'"
-    ).fetch_all(&state.db).await;
+        "SELECT symbol, industry FROM market_stock WHERE list_status = 'L'",
+    )
+    .fetch_all(&state.db)
+    .await;
 
     let industries: HashMap<String, String> = match ind_rows {
-        Ok(r) => r.into_iter()
+        Ok(r) => r
+            .into_iter()
             .filter_map(|(s, i)| i.filter(|i| !i.is_empty()).map(|i| (s, i)))
             .collect(),
         Err(e) => return Json(json!({"code":1,"message":format!("load industries: {}",e)})),
@@ -1209,7 +1884,7 @@ pub async fn neutralize_factors(
     let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
         "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
          WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0
-         ORDER BY symbol, trade_date"
+         ORDER BY symbol, trade_date",
     )
     .bind(&req.start_date)
     .bind(&req.end_date)
@@ -1228,7 +1903,10 @@ pub async fn neutralize_factors(
         }
     }
 
-    let config = NeutralizeConfig { industries, size_proxy };
+    let config = NeutralizeConfig {
+        industries,
+        size_proxy,
+    };
 
     // 4. Neutralize
     let (neut_output, result) = neutralize(&output, &config, req.do_industry, req.do_size);
@@ -1241,13 +1919,15 @@ pub async fn neutralize_factors(
             Err(_) => continue,
         };
         for fv in chunk {
-            if !fv.value.is_finite() { continue; }
+            if !fv.value.is_finite() {
+                continue;
+            }
             let res = sqlx::query(
                 "UPDATE factor_value SET neutralized_value = $4
                  WHERE factor_code = $1 AND factor_version = '1.0.0'
-                   AND symbol = $2 AND trade_date = $3"
+                   AND symbol = $2 AND trade_date = $3",
             )
-            .bind(&req.factor)  // original factor name
+            .bind(&req.factor) // original factor name
             .bind(&fv.symbol)
             .bind(fv.date)
             .bind(fv.value)
@@ -1273,4 +1953,69 @@ pub async fn neutralize_factors(
                 .iter().map(|v| json!({"symbol":v.symbol,"date":v.date,"value":v.value})).collect::<Vec<_>>(),
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_factor_definition_request_defaults_and_trims_fields() {
+        let req = RegisterFactorDefinitionRequest {
+            factor_code: " mom_5d_std ".to_string(),
+            version: " definition-api-v1 ".to_string(),
+            name: " 5 日动量标准化 ".to_string(),
+            category: " price_volume ".to_string(),
+            frequency: None,
+            dependencies: None,
+            parameters: None,
+            status: None,
+        };
+
+        let definition = req.into_definition().expect("valid definition");
+
+        assert_eq!(definition.factor_code, "mom_5d_std");
+        assert_eq!(definition.version, "definition-api-v1");
+        assert_eq!(definition.name, "5 日动量标准化");
+        assert_eq!(definition.category, "price_volume");
+        assert_eq!(definition.frequency, "daily");
+        assert_eq!(definition.dependencies, json!([]));
+        assert_eq!(definition.parameters, json!({}));
+        assert_eq!(definition.status, "active");
+    }
+
+    #[test]
+    fn register_factor_definition_request_rejects_required_blank_fields() {
+        let req = RegisterFactorDefinitionRequest {
+            factor_code: " ".to_string(),
+            version: "v1".to_string(),
+            name: "name".to_string(),
+            category: "price_volume".to_string(),
+            frequency: None,
+            dependencies: None,
+            parameters: None,
+            status: None,
+        };
+
+        let err = req.into_definition().unwrap_err();
+
+        assert!(err.contains("factor_code"));
+    }
+
+    #[test]
+    fn financial_indicator_factor_uses_announcement_date_as_pit_date() {
+        let row = FinancialIndicatorRow {
+            symbol: "000001.SZ".to_string(),
+            ann_date: NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+            value: Decimal::new(1234, 4),
+        };
+
+        let factor_value = row.to_factor_value();
+
+        assert_eq!(factor_value.date, row.ann_date);
+        assert_eq!(factor_value.available_at, row.ann_date);
+        assert_ne!(factor_value.date, row.end_date);
+        assert_eq!(factor_value.value, 0.1234);
+    }
 }

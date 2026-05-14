@@ -1,3 +1,4 @@
+-- PROTOTYPE ONLY: official Phase 3-C schema lives in docs/projects/quant/tasks/quant/sql/001_initial_schema.sql
 -- Phase 3: 财务数据表（精简版 — 财务报表 + 财务指标）
 -- 设计原则：EAV 风格，单表存所有财务字段，避免每种报表一张表
 

@@ -32,13 +32,21 @@ async fn load_ic_evals(
     horizon: i16,
 ) -> std::result::Result<HashMap<String, (f64, f64)>, sqlx::Error> {
     // (factor_code, factor_version) -> (mean_ic, ic_ir)
-    let rows = sqlx::query_as::<_, (String, String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+        ),
+    >(
         "SELECT factor_code, factor_version, mean_ic, ic_ir
          FROM factor_evaluation
          WHERE horizon = $1
            AND mean_ic IS NOT NULL
            AND ic_ir IS NOT NULL
-         ORDER BY factor_code"
+         ORDER BY factor_code",
     )
     .bind(horizon)
     .fetch_all(pool)
@@ -68,20 +76,24 @@ pub async fn compute_weights(
 
     match method {
         CombineMethod::EqualWeight => {
-            let weights: Vec<FactorWeight> = factors.iter().map(|(code, ver)| {
-                let key = format!("{}:{}", code, ver);
-                let (ic, _) = ic_evals.get(&key).copied().unwrap_or((0.0, 0.0));
-                let w = 1.0 / n;
-                FactorWeight {
-                    factor_code: code.clone(),
-                    factor_version: ver.clone(),
-                    weight: if ic < 0.0 { -w } else { w },
-                }
-            }).collect();
+            let weights: Vec<FactorWeight> = factors
+                .iter()
+                .map(|(code, ver)| {
+                    let key = format!("{}:{}", code, ver);
+                    let (ic, _) = ic_evals.get(&key).copied().unwrap_or((0.0, 0.0));
+                    let w = 1.0 / n;
+                    FactorWeight {
+                        factor_code: code.clone(),
+                        factor_version: ver.clone(),
+                        weight: if ic < 0.0 { -w } else { w },
+                    }
+                })
+                .collect();
             Ok(weights)
         }
         CombineMethod::IcirWeighted => {
-            let total_ir: f64 = factors.iter()
+            let total_ir: f64 = factors
+                .iter()
                 .filter_map(|(code, ver)| {
                     let key = format!("{}:{}", code, ver);
                     ic_evals.get(&key).map(|(_, ir)| ir.abs())
@@ -90,16 +102,19 @@ pub async fn compute_weights(
 
             let total_ir = if total_ir == 0.0 { 1.0 } else { total_ir };
 
-            let weights: Vec<FactorWeight> = factors.iter().map(|(code, ver)| {
-                let key = format!("{}:{}", code, ver);
-                let (ic, ir) = ic_evals.get(&key).copied().unwrap_or((0.0, 0.0));
-                let w = ir.abs() / total_ir;
-                FactorWeight {
-                    factor_code: code.clone(),
-                    factor_version: ver.clone(),
-                    weight: if ic < 0.0 { -w } else { w },
-                }
-            }).collect();
+            let weights: Vec<FactorWeight> = factors
+                .iter()
+                .map(|(code, ver)| {
+                    let key = format!("{}:{}", code, ver);
+                    let (ic, ir) = ic_evals.get(&key).copied().unwrap_or((0.0, 0.0));
+                    let w = ir.abs() / total_ir;
+                    FactorWeight {
+                        factor_code: code.clone(),
+                        factor_version: ver.clone(),
+                        weight: if ic < 0.0 { -w } else { w },
+                    }
+                })
+                .collect();
             Ok(weights)
         }
     }
@@ -122,32 +137,34 @@ pub async fn combine_and_persist(
     let mut factor_values: HashMap<(String, NaiveDate), HashMap<String, f64>> = HashMap::new();
 
     for fw in weights {
-        let rows: std::result::Result<Vec<_>, sqlx::Error> = if start_date.is_some() && end_date.is_some() {
-            sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
-                "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
+        let rows: std::result::Result<Vec<_>, sqlx::Error> =
+            if start_date.is_some() && end_date.is_some() {
+                sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+                    "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
                  FROM factor_value
                  WHERE factor_code = $1 AND factor_version = $2
-                   AND trade_date >= $3 AND trade_date <= $4"
-            )
-            .bind(&fw.factor_code)
-            .bind(&fw.factor_version)
-            .bind(start_date.unwrap())
-            .bind(end_date.unwrap())
-            .fetch_all(pool)
-            .await
-        } else {
-            sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
-                "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
+                   AND trade_date >= $3 AND trade_date <= $4",
+                )
+                .bind(&fw.factor_code)
+                .bind(&fw.factor_version)
+                .bind(start_date.unwrap())
+                .bind(end_date.unwrap())
+                .fetch_all(pool)
+                .await
+            } else {
+                sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+                    "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
                  FROM factor_value
-                 WHERE factor_code = $1 AND factor_version = $2"
-            )
-            .bind(&fw.factor_code)
-            .bind(&fw.factor_version)
-            .fetch_all(pool)
-            .await
-        };
+                 WHERE factor_code = $1 AND factor_version = $2",
+                )
+                .bind(&fw.factor_code)
+                .bind(&fw.factor_version)
+                .fetch_all(pool)
+                .await
+            };
 
-        let rows = rows.map_err(|e| format!("Failed to load factor values for {}: {}", fw.factor_code, e))?;
+        let rows = rows
+            .map_err(|e| format!("Failed to load factor values for {}: {}", fw.factor_code, e))?;
         for (sym, date, val) in rows {
             if let Some(v) = val {
                 let vf = v.to_f64().unwrap_or(f64::NAN);
@@ -185,22 +202,32 @@ pub async fn combine_and_persist(
 
     // Store weights config
     let weights_json = serde_json::to_value(
-        weights.iter().map(|w| (w.factor_code.clone(), w.weight)).collect::<HashMap<_, _>>()
-    ).map_err(|e| format!("JSON error: {}", e))?;
+        weights
+            .iter()
+            .map(|w| (w.factor_code.clone(), w.weight))
+            .collect::<HashMap<_, _>>(),
+    )
+    .map_err(|e| format!("JSON error: {}", e))?;
 
     let method_str = if weights.len() == 1 {
         "single"
     } else {
         let n = weights.len() as f64;
-        let all_equal = weights.iter().all(|w| (w.weight.abs() - 1.0 / n).abs() < 0.001);
-        if all_equal { "equal_weight" } else { "icir_weighted" }
+        let all_equal = weights
+            .iter()
+            .all(|w| (w.weight.abs() - 1.0 / n).abs() < 0.001);
+        if all_equal {
+            "equal_weight"
+        } else {
+            "icir_weighted"
+        }
     };
 
     sqlx::query(
         "INSERT INTO multi_factor_weight (combo_name, version, weights, method, status)
          VALUES ($1, $2, $3, $4, 'active')
          ON CONFLICT (combo_name, version) DO UPDATE SET
-           weights = EXCLUDED.weights, created_at = NOW()"
+           weights = EXCLUDED.weights, created_at = NOW()",
     )
     .bind(combo_name)
     .bind(version)
@@ -210,15 +237,19 @@ pub async fn combine_and_persist(
     .await
     .map_err(|e| format!("Failed to store weights: {}", e))?;
 
-    // Batch insert scores
+    // Batch insert scores. Alpha scores are available at the score date after
+    // source factor PIT filters have already been applied upstream.
     let mut inserted = 0usize;
     for chunk in scores.chunks(500) {
         for (sym, date, score) in chunk {
             let result = sqlx::query(
-                "INSERT INTO multi_factor_value (combo_name, version, symbol, trade_date, raw_score, normalized_score)
-                 VALUES ($1, $2, $3, $4, $5, $5)
+                "INSERT INTO multi_factor_value (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+                 VALUES ($1, $2, $3, $4, $5, $5, $4)
                  ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
-                   raw_score = EXCLUDED.raw_score, normalized_score = EXCLUDED.normalized_score, created_at = NOW()"
+                   raw_score = EXCLUDED.raw_score,
+                   normalized_score = EXCLUDED.normalized_score,
+                   available_at = EXCLUDED.available_at,
+                   created_at = NOW()"
             )
             .bind(combo_name)
             .bind(version)

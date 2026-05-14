@@ -5,8 +5,8 @@ pub mod tushare {
     pub mod client;
 }
 pub mod model {
-    pub mod tushare_dto;
     pub mod entities;
+    pub mod tushare_dto;
 }
 pub mod db;
 pub mod repository;

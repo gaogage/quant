@@ -1,9 +1,12 @@
 /// 回测路由
-
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, Query, State},
+    response::IntoResponse,
+    Json,
+};
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -11,21 +14,206 @@ use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
-use quant_backtest::engine::{BacktestConfig, BacktestMode, StrategySignal};
+use quant_backtest::engine::{
+    BacktestConfig, BacktestMode, ExecutionPrice, ExecutionTiming, StrategySignal,
+};
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::BacktestRunner;
 
 use crate::AppState;
 
+#[derive(Debug, Default, Deserialize)]
+pub struct BacktestListQuery {
+    pub strategy_version_id: Option<String>,
+    pub data_version_id: Option<String>,
+    pub status: Option<String>,
+    pub benchmark_symbol: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
+impl BacktestListQuery {
+    fn normalized_page(&self) -> i64 {
+        self.page.unwrap_or(1).max(1)
+    }
+
+    fn normalized_page_size(&self) -> i64 {
+        self.page_size.unwrap_or(20).clamp(1, 200)
+    }
+
+    fn offset(&self) -> i64 {
+        (self.normalized_page() - 1) * self.normalized_page_size()
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct EquityCurveQuery {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RunBacktestReq {
+    pub strategy_version_id: String,
+    pub data_version_id: String,
+    pub research_dataset_id: Option<String>,
+    pub feature_set_version_id: Option<String>,
+    pub prediction_set_id: Option<String>,
+    pub portfolio_policy_id: Option<String>,
     pub symbols: Vec<String>,
-    pub weights: Option<Vec<f64>>,  // equal weight if None
+    pub weights: Option<Vec<f64>>, // equal weight if None
     pub benchmark: Option<String>,
     pub start_date: String,
     pub end_date: String,
     pub initial_capital: Option<f64>,
-    pub mode: Option<String>,  // fast/standard/audit
+    pub mode: Option<String>, // fast/standard/audit
+    pub rebalance_frequency: Option<String>,
+    pub cost_model: Option<CostModelReq>,
+    pub execution_rules: Option<ExecutionRulesReq>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CostModelReq {
+    pub commission_rate: Option<f64>,
+    pub min_commission: Option<f64>,
+    pub tax_rate: Option<f64>,
+    pub slippage_bps: Option<f64>,
+    pub cost_multiplier: Option<f64>,
+    pub impact_cost_coefficient: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExecutionRulesReq {
+    pub execution_timing: Option<String>,
+    pub execution_price: Option<String>,
+    pub max_participation_rate: Option<f64>,
+}
+
+fn parse_yyyymmdd(value: &str, field: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value, "%Y%m%d")
+        .map_err(|_| format!("{} must use YYYYMMDD format", field))
+}
+
+fn parse_mode(value: Option<&str>) -> BacktestMode {
+    match value {
+        Some("fast") => BacktestMode::Fast,
+        Some("audit") => BacktestMode::Audit,
+        _ => BacktestMode::Standard,
+    }
+}
+
+fn parse_execution_timing(value: Option<&str>) -> Result<ExecutionTiming, String> {
+    match value {
+        None | Some("next_open") => Ok(ExecutionTiming::NextOpen),
+        Some("same_close_debug") => Ok(ExecutionTiming::SameCloseDebug),
+        Some(other) => Err(format!("unsupported execution_timing: {}", other)),
+    }
+}
+
+fn parse_execution_price(value: Option<&str>) -> Result<ExecutionPrice, String> {
+    match value {
+        None | Some("open") => Ok(ExecutionPrice::Open),
+        Some("close") => Ok(ExecutionPrice::Close),
+        Some(other) => Err(format!("unsupported execution_price: {}", other)),
+    }
+}
+
+fn decimal_from_f64(value: f64, field: &str) -> Result<Decimal, String> {
+    Decimal::from_f64(value).ok_or_else(|| format!("{} must be a finite number", field))
+}
+
+fn apply_cost_model(base: FeeConfig, req: Option<&CostModelReq>) -> Result<FeeConfig, String> {
+    let Some(req) = req else {
+        return Ok(base);
+    };
+    Ok(FeeConfig {
+        commission_rate: match req.commission_rate {
+            Some(value) => decimal_from_f64(value, "cost_model.commission_rate")?,
+            None => base.commission_rate,
+        },
+        min_commission: match req.min_commission {
+            Some(value) => decimal_from_f64(value, "cost_model.min_commission")?,
+            None => base.min_commission,
+        },
+        tax_rate: match req.tax_rate {
+            Some(value) => decimal_from_f64(value, "cost_model.tax_rate")?,
+            None => base.tax_rate,
+        },
+        slippage_bps: match req.slippage_bps {
+            Some(value) => decimal_from_f64(value, "cost_model.slippage_bps")?,
+            None => base.slippage_bps,
+        },
+        cost_multiplier: match req.cost_multiplier {
+            Some(value) => decimal_from_f64(value, "cost_model.cost_multiplier")?,
+            None => base.cost_multiplier,
+        },
+        impact_cost_coefficient: match req.impact_cost_coefficient {
+            Some(value) => decimal_from_f64(value, "cost_model.impact_cost_coefficient")?,
+            None => base.impact_cost_coefficient,
+        },
+    })
+}
+
+fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String> {
+    if req.symbols.is_empty() {
+        return Err("symbols must not be empty".into());
+    }
+    if let Some(weights) = &req.weights {
+        if weights.len() != req.symbols.len() {
+            return Err("weights length must match symbols length".into());
+        }
+    }
+
+    let start = parse_yyyymmdd(&req.start_date, "start_date")?;
+    let end = parse_yyyymmdd(&req.end_date, "end_date")?;
+    if end < start {
+        return Err("end_date must be greater than or equal to start_date".into());
+    }
+
+    let initial_capital = req.initial_capital.unwrap_or(1_000_000.0);
+    let capital = Decimal::from_f64(initial_capital)
+        .ok_or_else(|| "initial_capital must be a finite number".to_string())?;
+    let execution_timing = parse_execution_timing(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_timing.as_deref()),
+    )?;
+    let execution_price = parse_execution_price(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_price.as_deref()),
+    )?;
+    let max_participation_rate = req
+        .execution_rules
+        .as_ref()
+        .and_then(|rules| rules.max_participation_rate)
+        .map(|value| decimal_from_f64(value, "execution_rules.max_participation_rate"))
+        .transpose()?;
+
+    Ok(BacktestConfig {
+        initial_capital: capital,
+        benchmark: req.benchmark.clone().unwrap_or_else(|| "000300.SH".into()),
+        start_date: start,
+        end_date: end,
+        fee_config: apply_cost_model(FeeConfig::default(), req.cost_model.as_ref())?,
+        mode: parse_mode(req.mode.as_deref()),
+        max_position_pct: Decimal::new(10, 2),
+        strategy_version_id: req.strategy_version_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        research_dataset_id: req.research_dataset_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        prediction_set_id: req.prediction_set_id.clone(),
+        portfolio_policy_id: req.portfolio_policy_id.clone(),
+        symbols: req.symbols.clone(),
+        rebalance_frequency: req
+            .rebalance_frequency
+            .clone()
+            .unwrap_or_else(|| "daily".into()),
+        execution_timing,
+        execution_price,
+        max_participation_rate,
+        risk_control: Default::default(),
+    })
 }
 
 pub async fn run_backtest(
@@ -35,34 +223,24 @@ pub async fn run_backtest(
     let task_id = format!("bt-{}", Uuid::new_v4());
     info!(task_id, symbols = req.symbols.len(), "启动回测");
 
-    let start = NaiveDate::parse_from_str(&req.start_date, "%Y%m%d").unwrap();
-    let end = NaiveDate::parse_from_str(&req.end_date, "%Y%m%d").unwrap();
-    let capital = Decimal::from_f64(req.initial_capital.unwrap_or(1_000_000.0)).unwrap();
-
-    let mode = match req.mode.as_deref() {
-        Some("fast") => BacktestMode::Fast,
-        Some("audit") => BacktestMode::Audit,
-        _ => BacktestMode::Standard,
+    let config = match build_backtest_config(&req) {
+        Ok(config) => config,
+        Err(message) => return Json(json!({"code": 1, "message": message})),
     };
-
-    let config = BacktestConfig {
-        initial_capital: capital,
-        benchmark: req.benchmark.unwrap_or_else(|| "000300.SH".into()),
-        start_date: start,
-        end_date: end,
-        fee_config: FeeConfig::default(),
-        mode,
-        max_position_pct: Decimal::new(10, 2),
-        risk_control: Default::default(),
-    };
+    let start = config.start_date;
+    let end = config.end_date;
 
     // Equal-weight strategy signals
-    let n = req.symbols.len() as f64;
-    let weights: Vec<f64> = req.weights.unwrap_or_else(|| vec![1.0 / n; req.symbols.len()]);
+    let weights: Vec<f64> = req
+        .weights
+        .clone()
+        .unwrap_or_else(|| vec![1.0 / req.symbols.len() as f64; req.symbols.len()]);
     let mut signals: HashMap<NaiveDate, StrategySignal> = HashMap::new();
 
     // Generate daily signals: hold equal weight every day
-    let target_weights: HashMap<String, Decimal> = req.symbols.iter()
+    let target_weights: HashMap<String, Decimal> = req
+        .symbols
+        .iter()
         .zip(weights.iter())
         .map(|(s, w)| (s.clone(), Decimal::from_f64(*w).unwrap()))
         .collect();
@@ -84,18 +262,29 @@ pub async fn run_backtest(
     .collect();
 
     for day in &trading_days {
-        signals.insert(*day, StrategySignal {
-            date: *day,
-            target_weights: target_weights.clone(),
-        });
+        signals.insert(
+            *day,
+            StrategySignal {
+                date: *day,
+                target_weights: target_weights.clone(),
+            },
+        );
     }
 
     // Run backtest
     let runner = BacktestRunner::new(state.db.clone());
     match runner.run(&task_id, config, &signals).await {
         Ok(output) => {
-            let first_day = output.equity_curve.first().map(|(d,_)| d.to_string()).unwrap_or_default();
-            let last_day = output.equity_curve.last().map(|(d,_)| d.to_string()).unwrap_or_default();
+            let first_day = output
+                .equity_curve
+                .first()
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default();
+            let last_day = output
+                .equity_curve
+                .last()
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default();
             Json(json!({
                 "code": 0,
                 "data": {
@@ -116,6 +305,7 @@ pub async fn run_backtest(
                         "calmar_ratio": output.metrics.calmar_ratio,
                         "benchmark_return_pct": output.metrics.benchmark_return_pct,
                         "excess_return_pct": output.metrics.excess_return_pct,
+                        "turnover": output.metrics.turnover,
                         "num_trades": output.metrics.num_trades,
                     },
                     "trades": output.trades.len(),
@@ -123,19 +313,232 @@ pub async fn run_backtest(
                 }
             }))
         }
-        Err(e) => {
-            Json(json!({"code": 1, "message": e.to_string()}))
-        }
+        Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
     }
+}
+
+pub async fn list_backtests(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BacktestListQuery>,
+) -> impl IntoResponse {
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        Vec<String>,
+        NaiveDate,
+        NaiveDate,
+        String,
+        i32,
+        Option<NaiveDate>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<i32>,
+    )> = sqlx::query_as(
+        r#"SELECT t.task_id, t.status, t.strategy_version_id, t.data_version_id,
+                  t.symbols, t.start_date, t.end_date, t.benchmark_symbol, t.progress,
+                  t.last_completed_date,
+                  r.total_return, r.sharpe_ratio, r.max_drawdown, r.total_trades
+           FROM backtest_task t
+           LEFT JOIN backtest_result r ON r.task_id = t.task_id
+           WHERE ($1::varchar IS NULL OR t.strategy_version_id = $1)
+             AND ($2::varchar IS NULL OR t.data_version_id = $2)
+             AND ($3::varchar IS NULL OR t.status = $3)
+             AND ($4::varchar IS NULL OR t.benchmark_symbol = $4)
+           ORDER BY t.created_at DESC
+           LIMIT $5 OFFSET $6"#,
+    )
+    .bind(query.strategy_version_id.as_deref())
+    .bind(query.data_version_id.as_deref())
+    .bind(query.status.as_deref())
+    .bind(query.benchmark_symbol.as_deref())
+    .bind(query.normalized_page_size())
+    .bind(query.offset())
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Json(json!({"code": 0, "data": {
+        "page": query.normalized_page(),
+        "page_size": query.normalized_page_size(),
+        "items": rows.into_iter().map(|row| json!({
+            "task_id": row.0,
+            "status": row.1,
+            "strategy_version_id": row.2,
+            "data_version_id": row.3,
+            "symbols": row.4,
+            "start_date": row.5,
+            "end_date": row.6,
+            "benchmark_symbol": row.7,
+            "progress": row.8,
+            "last_completed_date": row.9,
+            "metrics": {
+                "total_return": row.10,
+                "sharpe_ratio": row.11,
+                "max_drawdown": row.12,
+                "total_trades": row.13,
+            }
+        })).collect::<Vec<_>>(),
+    }}))
+}
+
+pub async fn backtest_summary(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse {
+    let task: Option<(
+        String,
+        String,
+        String,
+        String,
+        Vec<String>,
+        NaiveDate,
+        NaiveDate,
+        String,
+        i32,
+        Option<NaiveDate>,
+    )> = sqlx::query_as(
+        r#"SELECT task_id, status, strategy_version_id, data_version_id,
+                  symbols, start_date, end_date, benchmark_symbol, progress,
+                  last_completed_date
+           FROM backtest_task
+           WHERE task_id = $1"#,
+    )
+    .bind(&task_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(task) = task else {
+        return Json(json!({"code": 1, "message": "backtest summary not found"}));
+    };
+
+    let result: Option<(
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Option<i32>,
+        Option<Decimal>,
+        String,
+    )> = sqlx::query_as(
+        r#"SELECT r.total_return, r.annualized_return, r.benchmark_return, r.excess_return,
+                  r.sharpe_ratio, r.sortino_ratio, r.information_ratio, r.max_drawdown,
+                  r.turnover, r.total_trades, r.win_rate, r.reproducibility_hash
+           FROM backtest_result r
+           WHERE r.task_id = $1"#,
+    )
+    .bind(&task_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(result) = result else {
+        return Json(json!({"code": 1, "message": "backtest summary not found"}));
+    };
+
+    Json(json!({"code": 0, "data": {
+        "task": {
+            "task_id": task.0,
+            "status": task.1,
+            "strategy_version_id": task.2,
+            "data_version_id": task.3,
+            "symbols": task.4,
+            "start_date": task.5,
+            "end_date": task.6,
+            "benchmark_symbol": task.7,
+            "progress": task.8,
+            "last_completed_date": task.9,
+        },
+        "metrics": {
+            "total_return": result.0,
+            "annualized_return": result.1,
+            "benchmark_return": result.2,
+            "excess_return": result.3,
+            "sharpe_ratio": result.4,
+            "sortino_ratio": result.5,
+            "information_ratio": result.6,
+            "max_drawdown": result.7,
+            "turnover": result.8,
+            "total_trades": result.9,
+            "win_rate": result.10,
+            "reproducibility_hash": result.11,
+        }
+    }}))
+}
+
+pub async fn backtest_equity_curve(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    Query(query): Query<EquityCurveQuery>,
+) -> impl IntoResponse {
+    let start = match query
+        .start_date
+        .as_deref()
+        .map(|value| parse_yyyymmdd(value, "start_date"))
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(message) => return Json(json!({"code": 1, "message": message})),
+    };
+    let end = match query
+        .end_date
+        .as_deref()
+        .map(|value| parse_yyyymmdd(value, "end_date"))
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(message) => return Json(json!({"code": 1, "message": message})),
+    };
+
+    let rows: Vec<(NaiveDate, Decimal)> = sqlx::query_as(
+        r#"SELECT trade_date, portfolio_value
+           FROM backtest_equity_curve
+           WHERE task_id = $1
+             AND ($2::date IS NULL OR trade_date >= $2)
+             AND ($3::date IS NULL OR trade_date <= $3)
+           ORDER BY trade_date"#,
+    )
+    .bind(&task_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Json(json!({"code": 0, "data": {
+        "task_id": task_id,
+        "points": rows.into_iter().map(|row| json!({
+            "trade_date": row.0,
+            "portfolio_value": row.1,
+        })).collect::<Vec<_>>(),
+    }}))
 }
 
 // ─── Factor-based backtest ────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RunFactorBacktestReq {
     pub combo_name: String,
     #[serde(default = "default_combo_version")]
     pub version: String,
+    #[serde(default = "default_factor_strategy_version")]
+    pub strategy_version_id: String,
+    #[serde(default = "default_data_version")]
+    pub data_version_id: String,
+    pub research_dataset_id: Option<String>,
+    pub feature_set_version_id: Option<String>,
+    pub prediction_set_id: Option<String>,
+    pub portfolio_policy_id: Option<String>,
     #[serde(default = "default_top_n")]
     pub top_n: usize,
     /// Rebalance frequency: "daily", "weekly", "monthly" (or integer trading days)
@@ -149,6 +552,11 @@ pub struct RunFactorBacktestReq {
     pub min_amount: f64,
     #[serde(default = "default_max_pct")]
     pub max_position_pct: f64,
+    /// Skip top N% of ranked stocks to avoid value traps (extreme reversal = junk)
+    #[serde(default)]
+    pub skip_top_pct: f64,
+    pub cost_model: Option<CostModelReq>,
+    pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
     pub start_date: String,
     pub end_date: String,
@@ -157,21 +565,202 @@ pub struct RunFactorBacktestReq {
     pub mode: Option<String>,
 }
 
-fn default_combo_version() -> String { "1.0.0".into() }
-fn default_top_n() -> usize { 20 }
-fn default_rebalance() -> String { "monthly".into() }
-fn default_entry_delay() -> usize { 0 }
-fn default_max_pct() -> f64 { 0.10 }
-fn default_capital() -> f64 { 1_000_000.0 }
+#[derive(Debug, Deserialize, Clone)]
+pub struct RunPredictionBacktestReq {
+    pub prediction_set_id: String,
+    #[serde(default = "default_prediction_strategy_version")]
+    pub strategy_version_id: String,
+    #[serde(default = "default_data_version")]
+    pub data_version_id: String,
+    pub research_dataset_id: Option<String>,
+    pub feature_set_version_id: Option<String>,
+    pub portfolio_policy_id: Option<String>,
+    #[serde(default = "default_top_n")]
+    pub top_n: usize,
+    #[serde(default = "default_rebalance")]
+    pub rebalance: String,
+    #[serde(default = "default_entry_delay")]
+    pub entry_delay: usize,
+    #[serde(default)]
+    pub min_amount: f64,
+    #[serde(default = "default_max_pct")]
+    pub max_position_pct: f64,
+    #[serde(default)]
+    pub skip_top_pct: f64,
+    pub cost_model: Option<CostModelReq>,
+    pub execution_rules: Option<ExecutionRulesReq>,
+    pub benchmark: Option<String>,
+    pub start_date: String,
+    pub end_date: String,
+    #[serde(default = "default_capital")]
+    pub initial_capital: f64,
+    pub mode: Option<String>,
+}
+
+pub(crate) struct FactorBacktestRunOutput {
+    pub signals_count: usize,
+    pub metrics: quant_backtest::metrics::BacktestMetrics,
+    pub trades: usize,
+    pub equity_points: usize,
+}
+
+fn default_combo_version() -> String {
+    "1.0.0".into()
+}
+fn default_factor_strategy_version() -> String {
+    "factor-debug-strategy".into()
+}
+fn default_prediction_strategy_version() -> String {
+    "prediction-set-strategy".into()
+}
+fn default_data_version() -> String {
+    "debug-data".into()
+}
+fn default_top_n() -> usize {
+    20
+}
+fn default_rebalance() -> String {
+    "monthly".into()
+}
+fn default_entry_delay() -> usize {
+    0
+}
+fn default_max_pct() -> f64 {
+    0.10
+}
+fn default_capital() -> f64 {
+    1_000_000.0
+}
 
 pub async fn run_factor_backtest(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunFactorBacktestReq>,
 ) -> impl IntoResponse {
     let task_id = format!("fbt-{}", Uuid::new_v4());
-    let start = NaiveDate::parse_from_str(&req.start_date, "%Y%m%d").unwrap();
-    let end = NaiveDate::parse_from_str(&req.end_date, "%Y%m%d").unwrap();
-    let capital = Decimal::from_f64(req.initial_capital).unwrap();
+    let config_summary = json!({
+        "combo": req.combo_name,
+        "top_n": req.top_n,
+        "rebalance": req.rebalance,
+        "entry_delay": req.entry_delay,
+    });
+
+    match execute_factor_backtest(&state.db, &task_id, req).await {
+        Ok(output) => Json(json!({
+            "code": 0,
+            "data": {
+                "task_id": task_id,
+                "config": {
+                    "combo": config_summary["combo"],
+                    "top_n": config_summary["top_n"],
+                    "rebalance": config_summary["rebalance"],
+                    "entry_delay": config_summary["entry_delay"],
+                    "signals_count": output.signals_count,
+                },
+                "metrics": {
+                    "total_return_pct": output.metrics.total_return_pct,
+                    "annual_return_pct": output.metrics.annual_return_pct,
+                    "sharpe_ratio": output.metrics.sharpe_ratio,
+                    "max_drawdown_pct": output.metrics.max_drawdown_pct,
+                    "calmar_ratio": output.metrics.calmar_ratio,
+                    "benchmark_return_pct": output.metrics.benchmark_return_pct,
+                    "excess_return_pct": output.metrics.excess_return_pct,
+                    "turnover": output.metrics.turnover,
+                    "num_trades": output.metrics.num_trades,
+                    "win_rate_pct": output.metrics.win_rate_pct,
+                },
+                "trades": output.trades,
+                "equity_points": output.equity_points,
+            }
+        })),
+        Err(e) => Json(json!({"code": 1, "message": e})),
+    }
+}
+
+pub async fn run_prediction_backtest(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RunPredictionBacktestReq>,
+) -> impl IntoResponse {
+    let task_id = format!("pbt-{}", Uuid::new_v4());
+    let config_summary = json!({
+        "prediction_set_id": req.prediction_set_id,
+        "top_n": req.top_n,
+        "rebalance": req.rebalance,
+        "entry_delay": req.entry_delay,
+    });
+
+    match execute_prediction_backtest(&state.db, &task_id, req).await {
+        Ok(output) => Json(json!({
+            "code": 0,
+            "data": {
+                "task_id": task_id,
+                "config": {
+                    "prediction_set_id": config_summary["prediction_set_id"],
+                    "top_n": config_summary["top_n"],
+                    "rebalance": config_summary["rebalance"],
+                    "entry_delay": config_summary["entry_delay"],
+                    "signals_count": output.signals_count,
+                },
+                "metrics": {
+                    "total_return_pct": output.metrics.total_return_pct,
+                    "annual_return_pct": output.metrics.annual_return_pct,
+                    "sharpe_ratio": output.metrics.sharpe_ratio,
+                    "max_drawdown_pct": output.metrics.max_drawdown_pct,
+                    "calmar_ratio": output.metrics.calmar_ratio,
+                    "benchmark_return_pct": output.metrics.benchmark_return_pct,
+                    "excess_return_pct": output.metrics.excess_return_pct,
+                    "turnover": output.metrics.turnover,
+                    "num_trades": output.metrics.num_trades,
+                    "win_rate_pct": output.metrics.win_rate_pct,
+                },
+                "trades": output.trades,
+                "equity_points": output.equity_points,
+            }
+        })),
+        Err(e) => Json(json!({"code": 1, "message": e})),
+    }
+}
+
+pub(crate) async fn execute_factor_backtest(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    req: RunFactorBacktestReq,
+) -> Result<FactorBacktestRunOutput, String> {
+    let start = parse_yyyymmdd(&req.start_date, "start_date")?;
+    let end = parse_yyyymmdd(&req.end_date, "end_date")?;
+    if end < start {
+        return Err("end_date must be greater than or equal to start_date".into());
+    }
+    let capital = decimal_from_f64(req.initial_capital, "initial_capital")?;
+    let fee_config = match apply_cost_model(FeeConfig::default(), req.cost_model.as_ref()) {
+        Ok(config) => config,
+        Err(message) => return Err(message),
+    };
+    let execution_timing = match parse_execution_timing(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_timing.as_deref()),
+    ) {
+        Ok(value) => value,
+        Err(message) => return Err(message),
+    };
+    let execution_price = match parse_execution_price(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_price.as_deref()),
+    ) {
+        Ok(value) => value,
+        Err(message) => return Err(message),
+    };
+    let max_participation_rate = match req
+        .execution_rules
+        .as_ref()
+        .and_then(|rules| rules.max_participation_rate)
+        .map(|value| decimal_from_f64(value, "execution_rules.max_participation_rate"))
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(message) => return Err(message),
+    };
 
     let reb_freq = match req.rebalance.as_str() {
         "daily" => 1,
@@ -186,20 +775,34 @@ pub async fn run_factor_backtest(
         top_n: req.top_n,
         rebalance_freq_days: reb_freq,
         entry_delay_days: req.entry_delay,
-        min_daily_amount_cny: if req.min_amount > 0.0 { Some(req.min_amount) } else { None },
-        max_position_pct: Decimal::from_f64(req.max_position_pct).unwrap(),
+        min_daily_amount_cny: if req.min_amount > 0.0 {
+            Some(req.min_amount)
+        } else {
+            None
+        },
+        max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
+        skip_top_pct: req.skip_top_pct,
     };
 
     info!(task_id, combo=%req.combo_name, top_n=req.top_n, reb=reb_freq, "Generating factor signals");
 
     let signals = match quant_backtest::signal_generator::generate_signals(
-        &state.db, &sig_config, start, end,
-    ).await {
+        db,
+        &sig_config,
+        start,
+        end,
+    )
+    .await
+    {
         Ok(s) => s,
-        Err(e) => return Json(json!({"code": 1, "message": e})),
+        Err(e) => return Err(e),
     };
 
-    info!(task_id, signals = signals.len(), "Signals generated, running backtest");
+    info!(
+        task_id,
+        signals = signals.len(),
+        "Signals generated, running backtest"
+    );
 
     let mode = match req.mode.as_deref() {
         Some("fast") => BacktestMode::Fast,
@@ -212,42 +815,245 @@ pub async fn run_factor_backtest(
         benchmark: req.benchmark.unwrap_or_else(|| "000300.SH".into()),
         start_date: start,
         end_date: end,
-        fee_config: FeeConfig::default(),
+        fee_config,
         mode,
         max_position_pct: Decimal::from_f64(req.max_position_pct).unwrap(),
+        strategy_version_id: req.strategy_version_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        research_dataset_id: req.research_dataset_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        prediction_set_id: req.prediction_set_id.clone(),
+        portfolio_policy_id: req.portfolio_policy_id.clone(),
+        symbols: signals
+            .values()
+            .flat_map(|signal| signal.target_weights.keys().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect(),
+        rebalance_frequency: req.rebalance.clone(),
+        execution_timing,
+        execution_price,
+        max_participation_rate,
         risk_control: Default::default(),
     };
 
-    let runner = BacktestRunner::new(state.db.clone());
+    let runner = BacktestRunner::new(db.clone());
     match runner.run(&task_id, config, &signals).await {
-        Ok(output) => {
-            Json(json!({
-                "code": 0,
-                "data": {
-                    "task_id": task_id,
-                    "config": {
-                        "combo": req.combo_name,
-                        "top_n": req.top_n,
-                        "rebalance": req.rebalance,
-                        "entry_delay": req.entry_delay,
-                        "signals_count": signals.len(),
-                    },
-                    "metrics": {
-                        "total_return_pct": output.metrics.total_return_pct,
-                        "annual_return_pct": output.metrics.annual_return_pct,
-                        "sharpe_ratio": output.metrics.sharpe_ratio,
-                        "max_drawdown_pct": output.metrics.max_drawdown_pct,
-                        "calmar_ratio": output.metrics.calmar_ratio,
-                        "benchmark_return_pct": output.metrics.benchmark_return_pct,
-                        "excess_return_pct": output.metrics.excess_return_pct,
-                        "num_trades": output.metrics.num_trades,
-                        "win_rate_pct": output.metrics.win_rate_pct,
-                    },
-                    "trades": output.trades.len(),
-                    "equity_points": output.equity_curve.len(),
-                }
-            }))
-        }
-        Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
+        Ok(output) => Ok(FactorBacktestRunOutput {
+            signals_count: signals.len(),
+            trades: output.trades.len(),
+            equity_points: output.equity_curve.len(),
+            metrics: output.metrics,
+        }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+pub(crate) async fn execute_prediction_backtest(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    req: RunPredictionBacktestReq,
+) -> Result<FactorBacktestRunOutput, String> {
+    let prediction_set_id = req.prediction_set_id.trim().to_string();
+    if prediction_set_id.is_empty() {
+        return Err("prediction_set_id must not be empty".into());
+    }
+    let start = parse_yyyymmdd(&req.start_date, "start_date")?;
+    let end = parse_yyyymmdd(&req.end_date, "end_date")?;
+    if end < start {
+        return Err("end_date must be greater than or equal to start_date".into());
+    }
+    let capital = decimal_from_f64(req.initial_capital, "initial_capital")?;
+    let fee_config = apply_cost_model(FeeConfig::default(), req.cost_model.as_ref())?;
+    let execution_timing = parse_execution_timing(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_timing.as_deref()),
+    )?;
+    let execution_price = parse_execution_price(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_price.as_deref()),
+    )?;
+    let max_participation_rate = req
+        .execution_rules
+        .as_ref()
+        .and_then(|rules| rules.max_participation_rate)
+        .map(|value| decimal_from_f64(value, "execution_rules.max_participation_rate"))
+        .transpose()?;
+
+    let reb_freq = match req.rebalance.as_str() {
+        "daily" => 1,
+        "weekly" => 5,
+        "monthly" => 20,
+        s => s.parse::<usize>().unwrap_or(20),
+    };
+
+    let sig_config = quant_backtest::signal_generator::PredictionSignalConfig {
+        prediction_set_id: prediction_set_id.clone(),
+        top_n: req.top_n,
+        rebalance_freq_days: reb_freq,
+        entry_delay_days: req.entry_delay,
+        min_daily_amount_cny: if req.min_amount > 0.0 {
+            Some(req.min_amount)
+        } else {
+            None
+        },
+        max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
+        skip_top_pct: req.skip_top_pct,
+    };
+
+    info!(
+        task_id,
+        prediction_set_id=%prediction_set_id,
+        top_n=req.top_n,
+        reb=reb_freq,
+        "Generating prediction signals"
+    );
+
+    let signals =
+        quant_backtest::signal_generator::generate_prediction_signals(db, &sig_config, start, end)
+            .await?;
+
+    let mode = match req.mode.as_deref() {
+        Some("fast") => BacktestMode::Fast,
+        Some("audit") => BacktestMode::Audit,
+        _ => BacktestMode::Standard,
+    };
+
+    let config = BacktestConfig {
+        initial_capital: capital,
+        benchmark: req.benchmark.unwrap_or_else(|| "000300.SH".into()),
+        start_date: start,
+        end_date: end,
+        fee_config,
+        mode,
+        max_position_pct: Decimal::from_f64(req.max_position_pct).unwrap(),
+        strategy_version_id: req.strategy_version_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        research_dataset_id: req.research_dataset_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        prediction_set_id: Some(prediction_set_id),
+        portfolio_policy_id: req.portfolio_policy_id.clone(),
+        symbols: signals
+            .values()
+            .flat_map(|signal| signal.target_weights.keys().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect(),
+        rebalance_frequency: req.rebalance.clone(),
+        execution_timing,
+        execution_price,
+        max_participation_rate,
+        risk_control: Default::default(),
+    };
+
+    let runner = BacktestRunner::new(db.clone());
+    runner
+        .run(task_id, config, &signals)
+        .await
+        .map(|output| FactorBacktestRunOutput {
+            signals_count: signals.len(),
+            trades: output.trades.len(),
+            equity_points: output.equity_curve.len(),
+            metrics: output.metrics,
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_yyyymmdd_rejects_invalid_date() {
+        let err = parse_yyyymmdd("2024-01-01", "start_date").unwrap_err();
+        assert!(err.contains("start_date"));
+    }
+
+    #[test]
+    fn build_config_requires_weight_count_to_match_symbols() {
+        let req = RunBacktestReq {
+            strategy_version_id: "strategy-v1".into(),
+            data_version_id: "data-v1".into(),
+            research_dataset_id: None,
+            feature_set_version_id: None,
+            prediction_set_id: None,
+            portfolio_policy_id: None,
+            symbols: vec!["000001.SZ".into(), "600000.SH".into()],
+            weights: Some(vec![0.5]),
+            benchmark: None,
+            start_date: "20240101".into(),
+            end_date: "20240131".into(),
+            initial_capital: Some(1_000_000.0),
+            mode: None,
+            rebalance_frequency: None,
+            cost_model: None,
+            execution_rules: None,
+        };
+
+        let err = build_backtest_config(&req).unwrap_err();
+        assert!(err.contains("weights"));
+    }
+
+    #[test]
+    fn build_config_accepts_cost_and_capacity_rules() {
+        let req = RunBacktestReq {
+            strategy_version_id: "strategy-v1".into(),
+            data_version_id: "data-v1".into(),
+            research_dataset_id: None,
+            feature_set_version_id: None,
+            prediction_set_id: None,
+            portfolio_policy_id: None,
+            symbols: vec!["000001.SZ".into()],
+            weights: Some(vec![1.0]),
+            benchmark: None,
+            start_date: "20240101".into(),
+            end_date: "20240131".into(),
+            initial_capital: Some(1_000_000.0),
+            mode: None,
+            rebalance_frequency: None,
+            cost_model: Some(CostModelReq {
+                commission_rate: None,
+                min_commission: None,
+                tax_rate: None,
+                slippage_bps: Some(0.0002),
+                cost_multiplier: Some(1.5),
+                impact_cost_coefficient: Some(0.02),
+            }),
+            execution_rules: Some(ExecutionRulesReq {
+                execution_timing: Some("next_open".into()),
+                execution_price: Some("open".into()),
+                max_participation_rate: Some(0.10),
+            }),
+        };
+
+        let config = build_backtest_config(&req).unwrap();
+
+        assert_eq!(
+            config.fee_config.cost_multiplier,
+            Decimal::from_f64(1.5).unwrap()
+        );
+        assert_eq!(
+            config.fee_config.impact_cost_coefficient,
+            Decimal::from_f64(0.02).unwrap()
+        );
+        assert_eq!(
+            config.max_participation_rate,
+            Some(Decimal::from_f64(0.10).unwrap())
+        );
+    }
+
+    #[test]
+    fn backtest_list_query_normalizes_page_size_bounds() {
+        let query = BacktestListQuery {
+            page: Some(0),
+            page_size: Some(5000),
+            ..BacktestListQuery::default()
+        };
+
+        assert_eq!(query.normalized_page(), 1);
+        assert_eq!(query.normalized_page_size(), 200);
+        assert_eq!(query.offset(), 0);
     }
 }

@@ -3,8 +3,8 @@
 //! 从 valentina 重构，新增：滑点模型、可配置费用率、涨跌停价格过滤。
 
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -22,11 +22,23 @@ pub struct Holding {
 
 impl Holding {
     pub fn new(symbol: String, quantity: Decimal, price: Decimal) -> Self {
-        Self { symbol, quantity, avg_cost: price, current_price: price, sellable_quantity: Decimal::zero() }
+        Self {
+            symbol,
+            quantity,
+            avg_cost: price,
+            current_price: price,
+            sellable_quantity: Decimal::zero(),
+        }
     }
-    pub fn market_value(&self) -> Decimal { self.quantity * self.current_price }
-    pub fn unrealized_pnl(&self) -> Decimal { self.market_value() - self.quantity * self.avg_cost }
-    pub fn update_price(&mut self, price: Decimal) { self.current_price = price; }
+    pub fn market_value(&self) -> Decimal {
+        self.quantity * self.current_price
+    }
+    pub fn unrealized_pnl(&self) -> Decimal {
+        self.market_value() - self.quantity * self.avg_cost
+    }
+    pub fn update_price(&mut self, price: Decimal) {
+        self.current_price = price;
+    }
 }
 
 // ─── Trade ────────────────────────────────────────────────────────
@@ -43,10 +55,16 @@ pub struct Trade {
     pub tax: Decimal,
     pub slippage: Decimal,
     pub signal_type: Option<String>,
+    pub event_reason: Option<String>,
+    pub target_weight: Option<Decimal>,
+    pub executed_weight: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TradeSide { Buy, Sell }
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
 
 // ─── Position (daily snapshot) ────────────────────────────────────
 
@@ -76,15 +94,21 @@ pub struct FeeConfig {
     pub tax_rate: Decimal,
     /// 滑点 bps (e.g. 0.0001 = 1bp)
     pub slippage_bps: Decimal,
+    /// 成本压力倍数，用于成本上浮敏感性测试
+    pub cost_multiplier: Decimal,
+    /// 冲击成本系数，额外滑点 = 成交参与率 * impact_cost_coefficient
+    pub impact_cost_coefficient: Decimal,
 }
 
 impl Default for FeeConfig {
     fn default() -> Self {
         Self {
-            commission_rate: Decimal::new(3, 4),  // 0.0003 = 万三
-            min_commission: Decimal::new(5, 0),   // 5 元
-            tax_rate: Decimal::new(5, 4),          // 0.0005 = 万五
-            slippage_bps: Decimal::new(1, 4),      // 0.0001 = 1bp
+            commission_rate: Decimal::new(3, 4), // 0.0003 = 万三
+            min_commission: Decimal::new(5, 0),  // 5 元
+            tax_rate: Decimal::new(5, 4),        // 0.0005 = 万五
+            slippage_bps: Decimal::new(1, 4),    // 0.0001 = 1bp
+            cost_multiplier: Decimal::ONE,
+            impact_cost_coefficient: Decimal::zero(),
         }
     }
 }
@@ -115,10 +139,17 @@ impl Portfolio {
     }
 
     pub fn total_value(&self) -> Decimal {
-        self.cash + self.holdings.values().map(|h| h.market_value()).sum::<Decimal>()
+        self.cash
+            + self
+                .holdings
+                .values()
+                .map(|h| h.market_value())
+                .sum::<Decimal>()
     }
 
-    pub fn num_positions(&self) -> usize { self.holdings.len() }
+    pub fn num_positions(&self) -> usize {
+        self.holdings.len()
+    }
 
     pub fn mark_to_market(&mut self, prices: &HashMap<String, Decimal>) {
         for (symbol, price) in prices {
@@ -131,8 +162,9 @@ impl Portfolio {
     /// 获取当日持仓快照
     pub fn snapshot(&self, date: NaiveDate) -> Vec<DailyPosition> {
         let tv = self.total_value();
-        self.holdings.iter().map(|(sym, h)| {
-            DailyPosition {
+        self.holdings
+            .iter()
+            .map(|(sym, h)| DailyPosition {
                 date,
                 symbol: sym.clone(),
                 quantity: h.quantity,
@@ -140,65 +172,153 @@ impl Portfolio {
                 avg_cost: h.avg_cost,
                 close_price: h.current_price,
                 market_value: h.market_value(),
-                weight: if tv.is_zero() { Decimal::zero() } else { h.market_value() / tv },
+                weight: if tv.is_zero() {
+                    Decimal::zero()
+                } else {
+                    h.market_value() / tv
+                },
                 unrealized_pnl: h.unrealized_pnl(),
                 target_weight: None,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// 买入：含手续费 + 滑点
     /// 返回实际成交价
-    pub fn buy(&mut self, date: NaiveDate, symbol: &str, quantity: Decimal, price: Decimal) -> Option<Decimal> {
-        if quantity.is_zero() { return None; }
-        let slippage_price = price * (Decimal::ONE + self.fee_config.slippage_bps);
+    pub fn buy(
+        &mut self,
+        date: NaiveDate,
+        symbol: &str,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> Option<Decimal> {
+        self.buy_with_cost(date, symbol, quantity, price, Decimal::zero())
+    }
+
+    /// 买入：含手续费、滑点和按参与率估算的冲击成本
+    /// 返回实际成交价
+    pub fn buy_with_cost(
+        &mut self,
+        date: NaiveDate,
+        symbol: &str,
+        quantity: Decimal,
+        price: Decimal,
+        participation_rate: Decimal,
+    ) -> Option<Decimal> {
+        if quantity.is_zero() {
+            return None;
+        }
+        let slippage = self.effective_slippage(participation_rate);
+        let slippage_price = price * (Decimal::ONE + slippage);
         let amount = quantity * slippage_price;
-        let commission = (amount * self.fee_config.commission_rate).max(self.fee_config.min_commission);
+        let commission =
+            (amount * self.effective_commission_rate()).max(self.effective_min_commission());
         let total = amount + commission;
-        if self.cash < total { return None; }
+        if self.cash < total {
+            return None;
+        }
         // 仓位上限检查
         if !self.max_position_pct.is_zero() {
-            let after_mv = self.holdings.get(symbol).map(|h| h.market_value()).unwrap_or_default() + amount;
-            if after_mv / self.total_value() > self.max_position_pct { return None; }
+            let after_mv = self
+                .holdings
+                .get(symbol)
+                .map(|h| h.market_value())
+                .unwrap_or_default()
+                + amount;
+            if after_mv / self.total_value() > self.max_position_pct {
+                return None;
+            }
         }
         self.cash -= total;
-        self.holdings.entry(symbol.to_string())
+        self.holdings
+            .entry(symbol.to_string())
             .and_modify(|h| {
                 let tc = h.quantity * h.avg_cost + amount;
                 h.quantity += quantity;
-                h.avg_cost = if h.quantity.is_zero() { Decimal::zero() } else { tc / h.quantity };
+                h.avg_cost = if h.quantity.is_zero() {
+                    Decimal::zero()
+                } else {
+                    tc / h.quantity
+                };
                 h.current_price = price;
             })
             .or_insert_with(|| Holding::new(symbol.to_string(), quantity, price));
         self.trades.push(Trade {
-            trade_date: date, symbol: symbol.to_string(), side: TradeSide::Buy,
-            quantity, price, amount, commission, tax: Decimal::zero(),
-            slippage: amount - quantity * price, signal_type: None,
+            trade_date: date,
+            symbol: symbol.to_string(),
+            side: TradeSide::Buy,
+            quantity,
+            price,
+            amount,
+            commission,
+            tax: Decimal::zero(),
+            slippage: amount - quantity * price,
+            signal_type: None,
+            event_reason: None,
+            target_weight: None,
+            executed_weight: None,
         });
         Some(slippage_price)
     }
 
     /// 卖出：含手续费 + 印花税 + 滑点
     /// 返回实际成交价
-    pub fn sell(&mut self, date: NaiveDate, symbol: &str, quantity: Decimal, price: Decimal) -> Option<Decimal> {
-        if quantity.is_zero() { return None; }
+    pub fn sell(
+        &mut self,
+        date: NaiveDate,
+        symbol: &str,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> Option<Decimal> {
+        self.sell_with_cost(date, symbol, quantity, price, Decimal::zero())
+    }
+
+    /// 卖出：含手续费、印花税、滑点和按参与率估算的冲击成本
+    /// 返回实际成交价
+    pub fn sell_with_cost(
+        &mut self,
+        date: NaiveDate,
+        symbol: &str,
+        quantity: Decimal,
+        price: Decimal,
+        participation_rate: Decimal,
+    ) -> Option<Decimal> {
+        if quantity.is_zero() {
+            return None;
+        }
         let holding = self.holdings.get(symbol)?;
-        if holding.sellable_quantity < quantity { return None; }
-        let slippage_price = price * (Decimal::ONE - self.fee_config.slippage_bps);
+        if holding.sellable_quantity < quantity {
+            return None;
+        }
+        let slippage = self.effective_slippage(participation_rate);
+        let slippage_price = price * (Decimal::ONE - slippage);
         let amount = quantity * slippage_price;
-        let commission = (amount * self.fee_config.commission_rate).max(self.fee_config.min_commission);
-        let tax = amount * self.fee_config.tax_rate;
+        let commission =
+            (amount * self.effective_commission_rate()).max(self.effective_min_commission());
+        let tax = amount * self.effective_tax_rate();
         let net = amount - commission - tax;
         self.cash += net;
         if let Some(h) = self.holdings.get_mut(symbol) {
             h.quantity -= quantity;
             h.sellable_quantity -= quantity;
-            if h.quantity.is_zero() { self.holdings.remove(symbol); }
+            if h.quantity.is_zero() {
+                self.holdings.remove(symbol);
+            }
         }
         self.trades.push(Trade {
-            trade_date: date, symbol: symbol.to_string(), side: TradeSide::Sell,
-            quantity, price, amount, commission, tax,
-            slippage: quantity * price - amount, signal_type: None,
+            trade_date: date,
+            symbol: symbol.to_string(),
+            side: TradeSide::Sell,
+            quantity,
+            price,
+            amount,
+            commission,
+            tax,
+            slippage: quantity * price - amount,
+            signal_type: None,
+            event_reason: None,
+            target_weight: None,
+            executed_weight: None,
         });
         Some(slippage_price)
     }
@@ -208,5 +328,23 @@ impl Portfolio {
         for h in self.holdings.values_mut() {
             h.sellable_quantity = h.quantity;
         }
+    }
+
+    fn effective_slippage(&self, participation_rate: Decimal) -> Decimal {
+        let base = self.fee_config.slippage_bps
+            + participation_rate * self.fee_config.impact_cost_coefficient;
+        base * self.fee_config.cost_multiplier
+    }
+
+    fn effective_commission_rate(&self) -> Decimal {
+        self.fee_config.commission_rate * self.fee_config.cost_multiplier
+    }
+
+    fn effective_tax_rate(&self) -> Decimal {
+        self.fee_config.tax_rate * self.fee_config.cost_multiplier
+    }
+
+    fn effective_min_commission(&self) -> Decimal {
+        self.fee_config.min_commission * self.fee_config.cost_multiplier
     }
 }

@@ -35,6 +35,7 @@ pub struct FactorValue {
     pub symbol: String,
     pub date: NaiveDate,
     pub value: f64,
+    pub available_at: Option<NaiveDate>,
 }
 
 /// Output of factor computation — vector of (symbol, date, value)

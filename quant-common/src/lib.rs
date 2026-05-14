@@ -55,7 +55,10 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled | Self::Timeout)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Timeout
+        )
     }
 
     pub fn is_active(&self) -> bool {

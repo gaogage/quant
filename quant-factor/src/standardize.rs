@@ -24,7 +24,11 @@ pub fn standardize(output: &FactorOutput, method: StandardizeMethod) -> FactorOu
 
     for (date, indices) in &grouped {
         if indices.len() < 3 {
-            debug!("date={}, only {} valid symbols, skipping standardization", date, indices.len());
+            debug!(
+                "date={}, only {} valid symbols, skipping standardization",
+                date,
+                indices.len()
+            );
             continue;
         }
 
@@ -35,13 +39,16 @@ pub fn standardize(output: &FactorOutput, method: StandardizeMethod) -> FactorOu
                 let (mean, std) = mean_std(&raw);
                 if std > 0.0 {
                     for &i in indices {
-                        new_values[i].value = (raw[indices.iter().position(|&j| j == i).unwrap()] - mean) / std;
+                        new_values[i].value =
+                            (raw[indices.iter().position(|&j| j == i).unwrap()] - mean) / std;
                     }
                 }
             }
             StandardizeMethod::Rank => {
                 let n = raw.len() as f64;
-                let mut sorted: Vec<(usize, f64)> = indices.iter().enumerate()
+                let mut sorted: Vec<(usize, f64)> = indices
+                    .iter()
+                    .enumerate()
                     .map(|(pos, &_idx)| (pos, raw[pos]))
                     .collect();
                 sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -59,16 +66,22 @@ pub fn standardize(output: &FactorOutput, method: StandardizeMethod) -> FactorOu
                 let mut current = raw.clone();
                 for _pass in 0..10 {
                     let (m, s) = mean_std(&current);
-                    if s <= 0.0 { break; }
+                    if s <= 0.0 {
+                        break;
+                    }
                     let lower = m - sigma * s;
                     let upper = m + sigma * s;
                     let mut clipped = false;
                     for x in &mut current {
                         let old = *x;
                         *x = x.clamp(lower, upper);
-                        if old != *x { clipped = true; }
+                        if old != *x {
+                            clipped = true;
+                        }
                     }
-                    if !clipped { break; }  // converged
+                    if !clipped {
+                        break;
+                    } // converged
                 }
                 let (cm, cs) = mean_std(&current);
                 if cs > 0.0 {
@@ -137,7 +150,8 @@ pub mod helpers {
             };
         }
 
-        let valid: Vec<f64> = values.iter()
+        let valid: Vec<f64> = values
+            .iter()
             .map(|v| v.value)
             .filter(|x| x.is_finite())
             .collect();
@@ -148,8 +162,10 @@ pub mod helpers {
         let min = valid.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = valid.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-        let symbols: std::collections::HashSet<&str> = values.iter().map(|v| v.symbol.as_str()).collect();
-        let dates: std::collections::HashSet<chrono::NaiveDate> = values.iter().map(|v| v.date).collect();
+        let symbols: std::collections::HashSet<&str> =
+            values.iter().map(|v| v.symbol.as_str()).collect();
+        let dates: std::collections::HashSet<chrono::NaiveDate> =
+            values.iter().map(|v| v.date).collect();
 
         FactorMetadata {
             factor_name: name.to_string(),
@@ -177,11 +193,16 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
         FactorOutput {
             name: name.to_string(),
-            values: values.iter().enumerate().map(|(i, (v, s))| FactorValue {
-                symbol: s.to_string(),
-                date,
-                value: *v,
-            }).collect(),
+            values: values
+                .iter()
+                .enumerate()
+                .map(|(i, (v, s))| FactorValue {
+                    symbol: s.to_string(),
+                    date,
+                    value: *v,
+                    available_at: None,
+                })
+                .collect(),
             metadata: FactorMetadata {
                 factor_name: name.to_string(),
                 category: FactorCategory::PriceVolume,
@@ -201,9 +222,10 @@ mod tests {
 
     #[test]
     fn test_zscore_standardization() {
-        let output = make_output("test", vec![
-            (1.0, "A"), (2.0, "B"), (3.0, "C"), (4.0, "D"), (5.0, "E"),
-        ]);
+        let output = make_output(
+            "test",
+            vec![(1.0, "A"), (2.0, "B"), (3.0, "C"), (4.0, "D"), (5.0, "E")],
+        );
         let result = standardize(&output, StandardizeMethod::ZScore);
         let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
         // mean=3.0, std≈1.581 → z-scores: [-1.265, -0.632, 0, 0.632, 1.265]
@@ -215,9 +237,10 @@ mod tests {
 
     #[test]
     fn test_rank_standardization() {
-        let output = make_output("test", vec![
-            (5.0, "A"), (1.0, "B"), (3.0, "C"), (4.0, "D"), (2.0, "E"),
-        ]);
+        let output = make_output(
+            "test",
+            vec![(5.0, "A"), (1.0, "B"), (3.0, "C"), (4.0, "D"), (2.0, "E")],
+        );
         let result = standardize(&output, StandardizeMethod::Rank);
         let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
         // sorted: B=1(0), E=2(1), C=3(2), D=4(3), A=5(4) → ranks: [1.0, 0.0, 0.5, 0.75, 0.25]
@@ -228,10 +251,16 @@ mod tests {
     #[test]
     fn test_winsorized_clips_extreme() {
         // Normal values + one extreme outlier → should be clipped to ≤ 5σ after re-zscore
-        let output = make_output("test", vec![
-            (1.0, "A"), (2.0, "B"), (3.0, "C"), (4.0, "D"),
-            (100.0, "E"), // extreme outlier — should be winsorized
-        ]);
+        let output = make_output(
+            "test",
+            vec![
+                (1.0, "A"),
+                (2.0, "B"),
+                (3.0, "C"),
+                (4.0, "D"),
+                (100.0, "E"), // extreme outlier — should be winsorized
+            ],
+        );
         let result = standardize(&output, StandardizeMethod::Winsorized(3.0));
         let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
         eprintln!("winsorized values: {:?}", vals);
@@ -248,21 +277,24 @@ mod tests {
             .map(|i| (i as f64 * 0.001 - 2.5, "N")) // spread from -2.5 to 2.5
             .collect();
         values.push((127.0, "OUTLIER"));
-        
+
         let output = make_output("large", values);
         let result = standardize(&output, StandardizeMethod::Winsorized(5.0));
         let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
         let outlier_val = vals.last().unwrap();
         eprintln!("outlier after winsorize(5): {}", outlier_val);
-        assert!(outlier_val.abs() <= 6.0, "127σ outlier should be clipped near 5σ, got {}", outlier_val);
+        assert!(
+            outlier_val.abs() <= 6.0,
+            "127σ outlier should be clipped near 5σ, got {}",
+            outlier_val
+        );
     }
 
     #[test]
     fn test_winsorized_double_outlier() {
         // Two extreme outliers on same date — iterative Winsorize should converge
-        let mut values: Vec<(f64, &str)> = (0..2998)
-            .map(|i| (i as f64 * 0.001 - 1.5, "N"))
-            .collect();
+        let mut values: Vec<(f64, &str)> =
+            (0..2998).map(|i| (i as f64 * 0.001 - 1.5, "N")).collect();
         values.push((774.0, "OUTLIER1"));
         values.push((550.0, "OUTLIER2"));
         let output = make_output("double", values);

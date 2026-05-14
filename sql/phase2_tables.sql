@@ -3,7 +3,14 @@
 
 -- 1. backtest_task: 加 mode 字段
 ALTER TABLE backtest_task ADD COLUMN IF NOT EXISTS mode VARCHAR(16) NOT NULL DEFAULT 'standard';
-ALTER TABLE backtest_task ADD CONSTRAINT chk_backtest_task_mode CHECK (mode IN ('fast', 'standard', 'audit'));
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_backtest_task_mode'
+    ) THEN
+        ALTER TABLE backtest_task ADD CONSTRAINT chk_backtest_task_mode CHECK (mode IN ('fast', 'standard', 'audit'));
+    END IF;
+END $$;
 
 -- 2. backtest_result: 加 calmar_ratio + annualized_volatility
 ALTER TABLE backtest_result ADD COLUMN IF NOT EXISTS calmar_ratio NUMERIC(18,10);
@@ -50,7 +57,14 @@ CREATE TABLE IF NOT EXISTS portfolio_constraint_violation (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_violation_task ON portfolio_constraint_violation(task_id, trade_date);
-ALTER TABLE portfolio_constraint_violation ADD CONSTRAINT chk_portfolio_violation_severity CHECK (severity IN ('warning', 'hard'));
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_portfolio_violation_severity'
+    ) THEN
+        ALTER TABLE portfolio_constraint_violation ADD CONSTRAINT chk_portfolio_violation_severity CHECK (severity IN ('warning', 'hard'));
+    END IF;
+END $$;
 
 -- 9. portfolio_attribution
 CREATE TABLE IF NOT EXISTS portfolio_attribution (

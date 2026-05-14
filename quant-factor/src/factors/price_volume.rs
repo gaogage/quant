@@ -48,12 +48,18 @@ impl MomentumFactor {
                     symbol: symbol.clone(),
                     date: bars[i].trade_date,
                     value: val,
+                    available_at: None,
                 });
             }
         }
 
-        let meta = build_metadata(&values, "momentum", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "momentum",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("mom_{}d", self.period),
@@ -111,7 +117,8 @@ impl VolatilityFactor {
                     continue;
                 }
                 let mean: f64 = slice.iter().sum::<f64>() / n;
-                let variance: f64 = slice.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                let variance: f64 =
+                    slice.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
 
                 // Annualized: sqrt(variance * 252)
                 let annual_vol = (variance * 252.0).sqrt();
@@ -120,12 +127,18 @@ impl VolatilityFactor {
                     symbol: symbol.clone(),
                     date: bars[i].trade_date,
                     value: annual_vol,
+                    available_at: None,
                 });
             }
         }
 
-        let meta = build_metadata(&values, "volatility", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period, "annualized": true}));
+        let meta = build_metadata(
+            &values,
+            "volatility",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period, "annualized": true}),
+        );
 
         FactorOutput {
             name: format!("vol_{}d", self.period),
@@ -186,6 +199,7 @@ impl RSIFactor {
                     symbol: symbol.clone(),
                     date,
                     value: rsi / 100.0, // normalize to [0,1]
+                    available_at: None,
                 });
             }
 
@@ -205,13 +219,19 @@ impl RSIFactor {
                         symbol: symbol.clone(),
                         date,
                         value: rsi / 100.0,
+                        available_at: None,
                     });
                 }
             }
         }
 
-        let meta = build_metadata(&values, "rsi", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "rsi",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("rsi_{}d", self.period),
@@ -247,7 +267,8 @@ impl BBandPositionFactor {
                 let window = &bars[i - self.period..i];
                 let n = window.len() as f64;
 
-                let closes: Vec<f64> = window.iter()
+                let closes: Vec<f64> = window
+                    .iter()
                     .map(|b| b.close.try_into().unwrap_or(f64::NAN))
                     .collect();
 
@@ -267,14 +288,20 @@ impl BBandPositionFactor {
                             symbol: symbol.clone(),
                             date: bars[i].trade_date,
                             value: pos.clamp(0.0, 1.0),
+                            available_at: None,
                         });
                     }
                 }
             }
         }
 
-        let meta = build_metadata(&values, "bb_position", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "bb_position",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("bb_pos_{}d", self.period),
@@ -319,7 +346,10 @@ impl ATRFactor {
             }
 
             // First ATR = simple mean
-            let initial_tr: f64 = tr_values[..self.period].iter().map(|(tr, _)| *tr).sum::<f64>()
+            let initial_tr: f64 = tr_values[..self.period]
+                .iter()
+                .map(|(tr, _)| *tr)
+                .sum::<f64>()
                 / self.period as f64;
 
             // Subsequent ATR = Wilder smoothing
@@ -330,6 +360,7 @@ impl ATRFactor {
                     symbol: symbol.clone(),
                     date: tr_values[self.period - 1].1,
                     value: atr / close_first,
+                    available_at: None,
                 });
             }
 
@@ -342,13 +373,19 @@ impl ATRFactor {
                         symbol: symbol.clone(),
                         date,
                         value: atr / close,
+                        available_at: None,
                     });
                 }
             }
         }
 
-        let meta = build_metadata(&values, "atr", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "atr",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("atr_{}d", self.period),
@@ -380,12 +417,17 @@ impl AmplitudeFactor {
 
             for i in self.period..bars.len() {
                 let window = &bars[i - self.period..i];
-                let total_amp: f64 = window.iter()
+                let total_amp: f64 = window
+                    .iter()
                     .map(|b| {
                         let high: f64 = b.high.try_into().unwrap_or(f64::NAN);
                         let low: f64 = b.low.try_into().unwrap_or(f64::NAN);
                         let open: f64 = b.open.try_into().unwrap_or(f64::NAN);
-                        if open > 0.0 { (high - low) / open } else { 0.0 }
+                        if open > 0.0 {
+                            (high - low) / open
+                        } else {
+                            0.0
+                        }
                     })
                     .sum();
                 let avg_amp = total_amp / self.period as f64;
@@ -394,12 +436,18 @@ impl AmplitudeFactor {
                     symbol: symbol.clone(),
                     date: bars[i].trade_date,
                     value: avg_amp,
+                    available_at: None,
                 });
             }
         }
 
-        let meta = build_metadata(&values, "amplitude", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "amplitude",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("amp_{}d", self.period),
@@ -433,22 +481,29 @@ impl VolPriceCorrFactor {
                 let window = &bars[i - self.period..i];
                 let n = window.len() as f64;
 
-                let closes: Vec<f64> = window.iter()
+                let closes: Vec<f64> = window
+                    .iter()
                     .map(|b| b.close.try_into().unwrap_or(f64::NAN))
                     .collect();
-                let volumes: Vec<f64> = window.iter()
+                let volumes: Vec<f64> = window
+                    .iter()
                     .map(|b| b.volume.try_into().unwrap_or(f64::NAN))
                     .collect();
 
                 let mean_close: f64 = closes.iter().sum::<f64>() / n;
                 let mean_vol: f64 = volumes.iter().sum::<f64>() / n;
 
-                let cov: f64 = closes.iter().zip(volumes.iter())
+                let cov: f64 = closes
+                    .iter()
+                    .zip(volumes.iter())
                     .map(|(c, v)| (c - mean_close) * (v - mean_vol))
-                    .sum::<f64>() / n;
+                    .sum::<f64>()
+                    / n;
 
-                let std_close = (closes.iter().map(|c| (c - mean_close).powi(2)).sum::<f64>() / n).sqrt();
-                let std_vol = (volumes.iter().map(|v| (v - mean_vol).powi(2)).sum::<f64>() / n).sqrt();
+                let std_close =
+                    (closes.iter().map(|c| (c - mean_close).powi(2)).sum::<f64>() / n).sqrt();
+                let std_vol =
+                    (volumes.iter().map(|v| (v - mean_vol).powi(2)).sum::<f64>() / n).sqrt();
 
                 let corr = if std_close > 0.0 && std_vol > 0.0 {
                     (cov / (std_close * std_vol)).clamp(-1.0, 1.0)
@@ -460,12 +515,18 @@ impl VolPriceCorrFactor {
                     symbol: symbol.clone(),
                     date: bars[i].trade_date,
                     value: corr,
+                    available_at: None,
                 });
             }
         }
 
-        let meta = build_metadata(&values, "vol_price_corr", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "vol_price_corr",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("vp_corr_{}d", self.period),
@@ -498,11 +559,16 @@ impl SkewnessFactor {
             }
 
             // Pre-compute daily returns
-            let returns: Vec<f64> = bars.windows(2)
+            let returns: Vec<f64> = bars
+                .windows(2)
                 .map(|w| {
                     let c0: f64 = w[0].close.try_into().unwrap_or(f64::NAN);
                     let c1: f64 = w[1].close.try_into().unwrap_or(f64::NAN);
-                    if c0 > 0.0 { (c1 - c0) / c0 } else { 0.0 }
+                    if c0 > 0.0 {
+                        (c1 - c0) / c0
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
 
@@ -513,28 +579,32 @@ impl SkewnessFactor {
                 }
                 let window_ret = &returns[ri - self.period..ri];
                 let n = window_ret.len() as f64;
-                if n < 3.0 { continue; }
+                if n < 3.0 {
+                    continue;
+                }
 
                 let mean: f64 = window_ret.iter().sum::<f64>() / n;
                 let m2: f64 = window_ret.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
                 let m3: f64 = window_ret.iter().map(|r| (r - mean).powi(3)).sum::<f64>() / n;
 
-                let skew = if m2 > 1e-20 {
-                    m3 / m2.powf(1.5)
-                } else {
-                    0.0
-                };
+                let skew = if m2 > 1e-20 { m3 / m2.powf(1.5) } else { 0.0 };
 
                 values.push(FactorValue {
                     symbol: symbol.clone(),
                     date: bars[i].trade_date,
                     value: skew.clamp(-5.0, 5.0),
+                    available_at: None,
                 });
             }
         }
 
-        let meta = build_metadata(&values, "skewness", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "skewness",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("skew_{}d", self.period),
@@ -568,7 +638,8 @@ impl MaxDrawdownFactor {
 
             for i in self.period..bars.len() {
                 let window = &bars[i - self.period..=i];
-                let closes: Vec<f64> = window.iter()
+                let closes: Vec<f64> = window
+                    .iter()
                     .map(|b| b.close.try_into().unwrap_or(f64::NAN))
                     .collect();
 
@@ -589,12 +660,18 @@ impl MaxDrawdownFactor {
                     symbol: symbol.clone(),
                     date: bars[i].trade_date,
                     value: max_dd, // negative, e.g. -0.15 = 15% drawdown
+                    available_at: None,
                 });
             }
         }
 
-        let meta = build_metadata(&values, "max_drawdown", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "max_drawdown",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("maxdd_{}d", self.period),
@@ -629,9 +706,7 @@ impl TurnoverFactor {
 
             for i in self.period..bars.len() {
                 let slice = &bars[i - self.period..i];
-                let avg_volume: Decimal = slice.iter()
-                    .map(|b| b.volume)
-                    .sum::<Decimal>()
+                let avg_volume: Decimal = slice.iter().map(|b| b.volume).sum::<Decimal>()
                     / Decimal::from(self.period as u64);
 
                 let current_vol: f64 = bars[i].volume.try_into().unwrap_or(f64::NAN);
@@ -647,12 +722,18 @@ impl TurnoverFactor {
                     symbol: symbol.clone(),
                     date: bars[i].trade_date,
                     value: turnover,
+                    available_at: None,
                 });
             }
         }
 
-        let meta = build_metadata(&values, "turnover", FactorCategory::PriceVolume, "1.0.0",
-            serde_json::json!({"period": self.period}));
+        let meta = build_metadata(
+            &values,
+            "turnover",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
 
         FactorOutput {
             name: format!("turn_{}d", self.period),
@@ -691,7 +772,11 @@ fn build_metadata(
         };
     }
 
-    let valid: Vec<f64> = values.iter().map(|v| v.value).filter(|x| x.is_finite()).collect();
+    let valid: Vec<f64> = values
+        .iter()
+        .map(|v| v.value)
+        .filter(|x| x.is_finite())
+        .collect();
     let m = valid.len() as f64;
     let mean = valid.iter().sum::<f64>() / m;
     let variance = valid.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / m;
@@ -699,7 +784,8 @@ fn build_metadata(
     let min = valid.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = valid.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    let symbols: std::collections::HashSet<&str> = values.iter().map(|v| v.symbol.as_str()).collect();
+    let symbols: std::collections::HashSet<&str> =
+        values.iter().map(|v| v.symbol.as_str()).collect();
     let dates: std::collections::HashSet<NaiveDate> = values.iter().map(|v| v.date).collect();
 
     FactorMetadata {
@@ -723,35 +809,48 @@ fn build_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use rust_decimal::Decimal;
+    use std::collections::HashMap;
 
     fn make_bars(symbol: &str, closes: &[f64], volumes: &[f64]) -> Vec<DailyBar> {
         let base_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
-        closes.iter().enumerate().map(|(i, c)| {
-            let date = base_date + chrono::Duration::days(i as i64);
-            DailyBar {
-                symbol: symbol.to_string(),
-                trade_date: date,
-                open: Decimal::from_f64_retain(*c * 0.99).unwrap(),
-                high: Decimal::from_f64_retain(*c * 1.02).unwrap(),
-                low: Decimal::from_f64_retain(*c * 0.98).unwrap(),
-                close: Decimal::from_f64_retain(*c).unwrap(),
-                pre_close: Some(Decimal::from_f64_retain(if i == 0 { *c } else { closes[i-1] }).unwrap()),
-                change_pct: None,
-                volume: Decimal::from_f64_retain(volumes[i]).unwrap(),
-                amount: Decimal::from_f64_retain(*c * volumes[i]).unwrap(),
-            }
-        }).collect()
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let date = base_date + chrono::Duration::days(i as i64);
+                DailyBar {
+                    symbol: symbol.to_string(),
+                    trade_date: date,
+                    open: Decimal::from_f64_retain(*c * 0.99).unwrap(),
+                    high: Decimal::from_f64_retain(*c * 1.02).unwrap(),
+                    low: Decimal::from_f64_retain(*c * 0.98).unwrap(),
+                    close: Decimal::from_f64_retain(*c).unwrap(),
+                    pre_close: Some(
+                        Decimal::from_f64_retain(if i == 0 { *c } else { closes[i - 1] }).unwrap(),
+                    ),
+                    change_pct: None,
+                    volume: Decimal::from_f64_retain(volumes[i]).unwrap(),
+                    amount: Decimal::from_f64_retain(*c * volumes[i]).unwrap(),
+                }
+            })
+            .collect()
     }
 
     #[test]
     fn test_momentum_factor() {
         let factor = MomentumFactor::new(5);
-        let bars = make_bars("000001.SZ", &[10.0, 10.5, 11.0, 10.8, 11.5, 12.0, 12.5, 13.0], &[1000.0; 8]);
+        let bars = make_bars(
+            "000001.SZ",
+            &[10.0, 10.5, 11.0, 10.8, 11.5, 12.0, 12.5, 13.0],
+            &[1000.0; 8],
+        );
         let mut input_bars = HashMap::new();
         input_bars.insert("000001.SZ".to_string(), bars);
-        let input = FactorInput { bars: input_bars, trade_dates: vec![] };
+        let input = FactorInput {
+            bars: input_bars,
+            trade_dates: vec![],
+        };
 
         let output = factor.compute(&input);
         assert_eq!(output.name, "mom_5d");
@@ -769,12 +868,17 @@ mod tests {
     #[test]
     fn test_volatility_factor() {
         let factor = VolatilityFactor::new(5);
-        let bars = make_bars("000001.SZ",
+        let bars = make_bars(
+            "000001.SZ",
             &[10.0, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8],
-            &[1000.0; 9]);
+            &[1000.0; 9],
+        );
         let mut input_bars = HashMap::new();
         input_bars.insert("000001.SZ".to_string(), bars);
-        let input = FactorInput { bars: input_bars, trade_dates: vec![] };
+        let input = FactorInput {
+            bars: input_bars,
+            trade_dates: vec![],
+        };
 
         let output = factor.compute(&input);
         assert_eq!(output.name, "vol_5d");
@@ -787,10 +891,17 @@ mod tests {
     fn test_turnover_factor() {
         let factor = TurnoverFactor::new(5);
         let vol: Vec<f64> = vec![1000.0, 1200.0, 1100.0, 1300.0, 900.0, 1500.0, 800.0, 2000.0];
-        let bars = make_bars("000001.SZ", &[10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0], &vol);
+        let bars = make_bars(
+            "000001.SZ",
+            &[10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+            &vol,
+        );
         let mut input_bars = HashMap::new();
         input_bars.insert("000001.SZ".to_string(), bars);
-        let input = FactorInput { bars: input_bars, trade_dates: vec![] };
+        let input = FactorInput {
+            bars: input_bars,
+            trade_dates: vec![],
+        };
 
         let output = factor.compute(&input);
         assert_eq!(output.name, "turn_5d");

@@ -1,8 +1,8 @@
 //! 数据库实体定义
-//! 
+//!
 //! 字段与 05-表结构设计.md 中的新 Quant 表结构对齐
 
-use chrono::{NaiveDate, DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,21 @@ pub struct MarketTradeCalendar {
 /// 股票日线 (market_stock_daily_bar)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketStockDailyBar {
+    pub symbol: String,
+    pub trade_date: NaiveDate,
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub pre_close: Option<Decimal>,
+    pub change_pct: Option<Decimal>,
+    pub volume: Decimal,
+    pub amount: Decimal,
+}
+
+/// 指数日线 (market_index_daily_bar)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketIndexDailyBar {
     pub symbol: String,
     pub trade_date: NaiveDate,
     pub open: Decimal,

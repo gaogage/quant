@@ -7,7 +7,10 @@ use sqlx::PgPool;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::model::entities::{MarketStock, MarketStockDailyBar, MarketTradeCalendar, MarketAdjustmentFactor};
+use crate::model::entities::{
+    MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockDailyBar,
+    MarketTradeCalendar,
+};
 use crate::repository;
 use crate::tushare::client::TushareClient;
 
@@ -15,7 +18,10 @@ use crate::tushare::client::TushareClient;
 use serde_json::Map;
 
 fn get_str(m: &Map<String, Value>, key: &str) -> String {
-    m.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    m.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 fn get_opt_str(m: &Map<String, Value>, key: &str) -> Option<String> {
     m.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
@@ -27,7 +33,8 @@ fn get_i64(m: &Map<String, Value>, key: &str) -> Option<i64> {
     m.get(key).and_then(|v| v.as_i64())
 }
 fn to_decimal(v: Option<f64>) -> Decimal {
-    v.and_then(|v| Decimal::from_f64_retain(v)).unwrap_or_default()
+    v.and_then(|v| Decimal::from_f64_retain(v))
+        .unwrap_or_default()
 }
 fn to_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y%m%d").ok()
@@ -38,10 +45,25 @@ fn to_date(s: &str) -> Option<NaiveDate> {
 pub async fn sync_stock_basic(
     pool: &PgPool,
     client: &TushareClient,
-    _data_version_id: &str,
+    data_version_id: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let task_id = Uuid::new_v4().to_string();
-    repository::create_sync_task(pool, &task_id, "stock_basic", "running").await?;
+    let task_id = if data_version_id.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        data_version_id.to_string()
+    };
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "stock_basic",
+        "tushare",
+        None,
+        None,
+        None,
+        "running",
+        None,
+    )
+    .await?;
     let mut all = Vec::new();
 
     for ex in &["SSE", "SZSE"] {
@@ -59,7 +81,11 @@ pub async fn sync_stock_basic(
                             industry: get_opt_str(item, "industry"),
                             list_status: {
                                 let s = get_str(item, "list_status");
-                                if s.is_empty() { "L".to_string() } else { s }
+                                if s.is_empty() {
+                                    "L".to_string()
+                                } else {
+                                    s
+                                }
                             },
                             list_date: to_date(&get_str(item, "list_date")),
                             delist_date: to_date(&get_str(item, "delist_date")),
@@ -72,7 +98,15 @@ pub async fn sync_stock_basic(
             }
             Err(e) => {
                 error!("拉取 {} 失败: {}", ex, e);
-                repository::update_sync_task(pool, &task_id, "failed", all.len() as i32, all.len() as i32, 1).await?;
+                repository::update_sync_task(
+                    pool,
+                    &task_id,
+                    "failed",
+                    all.len() as i32,
+                    all.len() as i32,
+                    1,
+                )
+                .await?;
                 return Err(e.into());
             }
         }
@@ -81,7 +115,8 @@ pub async fn sync_stock_basic(
     let total = all.len();
     info!("共拉取 {} 只股票", total);
     let count = repository::upsert_stocks_batch(pool, &all).await?;
-    repository::update_sync_task(pool, &task_id, "completed", total as i32, count as i32, 0).await?;
+    repository::update_sync_task(pool, &task_id, "completed", total as i32, count as i32, 0)
+        .await?;
     info!("stock_basic 同步完成: {}/{}", count, total);
     Ok(count)
 }
@@ -97,14 +132,30 @@ pub async fn sync_daily_bars(
     dv_id: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let task_id = dv_id.to_string();
-    repository::create_sync_task(pool, &task_id, "daily", "running").await?;
-
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
     let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "daily",
+        "tushare",
+        Some(symbols),
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
     repository::create_data_version(
-        pool, dv_id, "daily bars sync", "tushare",
-        &["market_stock_daily_bar"], s, e,
-    ).await?;
+        pool,
+        dv_id,
+        "daily bars sync",
+        "tushare",
+        &["market_stock_daily_bar"],
+        s,
+        e,
+    )
+    .await?;
 
     let total = symbols.len();
     let mut synced: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -130,35 +181,54 @@ pub async fn sync_daily_bars(
                 let mut retries = 0;
                 let mut row_count = 0usize;
                 while retries <= 3 {
-                    match client.daily_batch(&chunk_vec, Some(&sd), Some(&ed), Some(page_limit), Some(offset)).await {
+                    match client
+                        .daily_batch(
+                            &chunk_vec,
+                            Some(&sd),
+                            Some(&ed),
+                            Some(page_limit),
+                            Some(offset),
+                        )
+                        .await
+                    {
                         Ok(resp) => {
                             if let Some(data) = resp.data {
                                 let maps = data.to_maps();
                                 row_count = maps.len();
 
                                 if row_count > 0 {
-                                    let bars: Vec<MarketStockDailyBar> = maps.iter().filter_map(|item| {
-                                        let ts_code = get_str(item, "ts_code");
-                                        let symbol = ts_code.to_string();
-                                        Some(MarketStockDailyBar {
-                                            symbol,
-                                            trade_date: to_date(&get_str(item, "trade_date"))?,
-                                            open: to_decimal(get_f64(item, "open")),
-                                            high: to_decimal(get_f64(item, "high")),
-                                            low: to_decimal(get_f64(item, "low")),
-                                            close: to_decimal(get_f64(item, "close")),
-                                            pre_close: get_f64(item, "pre_close").and_then(|v| Decimal::from_f64_retain(v)),
-                                            change_pct: get_f64(item, "pct_chg")
-                                                .and_then(|v| Decimal::from_f64_retain(v / 100.0)),
-                                            volume: to_decimal(get_f64(item, "vol")),
-                                            amount: to_decimal(get_f64(item, "amount")),
+                                    let bars: Vec<MarketStockDailyBar> = maps
+                                        .iter()
+                                        .filter_map(|item| {
+                                            let ts_code = get_str(item, "ts_code");
+                                            let symbol = ts_code.to_string();
+                                            Some(MarketStockDailyBar {
+                                                symbol,
+                                                trade_date: to_date(&get_str(item, "trade_date"))?,
+                                                open: to_decimal(get_f64(item, "open")),
+                                                high: to_decimal(get_f64(item, "high")),
+                                                low: to_decimal(get_f64(item, "low")),
+                                                close: to_decimal(get_f64(item, "close")),
+                                                pre_close: get_f64(item, "pre_close")
+                                                    .and_then(|v| Decimal::from_f64_retain(v)),
+                                                change_pct: get_f64(item, "pct_chg").and_then(
+                                                    |v| Decimal::from_f64_retain(v / 100.0),
+                                                ),
+                                                volume: to_decimal(get_f64(item, "vol")),
+                                                amount: to_decimal(get_f64(item, "amount")),
+                                            })
                                         })
-                                    }).collect();
+                                        .collect();
 
                                     if !bars.is_empty() {
                                         total_rows += bars.len();
-                                        repository::upsert_daily_bars_batch(pool, &bars, dv_id, "tushare").await?;
-                                        for s in chunk { synced.insert(s.clone()); }
+                                        repository::upsert_daily_bars_batch(
+                                            pool, &bars, dv_id, "tushare",
+                                        )
+                                        .await?;
+                                        for s in chunk {
+                                            synced.insert(s.clone());
+                                        }
                                     }
                                 }
                             }
@@ -167,10 +237,17 @@ pub async fn sync_daily_bars(
                         Err(e) => {
                             retries += 1;
                             if retries > 3 {
-                                warn!("Batch daily failed after 3 retries for chunk offset {}: {}", offset, e);
-                                for s in chunk { failed.insert(s.clone()); }
+                                warn!(
+                                    "Batch daily failed after 3 retries for chunk offset {}: {}",
+                                    offset, e
+                                );
+                                for s in chunk {
+                                    failed.insert(s.clone());
+                                }
                             } else {
-                                let delay = std::time::Duration::from_millis(2000 * 2u64.pow(retries as u32 - 1));
+                                let delay = std::time::Duration::from_millis(
+                                    2000 * 2u64.pow(retries as u32 - 1),
+                                );
                                 warn!("Batch daily retry {}/3 after {:?}: {}", retries, delay, e);
                                 tokio::time::sleep(delay).await;
                             }
@@ -185,16 +262,31 @@ pub async fn sync_daily_bars(
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             }
         }
-        if total_rows % 50000 == 0 { info!("Daily sync: {} rows", total_rows); }
+        if total_rows % 50000 == 0 {
+            info!("Daily sync: {} rows", total_rows);
+        }
     }
 
     // Remove failed symbols from synced set
-    for s in &failed { synced.remove(s); }
+    for s in &failed {
+        synced.remove(s);
+    }
     let ok = synced.len() as i32;
     let fail = failed.len() as i32;
 
-    repository::update_sync_task(pool, &task_id, if fail>0{"partial"}else{"completed"}, total as i32, ok, fail).await?;
-    info!("Daily sync done: {} rows, ok={}/{}, fail={}", total_rows, ok, total, fail);
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if fail > 0 { "partial" } else { "completed" },
+        total as i32,
+        ok,
+        fail,
+    )
+    .await?;
+    info!(
+        "Daily sync done: {} rows, ok={}/{}, fail={}",
+        total_rows, ok, total, fail
+    );
     Ok(total_rows)
 }
 
@@ -206,27 +298,32 @@ fn months_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDat
     while cursor <= end {
         let year = cursor.year();
         let month = cursor.month();
-        let month_end = NaiveDate::from_ymd_opt(
-            year, month,
-            days_in_month(year, month)
-        ).unwrap_or(cursor);
+        let month_end =
+            NaiveDate::from_ymd_opt(year, month, days_in_month(year, month)).unwrap_or(cursor);
         let actual_end = month_end.min(end);
         result.push((cursor, actual_end));
         // Move to first day of next month
         cursor = NaiveDate::from_ymd_opt(
             if month == 12 { year + 1 } else { year },
             if month == 12 { 1 } else { month + 1 },
-            1
-        ).unwrap_or(end + chrono::Duration::days(1));
+            1,
+        )
+        .unwrap_or(end + chrono::Duration::days(1));
     }
     result
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
-        1|3|5|7|8|10|12 => 31,
-        4|6|9|11 => 30,
-        2 => if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 29 } else { 28 },
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 30,
     }
 }
@@ -239,8 +336,27 @@ pub async fn sync_trade_calendar(
     exchange: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let task_id = Uuid::new_v4().to_string();
-    repository::create_sync_task(pool, &task_id, "trade_cal", "running").await?;
+    sync_trade_calendar_with_task(pool, client, exchange, &task_id).await
+}
 
+pub async fn sync_trade_calendar_with_task(
+    pool: &PgPool,
+    client: &TushareClient,
+    exchange: &str,
+    task_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    repository::create_sync_task_with_context(
+        pool,
+        task_id,
+        "trade_cal",
+        "tushare",
+        None,
+        None,
+        None,
+        "running",
+        None,
+    )
+    .await?;
     let resp = client.trade_cal(exchange, None, None).await?;
     let mut cals = Vec::new();
 
@@ -250,18 +366,22 @@ pub async fn sync_trade_calendar(
             cals.push(MarketTradeCalendar {
                 exchange: exchange.to_string(),
                 trade_date: to_date(&get_str(item, "cal_date"))
-                    .unwrap_or(NaiveDate::from_ymd_opt(2000,1,1).unwrap()),
+                    .unwrap_or(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()),
                 is_open: get_i64(item, "is_open").map(|v| v == 1).unwrap_or(false),
                 pre_trade_date: {
                     let s = get_str(item, "pretrade_date");
-                    if s.is_empty() { None } else { to_date(&s) }
+                    if s.is_empty() {
+                        None
+                    } else {
+                        to_date(&s)
+                    }
                 },
             });
         }
     }
 
     let count = repository::bulk_upsert_calendars(pool, &cals).await?;
-    repository::update_sync_task(pool, &task_id, "completed", count as i32, count as i32, 0).await?;
+    repository::update_sync_task(pool, task_id, "completed", count as i32, count as i32, 0).await?;
     info!("交易日历同步完成: {} 条", count);
     Ok(count)
 }
@@ -278,14 +398,30 @@ pub async fn sync_adj_factor(
     dv_id: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let task_id = dv_id.to_string();
-    repository::create_sync_task(pool, &task_id, "adj_factor", "running").await?;
-
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
     let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "adj_factor",
+        "tushare",
+        Some(symbols),
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
     repository::create_data_version(
-        pool, dv_id, "adj factor sync", "tushare",
-        &["market_adjustment_factor"], s, e,
-    ).await?;
+        pool,
+        dv_id,
+        "adj factor sync",
+        "tushare",
+        &["market_adjustment_factor"],
+        s,
+        e,
+    )
+    .await?;
 
     let total = symbols.len();
     let mut ok = 0usize;
@@ -308,9 +444,8 @@ pub async fn sync_adj_factor(
                         .collect();
 
                     if !factors.is_empty() {
-                        repository::upsert_adj_factors_batch(
-                            pool, &factors, dv_id, "tushare",
-                        ).await?;
+                        repository::upsert_adj_factors_batch(pool, &factors, dv_id, "tushare")
+                            .await?;
                         ok += 1;
                     }
                 }
@@ -326,10 +461,14 @@ pub async fn sync_adj_factor(
     }
 
     repository::update_sync_task(
-        pool, &task_id,
+        pool,
+        &task_id,
         if fail > 0 { "partial" } else { "completed" },
-        total as i32, ok as i32, fail as i32,
-    ).await?;
+        total as i32,
+        ok as i32,
+        fail as i32,
+    )
+    .await?;
     info!("复权因子同步完成: ok={}/{}, fail={}", ok, total, fail);
     Ok(ok)
 }
@@ -345,15 +484,31 @@ pub async fn sync_index_daily(
     end: &str,
     dv_id: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let task_id = Uuid::new_v4().to_string();
-    repository::create_sync_task(pool, &task_id, "index_daily", "running").await?;
-
+    let task_id = dv_id.to_string();
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
     let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "index_daily",
+        "tushare",
+        Some(index_codes),
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
     repository::create_data_version(
-        pool, dv_id, "index daily sync", "tushare",
-        &["market_index_daily_bar"], s, e,
-    ).await?;
+        pool,
+        dv_id,
+        "index daily sync",
+        "tushare",
+        &["market_index_daily_bar"],
+        s,
+        e,
+    )
+    .await?;
 
     let total = index_codes.len();
     let mut ok = 0usize;
@@ -364,10 +519,10 @@ pub async fn sync_index_daily(
             Ok(resp) => {
                 if let Some(data) = resp.data {
                     let maps = data.to_maps();
-                    let bars: Vec<MarketStockDailyBar> = maps
+                    let bars: Vec<MarketIndexDailyBar> = maps
                         .iter()
                         .filter_map(|item| {
-                            Some(MarketStockDailyBar {
+                            Some(MarketIndexDailyBar {
                                 symbol: idx.clone(),
                                 trade_date: to_date(&get_str(item, "trade_date"))?,
                                 open: to_decimal(get_f64(item, "open")),
@@ -385,9 +540,8 @@ pub async fn sync_index_daily(
                         .collect();
 
                     if !bars.is_empty() {
-                        repository::upsert_daily_bars_batch(
-                            pool, &bars, dv_id, "tushare",
-                        ).await?;
+                        repository::upsert_index_daily_bars_batch(pool, &bars, dv_id, "tushare")
+                            .await?;
                         ok += 1;
                     }
                 }
@@ -400,10 +554,14 @@ pub async fn sync_index_daily(
     }
 
     repository::update_sync_task(
-        pool, &task_id,
+        pool,
+        &task_id,
         if fail > 0 { "partial" } else { "completed" },
-        total as i32, ok as i32, fail as i32,
-    ).await?;
+        total as i32,
+        ok as i32,
+        fail as i32,
+    )
+    .await?;
     info!("指数日线同步完成: ok={}/{}, fail={}", ok, total, fail);
     Ok(ok)
 }
@@ -537,7 +695,27 @@ pub async fn sync_financial_data(
     symbols: &[String],
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     let task_id = Uuid::new_v4().to_string();
-    repository::create_sync_task(pool, &task_id, "financial", "running").await?;
+    sync_financial_data_with_task(pool, client, symbols, &task_id).await
+}
+
+pub async fn sync_financial_data_with_task(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    task_id: &str,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    repository::create_sync_task_with_context(
+        pool,
+        task_id,
+        "financial",
+        "tushare",
+        Some(symbols),
+        None,
+        None,
+        "running",
+        None,
+    )
+    .await?;
 
     let mut stmt_count = 0usize;
     let mut ind_count = 0usize;
@@ -545,7 +723,10 @@ pub async fn sync_financial_data(
 
     for (i, sym) in symbols.iter().enumerate() {
         if i % 100 == 0 {
-            info!("财务数据同步: {}/{} ({} {} {})", i, total, stmt_count, ind_count, sym);
+            info!(
+                "财务数据同步: {}/{} ({} {} {})",
+                i, total, stmt_count, ind_count, sym
+            );
         }
 
         // 利润表
@@ -555,14 +736,22 @@ pub async fn sync_financial_data(
                 for item in &maps {
                     let end_date = to_date(&get_str(item, "end_date"));
                     let ann_date = to_date(&get_str(item, "ann_date"));
-                    if end_date.is_none() { continue; }
+                    if end_date.is_none() {
+                        continue;
+                    }
                     let ed = end_date.unwrap();
                     let ad = ann_date.unwrap_or(ed);
 
                     for (field, val) in item.iter() {
-                        if field == "ts_code" || field == "end_date" || field == "ann_date"
-                            || field == "f_ann_date" || field == "report_type" || field == "comp_type"
-                        { continue; }
+                        if field == "ts_code"
+                            || field == "end_date"
+                            || field == "ann_date"
+                            || field == "f_ann_date"
+                            || field == "report_type"
+                            || field == "comp_type"
+                        {
+                            continue;
+                        }
                         if let Some(v) = val.as_f64() {
                             sqlx::query(
                                 "INSERT INTO market_financial_statement (ts_code, ann_date, end_date, statement_type, field_name, field_value)
@@ -583,14 +772,22 @@ pub async fn sync_financial_data(
             if let Some(data) = resp.data {
                 let maps = data.to_maps();
                 const BS_FIELDS: &[&str] = &[
-                    "total_assets", "total_liab", "total_hldr_eqy_inc_min_int",
-                    "total_cur_assets", "total_cur_liab", "money_cap",
-                    "inventories", "accounts_receiv", "fix_assets",
+                    "total_assets",
+                    "total_liab",
+                    "total_hldr_eqy_inc_min_int",
+                    "total_cur_assets",
+                    "total_cur_liab",
+                    "money_cap",
+                    "inventories",
+                    "accounts_receiv",
+                    "fix_assets",
                 ];
                 for item in &maps {
                     let end_date = to_date(&get_str(item, "end_date"));
                     let ann_date = to_date(&get_str(item, "ann_date"));
-                    if end_date.is_none() { continue; }
+                    if end_date.is_none() {
+                        continue;
+                    }
                     let ed = end_date.unwrap();
                     let ad = ann_date.unwrap_or(ed);
 
@@ -617,7 +814,9 @@ pub async fn sync_financial_data(
                 for item in &maps {
                     let end_date = to_date(&get_str(item, "end_date"));
                     let ann_date = to_date(&get_str(item, "ann_date"));
-                    if end_date.is_none() { continue; }
+                    if end_date.is_none() {
+                        continue;
+                    }
                     let ed = end_date.unwrap();
                     let ad = ann_date.unwrap_or(ed);
 
@@ -646,7 +845,18 @@ pub async fn sync_financial_data(
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    repository::update_sync_task(pool, &task_id, "completed", (stmt_count + ind_count) as i32, (stmt_count + ind_count) as i32, 0).await?;
-    info!("财务数据同步完成: {} statements + {} indicators", stmt_count, ind_count);
+    repository::update_sync_task(
+        pool,
+        task_id,
+        "completed",
+        (stmt_count + ind_count) as i32,
+        (stmt_count + ind_count) as i32,
+        0,
+    )
+    .await?;
+    info!(
+        "财务数据同步完成: {} statements + {} indicators",
+        stmt_count, ind_count
+    );
     Ok((stmt_count, ind_count))
 }

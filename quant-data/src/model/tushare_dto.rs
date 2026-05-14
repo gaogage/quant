@@ -36,7 +36,12 @@ impl TushareData<Vec<serde_json::Value>> {
                 self.fields
                     .iter()
                     .enumerate()
-                    .map(|(i, f)| (f.clone(), row.get(i).cloned().unwrap_or(serde_json::Value::Null)))
+                    .map(|(i, f)| {
+                        (
+                            f.clone(),
+                            row.get(i).cloned().unwrap_or(serde_json::Value::Null),
+                        )
+                    })
                     .collect::<serde_json::Map<_, _>>()
             })
             .collect()

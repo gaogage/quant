@@ -5,8 +5,8 @@
 //! audit:  standard + 可复现 hash 校验
 
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::Zero;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
@@ -34,6 +34,16 @@ pub struct PortfolioAttribution {
     pub contribution: Decimal,
 }
 
+/// 目标组合记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioTarget {
+    pub trade_date: NaiveDate,
+    pub symbol: String,
+    pub target_weight: Decimal,
+    pub target_quantity: Option<Decimal>,
+    pub reason: Option<String>,
+}
+
 /// 约束违反记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstraintViolation {
@@ -49,8 +59,10 @@ pub struct ConstraintViolation {
 #[derive(Debug, Clone)]
 pub struct MarketDay {
     pub date: NaiveDate,
+    pub open: HashMap<String, Decimal>,
     pub close: HashMap<String, Decimal>,
     pub pre_close: HashMap<String, Decimal>,
+    pub amount: HashMap<String, Decimal>,
     pub suspended: HashSet<String>,
     pub up_limit: HashMap<String, Decimal>,
     pub down_limit: HashMap<String, Decimal>,
@@ -77,6 +89,17 @@ pub struct BacktestConfig {
     pub fee_config: FeeConfig,
     pub mode: BacktestMode,
     pub max_position_pct: Decimal,
+    pub strategy_version_id: String,
+    pub data_version_id: String,
+    pub research_dataset_id: Option<String>,
+    pub feature_set_version_id: Option<String>,
+    pub prediction_set_id: Option<String>,
+    pub portfolio_policy_id: Option<String>,
+    pub symbols: Vec<String>,
+    pub rebalance_frequency: String,
+    pub execution_timing: ExecutionTiming,
+    pub execution_price: ExecutionPrice,
+    pub max_participation_rate: Option<Decimal>,
     /// Risk control configuration
     #[serde(default)]
     pub risk_control: RiskControlConfig,
@@ -120,6 +143,17 @@ impl Default for BacktestConfig {
             fee_config: FeeConfig::default(),
             mode: BacktestMode::Standard,
             max_position_pct: Decimal::new(100, 2), // default 100%
+            strategy_version_id: "debug-strategy".into(),
+            data_version_id: "debug-data".into(),
+            research_dataset_id: None,
+            feature_set_version_id: None,
+            prediction_set_id: None,
+            portfolio_policy_id: None,
+            symbols: Vec::new(),
+            rebalance_frequency: "daily".into(),
+            execution_timing: ExecutionTiming::NextOpen,
+            execution_price: ExecutionPrice::Open,
+            max_participation_rate: None,
             risk_control: RiskControlConfig::default(),
         }
     }
@@ -133,6 +167,20 @@ pub enum BacktestMode {
     Audit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionTiming {
+    NextOpen,
+    SameCloseDebug,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPrice {
+    Open,
+    Close,
+}
+
 // ─── Result ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +191,7 @@ pub struct BacktestOutput {
     pub benchmark_curve: Vec<(NaiveDate, Decimal)>,
     pub trades: Vec<Trade>,
     pub daily_positions: Vec<DailyPosition>,
+    pub targets: Vec<PortfolioTarget>,
     pub exposures: Vec<PortfolioExposure>,
     pub attributions: Vec<PortfolioAttribution>,
     pub violations: Vec<ConstraintViolation>,
@@ -157,6 +206,7 @@ pub struct BacktestEngine {
     equity_curve: Vec<(NaiveDate, Decimal)>,
     benchmark_curve: Vec<(NaiveDate, Decimal)>,
     daily_positions: Vec<DailyPosition>,
+    targets: Vec<PortfolioTarget>,
     exposures: Vec<PortfolioExposure>,
     attributions: Vec<PortfolioAttribution>,
     violations: Vec<ConstraintViolation>,
@@ -178,6 +228,7 @@ impl BacktestEngine {
             equity_curve: Vec::new(),
             benchmark_curve: Vec::new(),
             daily_positions: Vec::new(),
+            targets: Vec::new(),
             exposures: Vec::new(),
             attributions: Vec::new(),
             violations: Vec::new(),
@@ -195,13 +246,15 @@ impl BacktestEngine {
             self.portfolio.holdings.len()
         );
 
+        let previous_value = self.equity_curve.last().map(|(_, value)| *value);
         self.portfolio.mark_to_market(&market.close);
 
         if let Some(sig) = signal {
             self.execute_rebalance(sig, market);
         }
 
-        self.equity_curve.push((market.date, self.portfolio.total_value()));
+        self.equity_curve
+            .push((market.date, self.portfolio.total_value()));
 
         let bm_val = if self.benchmark_curve.is_empty() {
             self.config.initial_capital
@@ -216,7 +269,8 @@ impl BacktestEngine {
         self.benchmark_curve.push((market.date, bm_val));
 
         if self.config.mode != BacktestMode::Fast {
-            self.daily_positions.extend(self.portfolio.snapshot(market.date));
+            self.daily_positions
+                .extend(self.portfolio.snapshot(market.date));
 
             // Portfolio exposure — per-symbol weights
             let tv = self.portfolio.total_value();
@@ -234,19 +288,100 @@ impl BacktestEngine {
             }
 
             // Portfolio attribution — daily return contribution
-            if let Some((_, prev_tv)) = self.equity_curve.last() {
+            if let Some(prev_tv) = previous_value {
                 if !prev_tv.is_zero() {
                     self.attributions.push(PortfolioAttribution {
                         trade_date: market.date,
                         attribution_type: "total".into(),
                         attribution_name: "portfolio_return".into(),
-                        contribution: (tv - *prev_tv) / *prev_tv,
+                        contribution: (tv - prev_tv) / prev_tv,
                     });
                 }
             }
         }
 
         self.portfolio.end_of_day();
+    }
+
+    fn execution_price_for(&self, market: &MarketDay, symbol: &str) -> Decimal {
+        match self.config.execution_price {
+            ExecutionPrice::Open => market.open.get(symbol).copied().unwrap_or_default(),
+            ExecutionPrice::Close => market.close.get(symbol).copied().unwrap_or_default(),
+        }
+    }
+
+    fn cap_order_amount(
+        &mut self,
+        market: &MarketDay,
+        symbol: &str,
+        desired_amount: Decimal,
+    ) -> Decimal {
+        let Some(max_rate) = self.config.max_participation_rate else {
+            return desired_amount;
+        };
+        let Some(liquidity_amount) = market.amount.get(symbol).copied() else {
+            self.violations.push(ConstraintViolation {
+                trade_date: market.date,
+                constraint_name: "liquidity_amount_missing".into(),
+                limit_value: Decimal::zero(),
+                actual_value: desired_amount,
+                severity: "warning".into(),
+            });
+            return desired_amount;
+        };
+        if liquidity_amount.is_zero() || max_rate.is_zero() {
+            self.violations.push(ConstraintViolation {
+                trade_date: market.date,
+                constraint_name: "participation_rate".into(),
+                limit_value: Decimal::zero(),
+                actual_value: desired_amount,
+                severity: "hard".into(),
+            });
+            return Decimal::zero();
+        }
+
+        let cap = liquidity_amount * max_rate;
+        if desired_amount > cap {
+            self.violations.push(ConstraintViolation {
+                trade_date: market.date,
+                constraint_name: "participation_rate".into(),
+                limit_value: max_rate,
+                actual_value: desired_amount / liquidity_amount,
+                severity: "hard".into(),
+            });
+            cap
+        } else {
+            desired_amount
+        }
+    }
+
+    fn participation_rate_for(
+        &self,
+        market: &MarketDay,
+        symbol: &str,
+        order_amount: Decimal,
+    ) -> Decimal {
+        market
+            .amount
+            .get(symbol)
+            .copied()
+            .filter(|amount| !amount.is_zero())
+            .map(|amount| order_amount / amount)
+            .unwrap_or_default()
+    }
+
+    fn annotate_last_trade(
+        &mut self,
+        target_weight: Decimal,
+        executed_weight: Decimal,
+        reason: &str,
+    ) {
+        if let Some(trade) = self.portfolio.trades.last_mut() {
+            trade.signal_type = Some("rebalance".into());
+            trade.event_reason = Some(reason.into());
+            trade.target_weight = Some(target_weight);
+            trade.executed_weight = Some(executed_weight);
+        }
     }
 
     fn execute_rebalance(&mut self, signal: &StrategySignal, market: &MarketDay) {
@@ -257,12 +392,14 @@ impl BacktestEngine {
             signal.target_weights.len(),
             market.close.len()
         );
-        let mut to_sell: Vec<(String, Decimal)> = Vec::new();
-        let mut to_buy: Vec<(String, Decimal, Decimal)> = Vec::new();
+        let mut to_sell: Vec<(String, Decimal, Decimal)> = Vec::new();
+        let mut to_buy: Vec<(String, Decimal, Decimal, Decimal)> = Vec::new();
 
         // Phase 1: 卖出不在信号中的持仓
         let symbols_to_remove: Vec<String> = self
-            .portfolio.holdings.keys()
+            .portfolio
+            .holdings
+            .keys()
             .filter(|s| !signal.target_weights.contains_key(*s))
             .cloned()
             .collect();
@@ -271,7 +408,7 @@ impl BacktestEngine {
             if let Some(h) = self.portfolio.holdings.get(sym) {
                 let qty = h.sellable_quantity;
                 if !qty.is_zero() {
-                    to_sell.push((sym.clone(), qty));
+                    to_sell.push((sym.clone(), qty, Decimal::zero()));
                 }
             }
         }
@@ -280,17 +417,32 @@ impl BacktestEngine {
         for (sym, target_w) in &signal.target_weights {
             let target_amount = total_value * target_w;
             let current_mv = self
-                .portfolio.holdings.get(sym)
+                .portfolio
+                .holdings
+                .get(sym)
                 .map(|h| h.market_value())
                 .unwrap_or_default();
 
-            let diff = target_amount - current_mv;
-            if diff.is_zero() {
+            let price = self.execution_price_for(market, sym);
+            if price.is_zero() || market.suspended.contains(sym) {
                 continue;
             }
 
-            let price = market.close.get(sym).copied().unwrap_or_default();
-            if price.is_zero() || market.suspended.contains(sym) {
+            let target_quantity = if price.is_zero() {
+                None
+            } else {
+                Some((target_amount / price).floor())
+            };
+            self.targets.push(PortfolioTarget {
+                trade_date: market.date,
+                symbol: sym.clone(),
+                target_weight: *target_w,
+                target_quantity,
+                reason: Some("rebalance_signal".into()),
+            });
+
+            let diff = target_amount - current_mv;
+            if diff.is_zero() {
                 continue;
             }
 
@@ -304,7 +456,7 @@ impl BacktestEngine {
                         continue;
                     }
                 }
-                to_buy.push((sym.clone(), diff, price));
+                to_buy.push((sym.clone(), diff, price, *target_w));
             } else {
                 // 卖出 — 跌停不卖
                 if let Some(dl_price) = dl {
@@ -315,31 +467,61 @@ impl BacktestEngine {
                 if let Some(h) = self.portfolio.holdings.get(sym) {
                     let sell_qty = (-diff / price).min(h.sellable_quantity);
                     if !sell_qty.is_zero() {
-                        to_sell.push((sym.clone(), sell_qty));
+                        to_sell.push((sym.clone(), sell_qty, *target_w));
                     }
                 }
             }
         }
 
         // Phase 3: 先卖后买
-        for (sym, qty) in &to_sell {
-            let price = market.close.get(sym).copied().unwrap_or_default();
+        for (sym, qty, target_w) in &to_sell {
+            let price = self.execution_price_for(market, sym);
             // 跌停不卖
             if let Some(dl) = market.down_limit.get(sym) {
                 if price <= *dl {
                     continue;
                 }
             }
-            self.portfolio.sell(market.date, sym, *qty, price);
+            let desired_amount = *qty * price;
+            let capped_amount = self.cap_order_amount(market, sym, desired_amount);
+            if capped_amount.is_zero() {
+                continue;
+            }
+            let capped_qty = (capped_amount / price).floor().min(*qty);
+            if capped_qty.is_zero() {
+                continue;
+            }
+            let participation_rate = self.participation_rate_for(market, sym, capped_qty * price);
+            if self
+                .portfolio
+                .sell_with_cost(market.date, sym, capped_qty, price, participation_rate)
+                .is_some()
+            {
+                let executed_weight = (capped_qty * price) / total_value;
+                self.annotate_last_trade(*target_w, executed_weight, "rebalance_sell");
+            }
         }
-        for (sym, amount, price) in &to_buy {
-            let qty = (amount / price).floor();
+        for (sym, amount, price, target_w) in &to_buy {
+            let capped_amount = self.cap_order_amount(market, sym, *amount);
+            if capped_amount.is_zero() {
+                continue;
+            }
+            let qty = (capped_amount / price).floor();
             if !qty.is_zero() {
                 // Pre-check for constraint violations
-                let slippage_price = *price * (Decimal::ONE + self.portfolio.fee_config.slippage_bps);
+                let participation_rate = self.participation_rate_for(market, sym, qty * *price);
+                let effective_slippage = (self.portfolio.fee_config.slippage_bps
+                    + participation_rate * self.portfolio.fee_config.impact_cost_coefficient)
+                    * self.portfolio.fee_config.cost_multiplier;
+                let slippage_price = *price * (Decimal::ONE + effective_slippage);
                 let buy_amount = qty * slippage_price;
-                let commission = (buy_amount * self.portfolio.fee_config.commission_rate)
-                    .max(self.portfolio.fee_config.min_commission);
+                let commission = (buy_amount
+                    * self.portfolio.fee_config.commission_rate
+                    * self.portfolio.fee_config.cost_multiplier)
+                    .max(
+                        self.portfolio.fee_config.min_commission
+                            * self.portfolio.fee_config.cost_multiplier,
+                    );
                 let total_cost = buy_amount + commission;
 
                 // Cash check
@@ -357,8 +539,13 @@ impl BacktestEngine {
                 // Position limit check
                 let max_pct = self.portfolio.max_position_pct;
                 if !max_pct.is_zero() {
-                    let after_mv = self.portfolio.holdings.get(sym)
-                        .map(|h| h.market_value()).unwrap_or_default() + buy_amount;
+                    let after_mv = self
+                        .portfolio
+                        .holdings
+                        .get(sym)
+                        .map(|h| h.market_value())
+                        .unwrap_or_default()
+                        + buy_amount;
                     let ratio = after_mv / self.portfolio.total_value();
                     if ratio > max_pct {
                         self.violations.push(ConstraintViolation {
@@ -372,7 +559,14 @@ impl BacktestEngine {
                     }
                 }
 
-                self.portfolio.buy(market.date, sym, qty, *price);
+                if self
+                    .portfolio
+                    .buy_with_cost(market.date, sym, qty, *price, participation_rate)
+                    .is_some()
+                {
+                    let executed_weight = (qty * *price) / total_value;
+                    self.annotate_last_trade(*target_w, executed_weight, "rebalance_buy");
+                }
             }
         }
     }
@@ -380,10 +574,25 @@ impl BacktestEngine {
     pub fn finalize(self) -> BacktestOutput {
         let nav: Vec<Decimal> = self.equity_curve.iter().map(|(_, v)| *v).collect();
         let bm_nav: Vec<Decimal> = self.benchmark_curve.iter().map(|(_, v)| *v).collect();
-        let mut metrics = super::metrics::BacktestMetrics::compute(
-            &nav, &bm_nav, self.config.initial_capital,
-        );
+        let mut metrics =
+            super::metrics::BacktestMetrics::compute(&nav, &bm_nav, self.config.initial_capital);
         metrics.num_trades = self.portfolio.trades.len();
+        let total_traded_amount = self
+            .portfolio
+            .trades
+            .iter()
+            .map(|trade| trade.amount)
+            .sum::<Decimal>();
+        let average_nav = if nav.is_empty() {
+            Decimal::zero()
+        } else {
+            nav.iter().copied().sum::<Decimal>() / Decimal::from(nav.len())
+        };
+        metrics.turnover = if average_nav.is_zero() {
+            Decimal::zero()
+        } else {
+            total_traded_amount / average_nav
+        };
 
         // Compute win_rate from trade P&L (FIFO matched buy-sell pairs per symbol)
         // Buy queue: (quantity, cost, commission)
@@ -392,9 +601,11 @@ impl BacktestEngine {
         let mut completed_trades: usize = 0;
         for trade in &self.portfolio.trades {
             if trade.side == super::portfolio::TradeSide::Buy {
-                buy_queue.entry(trade.symbol.clone())
-                    .or_default()
-                    .push((trade.quantity, trade.amount, trade.commission));
+                buy_queue.entry(trade.symbol.clone()).or_default().push((
+                    trade.quantity,
+                    trade.amount,
+                    trade.commission,
+                ));
             } else {
                 let mut remaining = trade.quantity;
                 let mut sell_gross = trade.amount;
@@ -403,22 +614,46 @@ impl BacktestEngine {
                 if let Some(queue) = buy_queue.get_mut(&trade.symbol) {
                     while !remaining.is_zero() && !queue.is_empty() {
                         let (bought_qty, bought_cost, bought_comm) = queue[0];
-                        let matched_qty = if remaining >= bought_qty { bought_qty } else { remaining };
+                        let matched_qty = if remaining >= bought_qty {
+                            bought_qty
+                        } else {
+                            remaining
+                        };
                         // Proportional allocation
-                        let cost_basis = if bought_qty.is_zero() { Decimal::zero() }
-                            else { bought_cost * matched_qty / bought_qty };
-                        let buy_comm = if bought_qty.is_zero() { Decimal::zero() }
-                            else { bought_comm * matched_qty / bought_qty };
-                        let sell_gross_alloc = if trade.quantity.is_zero() { Decimal::zero() }
-                            else { sell_gross * matched_qty / trade.quantity };
-                        let sell_comm_alloc = if trade.quantity.is_zero() { Decimal::zero() }
-                            else { sell_comm * matched_qty / trade.quantity };
-                        let sell_tax_alloc = if trade.quantity.is_zero() { Decimal::zero() }
-                            else { sell_tax * matched_qty / trade.quantity };
+                        let cost_basis = if bought_qty.is_zero() {
+                            Decimal::zero()
+                        } else {
+                            bought_cost * matched_qty / bought_qty
+                        };
+                        let buy_comm = if bought_qty.is_zero() {
+                            Decimal::zero()
+                        } else {
+                            bought_comm * matched_qty / bought_qty
+                        };
+                        let sell_gross_alloc = if trade.quantity.is_zero() {
+                            Decimal::zero()
+                        } else {
+                            sell_gross * matched_qty / trade.quantity
+                        };
+                        let sell_comm_alloc = if trade.quantity.is_zero() {
+                            Decimal::zero()
+                        } else {
+                            sell_comm * matched_qty / trade.quantity
+                        };
+                        let sell_tax_alloc = if trade.quantity.is_zero() {
+                            Decimal::zero()
+                        } else {
+                            sell_tax * matched_qty / trade.quantity
+                        };
                         // P&L = sell net - buy total
-                        let pnl = sell_gross_alloc - sell_comm_alloc - sell_tax_alloc
-                                - cost_basis - buy_comm;
-                        if pnl > Decimal::zero() { winning_trades += 1; }
+                        let pnl = sell_gross_alloc
+                            - sell_comm_alloc
+                            - sell_tax_alloc
+                            - cost_basis
+                            - buy_comm;
+                        if pnl > Decimal::zero() {
+                            winning_trades += 1;
+                        }
                         completed_trades += 1;
                         if remaining >= bought_qty {
                             queue.remove(0);
@@ -427,7 +662,11 @@ impl BacktestEngine {
                             sell_comm -= sell_comm_alloc;
                             sell_tax -= sell_tax_alloc;
                         } else {
-                            queue[0] = (bought_qty - matched_qty, bought_cost - cost_basis, bought_comm - buy_comm);
+                            queue[0] = (
+                                bought_qty - matched_qty,
+                                bought_cost - cost_basis,
+                                bought_comm - buy_comm,
+                            );
                             remaining = Decimal::zero();
                         }
                     }
@@ -460,6 +699,7 @@ impl BacktestEngine {
             benchmark_curve: self.benchmark_curve,
             trades: self.portfolio.trades,
             daily_positions: self.daily_positions,
+            targets: self.targets,
             exposures: self.exposures,
             attributions: self.attributions,
             violations: self.violations,
@@ -486,14 +726,18 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    fn d(s: &str) -> Decimal { Decimal::from_str(s).unwrap() }
+    fn d(s: &str) -> Decimal {
+        Decimal::from_str(s).unwrap()
+    }
 
     fn market(date: &str, close: (&str, &str), pre_close: (&str, &str)) -> MarketDay {
         let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
         let mut m = MarketDay {
             date,
+            open: HashMap::from([(close.0.into(), d(close.1))]),
             close: HashMap::from([(close.0.into(), d(close.1))]),
             pre_close: HashMap::from([(pre_close.0.into(), d(pre_close.1))]),
+            amount: HashMap::from([(close.0.into(), d("100000000"))]),
             suspended: HashSet::new(),
             up_limit: HashMap::new(),
             down_limit: HashMap::new(),
@@ -578,10 +822,19 @@ mod tests {
     #[test]
     fn test_simple_sell() {
         let mut e = eng();
-        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "9.9")), Some(&signal("A", "0.95")));
-        e.process_day(&market("2024-01-03", ("A", "11"), ("A", "10")), Some(&signal_empty()));
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.95")),
+        );
+        e.process_day(
+            &market("2024-01-03", ("A", "11"), ("A", "10")),
+            Some(&signal_empty()),
+        );
         let o = e.finalize();
-        let has_sell = o.trades.iter().any(|t| matches!(t.side, crate::portfolio::TradeSide::Sell));
+        let has_sell = o
+            .trades
+            .iter()
+            .any(|t| matches!(t.side, crate::portfolio::TradeSide::Sell));
         assert!(has_sell, "Should have at least one sell trade");
     }
 
@@ -591,7 +844,7 @@ mod tests {
     fn test_limit_up_blocks_buy() {
         let mut e = eng();
         e.process_day(
-            &market("2024-01-02", ("A", "11"), ("A", "10")),  // close=11 == up_limit=11
+            &market("2024-01-02", ("A", "11"), ("A", "10")), // close=11 == up_limit=11
             Some(&signal("A", "0.95")),
         );
         assert_eq!(e.finalize().trades.len(), 0);
@@ -600,10 +853,20 @@ mod tests {
     #[test]
     fn test_limit_down_blocks_sell() {
         let mut e = eng();
-        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "10")), Some(&signal("A", "0.95")));
-        e.process_day(&market("2024-01-03", ("A", "9"), ("A", "10")), Some(&signal_empty()));  // close=9 == down_limit=9
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.95")),
+        );
+        e.process_day(
+            &market("2024-01-03", ("A", "9"), ("A", "10")),
+            Some(&signal_empty()),
+        ); // close=9 == down_limit=9
         let o = e.finalize();
-        let sells = o.trades.iter().filter(|t| matches!(t.side, crate::portfolio::TradeSide::Sell)).count();
+        let sells = o
+            .trades
+            .iter()
+            .filter(|t| matches!(t.side, crate::portfolio::TradeSide::Sell))
+            .count();
         assert_eq!(sells, 0, "Limit-down should block sell");
     }
 
@@ -619,10 +882,20 @@ mod tests {
     #[test]
     fn test_t1_settlement() {
         let mut e = eng();
-        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "10")), Some(&signal_dated("2024-01-02", "A", "0.95")));
-        e.process_day(&market("2024-01-03", ("A", "10.5"), ("A", "10")), Some(&signal_dated_empty("2024-01-03")));
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal_dated("2024-01-02", "A", "0.95")),
+        );
+        e.process_day(
+            &market("2024-01-03", ("A", "10.5"), ("A", "10")),
+            Some(&signal_dated_empty("2024-01-03")),
+        );
         let o = e.finalize();
-        let sells = o.trades.iter().filter(|t| matches!(t.side, crate::portfolio::TradeSide::Sell)).count();
+        let sells = o
+            .trades
+            .iter()
+            .filter(|t| matches!(t.side, crate::portfolio::TradeSide::Sell))
+            .count();
         assert!(sells > 0, "T+1 should allow sell on day 2");
     }
 
@@ -633,7 +906,7 @@ mod tests {
         let mut e = eng();
         e.process_day(
             &market("2024-01-02", ("A", "1.0"), ("A", "1.0")),
-            Some(&signal("A", "0.01")),  // very small buy
+            Some(&signal("A", "0.01")), // very small buy
         );
         let o = e.finalize();
         assert!(o.trades[0].commission >= d("5.0"), "Min commission 5 CNY");
@@ -642,10 +915,18 @@ mod tests {
     #[test]
     fn test_stamp_tax() {
         let mut e = eng();
-        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "10")), Some(&signal("A", "0.95")));
-        e.process_day(&market("2024-01-03", ("A", "10"), ("A", "10")), Some(&signal_empty()));
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.95")),
+        );
+        e.process_day(
+            &market("2024-01-03", ("A", "10"), ("A", "10")),
+            Some(&signal_empty()),
+        );
         let o = e.finalize();
-        let sell = o.trades.iter()
+        let sell = o
+            .trades
+            .iter()
             .find(|t| matches!(t.side, crate::portfolio::TradeSide::Sell))
             .unwrap();
         assert!(sell.tax > Decimal::zero(), "Sell should have stamp tax");
@@ -675,7 +956,10 @@ mod tests {
         let s = signal("A", "0.95");
         e1.process_day(&m, Some(&s));
         e2.process_day(&m, Some(&s));
-        assert_eq!(e1.finalize().reproducibility_hash, e2.finalize().reproducibility_hash);
+        assert_eq!(
+            e1.finalize().reproducibility_hash,
+            e2.finalize().reproducibility_hash
+        );
     }
 
     #[test]
@@ -683,7 +967,10 @@ mod tests {
         let mut c = BacktestConfig::default();
         c.mode = BacktestMode::Standard;
         let mut e = BacktestEngine::new(c);
-        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "10")), Some(&signal("A", "0.95")));
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.95")),
+        );
         assert!(e.finalize().reproducibility_hash.is_none());
     }
 
@@ -692,9 +979,15 @@ mod tests {
         let mut c = BacktestConfig::default();
         c.mode = BacktestMode::Fast;
         let mut e = BacktestEngine::new(c);
-        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "10")), Some(&signal("A", "0.95")));
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.95")),
+        );
         let o = e.finalize();
-        assert!(o.daily_positions.is_empty(), "Fast mode should not record positions");
+        assert!(
+            o.daily_positions.is_empty(),
+            "Fast mode should not record positions"
+        );
         assert!(!o.trades.is_empty(), "Fast mode should still record trades");
     }
 
@@ -711,7 +1004,33 @@ mod tests {
         );
         let o = e.finalize();
         assert_eq!(o.trades.len(), 0);
-        assert!(!o.violations.is_empty(), "Should record constraint violation");
+        assert!(
+            !o.violations.is_empty(),
+            "Should record constraint violation"
+        );
         assert_eq!(o.violations[0].constraint_name, "position_limit");
+    }
+
+    #[test]
+    fn test_participation_rate_caps_buy_order() {
+        let mut c = BacktestConfig::default();
+        c.max_position_pct = d("1.01");
+        c.max_participation_rate = Some(d("0.10"));
+        c.fee_config.min_commission = Decimal::zero();
+        c.fee_config.commission_rate = Decimal::zero();
+        c.fee_config.slippage_bps = Decimal::zero();
+        let mut e = BacktestEngine::new(c);
+        let mut m = market("2024-01-02", ("A", "10"), ("A", "10"));
+        m.amount.insert("A".into(), d("1000"));
+
+        e.process_day(&m, Some(&signal("A", "0.95")));
+        let o = e.finalize();
+
+        assert_eq!(o.trades.len(), 1);
+        assert!(o.trades[0].amount <= d("100"));
+        assert!(o
+            .violations
+            .iter()
+            .any(|v| v.constraint_name == "participation_rate"));
     }
 }

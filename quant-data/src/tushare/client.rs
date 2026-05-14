@@ -3,9 +3,8 @@
 //! 从 valentina 迁移，增加 governor rate limiter 和复权因子 API。
 
 use governor::{
-    clock::DefaultClock,
-    state::keyed::DefaultKeyedStateStore,
-    Quota, RateLimiter as GovernorRateLimiter,
+    clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota,
+    RateLimiter as GovernorRateLimiter,
 };
 use quant_common::{QuantError, QuantResult};
 use reqwest::Client as HttpClient;
@@ -65,19 +64,20 @@ impl TushareClient {
 
         // 令牌桶：每分钟 replenish N 次，允许 10 次突发
         let quota = Quota::per_minute(
-            NonZeroU32::new(config.rate_limit_per_minute)
-                .unwrap_or(NonZeroU32::new(200).unwrap()),
+            NonZeroU32::new(config.rate_limit_per_minute).unwrap_or(NonZeroU32::new(200).unwrap()),
         )
-        .allow_burst(
-            NonZeroU32::new(10).unwrap(),
-        );
+        .allow_burst(NonZeroU32::new(10).unwrap());
         let limiter = Arc::new(GovernorRateLimiter::keyed(quota));
 
         info!(
             rate_limit_per_minute = config.rate_limit_per_minute,
             "Tushare client 初始化"
         );
-        Ok(Self { http, config, limiter })
+        Ok(Self {
+            http,
+            config,
+            limiter,
+        })
     }
 
     /// 从环境变量创建
@@ -94,9 +94,7 @@ impl TushareClient {
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         // 速率限制：使用 "tushare" 作为全局 key
         // until_key_ready() 会阻塞直到有可用令牌
-        self.limiter
-            .until_key_ready(&"tushare".to_string())
-            .await;
+        self.limiter.until_key_ready(&"tushare".to_string()).await;
 
         let request = TushareRequest {
             api_name: api_name.into(),
@@ -147,7 +145,8 @@ impl TushareClient {
         if let Some(ls) = list_status {
             params.push(("list_status", ls));
         }
-        self.call_api::<Vec<serde_json::Value>>("stock_basic", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("stock_basic", params, &[])
+            .await
     }
 
     /// 获取日线行情（批量，支持逗号分隔多只股票，支持分页）
@@ -162,18 +161,29 @@ impl TushareClient {
         let codes = ts_codes.join(",");
         let mut owned: Vec<String> = vec![codes];
         // Pre-push limit/offset so references stay valid
-        if let Some(l) = limit { owned.push(l.to_string()); }
-        if let Some(o) = offset { owned.push(o.to_string()); }
-        
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
         let mut params: Vec<(&str, &str)> = vec![("ts_code", owned[0].as_str())];
-        if let Some(sd) = start_date { params.push(("start_date", sd)); }
-        if let Some(ed) = end_date { params.push(("end_date", ed)); }
-        if limit.is_some() { params.push(("limit", owned[1].as_str())); }
+        if let Some(sd) = start_date {
+            params.push(("start_date", sd));
+        }
+        if let Some(ed) = end_date {
+            params.push(("end_date", ed));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[1].as_str()));
+        }
         if offset.is_some() {
             let idx = if limit.is_some() { 2 } else { 1 };
             params.push(("offset", owned[idx].as_str()));
         }
-        self.call_api::<Vec<serde_json::Value>>("daily", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("daily", params, &[])
+            .await
     }
 
     /// 获取交易日历
@@ -190,7 +200,8 @@ impl TushareClient {
         if let Some(ed) = end_date {
             params.push(("end_date", ed));
         }
-        self.call_api::<Vec<serde_json::Value>>("trade_cal", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("trade_cal", params, &[])
+            .await
     }
 
     /// 获取复权因子
@@ -207,7 +218,8 @@ impl TushareClient {
         if let Some(ed) = end_date {
             params.push(("end_date", ed));
         }
-        self.call_api::<Vec<serde_json::Value>>("adj_factor", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("adj_factor", params, &[])
+            .await
     }
 
     /// 获取指数日线
@@ -224,38 +236,63 @@ impl TushareClient {
         if let Some(ed) = end_date {
             params.push(("end_date", ed));
         }
-        self.call_api::<Vec<serde_json::Value>>("index_daily", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("index_daily", params, &[])
+            .await
     }
 
     // ─── 财务数据 ────────────────────────────────────────────
 
     /// 利润表
     pub async fn income(
-        &self, ts_code: &str, start_date: Option<&str>, end_date: Option<&str>,
+        &self,
+        ts_code: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         let mut params = vec![("ts_code", ts_code)];
-        if let Some(s) = start_date { params.push(("start_date", s)); }
-        if let Some(e) = end_date { params.push(("end_date", e)); }
-        self.call_api::<Vec<serde_json::Value>>("income", params, &[]).await
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        self.call_api::<Vec<serde_json::Value>>("income", params, &[])
+            .await
     }
 
     /// 资产负债表
     pub async fn balancesheet(
-        &self, ts_code: &str, start_date: Option<&str>, end_date: Option<&str>,
+        &self,
+        ts_code: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         let mut params = vec![("ts_code", ts_code)];
-        if let Some(s) = start_date { params.push(("start_date", s)); }
-        if let Some(e) = end_date { params.push(("end_date", e)); }
-        self.call_api::<Vec<serde_json::Value>>("balancesheet", params, &[]).await
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        self.call_api::<Vec<serde_json::Value>>("balancesheet", params, &[])
+            .await
     }
 
     /// 财务指标
     pub async fn fina_indicator(
-        &self, ts_code: &str, start_date: Option<&str>, end_date: Option<&str>,
+        &self,
+        ts_code: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         let mut params = vec![("ts_code", ts_code)];
-        if let Some(s) = start_date { params.push(("start_date", s)); }
-        if let Some(e) = end_date { params.push(("end_date", e)); }
-        self.call_api::<Vec<serde_json::Value>>("fina_indicator", params, &[]).await
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        self.call_api::<Vec<serde_json::Value>>("fina_indicator", params, &[])
+            .await
     }
 }

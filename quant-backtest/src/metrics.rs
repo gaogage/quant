@@ -2,8 +2,8 @@
 //!
 //! 绝对收益、相对收益、风险指标。
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 /// 回测绩效指标
@@ -22,6 +22,7 @@ pub struct BacktestMetrics {
     pub excess_return_pct: Decimal,
     pub information_ratio: Decimal,
     pub tracking_error_pct: Decimal,
+    pub turnover: Decimal,
     pub num_trades: usize,
     pub win_rate_pct: Decimal,
     pub profit_factor: Decimal,
@@ -30,14 +31,23 @@ pub struct BacktestMetrics {
 impl Default for BacktestMetrics {
     fn default() -> Self {
         Self {
-            total_return: Decimal::zero(), total_return_pct: Decimal::zero(),
-            annual_return_pct: Decimal::zero(), max_drawdown_pct: Decimal::zero(),
-            annual_volatility_pct: Decimal::zero(), annualized_volatility: Decimal::zero(),
-            sharpe_ratio: Decimal::zero(), sortino_ratio: Decimal::zero(),
-            calmar_ratio: Decimal::zero(), benchmark_return_pct: Decimal::zero(),
-            excess_return_pct: Decimal::zero(), information_ratio: Decimal::zero(),
-            tracking_error_pct: Decimal::zero(), num_trades: 0,
-            win_rate_pct: Decimal::zero(), profit_factor: Decimal::zero(),
+            total_return: Decimal::zero(),
+            total_return_pct: Decimal::zero(),
+            annual_return_pct: Decimal::zero(),
+            max_drawdown_pct: Decimal::zero(),
+            annual_volatility_pct: Decimal::zero(),
+            annualized_volatility: Decimal::zero(),
+            sharpe_ratio: Decimal::zero(),
+            sortino_ratio: Decimal::zero(),
+            calmar_ratio: Decimal::zero(),
+            benchmark_return_pct: Decimal::zero(),
+            excess_return_pct: Decimal::zero(),
+            information_ratio: Decimal::zero(),
+            tracking_error_pct: Decimal::zero(),
+            turnover: Decimal::zero(),
+            num_trades: 0,
+            win_rate_pct: Decimal::zero(),
+            profit_factor: Decimal::zero(),
         }
     }
 }
@@ -68,21 +78,20 @@ impl BacktestMetrics {
         };
 
         // 日收益率
-        let daily: Vec<Decimal> = nav.windows(2)
-            .map(|w| (w[1] - w[0]) / w[0])
-            .collect();
+        let daily: Vec<Decimal> = nav.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
 
         // 波动率
         let annual_vol = if daily.len() <= 1 {
             Decimal::zero()
         } else {
             let mean = daily.iter().sum::<Decimal>() / Decimal::from(daily.len());
-            let variance = daily.iter()
+            let variance = daily
+                .iter()
                 .map(|x| (*x - mean) * (*x - mean))
-                .sum::<Decimal>() / Decimal::from(daily.len() - 1);
-            let daily_vol = Decimal::from_f64(
-                variance.to_f64().unwrap_or(0.0).sqrt()
-            ).unwrap_or_default();
+                .sum::<Decimal>()
+                / Decimal::from(daily.len() - 1);
+            let daily_vol =
+                Decimal::from_f64(variance.to_f64().unwrap_or(0.0).sqrt()).unwrap_or_default();
             daily_vol * Decimal::from_f64(252.0_f64.sqrt()).unwrap()
         };
 
@@ -97,9 +106,13 @@ impl BacktestMetrics {
         let mut max_dd: Decimal = Decimal::zero();
         let mut peak = nav[0];
         for v in nav {
-            if *v > peak { peak = *v; }
+            if *v > peak {
+                peak = *v;
+            }
             let dd = (peak - *v) / peak;
-            if dd > max_dd { max_dd = dd; }
+            if dd > max_dd {
+                max_dd = dd;
+            }
         }
 
         // 基准
@@ -124,6 +137,7 @@ impl BacktestMetrics {
             excess_return_pct: excess,
             information_ratio: Decimal::zero(),
             tracking_error_pct: Decimal::zero(),
+            turnover: Decimal::zero(),
             num_trades: 0,
             win_rate_pct: Decimal::zero(),
             profit_factor: Decimal::zero(),

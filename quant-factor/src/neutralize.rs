@@ -45,23 +45,29 @@ pub fn neutralize(
         let mut groups: HashMap<(NaiveDate, String), Vec<usize>> = HashMap::new();
         for (idx, fv) in values.iter().enumerate() {
             if let Some(ind) = config.industries.get(&fv.symbol) {
-                groups
-                    .entry((fv.date, ind.clone()))
-                    .or_default()
-                    .push(idx);
+                groups.entry((fv.date, ind.clone())).or_default().push(idx);
             }
         }
 
         // Subtract group mean
         for ((_date, _ind), indices) in &groups {
-            if indices.len() < 3 { continue; }
-            let (sum_val, count) = indices.iter()
+            if indices.len() < 3 {
+                continue;
+            }
+            let (sum_val, count) = indices
+                .iter()
                 .filter_map(|&i| {
                     let v = values[i].value;
-                    if v.is_finite() { Some(v) } else { None }
+                    if v.is_finite() {
+                        Some(v)
+                    } else {
+                        None
+                    }
                 })
                 .fold((0.0f64, 0usize), |(sum, n), v| (sum + v, n + 1));
-            if count == 0 { continue; }
+            if count == 0 {
+                continue;
+            }
             let avg = sum_val / count as f64;
             for &i in indices {
                 if values[i].value.is_finite() {
@@ -74,10 +80,10 @@ pub fn neutralize(
     // Step 2: Size neutralization (cross-sectional regression per date)
     if do_size {
         // Convert size_proxy to a lookup: (symbol, date) → f64
-        let size_map: HashMap<(String, NaiveDate), f64> = config.size_proxy.iter()
-            .flat_map(|(sym, entries)| {
-                entries.iter().map(move |(d, v)| ((sym.clone(), *d), *v))
-            })
+        let size_map: HashMap<(String, NaiveDate), f64> = config
+            .size_proxy
+            .iter()
+            .flat_map(|(sym, entries)| entries.iter().map(move |(d, v)| ((sym.clone(), *d), *v)))
             .collect();
 
         // Group indices by date
@@ -91,10 +97,13 @@ pub fn neutralize(
 
         // Per-date OLS: factor_residual = factor - (alpha + beta * size)
         for (_date, indices) in &date_groups {
-            if indices.len() < 20 { continue; }
+            if indices.len() < 20 {
+                continue;
+            }
 
             let n = indices.len() as f64;
-            let pairs: Vec<(f64, f64)> = indices.iter()
+            let pairs: Vec<(f64, f64)> = indices
+                .iter()
                 .filter_map(|&i| {
                     let key = (values[i].symbol.clone(), values[i].date);
                     let sz = size_map.get(&key).copied()?;
@@ -106,7 +115,9 @@ pub fn neutralize(
                 })
                 .collect();
 
-            if pairs.len() < 20 { continue; }
+            if pairs.len() < 20 {
+                continue;
+            }
 
             // Simple OLS: y = a + b * size
             let sx: f64 = pairs.iter().map(|(_, x)| x).sum();
@@ -116,7 +127,9 @@ pub fn neutralize(
             let m = pairs.len() as f64;
 
             let denominator = m * sxx - sx * sx;
-            if denominator.abs() < 1e-12 { continue; }
+            if denominator.abs() < 1e-12 {
+                continue;
+            }
 
             let beta = (m * sxy - sx * sy) / denominator;
             let alpha = (sy - beta * sx) / m;

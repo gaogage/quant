@@ -4,11 +4,13 @@
 //! 遵循 05-表结构设计.md 中的表结构。
 
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
 use sqlx::PgPool;
 use tracing::{debug, info};
 
-use crate::model::entities::{MarketStock, MarketStockDailyBar, MarketTradeCalendar, MarketAdjustmentFactor};
+use crate::model::entities::{
+    MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockDailyBar,
+    MarketTradeCalendar,
+};
 
 // ─── market_stock ────────────────────────────────────────────────
 
@@ -125,6 +127,58 @@ pub async fn get_daily_date_range(
     Ok(row.unwrap_or((None, None)))
 }
 
+// ─── market_index_daily_bar ──────────────────────────────────────
+
+pub async fn upsert_index_daily_bar(
+    pool: &PgPool,
+    bar: &MarketIndexDailyBar,
+    data_version_id: &str,
+    source: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO market_index_daily_bar
+             (symbol, trade_date, open, high, low, close, pre_close, pct_change,
+              volume, amount, source, data_version_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           ON CONFLICT (symbol, trade_date) DO UPDATE SET
+             open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+             close = EXCLUDED.close, pre_close = EXCLUDED.pre_close,
+             pct_change = EXCLUDED.pct_change,
+             volume = EXCLUDED.volume, amount = EXCLUDED.amount,
+             source = EXCLUDED.source, data_version_id = EXCLUDED.data_version_id"#,
+    )
+    .bind(&bar.symbol)
+    .bind(bar.trade_date)
+    .bind(bar.open)
+    .bind(bar.high)
+    .bind(bar.low)
+    .bind(bar.close)
+    .bind(bar.pre_close)
+    .bind(bar.change_pct)
+    .bind(bar.volume)
+    .bind(bar.amount)
+    .bind(source)
+    .bind(data_version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_index_daily_bars_batch(
+    pool: &PgPool,
+    bars: &[MarketIndexDailyBar],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    let mut count = 0;
+    for bar in bars {
+        upsert_index_daily_bar(pool, bar, data_version_id, source).await?;
+        count += 1;
+    }
+    info!("批量 upsert {} 条指数日线", count);
+    Ok(count)
+}
+
 // ─── market_trade_calendar ───────────────────────────────────────
 
 pub async fn upsert_trade_calendar(
@@ -227,12 +281,52 @@ pub async fn create_sync_task(
     task_type: &str,
     status: &str,
 ) -> Result<(), sqlx::Error> {
+    create_sync_task_with_context(
+        pool, task_id, task_type, "tushare", None, None, None, status, None,
+    )
+    .await
+}
+
+pub async fn create_sync_task_with_context(
+    pool: &PgPool,
+    task_id: &str,
+    task_type: &str,
+    source: &str,
+    symbols: Option<&[String]>,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    status: &str,
+    retry_of_task_id: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let symbols_vec = symbols.map(|items| items.to_vec());
     sqlx::query(
-        "INSERT INTO data_sync_task (task_id, task_type, source, status) VALUES ($1, $2, 'tushare', $3)",
+        r#"INSERT INTO data_sync_task
+           (task_id, task_type, source, symbols, start_date, end_date, status,
+            retry_of_task_id, started_at, last_heartbeat_at, heartbeat_timeout_seconds)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+            CASE WHEN $7 = 'running' THEN now() ELSE NULL END,
+            CASE WHEN $7 = 'running' THEN now() ELSE NULL END,
+            600)
+           ON CONFLICT (task_id) DO UPDATE SET
+             task_type = EXCLUDED.task_type,
+             source = EXCLUDED.source,
+             symbols = EXCLUDED.symbols,
+             start_date = EXCLUDED.start_date,
+             end_date = EXCLUDED.end_date,
+             status = EXCLUDED.status,
+             retry_of_task_id = EXCLUDED.retry_of_task_id,
+             started_at = COALESCE(data_sync_task.started_at, EXCLUDED.started_at),
+             last_heartbeat_at = COALESCE(EXCLUDED.last_heartbeat_at, data_sync_task.last_heartbeat_at),
+             heartbeat_timeout_seconds = COALESCE(data_sync_task.heartbeat_timeout_seconds, EXCLUDED.heartbeat_timeout_seconds)"#,
     )
     .bind(task_id)
     .bind(task_type)
+    .bind(source)
+    .bind(symbols_vec.as_deref())
+    .bind(start_date)
+    .bind(end_date)
     .bind(status)
+    .bind(retry_of_task_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -250,6 +344,8 @@ pub async fn update_sync_task(
         r#"UPDATE data_sync_task
            SET status = $2, total_count = $3, success_count = $4, failed_count = $5,
                progress = CASE WHEN $3 > 0 THEN ($4 * 100 / $3) ELSE 0 END,
+               last_heartbeat_at = now(),
+               started_at = COALESCE(started_at, now()),
                completed_at = CASE WHEN $2 IN ('completed','partial','failed') THEN now() ELSE completed_at END
            WHERE task_id = $1"#,
     )
@@ -258,6 +354,24 @@ pub async fn update_sync_task(
     .bind(total)
     .bind(success)
     .bind(failed)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn fail_sync_task(
+    pool: &PgPool,
+    task_id: &str,
+    error_message: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"UPDATE data_sync_task
+           SET status = 'failed', failed_count = GREATEST(failed_count, 1),
+               error_message = $2, progress = 0, last_heartbeat_at = now(), completed_at = now()
+           WHERE task_id = $1"#,
+    )
+    .bind(task_id)
+    .bind(error_message)
     .execute(pool)
     .await?;
     Ok(())
