@@ -197,6 +197,14 @@ async fn main() {
             "/api/v1/quant/ml/prediction-sets/linear-smoke",
             post(routes::ml::create_linear_prediction_set),
         )
+        .route(
+            "/api/v1/quant/ml/training-tasks/linear",
+            post(routes::ml::train_linear_model),
+        )
+        .route(
+            "/api/v1/quant/ml/prediction-sets/evaluate",
+            post(routes::ml::evaluate_prediction_set),
+        )
         // 组合风控
         .route(
             "/api/v1/quant/portfolio/reports/{task_id}",
@@ -205,6 +213,27 @@ async fn main() {
         .route(
             "/api/v1/quant/portfolio/policies/{policy_id}",
             get(routes::portfolio::portfolio_policy),
+        )
+        // 仿真交易
+        .route(
+            "/api/v1/quant/paper/accounts",
+            post(routes::paper::create_paper_account),
+        )
+        .route(
+            "/api/v1/quant/paper/accounts/{account_id}",
+            get(routes::paper::paper_account_summary),
+        )
+        .route(
+            "/api/v1/quant/paper/orders",
+            post(routes::paper::submit_paper_order),
+        )
+        .route(
+            "/api/v1/quant/paper/orders/{order_id}/fills",
+            post(routes::paper::fill_paper_order),
+        )
+        .route(
+            "/api/v1/quant/paper/health",
+            get(routes::paper::paper_health),
         )
         // 参数优化
         .route(

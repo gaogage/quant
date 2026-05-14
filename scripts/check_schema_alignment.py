@@ -123,6 +123,8 @@ if main_routes.exists():
         '"/api/v1/quant/optimizations/{optimization_task_id}/promote"',
         '"/api/v1/quant/optimizations/{optimization_task_id}/robustness-gates"',
         '"/api/v1/quant/ml/prediction-sets/linear-smoke"',
+        '"/api/v1/quant/ml/training-tasks/linear"',
+        '"/api/v1/quant/ml/prediction-sets/evaluate"',
     ]:
         if required not in main_routes_text:
             failed.append(("factor_definition API routes must be mounted", str(main_routes.relative_to(ROOT)), [required]))
@@ -140,12 +142,31 @@ if optimization_routes.exists():
         "evaluate_robustness_gates(",
         "execute_pending_trials(",
         "build_factor_trial_request(",
+        "max_pairwise_correlation",
+        "correlation_lookback_days",
+        "kelly_fraction",
+        "kelly_lookback_days",
+        "max_gross_exposure",
+        "score_direction",
         "score_trial(",
         "trial_reuse_key(",
         "find_reusable_trial(",
+        "normalize_performance_gate(",
+        "evaluate_optimization_performance_gates(",
+        "persist_optimization_experiment_run(",
+        "build_market_scenario_analysis(",
+        "build_walk_forward_analysis(",
+        "build_bootstrap_analysis(",
+        "evaluate_robustness_gates_with_analysis(",
+        "load_robustness_timeseries_analysis(",
+        "walk_forward_min_window_count",
+        "bootstrap_positive_return_probability",
+        "market_scenario_coverage",
+        "optimization_trial_batch_release_gate",
         "strategy_parameter_candidate",
         "INSERT INTO audit_event",
         "INSERT INTO robustness_gate_result",
+        "INSERT INTO experiment_run",
         "generate_trial_parameters(",
         "DeterministicRng",
         "INSERT INTO optimization_task",
@@ -162,6 +183,22 @@ if schema_sql.exists():
     optimization_task_block = optimization_task_block.split("CREATE INDEX IF NOT EXISTS idx_optimization_task_status_created_at", 1)[0]
     if "backtest_template JSONB NULL" not in optimization_task_block:
         failed.append(("optimization_task schema must include backtest_template", str(schema_sql.relative_to(ROOT.parent)), ["missing backtest_template JSONB NULL"]))
+    model_training_task_block = schema_text.split("CREATE TABLE IF NOT EXISTS public.model_training_task", 1)[-1]
+    model_training_task_block = model_training_task_block.split("CREATE INDEX IF NOT EXISTS idx_model_training_task_status_created_at", 1)[0]
+    if "training_dataset_id VARCHAR(64) NULL" not in model_training_task_block:
+        failed.append(("model_training_task schema must include training_dataset_id", str(schema_sql.relative_to(ROOT.parent)), ["missing training_dataset_id VARCHAR(64) NULL"]))
+    if "fk_model_training_task_training_dataset" not in schema_text:
+        failed.append(("model_training_task schema must FK training_dataset", str(schema_sql.relative_to(ROOT.parent)), ["missing fk_model_training_task_training_dataset"]))
+    experiment_run_block = schema_text.split("CREATE TABLE IF NOT EXISTS public.experiment_run", 1)[-1]
+    experiment_run_block = experiment_run_block.split("CREATE INDEX IF NOT EXISTS idx_experiment_run_type_created_at", 1)[0]
+    for required in [
+        "experiment_type VARCHAR(64) NOT NULL",
+        "related_entity_type VARCHAR(64) NULL",
+        "related_entity_id VARCHAR(64) NULL",
+        "metrics JSONB NULL",
+    ]:
+        if required not in experiment_run_block:
+            failed.append(("experiment_run schema must support ML experiment summaries", str(schema_sql.relative_to(ROOT.parent)), [required]))
     backtest_task_block = schema_text.split("CREATE TABLE IF NOT EXISTS public.backtest_task", 1)[-1]
     backtest_task_block = backtest_task_block.split("CREATE INDEX IF NOT EXISTS idx_backtest_task_status_created_at", 1)[0]
     if "prediction_set_id VARCHAR(64) NULL" not in backtest_task_block:
@@ -192,6 +229,15 @@ if signal_generator.exists():
         "model_prediction",
         "available_at <= trade_date",
         "prediction_score_day_for_signal(",
+        "build_portfolio_weights(",
+        "select_uncorrelated_candidates(",
+        "max_pairwise_correlation",
+        "fractional_kelly_weight(",
+        "kelly_fraction",
+        "max_gross_exposure",
+        "load_symbol_return_history(",
+        "ScoreDirection",
+        "sort_factor_scores(",
     ]:
         if required not in signal_text:
             failed.append(("factor signal generation must preserve PIT score timing", str(signal_generator.relative_to(ROOT)), [required]))
@@ -205,21 +251,72 @@ if backtest_routes.exists():
         "execute_prediction_backtest(",
         "generate_prediction_signals(",
         "prediction_set_id: Some(prediction_set_id)",
+        "max_pairwise_correlation",
+        "correlation_lookback_days",
+        "kelly_fraction",
+        "kelly_lookback_days",
+        "max_gross_exposure",
+        "score_direction",
+        "parse_score_direction(",
     ]:
         if required not in backtest_text:
             failed.append(("prediction-set backtest API must bind model predictions into backtest", str(backtest_routes.relative_to(ROOT)), [required]))
+
+paper_routes = ROOT / "quant-api/src/routes/paper.rs"
+if paper_routes.exists():
+    paper_text = paper_routes.read_text(encoding="utf-8")
+    for required in [
+        "create_paper_account(",
+        "submit_paper_order(",
+        "fill_paper_order(",
+        "paper_account_summary(",
+        "paper_health(",
+        "INSERT INTO paper_account",
+        "INSERT INTO paper_order",
+        "INSERT INTO paper_fill",
+        "UPDATE paper_account SET cash",
+        "INSERT INTO audit_event",
+        "paper_order.risk_reject",
+        "evaluate_order_risk(",
+    ]:
+        if required not in paper_text:
+            failed.append(("paper trading API must close account/order/fill/audit loop", str(paper_routes.relative_to(ROOT)), [required]))
+    if main_routes.exists():
+        main_routes_text = main_routes.read_text(encoding="utf-8")
+        for required in [
+            '"/api/v1/quant/paper/accounts"',
+            '"/api/v1/quant/paper/accounts/{account_id}"',
+            '"/api/v1/quant/paper/orders"',
+            '"/api/v1/quant/paper/orders/{order_id}/fills"',
+            '"/api/v1/quant/paper/health"',
+        ]:
+            if required not in main_routes_text:
+                failed.append(("paper trading API routes must be mounted", str(main_routes.relative_to(ROOT)), [required]))
+else:
+    failed.append(("paper trading routes module must exist", "quant-api/src/routes/paper.rs", ["missing file"]))
 
 ml_routes = ROOT / "quant-api/src/routes/ml.rs"
 if ml_routes.exists():
     ml_text = ml_routes.read_text(encoding="utf-8")
     for required in [
         "create_linear_prediction_set(",
+        "train_linear_model(",
+        "INSERT INTO model_training_task",
         "INSERT INTO training_dataset",
         "INSERT INTO model_registry",
         "INSERT INTO prediction_set",
         "INSERT INTO model_prediction",
         "available_at",
         "available_at IS NULL OR available_at <= trade_date",
+        "future_return_label(",
+        "fit_linear_weights(",
+        "INSERT INTO experiment_run",
+        "ml_training_linear",
+        "linear_training_experiment_config(",
+        "linear_training_experiment_metrics(",
+        "evaluate_prediction_set(",
+        "ml_prediction_backtest_gate",
+        "evaluate_prediction_gates(",
     ]:
         if required not in ml_text:
             failed.append(("ML prediction-set smoke route must persist PIT model predictions", str(ml_routes.relative_to(ROOT)), [required]))

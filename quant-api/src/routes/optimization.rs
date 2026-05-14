@@ -5,10 +5,13 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::routes::backtest::{execute_factor_backtest, RunFactorBacktestReq};
@@ -39,6 +42,14 @@ pub struct TrialListQuery {
 #[derive(Debug, Deserialize)]
 pub struct RunOptimizationRequest {
     pub trial_limit: Option<i64>,
+    pub performance_gate: Option<OptimizationPerformanceGateRequest>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OptimizationPerformanceGateRequest {
+    pub min_completed_trials: Option<i64>,
+    pub max_failed_trials: Option<i64>,
+    pub max_elapsed_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +87,36 @@ struct ScoredTrial {
 struct RobustnessEvaluation {
     status: String,
     gates: Value,
+}
+
+#[derive(Debug, Clone)]
+struct RobustnessDailyPoint {
+    trade_date: NaiveDate,
+    portfolio_value: f64,
+    benchmark_value: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct RobustnessMetricSummary {
+    total_return: f64,
+    annual_return: f64,
+    sharpe_ratio: f64,
+    max_drawdown: f64,
+    benchmark_return: Option<f64>,
+    excess_return: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct RobustnessTimeSeriesAnalysis {
+    market_scenarios: Value,
+    walk_forward: Value,
+    bootstrap: Value,
+}
+
+struct OptimizationPerformanceGatePolicy {
+    min_completed_trials: i64,
+    max_failed_trials: i64,
+    max_elapsed_ms: Option<i64>,
 }
 
 struct NormalizedPromoteRequest {
@@ -244,7 +285,7 @@ pub async fn run_optimization_trials(
     Json(req): Json<RunOptimizationRequest>,
 ) -> impl IntoResponse {
     let trial_limit = normalize_limit(req.trial_limit);
-    match execute_pending_trials(&state.db, &task_id, trial_limit).await {
+    match execute_pending_trials(&state.db, &task_id, trial_limit, req.performance_gate.as_ref()).await {
         Ok(summary) => Json(json!({"code": 0, "data": summary})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -348,7 +389,10 @@ async fn execute_pending_trials(
     db: &sqlx::PgPool,
     task_id: &str,
     trial_limit: i64,
+    performance_gate: Option<&OptimizationPerformanceGateRequest>,
 ) -> Result<Value, String> {
+    let started = Instant::now();
+    let gate_policy = normalize_performance_gate(performance_gate, trial_limit)?;
     let task = load_execution_context(db, task_id).await?;
     let pending_trials = sqlx::query_as::<_, (String, i32, Value)>(
         "SELECT trial_id, trial_index, parameters
@@ -365,12 +409,34 @@ async fn execute_pending_trials(
 
     if pending_trials.is_empty() {
         refresh_task_progress(db, task_id).await?;
+        let elapsed_ms = started.elapsed().as_millis() as i64;
+        let best_trial_id = Value::Null;
+        let gates = evaluate_optimization_performance_gates(0, 0, 0, elapsed_ms, &gate_policy);
+        let gate_status = performance_gate_status(&gates);
+        let experiment_run_id = persist_optimization_experiment_run(
+            db,
+            task_id,
+            trial_limit,
+            0,
+            0,
+            0,
+            elapsed_ms,
+            &best_trial_id,
+            &gate_policy,
+            &gates,
+            gate_status,
+        )
+        .await?;
         return Ok(json!({
             "optimization_task_id": task_id,
             "executed": 0,
             "completed": 0,
             "failed": 0,
-            "best_trial_id": Value::Null,
+            "best_trial_id": best_trial_id,
+            "elapsed_ms": elapsed_ms,
+            "experiment_run_id": experiment_run_id,
+            "performance_gate_status": gate_status,
+            "performance_gates": gates,
         }));
     }
 
@@ -429,6 +495,30 @@ async fn execute_pending_trials(
     }
 
     let best_trial_id = refresh_task_progress(db, task_id).await?;
+    let elapsed_ms = started.elapsed().as_millis() as i64;
+    let gates = evaluate_optimization_performance_gates(
+        pending_trials.len() as i64,
+        completed,
+        failed,
+        elapsed_ms,
+        &gate_policy,
+    );
+    let gate_status = performance_gate_status(&gates);
+    let best_trial_value = json!(best_trial_id);
+    let experiment_run_id = persist_optimization_experiment_run(
+        db,
+        task_id,
+        trial_limit,
+        pending_trials.len() as i64,
+        completed,
+        failed,
+        elapsed_ms,
+        &best_trial_value,
+        &gate_policy,
+        &gates,
+        gate_status,
+    )
+    .await?;
 
     Ok(json!({
         "optimization_task_id": task_id,
@@ -436,7 +526,156 @@ async fn execute_pending_trials(
         "completed": completed,
         "failed": failed,
         "best_trial_id": best_trial_id,
+        "elapsed_ms": elapsed_ms,
+        "experiment_run_id": experiment_run_id,
+        "performance_gate_status": gate_status,
+        "performance_gates": gates,
     }))
+}
+
+fn normalize_performance_gate(
+    gate: Option<&OptimizationPerformanceGateRequest>,
+    trial_limit: i64,
+) -> Result<OptimizationPerformanceGatePolicy, String> {
+    let min_completed_trials = gate
+        .and_then(|gate| gate.min_completed_trials)
+        .unwrap_or(trial_limit);
+    if min_completed_trials < 0 {
+        return Err("performance_gate.min_completed_trials must be non-negative".into());
+    }
+    let max_failed_trials = gate.and_then(|gate| gate.max_failed_trials).unwrap_or(0);
+    if max_failed_trials < 0 {
+        return Err("performance_gate.max_failed_trials must be non-negative".into());
+    }
+    let max_elapsed_ms = gate.and_then(|gate| gate.max_elapsed_ms);
+    if matches!(max_elapsed_ms, Some(value) if value < 0) {
+        return Err("performance_gate.max_elapsed_ms must be non-negative".into());
+    }
+
+    Ok(OptimizationPerformanceGatePolicy {
+        min_completed_trials,
+        max_failed_trials,
+        max_elapsed_ms,
+    })
+}
+
+fn evaluate_optimization_performance_gates(
+    executed: i64,
+    completed: i64,
+    failed: i64,
+    elapsed_ms: i64,
+    policy: &OptimizationPerformanceGatePolicy,
+) -> Value {
+    let mut gates = vec![
+        json!({
+            "gate": "min_completed_trials",
+            "passed": completed >= policy.min_completed_trials,
+            "limit": policy.min_completed_trials,
+            "actual": completed,
+        }),
+        json!({
+            "gate": "max_failed_trials",
+            "passed": failed <= policy.max_failed_trials,
+            "limit": policy.max_failed_trials,
+            "actual": failed,
+        }),
+        json!({
+            "gate": "executed_trials",
+            "passed": executed >= policy.min_completed_trials,
+            "limit": policy.min_completed_trials,
+            "actual": executed,
+        }),
+    ];
+    if let Some(limit) = policy.max_elapsed_ms {
+        gates.push(json!({
+            "gate": "max_elapsed_ms",
+            "passed": elapsed_ms <= limit,
+            "limit": limit,
+            "actual": elapsed_ms,
+        }));
+    }
+    Value::Array(gates)
+}
+
+fn performance_gate_status(gates: &Value) -> &'static str {
+    let passed = gates
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .all(|item| item.get("passed").and_then(Value::as_bool).unwrap_or(false))
+        })
+        .unwrap_or(false);
+    if passed {
+        "passed"
+    } else {
+        "review_required"
+    }
+}
+
+async fn persist_optimization_experiment_run(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    trial_limit: i64,
+    executed: i64,
+    completed: i64,
+    failed: i64,
+    elapsed_ms: i64,
+    best_trial_id: &Value,
+    policy: &OptimizationPerformanceGatePolicy,
+    gates: &Value,
+    gate_status: &str,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let throughput = if elapsed_ms > 0 {
+        Some(executed as f64 * 1000.0 / elapsed_ms as f64)
+    } else {
+        None
+    };
+    let config = json!({
+        "optimization_task_id": task_id,
+        "trial_limit": trial_limit,
+        "gate_policy": {
+            "min_completed_trials": policy.min_completed_trials,
+            "max_failed_trials": policy.max_failed_trials,
+            "max_elapsed_ms": policy.max_elapsed_ms,
+        }
+    });
+    let metrics = json!({
+        "executed": executed,
+        "completed": completed,
+        "failed": failed,
+        "elapsed_ms": elapsed_ms,
+        "throughput_trials_per_sec": throughput,
+        "best_trial_id": best_trial_id,
+        "gate_status": gate_status,
+        "gates": gates,
+    });
+    let experiment_status = if gate_status == "passed" {
+        "completed"
+    } else if completed > 0 || failed > 0 || executed > 0 {
+        "partial"
+    } else {
+        "failed"
+    };
+
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'optimization_trial_batch_release_gate', 'optimization_task', $2,
+                 $3, $4, $5, now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(task_id)
+    .bind(&config)
+    .bind(&metrics)
+    .bind(experiment_status)
+    .execute(db)
+    .await
+    .map_err(|error| format!("Failed to insert optimization experiment_run: {}", error))?;
+
+    Ok(experiment_run_id)
 }
 
 async fn promote_trial(
@@ -573,8 +812,8 @@ async fn evaluate_and_persist_robustness(
         .as_deref()
         .ok_or_else(|| "optimization task has no best_trial_id; run completed trials first".to_string())?;
 
-    let trial = sqlx::query_as::<_, (Decimal, Option<Value>, Option<Value>)>(
-        "SELECT score, metrics, constraint_violations
+    let trial = sqlx::query_as::<_, (Decimal, Option<Value>, Option<Value>, Option<String>)>(
+        "SELECT score, metrics, constraint_violations, backtest_task_id
          FROM optimization_trial
          WHERE optimization_task_id = $1 AND trial_id = $2 AND status = 'completed'",
     )
@@ -602,14 +841,24 @@ async fn evaluate_and_persist_robustness(
     let policy = gate_policy.cloned().unwrap_or_else(|| json!({
         "min_trade_count": 1,
         "max_drawdown": 0.20,
-        "min_score_gap": 0.0
+        "min_score_gap": 0.0,
+        "walk_forward_window_days": 63,
+        "walk_forward_step_days": 21,
+        "bootstrap_trials": 256,
+        "bootstrap_seed": 42
     }));
-    let evaluation = evaluate_robustness_gates(
+    let analysis = if let Some(backtest_task_id) = trial.3.as_deref() {
+        load_robustness_timeseries_analysis(db, backtest_task_id, &policy).await?
+    } else {
+        None
+    };
+    let evaluation = evaluate_robustness_gates_with_analysis(
         trial.0,
         runner_up,
         trial.1.as_ref().unwrap_or(&json!({})),
         trial.2.as_ref().unwrap_or(&json!([])),
         Some(&policy),
+        analysis.as_ref(),
     );
     let gate_result_id = format!("gate-{}", Uuid::new_v4());
 
@@ -637,6 +886,67 @@ async fn evaluate_and_persist_robustness(
         "status": evaluation.status,
         "gate_results": evaluation.gates,
     }))
+}
+
+async fn load_robustness_timeseries_analysis(
+    db: &sqlx::PgPool,
+    backtest_task_id: &str,
+    policy: &Value,
+) -> Result<Option<RobustnessTimeSeriesAnalysis>, String> {
+    let rows = sqlx::query_as::<_, (NaiveDate, f64, Option<f64>)>(
+        "SELECT c.trade_date,
+                c.portfolio_value::double precision,
+                COALESCE(c.benchmark_value::double precision, i.close::double precision)
+         FROM backtest_equity_curve c
+         JOIN backtest_task t ON t.task_id = c.task_id
+         LEFT JOIN market_index_daily_bar i
+           ON i.symbol = t.benchmark_symbol
+          AND i.trade_date = c.trade_date
+         WHERE c.task_id = $1
+         ORDER BY c.trade_date",
+    )
+    .bind(backtest_task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load backtest equity curve for robustness: {}", error))?;
+
+    if rows.len() < 3 {
+        return Ok(None);
+    }
+    let points = rows
+        .into_iter()
+        .filter(|(_, portfolio_value, _)| portfolio_value.is_finite() && *portfolio_value > 0.0)
+        .map(|(trade_date, portfolio_value, benchmark_value)| RobustnessDailyPoint {
+            trade_date,
+            portfolio_value,
+            benchmark_value: benchmark_value.filter(|value| value.is_finite() && *value > 0.0),
+        })
+        .collect::<Vec<_>>();
+    if points.len() < 3 {
+        return Ok(None);
+    }
+
+    let window_size = constraint_i64(Some(policy), "walk_forward_window_days")
+        .unwrap_or(63)
+        .max(2) as usize;
+    let step_size = constraint_i64(Some(policy), "walk_forward_step_days")
+        .unwrap_or(21)
+        .max(1) as usize;
+    let bootstrap_trials = constraint_i64(Some(policy), "bootstrap_trials")
+        .unwrap_or(256)
+        .clamp(1, 10_000) as usize;
+    let bootstrap_seed = constraint_i64(Some(policy), "bootstrap_seed")
+        .unwrap_or(42)
+        .max(1) as u64;
+
+    RobustnessTimeSeriesAnalysis::from_points(
+        &points,
+        window_size.min(points.len()),
+        step_size,
+        bootstrap_trials,
+        bootstrap_seed,
+    )
+    .map(Some)
 }
 
 fn normalize_promote_request(
@@ -781,6 +1091,20 @@ fn build_factor_trial_request(
             _ => Err(format!("{} must be a finite number", name)),
         }
     };
+    let optional_f64_value = |name: &str| -> Result<Option<f64>, String> {
+        match params.get(name).or_else(|| template.get(name)) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(value)) => value
+                .as_f64()
+                .map(Some)
+                .ok_or_else(|| format!("{} must be a finite number", name)),
+            Some(Value::String(value)) => value
+                .parse::<f64>()
+                .map(Some)
+                .map_err(|_| format!("{} must be a finite number", name)),
+            _ => Err(format!("{} must be a finite number", name)),
+        }
+    };
 
     Ok(RunFactorBacktestReq {
         combo_name: string_value("combo_name", None)?,
@@ -797,6 +1121,12 @@ fn build_factor_trial_request(
         min_amount: f64_value("min_amount", 0.0)?,
         max_position_pct: f64_value("max_position_pct", 0.10)?,
         skip_top_pct: f64_value("skip_top_pct", 0.0)?,
+        max_pairwise_correlation: optional_f64_value("max_pairwise_correlation")?,
+        correlation_lookback_days: usize_value("correlation_lookback_days", 60)?,
+        kelly_fraction: f64_value("kelly_fraction", 0.0)?,
+        kelly_lookback_days: usize_value("kelly_lookback_days", 60)?,
+        max_gross_exposure: f64_value("max_gross_exposure", 1.0)?,
+        score_direction: string_value("score_direction", Some("descending"))?,
         cost_model: None,
         execution_rules: None,
         benchmark: optional_string("benchmark")?.or_else(|| Some("000300.SH".into())),
@@ -1000,6 +1330,308 @@ fn score_trial(
     }
 }
 
+impl RobustnessDailyPoint {
+    #[cfg(test)]
+    fn new(trade_date: &str, portfolio_value: f64, benchmark_value: Option<f64>) -> Self {
+        Self {
+            trade_date: NaiveDate::parse_from_str(trade_date, "%Y-%m-%d").expect("valid date"),
+            portfolio_value,
+            benchmark_value,
+        }
+    }
+}
+
+impl RobustnessTimeSeriesAnalysis {
+    fn from_points(
+        points: &[RobustnessDailyPoint],
+        window_size: usize,
+        step_size: usize,
+        bootstrap_trials: usize,
+        bootstrap_seed: u64,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            market_scenarios: build_market_scenario_analysis(points),
+            walk_forward: build_walk_forward_analysis(points, window_size, step_size),
+            bootstrap: build_bootstrap_analysis(points, bootstrap_trials, bootstrap_seed)?,
+        })
+    }
+}
+
+fn build_market_scenario_analysis(points: &[RobustnessDailyPoint]) -> Value {
+    if points.len() < 2 {
+        return json!({
+            "scenario_count": 0,
+            "scenarios": []
+        });
+    }
+    let summary = summarize_points(points);
+    let volatility = annualized_volatility(&daily_returns(points, |point| Some(point.portfolio_value)));
+    let scenario = classify_market_scenario(&summary, volatility);
+    json!({
+        "scenario_count": 1,
+        "scenarios": [{
+            "scenario": scenario,
+            "start_date": points.first().map(|point| point.trade_date),
+            "end_date": points.last().map(|point| point.trade_date),
+            "metrics": metric_summary_json(&summary),
+            "annualized_volatility": volatility
+        }]
+    })
+}
+
+fn build_walk_forward_analysis(points: &[RobustnessDailyPoint], window_size: usize, step_size: usize) -> Value {
+    if points.len() < 2 || window_size < 2 || step_size == 0 {
+        return json!({
+            "window_count": 0,
+            "windows": [],
+            "positive_excess_window_ratio": 0.0,
+            "worst_window_drawdown": 0.0
+        });
+    }
+
+    let mut windows = Vec::new();
+    let mut idx = 0;
+    while idx + window_size <= points.len() {
+        let slice = &points[idx..idx + window_size];
+        let summary = summarize_points(slice);
+        let volatility = annualized_volatility(&daily_returns(slice, |point| Some(point.portfolio_value)));
+        windows.push(json!({
+            "window_index": windows.len() + 1,
+            "start_date": slice.first().map(|point| point.trade_date),
+            "end_date": slice.last().map(|point| point.trade_date),
+            "scenario": classify_market_scenario(&summary, volatility),
+            "metrics": metric_summary_json(&summary),
+            "annualized_volatility": volatility
+        }));
+        idx += step_size;
+    }
+
+    let positive_excess_count = windows
+        .iter()
+        .filter(|window| {
+            window["metrics"]["excess_return"]
+                .as_f64()
+                .map(|value| value > 0.0)
+                .unwrap_or(false)
+        })
+        .count();
+    let worst_window_drawdown = windows
+        .iter()
+        .filter_map(|window| window["metrics"]["max_drawdown"].as_f64())
+        .fold(0.0_f64, f64::max);
+    let scenario_count = windows
+        .iter()
+        .filter_map(|window| window["scenario"].as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+
+    json!({
+        "window_count": windows.len(),
+        "window_size": window_size,
+        "step_size": step_size,
+        "positive_excess_window_ratio": if windows.is_empty() { 0.0 } else { positive_excess_count as f64 / windows.len() as f64 },
+        "worst_window_drawdown": worst_window_drawdown,
+        "scenario_count": scenario_count,
+        "windows": windows
+    })
+}
+
+fn build_bootstrap_analysis(
+    points: &[RobustnessDailyPoint],
+    trials: usize,
+    seed: u64,
+) -> Result<Value, String> {
+    if points.len() < 3 {
+        return Err("bootstrap requires at least 3 equity points".into());
+    }
+    let returns = daily_returns(points, |point| Some(point.portfolio_value));
+    if returns.is_empty() {
+        return Err("bootstrap requires non-empty daily returns".into());
+    }
+    let trials = trials.clamp(1, 10_000);
+    let mut rng = DeterministicRng::new(seed);
+    let mut total_returns = Vec::with_capacity(trials);
+    let mut sharpes = Vec::with_capacity(trials);
+    let mut positive = 0usize;
+
+    for _ in 0..trials {
+        let sample = (0..returns.len())
+            .map(|_| returns[rng.gen_usize(returns.len())])
+            .collect::<Vec<_>>();
+        let summary = summarize_return_sample(&sample);
+        if summary.total_return > 0.0 {
+            positive += 1;
+        }
+        total_returns.push(summary.total_return);
+        sharpes.push(summary.sharpe_ratio);
+    }
+
+    Ok(json!({
+        "trials": trials,
+        "sample_size": returns.len(),
+        "positive_return_probability": positive as f64 / trials as f64,
+        "total_return": distribution_summary(&mut total_returns),
+        "sharpe_ratio": distribution_summary(&mut sharpes)
+    }))
+}
+
+fn classify_market_scenario(summary: &RobustnessMetricSummary, annualized_volatility: f64) -> &'static str {
+    let benchmark_return = summary.benchmark_return.unwrap_or(summary.total_return);
+    if annualized_volatility >= 0.30 {
+        "high_volatility"
+    } else if benchmark_return <= -0.02 || summary.max_drawdown >= 0.20 {
+        "bear"
+    } else if benchmark_return >= 0.10 && summary.max_drawdown <= 0.15 {
+        "bull"
+    } else if annualized_volatility <= 0.12 && benchmark_return.abs() <= 0.05 {
+        "sideways"
+    } else {
+        "mixed"
+    }
+}
+
+fn summarize_points(points: &[RobustnessDailyPoint]) -> RobustnessMetricSummary {
+    let portfolio_returns = daily_returns(points, |point| Some(point.portfolio_value));
+    let benchmark_returns = daily_returns(points, |point| point.benchmark_value);
+    let mut nav = points.iter().map(|point| point.portfolio_value).collect::<Vec<_>>();
+    let total_return = ratio_return(points.first().map(|point| point.portfolio_value), points.last().map(|point| point.portfolio_value));
+    let benchmark_return = if benchmark_returns.is_empty() {
+        None
+    } else {
+        ratio_return(points.first().and_then(|point| point.benchmark_value), points.last().and_then(|point| point.benchmark_value)).into()
+    };
+    let sample = summarize_return_sample(&portfolio_returns);
+    RobustnessMetricSummary {
+        total_return,
+        annual_return: annualized_return(total_return, points.len().saturating_sub(1)),
+        sharpe_ratio: sample.sharpe_ratio,
+        max_drawdown: max_drawdown(&mut nav),
+        benchmark_return,
+        excess_return: benchmark_return.map(|value| total_return - value),
+    }
+}
+
+fn summarize_return_sample(returns: &[f64]) -> RobustnessMetricSummary {
+    let total_return = returns.iter().fold(1.0, |acc, value| acc * (1.0 + value)) - 1.0;
+    let volatility = annualized_volatility(returns);
+    let annual_return = annualized_return(total_return, returns.len());
+    RobustnessMetricSummary {
+        total_return,
+        annual_return,
+        sharpe_ratio: if volatility > 0.0 { annual_return / volatility } else { 0.0 },
+        max_drawdown: drawdown_from_returns(returns),
+        benchmark_return: None,
+        excess_return: None,
+    }
+}
+
+fn metric_summary_json(summary: &RobustnessMetricSummary) -> Value {
+    json!({
+        "total_return": summary.total_return,
+        "annual_return": summary.annual_return,
+        "sharpe_ratio": summary.sharpe_ratio,
+        "max_drawdown": summary.max_drawdown,
+        "benchmark_return": summary.benchmark_return,
+        "excess_return": summary.excess_return
+    })
+}
+
+fn daily_returns<F>(points: &[RobustnessDailyPoint], value_fn: F) -> Vec<f64>
+where
+    F: Fn(&RobustnessDailyPoint) -> Option<f64>,
+{
+    points
+        .windows(2)
+        .filter_map(|window| {
+            let prev = value_fn(&window[0])?;
+            let next = value_fn(&window[1])?;
+            if prev.is_finite() && next.is_finite() && prev > 0.0 {
+                Some(next / prev - 1.0)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn ratio_return(start: Option<f64>, end: Option<f64>) -> f64 {
+    match (start, end) {
+        (Some(start), Some(end)) if start.is_finite() && end.is_finite() && start > 0.0 => {
+            end / start - 1.0
+        }
+        _ => 0.0,
+    }
+}
+
+fn annualized_return(total_return: f64, periods: usize) -> f64 {
+    if periods == 0 || total_return <= -1.0 {
+        return 0.0;
+    }
+    (1.0 + total_return).powf(252.0 / periods as f64) - 1.0
+}
+
+fn annualized_volatility(returns: &[f64]) -> f64 {
+    if returns.len() < 2 {
+        return 0.0;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| {
+            let diff = value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / (returns.len() - 1) as f64;
+    variance.sqrt() * 252.0_f64.sqrt()
+}
+
+fn max_drawdown(nav: &mut [f64]) -> f64 {
+    let mut peak = None::<f64>;
+    let mut max_dd = 0.0;
+    for value in nav.iter().copied().filter(|value| value.is_finite() && *value > 0.0) {
+        let current_peak = peak.map(|peak| peak.max(value)).unwrap_or(value);
+        peak = Some(current_peak);
+        if current_peak > 0.0 {
+            let drawdown = (current_peak - value) / current_peak;
+            if drawdown > max_dd {
+                max_dd = drawdown;
+            }
+        }
+    }
+    max_dd
+}
+
+fn drawdown_from_returns(returns: &[f64]) -> f64 {
+    let mut value = 1.0;
+    let mut nav = Vec::with_capacity(returns.len() + 1);
+    nav.push(value);
+    for daily_return in returns {
+        value *= 1.0 + daily_return;
+        nav.push(value);
+    }
+    max_drawdown(&mut nav)
+}
+
+fn distribution_summary(values: &mut [f64]) -> Value {
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    json!({
+        "p05": percentile(values, 0.05),
+        "median": percentile(values, 0.50),
+        "p95": percentile(values, 0.95),
+        "mean": if values.is_empty() { 0.0 } else { values.iter().sum::<f64>() / values.len() as f64 }
+    })
+}
+
+fn percentile(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let idx = ((values.len() - 1) as f64 * percentile).round() as usize;
+    values[idx.min(values.len() - 1)]
+}
+
+#[cfg(test)]
 fn evaluate_robustness_gates(
     best_score: Decimal,
     runner_up_score: Option<Decimal>,
@@ -1007,9 +1639,31 @@ fn evaluate_robustness_gates(
     constraint_violations: &Value,
     gate_policy: Option<&Value>,
 ) -> RobustnessEvaluation {
+    evaluate_robustness_gates_with_analysis(
+        best_score,
+        runner_up_score,
+        metrics,
+        constraint_violations,
+        gate_policy,
+        None,
+    )
+}
+
+fn evaluate_robustness_gates_with_analysis(
+    best_score: Decimal,
+    runner_up_score: Option<Decimal>,
+    metrics: &Value,
+    constraint_violations: &Value,
+    gate_policy: Option<&Value>,
+    analysis: Option<&RobustnessTimeSeriesAnalysis>,
+) -> RobustnessEvaluation {
     let min_trade_count = constraint_i64(gate_policy, "min_trade_count").unwrap_or(1);
     let max_drawdown = constraint_decimal(gate_policy, "max_drawdown").unwrap_or(Decimal::new(20, 2));
     let min_score_gap = constraint_decimal(gate_policy, "min_score_gap").unwrap_or(Decimal::ZERO);
+    let min_walk_forward_windows = constraint_i64(gate_policy, "min_walk_forward_windows").unwrap_or(0);
+    let min_positive_excess_window_ratio = constraint_f64(gate_policy, "min_positive_excess_window_ratio").unwrap_or(0.0);
+    let min_bootstrap_positive_return_probability = constraint_f64(gate_policy, "min_bootstrap_positive_return_probability").unwrap_or(0.0);
+    let min_market_scenarios = constraint_i64(gate_policy, "min_market_scenarios").unwrap_or(1);
 
     let num_trades = metrics
         .get("num_trades")
@@ -1022,7 +1676,7 @@ fn evaluate_robustness_gates(
         .unwrap_or(false);
     let score_gap = runner_up_score.map(|runner_up| best_score - runner_up);
 
-    let gates = vec![
+    let mut gates = vec![
         json!({
             "gate": "no_hard_constraint_violations",
             "passed": !hard_violations,
@@ -1047,6 +1701,42 @@ fn evaluate_robustness_gates(
             "actual": score_gap,
         }),
     ];
+    if let Some(analysis) = analysis {
+        let window_count = analysis.walk_forward["window_count"].as_i64().unwrap_or(0);
+        let positive_excess_window_ratio = analysis.walk_forward["positive_excess_window_ratio"].as_f64().unwrap_or(0.0);
+        let bootstrap_positive_return_probability = analysis.bootstrap["positive_return_probability"].as_f64().unwrap_or(0.0);
+        let market_scenario_count = analysis.walk_forward["scenario_count"]
+            .as_i64()
+            .or_else(|| analysis.market_scenarios["scenario_count"].as_i64())
+            .unwrap_or(0);
+        gates.push(json!({
+            "gate": "walk_forward_min_window_count",
+            "passed": window_count >= min_walk_forward_windows,
+            "limit": min_walk_forward_windows,
+            "actual": window_count,
+            "details": analysis.walk_forward,
+        }));
+        gates.push(json!({
+            "gate": "walk_forward_positive_excess_ratio",
+            "passed": positive_excess_window_ratio >= min_positive_excess_window_ratio,
+            "limit": min_positive_excess_window_ratio,
+            "actual": positive_excess_window_ratio,
+        }));
+        gates.push(json!({
+            "gate": "bootstrap_positive_return_probability",
+            "passed": bootstrap_positive_return_probability >= min_bootstrap_positive_return_probability,
+            "limit": min_bootstrap_positive_return_probability,
+            "actual": bootstrap_positive_return_probability,
+            "details": analysis.bootstrap,
+        }));
+        gates.push(json!({
+            "gate": "market_scenario_coverage",
+            "passed": market_scenario_count >= min_market_scenarios,
+            "limit": min_market_scenarios,
+            "actual": market_scenario_count,
+            "details": analysis.market_scenarios,
+        }));
+    }
     let any_failed = gates.iter().any(|gate| gate["passed"] == false);
     let has_review_only_failure = gates
         .iter()
@@ -1088,6 +1778,12 @@ fn constraint_i64(constraints: Option<&Value>, name: &str) -> Option<i64> {
     constraints
         .and_then(|value| value.get(name))
         .and_then(Value::as_i64)
+}
+
+fn constraint_f64(constraints: Option<&Value>, name: &str) -> Option<f64> {
+    constraints
+        .and_then(|value| value.get(name))
+        .and_then(Value::as_f64)
 }
 
 async fn mark_trial_running(
@@ -1342,7 +2038,9 @@ mod tests {
                 "benchmark": "000300.SH",
                 "top_n": 20,
                 "rebalance": "monthly",
-                "max_position_pct": 0.10
+                "max_position_pct": 0.10,
+                "correlation_lookback_days": 60,
+                "kelly_lookback_days": 60
             }),
             objective: json!({"type": "risk_adjusted", "maximize": true}),
             constraints: None,
@@ -1350,7 +2048,11 @@ mod tests {
         let params = json!({
             "top_n": 8,
             "rebalance": "5",
-            "max_position_pct": 0.08
+            "max_position_pct": 0.08,
+            "max_pairwise_correlation": 0.65,
+            "kelly_fraction": 0.25,
+            "max_gross_exposure": 0.80,
+            "score_direction": "ascending"
         });
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
@@ -1361,6 +2063,12 @@ mod tests {
         assert_eq!(req.top_n, 8);
         assert_eq!(req.rebalance, "5");
         assert_eq!(req.max_position_pct, 0.08);
+        assert_eq!(req.max_pairwise_correlation, Some(0.65));
+        assert_eq!(req.correlation_lookback_days, 60);
+        assert_eq!(req.kelly_fraction, 0.25);
+        assert_eq!(req.kelly_lookback_days, 60);
+        assert_eq!(req.max_gross_exposure, 0.80);
+        assert_eq!(req.score_direction, "ascending");
     }
 
     #[test]
@@ -1446,6 +2154,41 @@ mod tests {
     }
 
     #[test]
+    fn optimization_performance_gate_passes_completed_release_batch() {
+        let policy = normalize_performance_gate(
+            Some(&OptimizationPerformanceGateRequest {
+                min_completed_trials: Some(200),
+                max_failed_trials: Some(0),
+                max_elapsed_ms: Some(60_000),
+            }),
+            200,
+        )
+        .expect("gate policy");
+
+        let gates = evaluate_optimization_performance_gates(200, 200, 0, 42_000, &policy);
+
+        assert_eq!(performance_gate_status(&gates), "passed");
+        assert!(gates
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["passed"] == true));
+    }
+
+    #[test]
+    fn optimization_performance_gate_requires_review_on_failures_or_shortfall() {
+        let policy = normalize_performance_gate(None, 200).expect("default gate policy");
+
+        let gates = evaluate_optimization_performance_gates(199, 198, 1, 42_000, &policy);
+
+        assert_eq!(performance_gate_status(&gates), "review_required");
+        assert_eq!(gates[0]["gate"], "min_completed_trials");
+        assert_eq!(gates[0]["passed"], false);
+        assert_eq!(gates[1]["gate"], "max_failed_trials");
+        assert_eq!(gates[1]["passed"], false);
+    }
+
+    #[test]
     fn robustness_gate_approves_clean_dominant_trial() {
         let evaluation = evaluate_robustness_gates(
             Decimal::new(10, 1),
@@ -1483,5 +2226,108 @@ mod tests {
         );
 
         assert_eq!(evaluation.status, "review_required");
+    }
+
+    #[test]
+    fn market_scenario_classifies_regime_from_benchmark_path() {
+        let bull = RobustnessMetricSummary {
+            total_return: 0.18,
+            annual_return: 0.20,
+            sharpe_ratio: 1.2,
+            max_drawdown: 0.04,
+            benchmark_return: Some(0.18),
+            excess_return: Some(0.02),
+        };
+        let bear = RobustnessMetricSummary {
+            total_return: -0.02,
+            annual_return: -0.02,
+            sharpe_ratio: -0.3,
+            max_drawdown: 0.24,
+            benchmark_return: Some(-0.18),
+            excess_return: Some(0.16),
+        };
+        let high_vol = RobustnessMetricSummary {
+            total_return: 0.01,
+            annual_return: 0.01,
+            sharpe_ratio: 0.1,
+            max_drawdown: 0.10,
+            benchmark_return: Some(0.01),
+            excess_return: Some(0.0),
+        };
+
+        assert_eq!(classify_market_scenario(&bull, 0.18), "bull");
+        assert_eq!(classify_market_scenario(&bear, 0.18), "bear");
+        assert_eq!(classify_market_scenario(&high_vol, 0.32), "high_volatility");
+    }
+
+    #[test]
+    fn walk_forward_analysis_records_window_degradation_and_scenarios() {
+        let points = vec![
+            RobustnessDailyPoint::new("2025-01-01", 100.0, Some(100.0)),
+            RobustnessDailyPoint::new("2025-01-02", 103.0, Some(101.0)),
+            RobustnessDailyPoint::new("2025-01-03", 106.0, Some(102.0)),
+            RobustnessDailyPoint::new("2025-01-06", 101.0, Some(99.0)),
+            RobustnessDailyPoint::new("2025-01-07", 98.0, Some(96.0)),
+            RobustnessDailyPoint::new("2025-01-08", 104.0, Some(97.0)),
+        ];
+        let analysis = build_walk_forward_analysis(&points, 3, 2);
+
+        assert_eq!(analysis["window_count"], 2);
+        assert_eq!(analysis["windows"][0]["start_date"], "2025-01-01");
+        assert_eq!(analysis["windows"][1]["scenario"], "bear");
+        assert!(analysis["positive_excess_window_ratio"].as_f64().unwrap() > 0.0);
+        assert!(analysis["worst_window_drawdown"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn bootstrap_analysis_reports_distribution_and_gate_probability() {
+        let points = vec![
+            RobustnessDailyPoint::new("2025-01-01", 100.0, Some(100.0)),
+            RobustnessDailyPoint::new("2025-01-02", 101.0, Some(100.4)),
+            RobustnessDailyPoint::new("2025-01-03", 102.0, Some(100.8)),
+            RobustnessDailyPoint::new("2025-01-06", 101.0, Some(100.2)),
+            RobustnessDailyPoint::new("2025-01-07", 103.0, Some(100.5)),
+        ];
+        let analysis = build_bootstrap_analysis(&points, 64, 7).expect("bootstrap analysis");
+
+        assert_eq!(analysis["trials"], 64);
+        assert!(analysis["positive_return_probability"].as_f64().unwrap() > 0.50);
+        assert!(analysis["total_return"]["p05"].is_number());
+        assert!(analysis["sharpe_ratio"]["median"].is_number());
+    }
+
+    #[test]
+    fn robustness_gate_includes_walk_forward_and_bootstrap_requirements() {
+        let points = vec![
+            RobustnessDailyPoint::new("2025-01-01", 100.0, Some(100.0)),
+            RobustnessDailyPoint::new("2025-01-02", 101.0, Some(100.2)),
+            RobustnessDailyPoint::new("2025-01-03", 102.0, Some(100.4)),
+            RobustnessDailyPoint::new("2025-01-06", 103.0, Some(100.6)),
+            RobustnessDailyPoint::new("2025-01-07", 104.0, Some(100.8)),
+            RobustnessDailyPoint::new("2025-01-08", 105.0, Some(101.0)),
+        ];
+        let analysis = RobustnessTimeSeriesAnalysis::from_points(&points, 3, 3, 32, 11)
+            .expect("timeseries analysis");
+
+        let evaluation = evaluate_robustness_gates_with_analysis(
+            Decimal::new(10, 1),
+            Some(Decimal::new(7, 1)),
+            &json!({"num_trades": 20, "max_drawdown_pct": "0.05"}),
+            &json!([]),
+            Some(&json!({
+                "min_trade_count": 5,
+                "max_drawdown": 0.20,
+                "min_walk_forward_windows": 2,
+                "min_positive_excess_window_ratio": 0.5,
+                "min_bootstrap_positive_return_probability": 0.50
+            })),
+            Some(&analysis),
+        );
+
+        assert_eq!(evaluation.status, "approved_candidate");
+        let gates = evaluation.gates.as_array().expect("gates");
+        assert!(gates.iter().any(|gate| gate["gate"] == "walk_forward_min_window_count"));
+        assert!(gates.iter().any(|gate| gate["gate"] == "bootstrap_positive_return_probability"));
+        assert!(gates.iter().any(|gate| gate["gate"] == "market_scenario_coverage"));
     }
 }

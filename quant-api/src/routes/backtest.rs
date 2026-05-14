@@ -19,6 +19,7 @@ use quant_backtest::engine::{
 };
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::BacktestRunner;
+use quant_backtest::signal_generator::ScoreDirection;
 
 use crate::AppState;
 
@@ -555,6 +556,17 @@ pub struct RunFactorBacktestReq {
     /// Skip top N% of ranked stocks to avoid value traps (extreme reversal = junk)
     #[serde(default)]
     pub skip_top_pct: f64,
+    pub max_pairwise_correlation: Option<f64>,
+    #[serde(default = "default_correlation_lookback_days")]
+    pub correlation_lookback_days: usize,
+    #[serde(default)]
+    pub kelly_fraction: f64,
+    #[serde(default = "default_kelly_lookback_days")]
+    pub kelly_lookback_days: usize,
+    #[serde(default = "default_max_gross_exposure")]
+    pub max_gross_exposure: f64,
+    #[serde(default = "default_score_direction")]
+    pub score_direction: String,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
@@ -587,6 +599,17 @@ pub struct RunPredictionBacktestReq {
     pub max_position_pct: f64,
     #[serde(default)]
     pub skip_top_pct: f64,
+    pub max_pairwise_correlation: Option<f64>,
+    #[serde(default = "default_correlation_lookback_days")]
+    pub correlation_lookback_days: usize,
+    #[serde(default)]
+    pub kelly_fraction: f64,
+    #[serde(default = "default_kelly_lookback_days")]
+    pub kelly_lookback_days: usize,
+    #[serde(default = "default_max_gross_exposure")]
+    pub max_gross_exposure: f64,
+    #[serde(default = "default_score_direction")]
+    pub score_direction: String,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
@@ -628,8 +651,28 @@ fn default_entry_delay() -> usize {
 fn default_max_pct() -> f64 {
     0.10
 }
+fn default_correlation_lookback_days() -> usize {
+    60
+}
+fn default_kelly_lookback_days() -> usize {
+    60
+}
+fn default_max_gross_exposure() -> f64 {
+    1.0
+}
+fn default_score_direction() -> String {
+    "descending".into()
+}
 fn default_capital() -> f64 {
     1_000_000.0
+}
+
+fn parse_score_direction(value: &str) -> Result<ScoreDirection, String> {
+    match value {
+        "descending" | "desc" => Ok(ScoreDirection::Descending),
+        "ascending" | "asc" => Ok(ScoreDirection::Ascending),
+        other => Err(format!("unsupported score_direction: {}", other)),
+    }
 }
 
 pub async fn run_factor_backtest(
@@ -768,6 +811,7 @@ pub(crate) async fn execute_factor_backtest(
         "monthly" => 20,
         s => s.parse::<usize>().unwrap_or(20),
     };
+    let score_direction = parse_score_direction(&req.score_direction)?;
 
     let sig_config = quant_backtest::signal_generator::SignalConfig {
         combo_name: req.combo_name.clone(),
@@ -782,6 +826,12 @@ pub(crate) async fn execute_factor_backtest(
         },
         max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
         skip_top_pct: req.skip_top_pct,
+        max_pairwise_correlation: req.max_pairwise_correlation,
+        correlation_lookback_days: req.correlation_lookback_days,
+        kelly_fraction: req.kelly_fraction,
+        kelly_lookback_days: req.kelly_lookback_days,
+        max_gross_exposure: req.max_gross_exposure,
+        score_direction,
     };
 
     info!(task_id, combo=%req.combo_name, top_n=req.top_n, reb=reb_freq, "Generating factor signals");
@@ -888,6 +938,7 @@ pub(crate) async fn execute_prediction_backtest(
         "monthly" => 20,
         s => s.parse::<usize>().unwrap_or(20),
     };
+    let score_direction = parse_score_direction(&req.score_direction)?;
 
     let sig_config = quant_backtest::signal_generator::PredictionSignalConfig {
         prediction_set_id: prediction_set_id.clone(),
@@ -901,6 +952,12 @@ pub(crate) async fn execute_prediction_backtest(
         },
         max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
         skip_top_pct: req.skip_top_pct,
+        max_pairwise_correlation: req.max_pairwise_correlation,
+        correlation_lookback_days: req.correlation_lookback_days,
+        kelly_fraction: req.kelly_fraction,
+        kelly_lookback_days: req.kelly_lookback_days,
+        max_gross_exposure: req.max_gross_exposure,
+        score_direction,
     };
 
     info!(

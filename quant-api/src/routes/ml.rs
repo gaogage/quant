@@ -1,11 +1,12 @@
 //! ML API routes — minimal Phase 5 prediction-set smoke path
 
 use axum::{extract::State, response::IntoResponse, Json};
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::AppState;
 
@@ -30,6 +31,39 @@ pub struct LinearFactorWeight {
     pub weight: f64,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LinearFactorRef {
+    pub factor_code: String,
+    pub factor_version: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TrainLinearModelRequest {
+    pub model_code: String,
+    pub model_version: String,
+    pub model_version_id: Option<String>,
+    pub training_task_id: Option<String>,
+    pub prediction_set_id: Option<String>,
+    pub data_version_id: String,
+    pub feature_set_version_id: String,
+    pub training_dataset_id: String,
+    pub train_start_date: String,
+    pub train_end_date: String,
+    pub prediction_start_date: String,
+    pub prediction_end_date: String,
+    pub label_horizon_days: Option<i64>,
+    pub factors: Vec<LinearFactorRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EvaluatePredictionSetRequest {
+    pub prediction_set_id: String,
+    pub backtest_task_id: String,
+    pub min_trade_count: Option<i64>,
+    pub max_drawdown: Option<f64>,
+    pub min_excess_return: Option<f64>,
+}
+
 struct NormalizedLinearPredictionSetRequest {
     model_code: String,
     model_version: String,
@@ -43,6 +77,23 @@ struct NormalizedLinearPredictionSetRequest {
     factors: Vec<LinearFactorWeight>,
 }
 
+struct NormalizedLinearTrainingRequest {
+    model_code: String,
+    model_version: String,
+    model_version_id: String,
+    training_task_id: String,
+    prediction_set_id: String,
+    data_version_id: String,
+    feature_set_version_id: String,
+    training_dataset_id: String,
+    train_start_date: NaiveDate,
+    train_end_date: NaiveDate,
+    prediction_start_date: NaiveDate,
+    prediction_end_date: NaiveDate,
+    label_horizon_days: i64,
+    factors: Vec<LinearFactorRef>,
+}
+
 #[derive(Debug, Clone)]
 struct PredictionRow {
     prediction_set_id: String,
@@ -54,6 +105,20 @@ struct PredictionRow {
     available_at: NaiveDate,
 }
 
+#[derive(Debug, Clone)]
+struct TrainingSample {
+    features: Vec<f64>,
+    label: f64,
+}
+
+struct NormalizedPredictionSetEvaluationRequest {
+    prediction_set_id: String,
+    backtest_task_id: String,
+    min_trade_count: i64,
+    max_drawdown: f64,
+    min_excess_return: f64,
+}
+
 pub async fn create_linear_prediction_set(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LinearPredictionSetRequest>,
@@ -61,6 +126,544 @@ pub async fn create_linear_prediction_set(
     match create_linear_prediction_set_inner(&state.db, req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn train_linear_model(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TrainLinearModelRequest>,
+) -> impl IntoResponse {
+    match train_linear_model_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn evaluate_prediction_set(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EvaluatePredictionSetRequest>,
+) -> impl IntoResponse {
+    match evaluate_prediction_set_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn train_linear_model_inner(
+    db: &sqlx::PgPool,
+    req: TrainLinearModelRequest,
+) -> Result<Value, String> {
+    let req = normalize_linear_training_request(&req)?;
+    let samples = load_training_samples(db, &req).await?;
+    if samples.len() < req.factors.len().max(5) {
+        return Err(format!(
+            "linear training found too few complete samples: {}",
+            samples.len()
+        ));
+    }
+
+    let weights = fit_linear_weights(&samples, req.factors.len());
+    let weighted_factors = req
+        .factors
+        .iter()
+        .zip(weights.iter())
+        .map(|(factor, weight)| LinearFactorWeight {
+            factor_code: factor.factor_code.clone(),
+            factor_version: factor.factor_version.clone(),
+            weight: *weight,
+        })
+        .collect::<Vec<_>>();
+
+    let prediction_req = NormalizedLinearPredictionSetRequest {
+        model_code: req.model_code.clone(),
+        model_version: req.model_version.clone(),
+        model_version_id: req.model_version_id.clone(),
+        prediction_set_id: req.prediction_set_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        training_dataset_id: req.training_dataset_id.clone(),
+        start_date: req.prediction_start_date,
+        end_date: req.prediction_end_date,
+        factors: weighted_factors.clone(),
+    };
+    let rows = build_linear_prediction_rows(db, &prediction_req).await?;
+    if rows.is_empty() {
+        return Err("trained linear model found no prediction factor values".into());
+    }
+
+    let label_definition = json!({
+        "label": "future_return",
+        "horizon_trading_days": req.label_horizon_days,
+        "price": "close",
+    });
+    let feature_config = json!({
+        "feature_set_version_id": req.feature_set_version_id,
+        "factors": req.factors,
+        "point_in_time_policy": "factor_value.available_at <= trade_date",
+    });
+    let hyperparameters = json!({
+        "trainer": "covariance_linear_v1",
+        "normalization": "absolute_weight_sum",
+    });
+    let metadata = json!({
+        "model_type": "trained_linear_factor",
+        "training_task_id": req.training_task_id,
+        "sample_count": samples.len(),
+        "factors": weighted_factors,
+        "label_definition": label_definition,
+        "point_in_time_policy": "model_prediction.available_at = trade_date",
+    });
+    let dataset_hash = stable_metadata_hash(&json!({
+        "data_version_id": req.data_version_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "training_window": {"start": req.train_start_date, "end": req.train_end_date},
+        "label_definition": label_definition,
+        "factors": feature_config["factors"],
+    }));
+    let artifact_hash = stable_metadata_hash(&metadata);
+    let prediction_hash = stable_metadata_hash(&json!({
+        "model_version_id": req.model_version_id,
+        "prediction_set_id": req.prediction_set_id,
+        "data_version_id": req.data_version_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "start_date": req.prediction_start_date,
+        "end_date": req.prediction_end_date,
+        "weights": metadata["factors"],
+    }));
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let experiment_config = linear_training_experiment_config(&req);
+    let experiment_metrics = linear_training_experiment_metrics(
+        samples.len(),
+        rows.len(),
+        &metadata["factors"],
+        &artifact_hash,
+        &prediction_hash,
+    );
+
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin ML training transaction: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO training_dataset
+           (training_dataset_id, data_version_id, feature_set_version_id, label_definition,
+            train_window, validation_window, test_window, sample_filter, split_policy,
+            dataset_hash, status, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'frozen', $11)
+         ON CONFLICT (training_dataset_id) DO UPDATE SET
+            data_version_id = EXCLUDED.data_version_id,
+            feature_set_version_id = EXCLUDED.feature_set_version_id,
+            label_definition = EXCLUDED.label_definition,
+            train_window = EXCLUDED.train_window,
+            validation_window = EXCLUDED.validation_window,
+            test_window = EXCLUDED.test_window,
+            sample_filter = EXCLUDED.sample_filter,
+            split_policy = EXCLUDED.split_policy,
+            dataset_hash = EXCLUDED.dataset_hash,
+            status = EXCLUDED.status,
+            metadata = EXCLUDED.metadata",
+    )
+    .bind(&req.training_dataset_id)
+    .bind(&req.data_version_id)
+    .bind(&req.feature_set_version_id)
+    .bind(&label_definition)
+    .bind(json!({"start": req.train_start_date, "end": req.train_end_date}))
+    .bind(json!({"start": req.train_start_date, "end": req.train_end_date}))
+    .bind(json!({"start": req.prediction_start_date, "end": req.prediction_end_date}))
+    .bind(json!({"complete_features": true, "finite_label": true}))
+    .bind(json!({"type": "phase5c_train_predict_split"}))
+    .bind(&dataset_hash)
+    .bind(json!({"training_task_id": req.training_task_id, "sample_count": samples.len()}))
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert training_dataset: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO model_training_task
+           (training_task_id, model_code, model_type, data_version_id, training_dataset_id,
+            feature_config, label_definition, hyperparameters, status, progress,
+            last_heartbeat_at, heartbeat_timeout_seconds, started_at, completed_at)
+         VALUES ($1, $2, 'trained_linear_factor', $3, $4, $5, $6, $7, 'completed', 100,
+                 now(), 600, now(), now())
+         ON CONFLICT (training_task_id) DO UPDATE SET
+            training_dataset_id = EXCLUDED.training_dataset_id,
+            feature_config = EXCLUDED.feature_config,
+            label_definition = EXCLUDED.label_definition,
+            hyperparameters = EXCLUDED.hyperparameters,
+            status = EXCLUDED.status,
+            progress = EXCLUDED.progress,
+            last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+            completed_at = EXCLUDED.completed_at",
+    )
+    .bind(&req.training_task_id)
+    .bind(&req.model_code)
+    .bind(&req.data_version_id)
+    .bind(&req.training_dataset_id)
+    .bind(&feature_config)
+    .bind(&label_definition)
+    .bind(&hyperparameters)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert model_training_task: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO model_registry
+           (model_version_id, model_code, model_type, version, feature_version_id,
+            label_definition, training_window, validation_metrics, test_metrics,
+            artifact_path, artifact_hash, status, training_dataset_id)
+         VALUES ($1, $2, 'trained_linear_factor', $3, $4, $5, $6,
+                 $7, $8, $9, $10, 'active', $11)
+         ON CONFLICT (model_version_id) DO UPDATE SET
+            feature_version_id = EXCLUDED.feature_version_id,
+            label_definition = EXCLUDED.label_definition,
+            training_window = EXCLUDED.training_window,
+            validation_metrics = EXCLUDED.validation_metrics,
+            test_metrics = EXCLUDED.test_metrics,
+            artifact_hash = EXCLUDED.artifact_hash,
+            status = EXCLUDED.status,
+            training_dataset_id = EXCLUDED.training_dataset_id",
+    )
+    .bind(&req.model_version_id)
+    .bind(&req.model_code)
+    .bind(&req.model_version)
+    .bind(&req.feature_set_version_id)
+    .bind(&label_definition)
+    .bind(json!({"start": req.train_start_date, "end": req.train_end_date}))
+    .bind(json!({"sample_count": samples.len(), "weights": metadata["factors"]}))
+    .bind(json!({"prediction_row_count": rows.len()}))
+    .bind(format!("artifact://{}", req.model_version_id))
+    .bind(&artifact_hash)
+    .bind(&req.training_dataset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert model_registry: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO prediction_set
+           (prediction_set_id, model_version_id, feature_set_version_id, data_version_id,
+            start_date, end_date, prediction_hash, status, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8)
+         ON CONFLICT (prediction_set_id) DO UPDATE SET
+            model_version_id = EXCLUDED.model_version_id,
+            feature_set_version_id = EXCLUDED.feature_set_version_id,
+            data_version_id = EXCLUDED.data_version_id,
+            start_date = EXCLUDED.start_date,
+            end_date = EXCLUDED.end_date,
+            prediction_hash = EXCLUDED.prediction_hash,
+            status = EXCLUDED.status,
+            metadata = EXCLUDED.metadata",
+    )
+    .bind(&req.prediction_set_id)
+    .bind(&req.model_version_id)
+    .bind(&req.feature_set_version_id)
+    .bind(&req.data_version_id)
+    .bind(req.prediction_start_date)
+    .bind(req.prediction_end_date)
+    .bind(&prediction_hash)
+    .bind(&metadata)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert prediction_set: {}", error))?;
+
+    sqlx::query("DELETE FROM model_prediction WHERE prediction_set_id = $1")
+        .bind(&req.prediction_set_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to clear model_prediction: {}", error))?;
+
+    for row in &rows {
+        sqlx::query(
+            "INSERT INTO model_prediction
+               (prediction_set_id, trade_date, symbol, score, probability, rank, available_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&row.prediction_set_id)
+        .bind(row.trade_date)
+        .bind(&row.symbol)
+        .bind(row.score)
+        .bind(row.probability)
+        .bind(row.rank)
+        .bind(row.available_at)
+        .execute(&mut *tx)
+        .await
+            .map_err(|error| format!("Failed to insert model_prediction: {}", error))?;
+    }
+
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'ml_training_linear', 'model_training_task', $2, $3, $4,
+                 'completed', now(), now())
+         ON CONFLICT (experiment_run_id) DO UPDATE SET
+            config = EXCLUDED.config,
+            metrics = EXCLUDED.metrics,
+            status = EXCLUDED.status,
+            completed_at = EXCLUDED.completed_at",
+    )
+    .bind(&experiment_run_id)
+    .bind(&req.training_task_id)
+    .bind(&experiment_config)
+    .bind(&experiment_metrics)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to insert experiment_run: {}", error))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit ML training transaction: {}", error))?;
+
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "training_task_id": req.training_task_id,
+        "model_version_id": req.model_version_id,
+        "training_dataset_id": req.training_dataset_id,
+        "prediction_set_id": req.prediction_set_id,
+        "sample_count": samples.len(),
+        "prediction_rows": rows.len(),
+        "artifact_hash": artifact_hash,
+        "prediction_hash": prediction_hash,
+        "weights": metadata["factors"],
+    }))
+}
+
+async fn evaluate_prediction_set_inner(
+    db: &sqlx::PgPool,
+    req: EvaluatePredictionSetRequest,
+) -> Result<Value, String> {
+    let req = normalize_prediction_set_evaluation_request(&req)?;
+
+    let prediction = sqlx::query_as::<_, (Option<i64>, Option<NaiveDate>, Option<NaiveDate>, Option<i64>)>(
+        "SELECT COUNT(*)::bigint, MIN(trade_date), MAX(trade_date), COUNT(DISTINCT symbol)::bigint
+         FROM model_prediction
+         WHERE prediction_set_id = $1",
+    )
+    .bind(&req.prediction_set_id)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to summarize model_prediction: {}", error))?;
+
+    let backtest = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT status, prediction_set_id, error_message
+         FROM backtest_task
+         WHERE task_id = $1",
+    )
+    .bind(&req.backtest_task_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("Failed to load backtest_task: {}", error))?
+    .ok_or_else(|| "backtest_task not found".to_string())?;
+    if backtest.1.as_deref() != Some(req.prediction_set_id.as_str()) {
+        return Err("backtest_task.prediction_set_id does not match request".into());
+    }
+
+    let result = sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<i32>, Option<f64>)>(
+        "SELECT total_return::double precision,
+                benchmark_return::double precision,
+                excess_return::double precision,
+                max_drawdown::double precision,
+                total_trades,
+                turnover::double precision
+         FROM backtest_result
+         WHERE task_id = $1",
+    )
+    .bind(&req.backtest_task_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("Failed to load backtest_result: {}", error))?
+    .unwrap_or((None, None, None, None, None, None));
+
+    let target_count = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+        "SELECT COUNT(*)::bigint, COUNT(DISTINCT symbol)::bigint
+         FROM portfolio_target
+         WHERE task_id = $1",
+    )
+    .bind(&req.backtest_task_id)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to summarize portfolio_target: {}", error))?;
+
+    let prediction_rows = prediction.0.unwrap_or(0);
+    let target_rows = target_count.0.unwrap_or(0);
+    let trade_count = i64::from(result.4.unwrap_or(0));
+    let max_drawdown = result.3.unwrap_or(0.0);
+    let excess_return = result.2.unwrap_or(0.0);
+    let gates = evaluate_prediction_gates(
+        trade_count,
+        max_drawdown,
+        excess_return,
+        req.min_trade_count,
+        req.max_drawdown,
+        req.min_excess_return,
+    );
+    let status = prediction_evaluation_status(&gates);
+    let metrics = json!({
+        "prediction_rows": prediction_rows,
+        "prediction_symbol_count": prediction.3.unwrap_or(0),
+        "prediction_start_date": prediction.1,
+        "prediction_end_date": prediction.2,
+        "target_rows": target_rows,
+        "target_symbol_count": target_count.1.unwrap_or(0),
+        "trade_count": trade_count,
+        "total_return": result.0,
+        "benchmark_return": result.1,
+        "excess_return": result.2,
+        "max_drawdown": result.3,
+        "turnover": result.5,
+        "backtest_status": backtest.0,
+        "backtest_error": backtest.2,
+        "gates": gates,
+    });
+    let config = json!({
+        "prediction_set_id": req.prediction_set_id,
+        "backtest_task_id": req.backtest_task_id,
+        "gate_policy": {
+            "min_trade_count": req.min_trade_count,
+            "max_drawdown": req.max_drawdown,
+            "min_excess_return": req.min_excess_return,
+        }
+    });
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'ml_prediction_backtest_gate', 'prediction_set', $2, $3, $4,
+                 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(&req.prediction_set_id)
+    .bind(&config)
+    .bind(&metrics)
+    .execute(db)
+    .await
+    .map_err(|error| format!("Failed to insert prediction evaluation experiment_run: {}", error))?;
+
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "prediction_set_id": req.prediction_set_id,
+        "backtest_task_id": req.backtest_task_id,
+        "status": status,
+        "metrics": metrics,
+    }))
+}
+
+fn linear_training_experiment_config(req: &NormalizedLinearTrainingRequest) -> Value {
+    json!({
+        "model_code": req.model_code,
+        "model_version": req.model_version,
+        "model_version_id": req.model_version_id,
+        "training_task_id": req.training_task_id,
+        "training_dataset_id": req.training_dataset_id,
+        "prediction_set_id": req.prediction_set_id,
+        "data_version_id": req.data_version_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "train_window": {"start": req.train_start_date, "end": req.train_end_date},
+        "prediction_window": {"start": req.prediction_start_date, "end": req.prediction_end_date},
+        "label": {
+            "type": "future_return",
+            "horizon_trading_days": req.label_horizon_days,
+            "price": "close"
+        },
+        "factors": req.factors,
+        "trainer": "covariance_linear_v1",
+        "point_in_time_policy": "factor_value.available_at <= trade_date"
+    })
+}
+
+fn linear_training_experiment_metrics(
+    sample_count: usize,
+    prediction_rows: usize,
+    weights: &Value,
+    artifact_hash: &str,
+    prediction_hash: &str,
+) -> Value {
+    json!({
+        "sample_count": sample_count,
+        "prediction_rows": prediction_rows,
+        "weights": weights,
+        "artifact_hash": artifact_hash,
+        "prediction_hash": prediction_hash,
+        "prediction_point_in_time_policy": "model_prediction.available_at = trade_date",
+        "status": "training_and_prediction_completed"
+    })
+}
+
+fn normalize_prediction_set_evaluation_request(
+    req: &EvaluatePredictionSetRequest,
+) -> Result<NormalizedPredictionSetEvaluationRequest, String> {
+    let prediction_set_id = req.prediction_set_id.trim().to_string();
+    let backtest_task_id = req.backtest_task_id.trim().to_string();
+    if prediction_set_id.is_empty() || backtest_task_id.is_empty() {
+        return Err("prediction_set_id/backtest_task_id must not be empty".into());
+    }
+    let min_trade_count = req.min_trade_count.unwrap_or(1);
+    if min_trade_count < 0 {
+        return Err("min_trade_count must be non-negative".into());
+    }
+    let max_drawdown = req.max_drawdown.unwrap_or(0.20);
+    if !max_drawdown.is_finite() || max_drawdown < 0.0 {
+        return Err("max_drawdown must be a non-negative finite number".into());
+    }
+    let min_excess_return = req.min_excess_return.unwrap_or(0.0);
+    if !min_excess_return.is_finite() {
+        return Err("min_excess_return must be finite".into());
+    }
+
+    Ok(NormalizedPredictionSetEvaluationRequest {
+        prediction_set_id,
+        backtest_task_id,
+        min_trade_count,
+        max_drawdown,
+        min_excess_return,
+    })
+}
+
+fn evaluate_prediction_gates(
+    trade_count: i64,
+    max_drawdown: f64,
+    excess_return: f64,
+    min_trade_count: i64,
+    max_drawdown_limit: f64,
+    min_excess_return: f64,
+) -> Value {
+    json!([
+        {
+            "gate": "min_trade_count",
+            "passed": trade_count >= min_trade_count,
+            "limit": min_trade_count,
+            "actual": trade_count
+        },
+        {
+            "gate": "max_drawdown",
+            "passed": max_drawdown <= max_drawdown_limit,
+            "limit": max_drawdown_limit,
+            "actual": max_drawdown
+        },
+        {
+            "gate": "min_excess_return",
+            "passed": excess_return >= min_excess_return,
+            "limit": min_excess_return,
+            "actual": excess_return
+        }
+    ])
+}
+
+fn prediction_evaluation_status(gates: &Value) -> &'static str {
+    let passed = gates
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .all(|item| item.get("passed").and_then(Value::as_bool).unwrap_or(false))
+        })
+        .unwrap_or(false);
+    if passed {
+        "approved_candidate"
+    } else {
+        "review_required"
     }
 }
 
@@ -280,6 +883,222 @@ fn normalize_linear_prediction_request(
     })
 }
 
+fn normalize_linear_training_request(
+    req: &TrainLinearModelRequest,
+) -> Result<NormalizedLinearTrainingRequest, String> {
+    if req.factors.is_empty() {
+        return Err("factors must not be empty".into());
+    }
+    let model_code = req.model_code.trim().to_string();
+    let model_version = req.model_version.trim().to_string();
+    let data_version_id = req.data_version_id.trim().to_string();
+    let feature_set_version_id = req.feature_set_version_id.trim().to_string();
+    let training_dataset_id = req.training_dataset_id.trim().to_string();
+    if model_code.is_empty()
+        || model_version.is_empty()
+        || data_version_id.is_empty()
+        || feature_set_version_id.is_empty()
+        || training_dataset_id.is_empty()
+    {
+        return Err("model_code/model_version/data_version_id/feature_set_version_id/training_dataset_id must not be empty".into());
+    }
+
+    let train_start_date = parse_yyyymmdd(&req.train_start_date, "train_start_date")?;
+    let train_end_date = parse_yyyymmdd(&req.train_end_date, "train_end_date")?;
+    let prediction_start_date =
+        parse_yyyymmdd(&req.prediction_start_date, "prediction_start_date")?;
+    let prediction_end_date = parse_yyyymmdd(&req.prediction_end_date, "prediction_end_date")?;
+    if train_end_date < train_start_date {
+        return Err("train_end_date must be greater than or equal to train_start_date".into());
+    }
+    if prediction_end_date < prediction_start_date {
+        return Err(
+            "prediction_end_date must be greater than or equal to prediction_start_date".into(),
+        );
+    }
+    let label_horizon_days = req.label_horizon_days.unwrap_or(1);
+    if label_horizon_days <= 0 {
+        return Err("label_horizon_days must be positive".into());
+    }
+
+    Ok(NormalizedLinearTrainingRequest {
+        model_version_id: req
+            .model_version_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{}@{}", model_code, model_version)),
+        training_task_id: req
+            .training_task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("train-{}-{}", model_code, model_version)),
+        prediction_set_id: req
+            .prediction_set_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "pred-{}-{}-{}-{}",
+                    model_code,
+                    model_version,
+                    req.prediction_start_date.trim(),
+                    req.prediction_end_date.trim()
+                )
+            }),
+        model_code,
+        model_version,
+        data_version_id,
+        feature_set_version_id,
+        training_dataset_id,
+        train_start_date,
+        train_end_date,
+        prediction_start_date,
+        prediction_end_date,
+        label_horizon_days,
+        factors: req.factors.clone(),
+    })
+}
+
+async fn load_training_samples(
+    db: &sqlx::PgPool,
+    req: &NormalizedLinearTrainingRequest,
+) -> Result<Vec<TrainingSample>, String> {
+    let mut features_by_key: BTreeMap<(NaiveDate, String), Vec<Option<f64>>> = BTreeMap::new();
+    for (factor_idx, factor) in req.factors.iter().enumerate() {
+        let rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
+            "SELECT symbol, trade_date, normalized_value::double precision
+             FROM factor_value
+             WHERE factor_code = $1
+               AND factor_version = $2
+               AND trade_date >= $3
+               AND trade_date <= $4
+               AND (available_at IS NULL OR available_at <= trade_date)",
+        )
+        .bind(&factor.factor_code)
+        .bind(&factor.factor_version)
+        .bind(req.train_start_date)
+        .bind(req.train_end_date)
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("Failed to load training factor values: {}", error))?;
+
+        for (symbol, trade_date, value) in rows {
+            let entry = features_by_key
+                .entry((trade_date, symbol))
+                .or_insert_with(|| vec![None; req.factors.len()]);
+            entry[factor_idx] = value;
+        }
+    }
+
+    let label_end_date = req.train_end_date + Duration::days(req.label_horizon_days + 7);
+    let price_rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
+        "SELECT symbol, trade_date, close::double precision
+         FROM market_stock_daily_bar
+         WHERE trade_date >= $1
+           AND trade_date <= $2
+           AND close IS NOT NULL
+         ORDER BY symbol, trade_date",
+    )
+    .bind(req.train_start_date)
+    .bind(label_end_date)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load training labels: {}", error))?;
+
+    let mut closes_by_symbol: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+    for (symbol, trade_date, close) in price_rows {
+        if let Some(close) = close {
+            if close.is_finite() && close > 0.0 {
+                closes_by_symbol
+                    .entry(symbol)
+                    .or_default()
+                    .push((trade_date, close));
+            }
+        }
+    }
+
+    let mut samples = Vec::new();
+    for ((trade_date, symbol), maybe_features) in features_by_key {
+        let Some(features) = complete_features(maybe_features) else {
+            continue;
+        };
+        let Some(label) = future_return_label(
+            closes_by_symbol.get(&symbol),
+            trade_date,
+            req.label_horizon_days,
+        ) else {
+            continue;
+        };
+        if label.is_finite() {
+            samples.push(TrainingSample { features, label });
+        }
+    }
+
+    Ok(samples)
+}
+
+fn complete_features(values: Vec<Option<f64>>) -> Option<Vec<f64>> {
+    values
+        .into_iter()
+        .map(|value| value.filter(|v| v.is_finite()))
+        .collect()
+}
+
+fn future_return_label(
+    closes: Option<&Vec<(NaiveDate, f64)>>,
+    trade_date: NaiveDate,
+    horizon_days: i64,
+) -> Option<f64> {
+    let closes = closes?;
+    let current_idx = closes
+        .iter()
+        .position(|(date, close)| *date == trade_date && close.is_finite() && *close > 0.0)?;
+    let target_idx = current_idx.checked_add(horizon_days as usize)?;
+    let (_, current_close) = closes.get(current_idx)?;
+    let (_, future_close) = closes.get(target_idx)?;
+    if *future_close > 0.0 {
+        Some((future_close / current_close) - 1.0)
+    } else {
+        None
+    }
+}
+
+fn fit_linear_weights(samples: &[TrainingSample], factor_count: usize) -> Vec<f64> {
+    if factor_count == 0 {
+        return Vec::new();
+    }
+
+    let mut weights = vec![0.0; factor_count];
+    for sample in samples {
+        for (idx, feature) in sample.features.iter().take(factor_count).enumerate() {
+            if feature.is_finite() && sample.label.is_finite() {
+                weights[idx] += feature * sample.label;
+            }
+        }
+    }
+
+    normalize_weights(weights)
+}
+
+fn normalize_weights(mut weights: Vec<f64>) -> Vec<f64> {
+    let gross: f64 = weights.iter().map(|value| value.abs()).sum();
+    if gross > 0.0 {
+        for weight in &mut weights {
+            *weight /= gross;
+        }
+    } else if !weights.is_empty() {
+        let equal = 1.0 / weights.len() as f64;
+        weights.fill(equal);
+    }
+    weights
+}
+
 async fn build_linear_prediction_rows(
     db: &sqlx::PgPool,
     req: &NormalizedLinearPredictionSetRequest,
@@ -447,5 +1266,155 @@ mod tests {
 
         assert_eq!(left, right);
         assert!(left.starts_with("hash-"));
+    }
+
+    #[test]
+    fn linear_training_request_defaults_ids_and_label_horizon() {
+        let req = TrainLinearModelRequest {
+            model_code: "trained_linear_alpha".into(),
+            model_version: "phase5c-v1".into(),
+            model_version_id: None,
+            training_task_id: None,
+            prediction_set_id: None,
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            feature_set_version_id: "phase5c-feature-smoke-v1".into(),
+            training_dataset_id: "phase5c-training-smoke-v1".into(),
+            train_start_date: "20250109".into(),
+            train_end_date: "20250120".into(),
+            prediction_start_date: "20250121".into(),
+            prediction_end_date: "20250131".into(),
+            label_horizon_days: None,
+            factors: vec![LinearFactorRef {
+                factor_code: "mom_5d_std".into(),
+                factor_version: "1.0.0".into(),
+            }],
+        };
+
+        let normalized = normalize_linear_training_request(&req).expect("training request");
+
+        assert_eq!(
+            normalized.model_version_id,
+            "trained_linear_alpha@phase5c-v1"
+        );
+        assert_eq!(
+            normalized.training_task_id,
+            "train-trained_linear_alpha-phase5c-v1"
+        );
+        assert_eq!(
+            normalized.prediction_set_id,
+            "pred-trained_linear_alpha-phase5c-v1-20250121-20250131"
+        );
+        assert_eq!(normalized.label_horizon_days, 1);
+    }
+
+    #[test]
+    fn fit_linear_weights_normalizes_covariance_scores() {
+        let samples = vec![
+            TrainingSample {
+                features: vec![1.0, 0.0],
+                label: 0.10,
+            },
+            TrainingSample {
+                features: vec![0.0, 1.0],
+                label: -0.05,
+            },
+        ];
+
+        let weights = fit_linear_weights(&samples, 2);
+
+        assert_eq!(weights.len(), 2);
+        assert!((weights[0] - 0.6666666667).abs() < 1e-6);
+        assert!((weights[1] + 0.3333333333).abs() < 1e-6);
+        assert!((weights.iter().map(|value| value.abs()).sum::<f64>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn future_return_label_uses_later_close_only() {
+        let closes = vec![
+            (NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(), 10.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 11.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 12.1),
+        ];
+
+        let label =
+            future_return_label(Some(&closes), NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(), 2)
+                .expect("label");
+
+        assert!((label - 0.21).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linear_training_experiment_records_lineage_and_metrics() {
+        let req = TrainLinearModelRequest {
+            model_code: "trained_linear_alpha".into(),
+            model_version: "phase5c-v1".into(),
+            model_version_id: None,
+            training_task_id: None,
+            prediction_set_id: None,
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            feature_set_version_id: "phase5c-feature-smoke-v1".into(),
+            training_dataset_id: "phase5c-training-smoke-v1".into(),
+            train_start_date: "20250109".into(),
+            train_end_date: "20250120".into(),
+            prediction_start_date: "20250121".into(),
+            prediction_end_date: "20250131".into(),
+            label_horizon_days: Some(1),
+            factors: vec![LinearFactorRef {
+                factor_code: "mom_5d_std".into(),
+                factor_version: "1.0.0".into(),
+            }],
+        };
+        let normalized = normalize_linear_training_request(&req).expect("training request");
+
+        let config = linear_training_experiment_config(&normalized);
+        let metrics = linear_training_experiment_metrics(
+            40367,
+            25418,
+            &json!([{"factor_code":"mom_5d_std","factor_version":"1.0.0","weight":1.0}]),
+            "hash-artifact",
+            "hash-prediction",
+        );
+
+        assert_eq!(config["training_task_id"], "train-trained_linear_alpha-phase5c-v1");
+        assert_eq!(config["prediction_set_id"], "pred-trained_linear_alpha-phase5c-v1-20250121-20250131");
+        assert_eq!(config["label"]["horizon_trading_days"], 1);
+        assert_eq!(metrics["sample_count"], 40367);
+        assert_eq!(metrics["prediction_rows"], 25418);
+        assert_eq!(metrics["artifact_hash"], "hash-artifact");
+        assert_eq!(metrics["prediction_hash"], "hash-prediction");
+    }
+
+    #[test]
+    fn prediction_evaluation_gates_require_trades_drawdown_and_excess_return() {
+        let gates = evaluate_prediction_gates(0, 0.05, -0.01, 1, 0.20, 0.0);
+
+        assert_eq!(prediction_evaluation_status(&gates), "review_required");
+        assert_eq!(gates[0]["gate"], "min_trade_count");
+        assert_eq!(gates[0]["passed"], false);
+        assert_eq!(gates[1]["passed"], true);
+        assert_eq!(gates[2]["passed"], false);
+
+        let passed = evaluate_prediction_gates(3, 0.05, 0.01, 1, 0.20, 0.0);
+        assert_eq!(prediction_evaluation_status(&passed), "approved_candidate");
+    }
+
+    #[test]
+    fn prediction_evaluation_request_defaults_gate_policy() {
+        let req = EvaluatePredictionSetRequest {
+            prediction_set_id: "pred-v1".into(),
+            backtest_task_id: "pbt-v1".into(),
+            min_trade_count: None,
+            max_drawdown: None,
+            min_excess_return: None,
+        };
+
+        let normalized =
+            normalize_prediction_set_evaluation_request(&req).expect("evaluation request");
+
+        assert_eq!(normalized.prediction_set_id, "pred-v1");
+        assert_eq!(normalized.backtest_task_id, "pbt-v1");
+        assert_eq!(normalized.min_trade_count, 1);
+        assert!((normalized.max_drawdown - 0.20).abs() < 1e-9);
+        assert_eq!(normalized.min_excess_return, 0.0);
     }
 }

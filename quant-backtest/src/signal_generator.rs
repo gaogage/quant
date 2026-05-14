@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -39,6 +39,18 @@ pub struct SignalConfig {
     /// e.g. 0.15 = skip top 15%, pick from the 15th-100th percentile.
     /// Default: 0.0 (pick from top)
     pub skip_top_pct: f64,
+    /// Optional max absolute pairwise correlation among selected holdings.
+    pub max_pairwise_correlation: Option<f64>,
+    /// Trailing trading-day returns used for correlation estimates.
+    pub correlation_lookback_days: usize,
+    /// Fractional Kelly multiplier. 0 disables Kelly and uses equal weights.
+    pub kelly_fraction: f64,
+    /// Trailing trading-day returns used for Kelly edge/variance estimates.
+    pub kelly_lookback_days: usize,
+    /// Max long gross exposure across generated target weights.
+    pub max_gross_exposure: f64,
+    /// Score direction: "descending" picks high scores first; "ascending" picks low scores first.
+    pub score_direction: ScoreDirection,
 }
 
 /// Signal generation parameters for persisted model predictions.
@@ -58,6 +70,18 @@ pub struct PredictionSignalConfig {
     pub max_position_pct: Decimal,
     /// Skip top N% of ranked stocks.
     pub skip_top_pct: f64,
+    /// Optional max absolute pairwise correlation among selected holdings.
+    pub max_pairwise_correlation: Option<f64>,
+    /// Trailing trading-day returns used for correlation estimates.
+    pub correlation_lookback_days: usize,
+    /// Fractional Kelly multiplier. 0 disables Kelly and uses equal weights.
+    pub kelly_fraction: f64,
+    /// Trailing trading-day returns used for Kelly edge/variance estimates.
+    pub kelly_lookback_days: usize,
+    /// Max long gross exposure across generated target weights.
+    pub max_gross_exposure: f64,
+    /// Score direction: "descending" picks high scores first; "ascending" picks low scores first.
+    pub score_direction: ScoreDirection,
 }
 
 impl Default for PredictionSignalConfig {
@@ -70,6 +94,12 @@ impl Default for PredictionSignalConfig {
             min_daily_amount_cny: None,
             max_position_pct: Decimal::new(10, 2),
             skip_top_pct: 0.0,
+            max_pairwise_correlation: None,
+            correlation_lookback_days: 60,
+            kelly_fraction: 0.0,
+            kelly_lookback_days: 60,
+            max_gross_exposure: 1.0,
+            score_direction: ScoreDirection::Descending,
         }
     }
 }
@@ -93,6 +123,71 @@ impl Default for SignalConfig {
             min_daily_amount_cny: None, // no filter by default
             max_position_pct: Decimal::new(10, 2),
             skip_top_pct: 0.0,
+            max_pairwise_correlation: None,
+            correlation_lookback_days: 60,
+            kelly_fraction: 0.0,
+            kelly_lookback_days: 60,
+            max_gross_exposure: 1.0,
+            score_direction: ScoreDirection::Descending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreDirection {
+    Descending,
+    Ascending,
+}
+
+#[derive(Debug, Clone)]
+struct PortfolioConstructionConfig {
+    top_n: usize,
+    max_position_pct: Decimal,
+    max_pairwise_correlation: Option<f64>,
+    correlation_lookback_days: usize,
+    kelly_fraction: f64,
+    kelly_lookback_days: usize,
+    max_gross_exposure: f64,
+}
+
+impl Default for PortfolioConstructionConfig {
+    fn default() -> Self {
+        Self {
+            top_n: 20,
+            max_position_pct: Decimal::new(10, 2),
+            max_pairwise_correlation: None,
+            correlation_lookback_days: 60,
+            kelly_fraction: 0.0,
+            kelly_lookback_days: 60,
+            max_gross_exposure: 1.0,
+        }
+    }
+}
+
+impl From<&SignalConfig> for PortfolioConstructionConfig {
+    fn from(config: &SignalConfig) -> Self {
+        Self {
+            top_n: config.top_n,
+            max_position_pct: config.max_position_pct,
+            max_pairwise_correlation: config.max_pairwise_correlation,
+            correlation_lookback_days: config.correlation_lookback_days,
+            kelly_fraction: config.kelly_fraction,
+            kelly_lookback_days: config.kelly_lookback_days,
+            max_gross_exposure: config.max_gross_exposure,
+        }
+    }
+}
+
+impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
+    fn from(config: &PredictionSignalConfig) -> Self {
+        Self {
+            top_n: config.top_n,
+            max_position_pct: config.max_position_pct,
+            max_pairwise_correlation: config.max_pairwise_correlation,
+            correlation_lookback_days: config.correlation_lookback_days,
+            kelly_fraction: config.kelly_fraction,
+            kelly_lookback_days: config.kelly_lookback_days,
+            max_gross_exposure: config.max_gross_exposure,
         }
     }
 }
@@ -141,10 +236,9 @@ pub async fn generate_signals(
         }
     }
 
-    // Sort each day's scores descending (highest=strongest reversal signal)
-    // Negative weights: highest score = most oversold = strongest bounce candidate
+    // Sort each day's scores according to the configured alpha direction.
     for items in scores_by_date.values_mut() {
-        items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        sort_factor_scores(items, config.score_direction);
     }
 
     // 2. Liquidity filter: remove stocks with low average daily trading amount
@@ -192,20 +286,22 @@ pub async fn generate_signals(
     }
 
     // 3. Load trading calendar
-    let trading_days: Vec<NaiveDate> = sqlx::query_as::<_, (NaiveDate,)>(
-        "SELECT trade_date FROM market_trade_calendar
-         WHERE exchange = 'SSE' AND is_open = true
-           AND trade_date >= $1 AND trade_date <= $2
-         ORDER BY trade_date",
+    let trading_days = load_open_trading_days(pool, start_date, end_date).await?;
+
+    let all_symbols: Vec<String> = scores_by_date
+        .values()
+        .flat_map(|v| v.iter().map(|(s, _)| s.clone()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let return_history = load_symbol_return_history(
+        pool,
+        &all_symbols,
+        start_date,
+        end_date,
+        portfolio_history_lookback_days(&PortfolioConstructionConfig::from(config)),
     )
-    .bind(start_date)
-    .bind(end_date)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load calendar: {}", e))?
-    .into_iter()
-    .map(|(d,)| d)
-    .collect();
+    .await?;
 
     let min_idx = 1 + config.entry_delay_days; // need at least this many days of history
 
@@ -240,18 +336,23 @@ pub async fn generate_signals(
         } else {
             0
         };
-        let top: Vec<&(String, f64)> = prev_scores.iter().skip(skip_count).take(n).collect();
-        if top.len() < n.min(5) {
+        let candidates: Vec<(String, f64)> = prev_scores
+            .iter()
+            .skip(skip_count)
+            .map(|(symbol, score)| (symbol.clone(), *score))
+            .collect();
+        if candidates.len() < n.min(5) {
             continue; // not enough candidates
         }
 
-        let weight = Decimal::from_f64(1.0 / top.len() as f64)
-            .unwrap_or(Decimal::new(1, 1))
-            .min(config.max_position_pct);
-
-        let mut target_weights = HashMap::new();
-        for (sym, _score) in &top {
-            target_weights.insert((*sym).clone(), weight);
+        let target_weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &PortfolioConstructionConfig::from(config),
+        );
+        if target_weights.len() < n.min(5) {
+            continue;
         }
 
         signals.insert(
@@ -339,7 +440,22 @@ async fn build_prediction_signals_from_rows(
         .await?;
 
     let trading_days = load_open_trading_days(pool, start_date, end_date).await?;
-    build_rebalance_prediction_signals(&trading_days, &scores_by_date, config)
+    let all_symbols: Vec<String> = scores_by_date
+        .values()
+        .flat_map(|v| v.iter().map(|(s, _, _)| s.clone()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let return_history = load_symbol_return_history(
+        pool,
+        &all_symbols,
+        start_date,
+        end_date,
+        portfolio_history_lookback_days(&PortfolioConstructionConfig::from(config)),
+    )
+    .await?;
+
+    build_rebalance_prediction_signals(&trading_days, &scores_by_date, config, &return_history)
 }
 
 fn sort_prediction_scores(scores_by_date: &mut HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>) {
@@ -357,6 +473,17 @@ fn sort_prediction_scores(scores_by_date: &mut HashMap<NaiveDate, Vec<(String, f
                 .then_with(|| left.0.cmp(&right.0))
         });
     }
+}
+
+fn sort_factor_scores(items: &mut [(String, f64)], direction: ScoreDirection) {
+    items.sort_by(|a, b| {
+        let score_order = match direction {
+            ScoreDirection::Descending => b.1.partial_cmp(&a.1),
+            ScoreDirection::Ascending => a.1.partial_cmp(&b.1),
+        }
+        .unwrap_or(std::cmp::Ordering::Equal);
+        score_order.then_with(|| a.0.cmp(&b.0))
+    });
 }
 
 async fn apply_prediction_liquidity_filter(
@@ -440,6 +567,7 @@ fn build_rebalance_prediction_signals(
     trading_days: &[NaiveDate],
     scores_by_date: &HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
     config: &PredictionSignalConfig,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
     let min_idx = 1 + config.entry_delay_days;
     let mut signals = HashMap::new();
@@ -462,19 +590,24 @@ fn build_rebalance_prediction_signals(
         } else {
             0
         };
-        let top: Vec<&(String, f64, Option<i32>)> =
-            prev_scores.iter().skip(skip_count).take(config.top_n).collect();
-        if top.len() < config.top_n.min(5) {
+        let candidates: Vec<(String, f64)> = prev_scores
+            .iter()
+            .skip(skip_count)
+            .map(|(symbol, score, _)| (symbol.clone(), *score))
+            .collect();
+        if candidates.len() < config.top_n.min(5) {
             continue;
         }
 
-        let weight = Decimal::from_f64(1.0 / top.len() as f64)
-            .unwrap_or(Decimal::new(1, 1))
-            .min(config.max_position_pct);
-        let target_weights = top
-            .into_iter()
-            .map(|(symbol, _, _)| (symbol.clone(), weight))
-            .collect();
+        let target_weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            return_history,
+            &PortfolioConstructionConfig::from(config),
+        );
+        if target_weights.len() < config.top_n.min(5) {
+            continue;
+        }
 
         signals.insert(
             day,
@@ -517,6 +650,249 @@ fn prediction_score_day_for_signal(
 ) -> Option<NaiveDate> {
     let score_idx = signal_day_idx.checked_sub(1 + config.entry_delay_days)?;
     trading_days.get(score_idx).copied()
+}
+
+fn portfolio_history_lookback_days(config: &PortfolioConstructionConfig) -> usize {
+    config
+        .correlation_lookback_days
+        .max(config.kelly_lookback_days)
+        .max(1)
+}
+
+async fn load_symbol_return_history(
+    pool: &PgPool,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    lookback_days: usize,
+) -> Result<HashMap<String, Vec<(NaiveDate, f64)>>, String> {
+    if symbols.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let query_start = start_date - Duration::days((lookback_days as i64).saturating_mul(3));
+    let rows: Vec<(String, NaiveDate, Decimal, Option<Decimal>)> = sqlx::query_as(
+        "SELECT symbol, trade_date, close, pre_close
+         FROM market_stock_daily_bar
+         WHERE symbol = ANY($1)
+           AND trade_date >= $2 AND trade_date <= $3
+           AND close IS NOT NULL AND close > 0
+         ORDER BY symbol, trade_date",
+    )
+    .bind(symbols)
+    .bind(query_start)
+    .bind(end_date)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load portfolio construction return history: {}", e))?;
+
+    let mut grouped_prices: HashMap<String, Vec<(NaiveDate, f64, Option<f64>)>> = HashMap::new();
+    for (symbol, date, close, pre_close) in rows {
+        if let Some(close) = close.to_f64().filter(|value| value.is_finite() && *value > 0.0) {
+            let pre_close = pre_close.and_then(|value| value.to_f64());
+            grouped_prices
+                .entry(symbol)
+                .or_default()
+                .push((date, close, pre_close));
+        }
+    }
+
+    let mut returns_by_symbol = HashMap::new();
+    for (symbol, rows) in grouped_prices {
+        let mut returns = Vec::with_capacity(rows.len());
+        let mut previous_close: Option<f64> = None;
+        for (date, close, pre_close) in rows {
+            let base = pre_close.or(previous_close);
+            if let Some(base) = base.filter(|value| value.is_finite() && *value > 0.0) {
+                let daily_return = close / base - 1.0;
+                if daily_return.is_finite() {
+                    returns.push((date, daily_return));
+                }
+            }
+            previous_close = Some(close);
+        }
+        returns_by_symbol.insert(symbol, returns);
+    }
+
+    Ok(returns_by_symbol)
+}
+
+fn build_portfolio_weights(
+    score_day: NaiveDate,
+    candidates: &[(String, f64)],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    config: &PortfolioConstructionConfig,
+) -> HashMap<String, Decimal> {
+    let selected = select_uncorrelated_candidates(score_day, candidates, return_history, config);
+    if selected.is_empty() {
+        return HashMap::new();
+    }
+
+    let raw_weights = if config.kelly_fraction > 0.0 {
+        build_kelly_raw_weights(score_day, &selected, return_history, config)
+    } else {
+        vec![1.0; selected.len()]
+    };
+
+    normalize_and_cap_weights(&selected, &raw_weights, config)
+}
+
+fn select_uncorrelated_candidates(
+    score_day: NaiveDate,
+    candidates: &[(String, f64)],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<String> {
+    let mut selected: Vec<String> = Vec::new();
+    for (symbol, _) in candidates {
+        if selected.len() >= config.top_n {
+            break;
+        }
+        if let Some(limit) = config.max_pairwise_correlation {
+            let candidate_returns = trailing_returns(
+                return_history,
+                symbol,
+                score_day,
+                config.correlation_lookback_days,
+            );
+            let too_correlated = selected.iter().any(|selected_symbol| {
+                let selected_returns = trailing_returns(
+                    return_history,
+                    selected_symbol,
+                    score_day,
+                    config.correlation_lookback_days,
+                );
+                pearson_correlation(&candidate_returns, &selected_returns)
+                    .map(|corr| corr.abs() > limit)
+                    .unwrap_or(false)
+            });
+            if too_correlated {
+                continue;
+            }
+        }
+        selected.push(symbol.clone());
+    }
+    selected
+}
+
+fn build_kelly_raw_weights(
+    score_day: NaiveDate,
+    symbols: &[String],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let returns = trailing_returns(
+            return_history,
+            symbol,
+            score_day,
+            config.kelly_lookback_days,
+        );
+        let kelly = fractional_kelly_weight(&returns, config.kelly_fraction).unwrap_or(0.0);
+        raw_weights.push(kelly.max(0.0));
+    }
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+fn normalize_and_cap_weights(
+    symbols: &[String],
+    raw_weights: &[f64],
+    config: &PortfolioConstructionConfig,
+) -> HashMap<String, Decimal> {
+    let positive_sum: f64 = raw_weights
+        .iter()
+        .copied()
+        .filter(|weight| weight.is_finite() && *weight > 0.0)
+        .sum();
+    if positive_sum <= 0.0 {
+        return HashMap::new();
+    }
+
+    let gross = config.max_gross_exposure.clamp(0.0, 1.0);
+    let mut target_weights = HashMap::new();
+    for (symbol, raw_weight) in symbols.iter().zip(raw_weights.iter()) {
+        if !raw_weight.is_finite() || *raw_weight <= 0.0 {
+            continue;
+        }
+        let normalized = (*raw_weight / positive_sum * gross).max(0.0);
+        let weight = Decimal::from_f64(normalized)
+            .unwrap_or(Decimal::zero())
+            .min(config.max_position_pct);
+        if !weight.is_zero() {
+            target_weights.insert(symbol.clone(), weight);
+        }
+    }
+    target_weights
+}
+
+fn trailing_returns(
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    symbol: &str,
+    score_day: NaiveDate,
+    lookback_days: usize,
+) -> Vec<f64> {
+    let mut values: Vec<f64> = return_history
+        .get(symbol)
+        .map(|rows| {
+            rows.iter()
+                .filter(|(date, value)| *date < score_day && value.is_finite())
+                .map(|(_, value)| *value)
+                .collect()
+        })
+        .unwrap_or_default();
+    if values.len() > lookback_days {
+        values = values[values.len() - lookback_days..].to_vec();
+    }
+    values
+}
+
+fn pearson_correlation(left: &[f64], right: &[f64]) -> Option<f64> {
+    let len = left.len().min(right.len());
+    if len < 3 {
+        return None;
+    }
+    let left = &left[left.len() - len..];
+    let right = &right[right.len() - len..];
+    let left_mean = left.iter().sum::<f64>() / len as f64;
+    let right_mean = right.iter().sum::<f64>() / len as f64;
+    let mut covariance = 0.0;
+    let mut left_var = 0.0;
+    let mut right_var = 0.0;
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        let left_diff = *left_value - left_mean;
+        let right_diff = *right_value - right_mean;
+        covariance += left_diff * right_diff;
+        left_var += left_diff * left_diff;
+        right_var += right_diff * right_diff;
+    }
+    if left_var <= f64::EPSILON || right_var <= f64::EPSILON {
+        return None;
+    }
+    Some(covariance / (left_var.sqrt() * right_var.sqrt()))
+}
+
+fn fractional_kelly_weight(returns: &[f64], fraction: f64) -> Option<f64> {
+    if returns.len() < 3 || fraction <= 0.0 {
+        return None;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| {
+            let diff = *value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / returns.len() as f64;
+    if variance <= f64::EPSILON {
+        return None;
+    }
+    Some((mean / variance * fraction).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -592,6 +968,7 @@ mod tests {
                 max_position_pct: Decimal::new(20, 2),
                 ..Default::default()
             },
+            &HashMap::new(),
         )
         .expect("prediction signals");
 
@@ -605,5 +982,93 @@ mod tests {
             signal.target_weights["000001.SZ"],
             Decimal::from_f64(0.2).unwrap()
         );
+    }
+
+    #[test]
+    fn sort_factor_scores_honors_ascending_direction() {
+        let mut scores = vec![
+            ("AAA".to_string(), 3.0),
+            ("BBB".to_string(), 1.0),
+            ("CCC".to_string(), 2.0),
+        ];
+
+        sort_factor_scores(&mut scores, ScoreDirection::Ascending);
+
+        assert_eq!(scores[0].0, "BBB");
+        assert_eq!(scores[1].0, "CCC");
+        assert_eq!(scores[2].0, "AAA");
+    }
+
+    #[test]
+    fn portfolio_construction_filters_highly_correlated_candidates() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("AAA".to_string(), 3.0),
+            ("BBB".to_string(), 2.0),
+            ("CCC".to_string(), 1.0),
+        ];
+        let return_history = HashMap::from([
+            ("AAA".to_string(), dated_returns(&[0.01, 0.02, 0.03, 0.04])),
+            ("BBB".to_string(), dated_returns(&[0.011, 0.021, 0.031, 0.041])),
+            ("CCC".to_string(), dated_returns(&[0.02, -0.01, 0.01, -0.02])),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::new(50, 2),
+            max_pairwise_correlation: Some(0.8),
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &config,
+        );
+
+        assert!(weights.contains_key("AAA"));
+        assert!(!weights.contains_key("BBB"));
+        assert!(weights.contains_key("CCC"));
+    }
+
+    #[test]
+    fn portfolio_construction_uses_fractional_kelly_with_caps() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("AAA".to_string(), 3.0),
+            ("BBB".to_string(), 2.0),
+        ];
+        let return_history = HashMap::from([
+            ("AAA".to_string(), dated_returns(&[0.03, 0.02, 0.01, 0.02])),
+            ("BBB".to_string(), dated_returns(&[0.03, -0.03, 0.02, -0.019])),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(60, 2),
+            kelly_fraction: 0.5,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &config,
+        );
+
+        assert!(weights["AAA"] > weights["BBB"]);
+        let gross: Decimal = weights.values().copied().sum();
+        assert!(gross <= Decimal::ONE);
+        assert!(weights.values().all(|weight| *weight <= Decimal::new(60, 2)));
+    }
+
+    fn dated_returns(values: &[f64]) -> Vec<(NaiveDate, f64)> {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        values
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| (start + chrono::Duration::days(idx as i64), *value))
+            .collect()
     }
 }

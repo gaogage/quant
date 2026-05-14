@@ -1,0 +1,2006 @@
+[
+  {
+    "window_index": 1,
+    "start_date": "20160405",
+    "end_date": "20190404",
+    "optimization_task_id": "opt-67df5091-0519-4f51-9634-5f6320cd06fc",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-67df5091-0519-4f51-9634-5f6320cd06fc",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": "trial-opt-67df5091-0519-4f51-9634-5f6320cd06fc-0002",
+        "completed": 8,
+        "elapsed_ms": 31700,
+        "executed": 8,
+        "experiment_run_id": "exp-355315cb-a88f-4a98-8db8-26a03a8b7aec",
+        "failed": 0,
+        "optimization_task_id": "opt-67df5091-0519-4f51-9634-5f6320cd06fc",
+        "performance_gate_status": "passed",
+        "performance_gates": [
+          {
+            "actual": 8,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 0,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 31700,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 0,
+      "data": {
+        "gate_result_id": "gate-7bf97398-fb9c-4d21-bd40-9849dce75686",
+        "gate_results": [
+          {
+            "actual": [],
+            "gate": "no_hard_constraint_violations",
+            "passed": true
+          },
+          {
+            "actual": 5098,
+            "gate": "min_trade_count",
+            "limit": 20,
+            "passed": true
+          },
+          {
+            "actual": "0.5477602301806167042816626931",
+            "gate": "max_drawdown",
+            "limit": "0.5999999999999999777955395073",
+            "passed": true
+          },
+          {
+            "actual": "0.0000000000",
+            "gate": "score_gap_vs_runner_up",
+            "limit": "0",
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "details": {
+              "positive_excess_window_ratio": 0.0,
+              "scenario_count": 2,
+              "step_size": 63,
+              "window_count": 8,
+              "window_size": 252,
+              "windows": [
+                {
+                  "annualized_volatility": 0.167423152816135,
+                  "end_date": "2017-04-17",
+                  "metrics": {
+                    "annual_return": 0.0018219874152405335,
+                    "benchmark_return": 0.06599995012997151,
+                    "excess_return": -0.06418519937997158,
+                    "max_drawdown": 0.15023921838991972,
+                    "sharpe_ratio": 0.0108825295939784,
+                    "total_return": 0.0018147507499999271
+                  },
+                  "scenario": "mixed",
+                  "start_date": "2016-04-05",
+                  "window_index": 1
+                },
+                {
+                  "annualized_volatility": 0.1628785004579099,
+                  "end_date": "2017-07-18",
+                  "metrics": {
+                    "annual_return": -0.16593910654314725,
+                    "benchmark_return": 0.14000768153852094,
+                    "excess_return": -0.3053460186338699,
+                    "max_drawdown": 0.26265911393034247,
+                    "sharpe_ratio": -1.0187907309843425,
+                    "total_return": -0.16533833709534895
+                  },
+                  "scenario": "bear",
+                  "start_date": "2016-07-06",
+                  "window_index": 2
+                },
+                {
+                  "annualized_volatility": 0.15262813352127236,
+                  "end_date": "2017-10-20",
+                  "metrics": {
+                    "annual_return": -0.11539330285711136,
+                    "benchmark_return": 0.1899515816604065,
+                    "excess_return": -0.3049143689869086,
+                    "max_drawdown": 0.26265911393034247,
+                    "sharpe_ratio": -0.756042154187971,
+                    "total_return": -0.11496278732650211
+                  },
+                  "scenario": "bear",
+                  "start_date": "2016-10-12",
+                  "window_index": 3
+                },
+                {
+                  "annualized_volatility": 0.15647839340514658,
+                  "end_date": "2018-01-18",
+                  "metrics": {
+                    "annual_return": -0.14073982821589126,
+                    "benchmark_return": 0.2719092761883821,
+                    "excess_return": -0.41213174390570806,
+                    "max_drawdown": 0.22239172667840193,
+                    "sharpe_ratio": -0.8994202020690132,
+                    "total_return": -0.14022246771732594
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-01-10",
+                  "window_index": 4
+                },
+                {
+                  "annualized_volatility": 0.18803169712980758,
+                  "end_date": "2018-04-26",
+                  "metrics": {
+                    "annual_return": -0.19463908320987977,
+                    "benchmark_return": 0.08454315219302,
+                    "excess_return": -0.27849014352931434,
+                    "max_drawdown": 0.23577530762530535,
+                    "sharpe_ratio": -1.0351397460158598,
+                    "total_return": -0.19394699133629434
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-04-18",
+                  "window_index": 5
+                },
+                {
+                  "annualized_volatility": 0.203761435856902,
+                  "end_date": "2018-07-27",
+                  "metrics": {
+                    "annual_return": -0.2317223709502566,
+                    "benchmark_return": -0.05590720291828932,
+                    "excess_return": -0.17501109221907074,
+                    "max_drawdown": 0.3493088789476604,
+                    "sharpe_ratio": -1.1372238813285118,
+                    "total_return": -0.23091829513736006
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-07-19",
+                  "window_index": 6
+                },
+                {
+                  "annualized_volatility": 0.23789404077001453,
+                  "end_date": "2018-11-01",
+                  "metrics": {
+                    "annual_return": -0.4204538444427238,
+                    "benchmark_return": -0.19175858968691362,
+                    "excess_return": -0.2274393395147759,
+                    "max_drawdown": 0.4672359227036708,
+                    "sharpe_ratio": -1.767399650204773,
+                    "total_return": -0.4191979292016895
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-10-23",
+                  "window_index": 7
+                },
+                {
+                  "annualized_volatility": 0.24257912291078154,
+                  "end_date": "2019-01-31",
+                  "metrics": {
+                    "annual_return": -0.3795257342466869,
+                    "benchmark_return": -0.25289661746466785,
+                    "excess_return": -0.12545286649609522,
+                    "max_drawdown": 0.4331779573878946,
+                    "sharpe_ratio": -1.5645440946963676,
+                    "total_return": -0.37834948396076307
+                  },
+                  "scenario": "bear",
+                  "start_date": "2018-01-19",
+                  "window_index": 8
+                }
+              ],
+              "worst_window_drawdown": 0.4672359227036708
+            },
+            "gate": "walk_forward_min_window_count",
+            "limit": 3,
+            "passed": true
+          },
+          {
+            "actual": 0.0,
+            "gate": "walk_forward_positive_excess_ratio",
+            "limit": 0.35,
+            "passed": false
+          },
+          {
+            "actual": 0.2109375,
+            "details": {
+              "positive_return_probability": 0.2109375,
+              "sample_size": 732,
+              "sharpe_ratio": {
+                "mean": -0.3621070585833359,
+                "median": -0.4546786378425795,
+                "p05": -1.1767780129192171,
+                "p95": 0.7343151356663346
+              },
+              "total_return": {
+                "mean": -0.17050107355906707,
+                "median": -0.253794253909842,
+                "p05": -0.5630322365463069,
+                "p95": 0.461858958544223
+              },
+              "trials": 128
+            },
+            "gate": "bootstrap_positive_return_probability",
+            "limit": 0.35,
+            "passed": false
+          },
+          {
+            "actual": 2,
+            "details": {
+              "scenario_count": 1,
+              "scenarios": [
+                {
+                  "annualized_volatility": 0.2062330298945301,
+                  "end_date": "2019-04-04",
+                  "metrics": {
+                    "annual_return": -0.07716808340371151,
+                    "benchmark_return": 0.24437082863095938,
+                    "excess_return": -0.4524359408599593,
+                    "max_drawdown": 0.5477602301809972,
+                    "sharpe_ratio": -0.37417907036121884,
+                    "total_return": -0.20806511222899993
+                  },
+                  "scenario": "bear",
+                  "start_date": "2016-04-05"
+                }
+              ]
+            },
+            "gate": "market_scenario_coverage",
+            "limit": 1,
+            "passed": true
+          }
+        ],
+        "optimization_task_id": "opt-67df5091-0519-4f51-9634-5f6320cd06fc",
+        "status": "rejected",
+        "trial_id": "trial-opt-67df5091-0519-4f51-9634-5f6320cd06fc-0002"
+      }
+    },
+    "best_trial": {
+      "optimization_task_id": "opt-67df5091-0519-4f51-9634-5f6320cd06fc",
+      "trial_id": "trial-opt-67df5091-0519-4f51-9634-5f6320cd06fc-0002",
+      "backtest_task_id": "optbt-cc763830-7735-4dfc-8894-d16fea729ac7",
+      "score": -0.0904871882,
+      "parameters": {
+        "top_n": 80,
+        "rebalance": "20",
+        "combo_name": "full_eq_16f",
+        "min_amount": 0.0,
+        "skip_top_pct": 0.0,
+        "kelly_fraction": 0.0,
+        "score_direction": "ascending",
+        "max_position_pct": 0.08,
+        "max_gross_exposure": 1.0,
+        "kelly_lookback_days": 60,
+        "max_pairwise_correlation": 0.9,
+        "correlation_lookback_days": 60
+      },
+      "metrics": {
+        "turnover": "60.241997627767288888345531158",
+        "num_trades": 5098,
+        "sharpe_ratio": "-0.3736887906607115281831765374",
+        "win_rate_pct": "0.4264093832765796443435489974",
+        "max_drawdown_pct": "0.5477602301806167042816626931",
+        "total_return_pct": "-0.2080651122287293",
+        "annual_return_pct": "-0.0770669715355612",
+        "excess_return_pct": "-0.4524359408596885769556540881",
+        "information_ratio": "0",
+        "benchmark_return_pct": "0.2443708286309592769556540881"
+      },
+      "constraint_violations": [],
+      "status": "completed"
+    }
+  },
+  {
+    "window_index": 2,
+    "start_date": "20170405",
+    "end_date": "20200403",
+    "optimization_task_id": "opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": "trial-opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f-0007",
+        "completed": 8,
+        "elapsed_ms": 22115,
+        "executed": 8,
+        "experiment_run_id": "exp-c47d3511-5ec7-4bad-a3f4-7d3d01b1d0d2",
+        "failed": 0,
+        "optimization_task_id": "opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f",
+        "performance_gate_status": "passed",
+        "performance_gates": [
+          {
+            "actual": 8,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 0,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 22115,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 0,
+      "data": {
+        "gate_result_id": "gate-ce487295-46dd-4606-9797-1a326d798975",
+        "gate_results": [
+          {
+            "actual": [],
+            "gate": "no_hard_constraint_violations",
+            "passed": true
+          },
+          {
+            "actual": 2313,
+            "gate": "min_trade_count",
+            "limit": 20,
+            "passed": true
+          },
+          {
+            "actual": "0.4374588326701710",
+            "gate": "max_drawdown",
+            "limit": "0.5999999999999999777955395073",
+            "passed": true
+          },
+          {
+            "actual": "0.0000000000",
+            "gate": "score_gap_vs_runner_up",
+            "limit": "0",
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "details": {
+              "positive_excess_window_ratio": 0.125,
+              "scenario_count": 1,
+              "step_size": 63,
+              "window_count": 8,
+              "window_size": 252,
+              "windows": [
+                {
+                  "annualized_volatility": 0.1845753100100012,
+                  "end_date": "2018-04-13",
+                  "metrics": {
+                    "annual_return": -0.1557147467823018,
+                    "benchmark_return": 0.10481229850270557,
+                    "excess_return": -0.25995976023070555,
+                    "max_drawdown": 0.20002249085399998,
+                    "sharpe_ratio": -0.8436380075637664,
+                    "total_return": -0.15514746172799998
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-04-05",
+                  "window_index": 1
+                },
+                {
+                  "annualized_volatility": 0.2227511014733765,
+                  "end_date": "2018-07-16",
+                  "metrics": {
+                    "annual_return": -0.30626875170743306,
+                    "benchmark_return": -0.051367713863953335,
+                    "excess_return": -0.25389365175862044,
+                    "max_drawdown": 0.3781824452283483,
+                    "sharpe_ratio": -1.3749370920351542,
+                    "total_return": -0.3052613656225738
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-07-06",
+                  "window_index": 2
+                },
+                {
+                  "annualized_volatility": 0.22005539827395734,
+                  "end_date": "2018-10-19",
+                  "metrics": {
+                    "annual_return": -0.4019563912119982,
+                    "benchmark_return": -0.1940731753660161,
+                    "excess_return": -0.20666193403523758,
+                    "max_drawdown": 0.4140882602700416,
+                    "sharpe_ratio": -1.8266145450864335,
+                    "total_return": -0.4007351094012537
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-10-10",
+                  "window_index": 3
+                },
+                {
+                  "annualized_volatility": 0.22981346705081981,
+                  "end_date": "2019-01-18",
+                  "metrics": {
+                    "annual_return": -0.3297684359498251,
+                    "benchmark_return": -0.23844893446994042,
+                    "excess_return": -0.09025444542081296,
+                    "max_drawdown": 0.4031086290457721,
+                    "sharpe_ratio": -1.434939562862528,
+                    "total_return": -0.3287033798907534
+                  },
+                  "scenario": "bear",
+                  "start_date": "2018-01-08",
+                  "window_index": 4
+                },
+                {
+                  "annualized_volatility": 0.25458389679243776,
+                  "end_date": "2019-04-25",
+                  "metrics": {
+                    "annual_return": -0.1366759847408363,
+                    "benchmark_return": 0.034906217419739205,
+                    "excess_return": -0.17107856884086192,
+                    "max_drawdown": 0.3359018002773477,
+                    "sharpe_ratio": -0.5368602903123427,
+                    "total_return": -0.13617235142112272
+                  },
+                  "scenario": "bear",
+                  "start_date": "2018-04-16",
+                  "window_index": 5
+                },
+                {
+                  "annualized_volatility": 0.256171689774235,
+                  "end_date": "2019-07-29",
+                  "metrics": {
+                    "annual_return": -0.0247196705238234,
+                    "benchmark_return": 0.1173815053517051,
+                    "excess_return": -0.14200429967417105,
+                    "max_drawdown": 0.2305871694934745,
+                    "sharpe_ratio": -0.09649649633653092,
+                    "total_return": -0.024622794322465946
+                  },
+                  "scenario": "bear",
+                  "start_date": "2018-07-17",
+                  "window_index": 6
+                },
+                {
+                  "annualized_volatility": 0.25651293372478656,
+                  "end_date": "2019-11-01",
+                  "metrics": {
+                    "annual_return": 0.03890335308693316,
+                    "benchmark_return": 0.2085801271893737,
+                    "excess_return": -0.16983410529086496,
+                    "max_drawdown": 0.2305871694934745,
+                    "sharpe_ratio": 0.15166234513801513,
+                    "total_return": 0.03874602189850873
+                  },
+                  "scenario": "bear",
+                  "start_date": "2018-10-22",
+                  "window_index": 7
+                },
+                {
+                  "annualized_volatility": 0.2753738230925521,
+                  "end_date": "2020-02-07",
+                  "metrics": {
+                    "annual_return": 0.2657132285381607,
+                    "benchmark_return": 0.22420414960100277,
+                    "excess_return": 0.04032611096986449,
+                    "max_drawdown": 0.2305871694934745,
+                    "sharpe_ratio": 0.9649182538634318,
+                    "total_return": 0.26453026057086726
+                  },
+                  "scenario": "bear",
+                  "start_date": "2019-01-21",
+                  "window_index": 8
+                }
+              ],
+              "worst_window_drawdown": 0.4140882602700416
+            },
+            "gate": "walk_forward_min_window_count",
+            "limit": 3,
+            "passed": true
+          },
+          {
+            "actual": 0.125,
+            "gate": "walk_forward_positive_excess_ratio",
+            "limit": 0.35,
+            "passed": false
+          },
+          {
+            "actual": 0.2578125,
+            "details": {
+              "positive_return_probability": 0.2578125,
+              "sample_size": 732,
+              "sharpe_ratio": {
+                "mean": -0.31304629907018033,
+                "median": -0.28544390276376885,
+                "p05": -1.1637969422402619,
+                "p95": 0.6014809240427148
+              },
+              "total_return": {
+                "mean": -0.16377838771934086,
+                "median": -0.20171592050576992,
+                "p05": -0.6279177104535416,
+                "p95": 0.5111456953194549
+              },
+              "trials": 128
+            },
+            "gate": "bootstrap_positive_return_probability",
+            "limit": 0.35,
+            "passed": false
+          },
+          {
+            "actual": 1,
+            "details": {
+              "scenario_count": 1,
+              "scenarios": [
+                {
+                  "annualized_volatility": 0.2481518873322949,
+                  "end_date": "2020-04-03",
+                  "metrics": {
+                    "annual_return": -0.08957079703890458,
+                    "benchmark_return": 0.05974071926621516,
+                    "excess_return": -0.29832847682921515,
+                    "max_drawdown": 0.43745883267,
+                    "sharpe_ratio": -0.36095150434605094,
+                    "total_return": -0.238587757563
+                  },
+                  "scenario": "bear",
+                  "start_date": "2017-04-05"
+                }
+              ]
+            },
+            "gate": "market_scenario_coverage",
+            "limit": 1,
+            "passed": true
+          }
+        ],
+        "optimization_task_id": "opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f",
+        "status": "rejected",
+        "trial_id": "trial-opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f-0007"
+      }
+    },
+    "best_trial": {
+      "optimization_task_id": "opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f",
+      "trial_id": "trial-opt-5eca59f2-a3e5-4eb2-87fc-5fe6c8c06a8f-0008",
+      "backtest_task_id": "optbt-29b3e275-2720-4b59-bbbd-940ea92c548c",
+      "score": -0.0596656954,
+      "parameters": {
+        "top_n": 50,
+        "rebalance": "20",
+        "combo_name": "full_icir_16f",
+        "min_amount": 0.0,
+        "skip_top_pct": 0.05,
+        "kelly_fraction": 0.25,
+        "score_direction": "descending",
+        "max_position_pct": 0.08,
+        "max_gross_exposure": 1.0,
+        "kelly_lookback_days": 60,
+        "max_pairwise_correlation": 0.75,
+        "correlation_lookback_days": 60
+      },
+      "metrics": {
+        "turnover": "62.738338409822322985875393363",
+        "num_trades": 2313,
+        "sharpe_ratio": "-0.3604817871745049085436764361",
+        "win_rate_pct": "0.4285714285714285714285714286",
+        "max_drawdown_pct": "0.4374588326701710",
+        "total_return_pct": "-0.2385877575627975",
+        "annual_return_pct": "-0.0894542358362782",
+        "excess_return_pct": "-0.2983284768290125775600123885",
+        "information_ratio": "0",
+        "benchmark_return_pct": "0.0597407192662150775600123885"
+      },
+      "constraint_violations": [],
+      "status": "completed"
+    }
+  },
+  {
+    "window_index": 3,
+    "start_date": "20180405",
+    "end_date": "20210402",
+    "optimization_task_id": "opt-cb041c67-decd-4ed2-bb80-46c74d0e8cb6",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-cb041c67-decd-4ed2-bb80-46c74d0e8cb6",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": null,
+        "completed": 0,
+        "elapsed_ms": 94,
+        "executed": 8,
+        "experiment_run_id": "exp-c9a47175-8cfb-4703-b869-2c7b6b18e296",
+        "failed": 8,
+        "optimization_task_id": "opt-cb041c67-decd-4ed2-bb80-46c74d0e8cb6",
+        "performance_gate_status": "review_required",
+        "performance_gates": [
+          {
+            "actual": 0,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": false
+          },
+          {
+            "actual": 8,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": false
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 94,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 1,
+      "message": "optimization task has no best_trial_id; run completed trials first"
+    },
+    "best_trial": null
+  },
+  {
+    "window_index": 4,
+    "start_date": "20190405",
+    "end_date": "20220401",
+    "optimization_task_id": "opt-b3b75a52-291f-4951-b4e1-c11f09e4a278",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-b3b75a52-291f-4951-b4e1-c11f09e4a278",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": "trial-opt-b3b75a52-291f-4951-b4e1-c11f09e4a278-0004",
+        "completed": 8,
+        "elapsed_ms": 25735,
+        "executed": 8,
+        "experiment_run_id": "exp-56c52ff9-6814-47bd-8f23-8337147f5689",
+        "failed": 0,
+        "optimization_task_id": "opt-b3b75a52-291f-4951-b4e1-c11f09e4a278",
+        "performance_gate_status": "passed",
+        "performance_gates": [
+          {
+            "actual": 8,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 0,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 25735,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 0,
+      "data": {
+        "gate_result_id": "gate-d8a87359-9a7c-4e3d-a9de-22afde08a5db",
+        "gate_results": [
+          {
+            "actual": [],
+            "gate": "no_hard_constraint_violations",
+            "passed": true
+          },
+          {
+            "actual": 1156,
+            "gate": "min_trade_count",
+            "limit": 20,
+            "passed": true
+          },
+          {
+            "actual": "0.1799509711756395088971043535",
+            "gate": "max_drawdown",
+            "limit": "0.5999999999999999777955395073",
+            "passed": true
+          },
+          {
+            "actual": "0.0327016133",
+            "gate": "score_gap_vs_runner_up",
+            "limit": "0",
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "details": {
+              "positive_excess_window_ratio": 0.25,
+              "scenario_count": 3,
+              "step_size": 63,
+              "window_count": 8,
+              "window_size": 252,
+              "windows": [
+                {
+                  "annualized_volatility": 0.11984815818575921,
+                  "end_date": "2020-04-17",
+                  "metrics": {
+                    "annual_return": -0.1213551685916534,
+                    "benchmark_return": -0.05366754537814311,
+                    "excess_return": -0.06723641908485689,
+                    "max_drawdown": 0.17995097117521486,
+                    "sharpe_ratio": -1.0125743309593382,
+                    "total_return": -0.120903964463
+                  },
+                  "scenario": "bear",
+                  "start_date": "2019-04-08",
+                  "window_index": 1
+                },
+                {
+                  "annualized_volatility": 0.1179603990956379,
+                  "end_date": "2020-07-22",
+                  "metrics": {
+                    "annual_return": 0.10262872246775645,
+                    "benchmark_return": 0.244988207531599,
+                    "excess_return": -0.1427868768255267,
+                    "max_drawdown": 0.10975964311943455,
+                    "sharpe_ratio": 0.8700269179705755,
+                    "total_return": 0.10220133070607229
+                  },
+                  "scenario": "bull",
+                  "start_date": "2019-07-10",
+                  "window_index": 2
+                },
+                {
+                  "annualized_volatility": 0.13495449546749447,
+                  "end_date": "2020-10-27",
+                  "metrics": {
+                    "annual_return": 0.12841190772817512,
+                    "benchmark_return": 0.1938467929550609,
+                    "excess_return": -0.06597572722604128,
+                    "max_drawdown": 0.10975964311943455,
+                    "sharpe_ratio": 0.9515200459484171,
+                    "total_return": 0.12787106572901963
+                  },
+                  "scenario": "bull",
+                  "start_date": "2019-10-15",
+                  "window_index": 3
+                },
+                {
+                  "annualized_volatility": 0.14652136105734773,
+                  "end_date": "2021-01-25",
+                  "metrics": {
+                    "annual_return": 0.040633542635569286,
+                    "benchmark_return": 0.33823474247062024,
+                    "excess_return": -0.2977656635250625,
+                    "max_drawdown": 0.11240030081720705,
+                    "sharpe_ratio": 0.2773216297087553,
+                    "total_return": 0.040469078945557735
+                  },
+                  "scenario": "bull",
+                  "start_date": "2020-01-13",
+                  "window_index": 4
+                },
+                {
+                  "annualized_volatility": 0.11838214439790615,
+                  "end_date": "2021-04-30",
+                  "metrics": {
+                    "annual_return": 0.0952869430290546,
+                    "benchmark_return": 0.329583157722533,
+                    "excess_return": -0.23469173473018135,
+                    "max_drawdown": 0.11240030081720705,
+                    "sharpe_ratio": 0.8049097565657937,
+                    "total_return": 0.09489142299235165
+                  },
+                  "scenario": "bull",
+                  "start_date": "2020-04-20",
+                  "window_index": 5
+                },
+                {
+                  "annualized_volatility": 0.1163029036497974,
+                  "end_date": "2021-08-03",
+                  "metrics": {
+                    "annual_return": 0.03412193369425798,
+                    "benchmark_return": 0.047114191924146676,
+                    "excess_return": -0.013129937858340934,
+                    "max_drawdown": 0.11240030081720705,
+                    "sharpe_ratio": 0.29338849352379076,
+                    "total_return": 0.03398425406580574
+                  },
+                  "scenario": "sideways",
+                  "start_date": "2020-07-23",
+                  "window_index": 6
+                },
+                {
+                  "annualized_volatility": 0.09431668145491218,
+                  "end_date": "2021-11-09",
+                  "metrics": {
+                    "annual_return": 0.036094042761234846,
+                    "benchmark_return": 0.023108785947219435,
+                    "excess_return": 0.012839482410920144,
+                    "max_drawdown": 0.09895803336102604,
+                    "sharpe_ratio": 0.3826899144929091,
+                    "total_return": 0.03594826835813958
+                  },
+                  "scenario": "sideways",
+                  "start_date": "2020-10-28",
+                  "window_index": 7
+                },
+                {
+                  "annualized_volatility": 0.1075707556989966,
+                  "end_date": "2022-02-14",
+                  "metrics": {
+                    "annual_return": 0.19885327087042493,
+                    "benchmark_return": -0.17436706232893295,
+                    "excess_return": 0.37235782371698145,
+                    "max_drawdown": 0.07924300052795717,
+                    "sharpe_ratio": 1.848581146225784,
+                    "total_return": 0.1979907613880485
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-01-26",
+                  "window_index": 8
+                }
+              ],
+              "worst_window_drawdown": 0.17995097117521486
+            },
+            "gate": "walk_forward_min_window_count",
+            "limit": 3,
+            "passed": true
+          },
+          {
+            "actual": 0.25,
+            "gate": "walk_forward_positive_excess_ratio",
+            "limit": 0.35,
+            "passed": false
+          },
+          {
+            "actual": 0.7734375,
+            "details": {
+              "positive_return_probability": 0.7734375,
+              "sample_size": 726,
+              "sharpe_ratio": {
+                "mean": 0.4884932687805193,
+                "median": 0.3982828860972284,
+                "p05": -0.3446549584910418,
+                "p95": 1.5890951055073306
+              },
+              "total_return": {
+                "mean": 0.19506859434303564,
+                "median": 0.15061095205351727,
+                "p05": -0.12134097991627202,
+                "p95": 0.6431994285408091
+              },
+              "trials": 128
+            },
+            "gate": "bootstrap_positive_return_probability",
+            "limit": 0.35,
+            "passed": true
+          },
+          {
+            "actual": 3,
+            "details": {
+              "scenario_count": 1,
+              "scenarios": [
+                {
+                  "annualized_volatility": 0.12131537286665825,
+                  "end_date": "2022-04-01",
+                  "metrics": {
+                    "annual_return": 0.06032201820709715,
+                    "benchmark_return": 0.05396033144398138,
+                    "excess_return": 0.12985792304101862,
+                    "max_drawdown": 0.17995097117521486,
+                    "sharpe_ratio": 0.497233094056416,
+                    "total_return": 0.183818254485
+                  },
+                  "scenario": "mixed",
+                  "start_date": "2019-04-08"
+                }
+              ]
+            },
+            "gate": "market_scenario_coverage",
+            "limit": 1,
+            "passed": true
+          }
+        ],
+        "optimization_task_id": "opt-b3b75a52-291f-4951-b4e1-c11f09e4a278",
+        "status": "rejected",
+        "trial_id": "trial-opt-b3b75a52-291f-4951-b4e1-c11f09e4a278-0004"
+      }
+    },
+    "best_trial": {
+      "optimization_task_id": "opt-b3b75a52-291f-4951-b4e1-c11f09e4a278",
+      "trial_id": "trial-opt-b3b75a52-291f-4951-b4e1-c11f09e4a278-0004",
+      "backtest_task_id": "optbt-15cf7955-de42-4d6b-b599-97166aca055a",
+      "score": 0.0259715846,
+      "parameters": {
+        "top_n": 80,
+        "rebalance": "20",
+        "combo_name": "full_icir_16f_v3",
+        "min_amount": 0.0,
+        "skip_top_pct": 0.05,
+        "kelly_fraction": 0.25,
+        "score_direction": "descending",
+        "max_position_pct": 0.08,
+        "max_gross_exposure": 1.0,
+        "kelly_lookback_days": 60,
+        "max_pairwise_correlation": 0.75,
+        "correlation_lookback_days": 60
+      },
+      "metrics": {
+        "turnover": "35.173894276544515043727766539",
+        "num_trades": 1156,
+        "sharpe_ratio": "0.496528944466557450518422367",
+        "win_rate_pct": "0.4360770577933450087565674256",
+        "max_drawdown_pct": "0.1799509711756395088971043535",
+        "total_return_pct": "0.1838182544848038",
+        "annual_return_pct": "0.0602365940370468",
+        "excess_return_pct": "0.1298579230408225562514964035",
+        "information_ratio": "0",
+        "benchmark_return_pct": "0.0539603314439812437485035965"
+      },
+      "constraint_violations": [],
+      "status": "completed"
+    }
+  },
+  {
+    "window_index": 5,
+    "start_date": "20200406",
+    "end_date": "20230405",
+    "optimization_task_id": "opt-015eef9c-9500-4a45-b982-15bb7798ae37",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-015eef9c-9500-4a45-b982-15bb7798ae37",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": "trial-opt-015eef9c-9500-4a45-b982-15bb7798ae37-0002",
+        "completed": 8,
+        "elapsed_ms": 30519,
+        "executed": 8,
+        "experiment_run_id": "exp-e205a67a-bf96-423e-91a0-e71ca043327e",
+        "failed": 0,
+        "optimization_task_id": "opt-015eef9c-9500-4a45-b982-15bb7798ae37",
+        "performance_gate_status": "passed",
+        "performance_gates": [
+          {
+            "actual": 8,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 0,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 30519,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 0,
+      "data": {
+        "gate_result_id": "gate-baaac084-ea2d-4e78-ad92-5acb1ecc774f",
+        "gate_results": [
+          {
+            "actual": [],
+            "gate": "no_hard_constraint_violations",
+            "passed": true
+          },
+          {
+            "actual": 2019,
+            "gate": "min_trade_count",
+            "limit": 20,
+            "passed": true
+          },
+          {
+            "actual": "0.282922963277339724424247309",
+            "gate": "max_drawdown",
+            "limit": "0.5999999999999999777955395073",
+            "passed": true
+          },
+          {
+            "actual": "0.0000000000",
+            "gate": "score_gap_vs_runner_up",
+            "limit": "0",
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "details": {
+              "positive_excess_window_ratio": 0.625,
+              "scenario_count": 1,
+              "step_size": 63,
+              "window_count": 8,
+              "window_size": 252,
+              "windows": [
+                {
+                  "annualized_volatility": 0.19925481814994583,
+                  "end_date": "2021-04-19",
+                  "metrics": {
+                    "annual_return": 0.1698104697132361,
+                    "benchmark_return": 0.3393859497474132,
+                    "excess_return": -0.17030332935841308,
+                    "max_drawdown": 0.25158986457632343,
+                    "sharpe_ratio": 0.8522276715308842,
+                    "total_return": 0.16908262038900013
+                  },
+                  "scenario": "bear",
+                  "start_date": "2020-04-07",
+                  "window_index": 1
+                },
+                {
+                  "annualized_volatility": 0.1950906689121734,
+                  "end_date": "2021-07-21",
+                  "metrics": {
+                    "annual_return": -0.0805472993799603,
+                    "benchmark_return": 0.0822424862353428,
+                    "excess_return": -0.16248333542206173,
+                    "max_drawdown": 0.25158986457632343,
+                    "sharpe_ratio": -0.412871101570831,
+                    "total_return": -0.08024084918671892
+                  },
+                  "scenario": "bear",
+                  "start_date": "2020-07-10",
+                  "window_index": 2
+                },
+                {
+                  "annualized_volatility": 0.18961162574084517,
+                  "end_date": "2021-10-27",
+                  "metrics": {
+                    "annual_return": -0.02094894529146263,
+                    "benchmark_return": 0.020719684918701686,
+                    "excess_return": -0.04158637291510314,
+                    "max_drawdown": 0.22893602433877855,
+                    "sharpe_ratio": -0.11048344324675037,
+                    "total_return": -0.020866687996401456
+                  },
+                  "scenario": "bear",
+                  "start_date": "2020-10-15",
+                  "window_index": 3
+                },
+                {
+                  "annualized_volatility": 0.18352249051657285,
+                  "end_date": "2022-01-25",
+                  "metrics": {
+                    "annual_return": 0.24438912130707924,
+                    "benchmark_return": -0.1612629366258279,
+                    "excess_return": 0.40457284705288254,
+                    "max_drawdown": 0.11516147320878677,
+                    "sharpe_ratio": 1.3316576111144778,
+                    "total_return": 0.24330991042705463
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-01-13",
+                  "window_index": 4
+                },
+                {
+                  "annualized_volatility": 0.21205608320816652,
+                  "end_date": "2022-05-06",
+                  "metrics": {
+                    "annual_return": -0.05763481668056902,
+                    "benchmark_return": -0.2310576375249357,
+                    "excess_return": 0.17364483536484243,
+                    "max_drawdown": 0.2829229632772117,
+                    "sharpe_ratio": -0.2717904424556955,
+                    "total_return": -0.05741280216009326
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-04-20",
+                  "window_index": 5
+                },
+                {
+                  "annualized_volatility": 0.22445006762119626,
+                  "end_date": "2022-08-04",
+                  "metrics": {
+                    "annual_return": 0.06443235973901995,
+                    "benchmark_return": -0.2038559040025163,
+                    "excess_return": 0.2680245467125224,
+                    "max_drawdown": 0.2829229632772117,
+                    "sharpe_ratio": 0.28706767800026406,
+                    "total_return": 0.06416864271000611
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-07-22",
+                  "window_index": 6
+                },
+                {
+                  "annualized_volatility": 0.23912935921086229,
+                  "end_date": "2022-11-09",
+                  "metrics": {
+                    "annual_return": 0.04385062437694365,
+                    "benchmark_return": -0.236396993670821,
+                    "excess_return": 0.2800698621128763,
+                    "max_drawdown": 0.2829229632772117,
+                    "sharpe_ratio": 0.18337616310122792,
+                    "total_return": 0.04367286844205531
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-10-28",
+                  "window_index": 7
+                },
+                {
+                  "annualized_volatility": 0.23985962376922842,
+                  "end_date": "2023-02-14",
+                  "metrics": {
+                    "annual_return": 0.14856631362216843,
+                    "benchmark_return": -0.12032752338136266,
+                    "excess_return": 0.26826268878519477,
+                    "max_drawdown": 0.2482415468492245,
+                    "sharpe_ratio": 0.6193885877395778,
+                    "total_return": 0.14793516540383211
+                  },
+                  "scenario": "bear",
+                  "start_date": "2022-01-26",
+                  "window_index": 8
+                }
+              ],
+              "worst_window_drawdown": 0.2829229632772117
+            },
+            "gate": "walk_forward_min_window_count",
+            "limit": 3,
+            "passed": true
+          },
+          {
+            "actual": 0.625,
+            "gate": "walk_forward_positive_excess_ratio",
+            "limit": 0.35,
+            "passed": true
+          },
+          {
+            "actual": 0.765625,
+            "details": {
+              "positive_return_probability": 0.765625,
+              "sample_size": 727,
+              "sharpe_ratio": {
+                "mean": 0.491908211883549,
+                "median": 0.44472116242473597,
+                "p05": -0.6168041687391945,
+                "p95": 1.790883397951942
+              },
+              "total_return": {
+                "mean": 0.36438440805759054,
+                "median": 0.27460374947224575,
+                "p05": -0.3134521212878859,
+                "p95": 1.420239749219677
+              },
+              "trials": 128
+            },
+            "gate": "bootstrap_positive_return_probability",
+            "limit": 0.35,
+            "passed": true
+          },
+          {
+            "actual": 1,
+            "details": {
+              "scenario_count": 1,
+              "scenarios": [
+                {
+                  "annualized_volatility": 0.20349183577656726,
+                  "end_date": "2023-04-04",
+                  "metrics": {
+                    "annual_return": 0.11146763722613873,
+                    "benchmark_return": 0.08032703554540266,
+                    "excess_return": 0.2761382638895973,
+                    "max_drawdown": 0.2829229632772117,
+                    "sharpe_ratio": 0.5477744932653194,
+                    "total_return": 0.35646529943499994
+                  },
+                  "scenario": "bear",
+                  "start_date": "2020-04-07"
+                }
+              ]
+            },
+            "gate": "market_scenario_coverage",
+            "limit": 1,
+            "passed": true
+          }
+        ],
+        "optimization_task_id": "opt-015eef9c-9500-4a45-b982-15bb7798ae37",
+        "status": "approved_candidate",
+        "trial_id": "trial-opt-015eef9c-9500-4a45-b982-15bb7798ae37-0002"
+      }
+    },
+    "best_trial": {
+      "optimization_task_id": "opt-015eef9c-9500-4a45-b982-15bb7798ae37",
+      "trial_id": "trial-opt-015eef9c-9500-4a45-b982-15bb7798ae37-0002",
+      "backtest_task_id": "optbt-9c5c062a-1fff-493a-9067-4026869d3fb9",
+      "score": 0.0552276528,
+      "parameters": {
+        "top_n": 30,
+        "rebalance": "20",
+        "combo_name": "full_eq_16f",
+        "min_amount": 0.0,
+        "skip_top_pct": 0.0,
+        "kelly_fraction": 0.0,
+        "score_direction": "ascending",
+        "max_position_pct": 0.08,
+        "max_gross_exposure": 1.0,
+        "kelly_lookback_days": 60,
+        "max_pairwise_correlation": 0.9,
+        "correlation_lookback_days": 60
+      },
+      "metrics": {
+        "turnover": "66.572832724074761449134391297",
+        "num_trades": 2019,
+        "sharpe_ratio": "0.546981653849983884207098305",
+        "win_rate_pct": "0.4945919370698131760078662734",
+        "max_drawdown_pct": "0.282922963277339724424247309",
+        "total_return_pct": "0.3564652994348129",
+        "annual_return_pct": "0.1113063008780402",
+        "excess_return_pct": "0.2761382638894102332325089061",
+        "information_ratio": "0",
+        "benchmark_return_pct": "0.0803270355454026667674910939"
+      },
+      "constraint_violations": [],
+      "status": "completed"
+    }
+  },
+  {
+    "window_index": 6,
+    "start_date": "20210406",
+    "end_date": "20240405",
+    "optimization_task_id": "opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": "trial-opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24-0001",
+        "completed": 8,
+        "elapsed_ms": 27423,
+        "executed": 8,
+        "experiment_run_id": "exp-a1940040-dbb6-4085-b4cf-b6ec8d6ffdb5",
+        "failed": 0,
+        "optimization_task_id": "opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24",
+        "performance_gate_status": "passed",
+        "performance_gates": [
+          {
+            "actual": 8,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 0,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 27423,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 0,
+      "data": {
+        "gate_result_id": "gate-5dc3d5e0-1b41-4e4a-9e58-e34c4f1face1",
+        "gate_results": [
+          {
+            "actual": [
+              {
+                "actual": "0.6068705096492625992263824868",
+                "constraint": "max_drawdown",
+                "limit": "0.5999999999999999777955395073",
+                "severity": "hard"
+              }
+            ],
+            "gate": "no_hard_constraint_violations",
+            "passed": false
+          },
+          {
+            "actual": 4066,
+            "gate": "min_trade_count",
+            "limit": 20,
+            "passed": true
+          },
+          {
+            "actual": "0.6068705096492625992263824868",
+            "gate": "max_drawdown",
+            "limit": "0.5999999999999999777955395073",
+            "passed": false
+          },
+          {
+            "actual": "0.0000000000",
+            "gate": "score_gap_vs_runner_up",
+            "limit": "0",
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "details": {
+              "positive_excess_window_ratio": 0.25,
+              "scenario_count": 1,
+              "step_size": 63,
+              "window_count": 8,
+              "window_size": 252,
+              "windows": [
+                {
+                  "annualized_volatility": 0.23264749368406887,
+                  "end_date": "2022-04-19",
+                  "metrics": {
+                    "annual_return": -0.10980599543596159,
+                    "benchmark_return": -0.1955979075165779,
+                    "excess_return": 0.08620289453657792,
+                    "max_drawdown": 0.229878763766141,
+                    "sharpe_ratio": -0.47198443317457045,
+                    "total_return": -0.10939501297999998
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-04-06",
+                  "window_index": 1
+                },
+                {
+                  "annualized_volatility": 0.2550325077898612,
+                  "end_date": "2022-07-21",
+                  "metrics": {
+                    "annual_return": -0.2778173168852325,
+                    "benchmark_return": -0.1674834559247661,
+                    "excess_return": -0.10940050452905925,
+                    "max_drawdown": 0.36099034150242787,
+                    "sharpe_ratio": -1.0893408032286733,
+                    "total_return": -0.27688396045382535
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-07-08",
+                  "window_index": 2
+                },
+                {
+                  "annualized_volatility": 0.2381146662419033,
+                  "end_date": "2022-10-26",
+                  "metrics": {
+                    "annual_return": -0.2536306848943085,
+                    "benchmark_return": -0.25576083811089445,
+                    "excess_return": 0.002997080727785484,
+                    "max_drawdown": 0.38641886592265307,
+                    "sharpe_ratio": -1.0651619612403125,
+                    "total_return": -0.25276375738310897
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-10-14",
+                  "window_index": 3
+                },
+                {
+                  "annualized_volatility": 0.22836158029372242,
+                  "end_date": "2023-01-31",
+                  "metrics": {
+                    "annual_return": -0.37153634344022624,
+                    "benchmark_return": -0.142133879695319,
+                    "excess_return": -0.22824303460032846,
+                    "max_drawdown": 0.3826198467712156,
+                    "sharpe_ratio": -1.6269651968704606,
+                    "total_return": -0.37037691429564745
+                  },
+                  "scenario": "bear",
+                  "start_date": "2022-01-12",
+                  "window_index": 4
+                },
+                {
+                  "annualized_volatility": 0.21254551679532654,
+                  "end_date": "2023-05-04",
+                  "metrics": {
+                    "annual_return": -0.24418410375827437,
+                    "benchmark_return": -0.0099591998003139,
+                    "excess_return": -0.23338476953474252,
+                    "max_drawdown": 0.277137314647565,
+                    "sharpe_ratio": -1.1488555836885275,
+                    "total_return": -0.24334396933505642
+                  },
+                  "scenario": "bear",
+                  "start_date": "2022-04-20",
+                  "window_index": 5
+                },
+                {
+                  "annualized_volatility": 0.1987465377212847,
+                  "end_date": "2023-08-03",
+                  "metrics": {
+                    "annual_return": -0.1432869025489225,
+                    "benchmark_return": -0.05503476082172987,
+                    "excess_return": -0.08772621624334442,
+                    "max_drawdown": 0.2551981187978269,
+                    "sharpe_ratio": -0.7209529493784821,
+                    "total_return": -0.1427609770650743
+                  },
+                  "scenario": "bear",
+                  "start_date": "2022-07-22",
+                  "window_index": 6
+                },
+                {
+                  "annualized_volatility": 0.1812290102211266,
+                  "end_date": "2023-11-08",
+                  "metrics": {
+                    "annual_return": -0.1317564027702225,
+                    "benchmark_return": -0.0055278709898872735,
+                    "excess_return": -0.1257416174150463,
+                    "max_drawdown": 0.22686833119739594,
+                    "sharpe_ratio": -0.7270160699407856,
+                    "total_return": -0.13126948840493358
+                  },
+                  "scenario": "bear",
+                  "start_date": "2022-10-27",
+                  "window_index": 7
+                },
+                {
+                  "annualized_volatility": 0.20292978667303213,
+                  "end_date": "2024-02-06",
+                  "metrics": {
+                    "annual_return": -0.29094202994440077,
+                    "benchmark_return": -0.21073762566096155,
+                    "excess_return": -0.07923633575250166,
+                    "max_drawdown": 0.34193093879624126,
+                    "sharpe_ratio": -1.4337078588328591,
+                    "total_return": -0.2899739614134632
+                  },
+                  "scenario": "bear",
+                  "start_date": "2023-02-01",
+                  "window_index": 8
+                }
+              ],
+              "worst_window_drawdown": 0.38641886592265307
+            },
+            "gate": "walk_forward_min_window_count",
+            "limit": 3,
+            "passed": true
+          },
+          {
+            "actual": 0.25,
+            "gate": "walk_forward_positive_excess_ratio",
+            "limit": 0.35,
+            "passed": false
+          },
+          {
+            "actual": 0.0234375,
+            "details": {
+              "positive_return_probability": 0.0234375,
+              "sample_size": 727,
+              "sharpe_ratio": {
+                "mean": -0.844759960049527,
+                "median": -0.8571074188761718,
+                "p05": -1.566659503867219,
+                "p95": -0.10936461192455307
+              },
+              "total_return": {
+                "mean": -0.4281687505384837,
+                "median": -0.456970329705363,
+                "p05": -0.6906301128725936,
+                "p95": -0.06706322559560385
+              },
+              "trials": 128
+            },
+            "gate": "bootstrap_positive_return_probability",
+            "limit": 0.35,
+            "passed": false
+          },
+          {
+            "actual": 1,
+            "details": {
+              "scenario_count": 1,
+              "scenarios": [
+                {
+                  "annualized_volatility": 0.21877630396364559,
+                  "end_date": "2024-04-03",
+                  "metrics": {
+                    "annual_return": -0.17879387587456863,
+                    "benchmark_return": -0.3059210381690961,
+                    "excess_return": -0.12757711865390398,
+                    "max_drawdown": 0.6068705096491109,
+                    "sharpe_ratio": -0.8172451615430831,
+                    "total_return": -0.4334981568230001
+                  },
+                  "scenario": "bear",
+                  "start_date": "2021-04-06"
+                }
+              ]
+            },
+            "gate": "market_scenario_coverage",
+            "limit": 1,
+            "passed": true
+          }
+        ],
+        "optimization_task_id": "opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24",
+        "status": "rejected",
+        "trial_id": "trial-opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24-0001"
+      }
+    },
+    "best_trial": {
+      "optimization_task_id": "opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24",
+      "trial_id": "trial-opt-3e4e8494-33a9-4c72-837b-b1d0dc540e24-0001",
+      "backtest_task_id": "optbt-5abdc6e8-4763-49f9-a502-7941c6cd7d0c",
+      "score": -0.0289506786,
+      "parameters": {
+        "top_n": 80,
+        "rebalance": "20",
+        "combo_name": "full_icir_16f",
+        "min_amount": 0.0,
+        "skip_top_pct": 0.05,
+        "kelly_fraction": 0.25,
+        "score_direction": "descending",
+        "max_position_pct": 0.08,
+        "max_gross_exposure": 1.0,
+        "kelly_lookback_days": 60,
+        "max_pairwise_correlation": 0.75,
+        "correlation_lookback_days": 60
+      },
+      "metrics": {
+        "turnover": "66.487597990355751709899295894",
+        "num_trades": 4066,
+        "sharpe_ratio": "-0.816229371587171748405411976",
+        "win_rate_pct": "0.3821499013806706114398422091",
+        "max_drawdown_pct": "0.6068705096492625992263824868",
+        "total_return_pct": "-0.4334981568230266",
+        "annual_return_pct": "-0.1785716451024091",
+        "excess_return_pct": "-0.1275771186539305293846179645",
+        "information_ratio": "0",
+        "benchmark_return_pct": "-0.3059210381690960706153820355"
+      },
+      "constraint_violations": [
+        {
+          "limit": "0.5999999999999999777955395073",
+          "actual": "0.6068705096492625992263824868",
+          "severity": "hard",
+          "constraint": "max_drawdown"
+        }
+      ],
+      "status": "completed"
+    }
+  },
+  {
+    "window_index": 7,
+    "start_date": "20220406",
+    "end_date": "20250405",
+    "optimization_task_id": "opt-d87a6689-cece-4ea2-94a6-695b2d801647",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-d87a6689-cece-4ea2-94a6-695b2d801647",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": null,
+        "completed": 0,
+        "elapsed_ms": 42,
+        "executed": 8,
+        "experiment_run_id": "exp-b16edb33-3d2d-4e8e-9c2a-59e285a476d9",
+        "failed": 8,
+        "optimization_task_id": "opt-d87a6689-cece-4ea2-94a6-695b2d801647",
+        "performance_gate_status": "review_required",
+        "performance_gates": [
+          {
+            "actual": 0,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": false
+          },
+          {
+            "actual": 8,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": false
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 42,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 1,
+      "message": "optimization task has no best_trial_id; run completed trials first"
+    },
+    "best_trial": null
+  },
+  {
+    "window_index": 8,
+    "start_date": "20230512",
+    "end_date": "20260511",
+    "optimization_task_id": "opt-1435cb89-a99c-4fd8-8a25-70688f68fa67",
+    "create": {
+      "code": 0,
+      "data": {
+        "max_trials": 8,
+        "optimization_task_id": "opt-1435cb89-a99c-4fd8-8a25-70688f68fa67",
+        "status": "pending",
+        "trial_count": 8
+      }
+    },
+    "run": {
+      "code": 0,
+      "data": {
+        "best_trial_id": "trial-opt-1435cb89-a99c-4fd8-8a25-70688f68fa67-0003",
+        "completed": 8,
+        "elapsed_ms": 22718,
+        "executed": 8,
+        "experiment_run_id": "exp-046e1232-2f45-4929-8316-6a66aa5969bf",
+        "failed": 0,
+        "optimization_task_id": "opt-1435cb89-a99c-4fd8-8a25-70688f68fa67",
+        "performance_gate_status": "passed",
+        "performance_gates": [
+          {
+            "actual": 8,
+            "gate": "min_completed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 0,
+            "gate": "max_failed_trials",
+            "limit": 0,
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "gate": "executed_trials",
+            "limit": 8,
+            "passed": true
+          },
+          {
+            "actual": 22718,
+            "gate": "max_elapsed_ms",
+            "limit": 2400000,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "robustness": {
+      "code": 0,
+      "data": {
+        "gate_result_id": "gate-b99ac92c-9f2d-4522-8945-8f2554d5b962",
+        "gate_results": [
+          {
+            "actual": [],
+            "gate": "no_hard_constraint_violations",
+            "passed": true
+          },
+          {
+            "actual": 398,
+            "gate": "min_trade_count",
+            "limit": 20,
+            "passed": true
+          },
+          {
+            "actual": "0.1052400728280702",
+            "gate": "max_drawdown",
+            "limit": "0.5999999999999999777955395073",
+            "passed": true
+          },
+          {
+            "actual": "0.0000000000",
+            "gate": "score_gap_vs_runner_up",
+            "limit": "0",
+            "passed": true
+          },
+          {
+            "actual": 8,
+            "details": {
+              "positive_excess_window_ratio": 0.75,
+              "scenario_count": 3,
+              "step_size": 63,
+              "window_count": 8,
+              "window_size": 252,
+              "windows": [
+                {
+                  "annualized_volatility": 0.17128018442430165,
+                  "end_date": "2024-05-27",
+                  "metrics": {
+                    "annual_return": 0.160561752973573,
+                    "benchmark_return": -0.07670709521260588,
+                    "excess_return": 0.2365832869806057,
+                    "max_drawdown": 0.10524007282799995,
+                    "sharpe_ratio": 0.937421649289121,
+                    "total_return": 0.15987619176799983
+                  },
+                  "scenario": "bear",
+                  "start_date": "2023-05-12",
+                  "window_index": 1
+                },
+                {
+                  "annualized_volatility": 0.1750475455819707,
+                  "end_date": "2024-08-23",
+                  "metrics": {
+                    "annual_return": 0.13062864341437885,
+                    "benchmark_return": -0.1434157829748406,
+                    "excess_return": 0.2734937209698116,
+                    "max_drawdown": 0.10383578337688085,
+                    "sharpe_ratio": 0.7462466439051494,
+                    "total_return": 0.13007793799497103
+                  },
+                  "scenario": "bear",
+                  "start_date": "2023-08-11",
+                  "window_index": 2
+                },
+                {
+                  "annualized_volatility": 0.19514657167666652,
+                  "end_date": "2024-11-29",
+                  "metrics": {
+                    "annual_return": 0.24598865445382812,
+                    "benchmark_return": 0.09635610771029768,
+                    "excess_return": 0.14854560274293993,
+                    "max_drawdown": 0.10041664312834524,
+                    "sharpe_ratio": 1.2605328002451472,
+                    "total_return": 0.2449017104532376
+                  },
+                  "scenario": "mixed",
+                  "start_date": "2023-11-16",
+                  "window_index": 3
+                },
+                {
+                  "annualized_volatility": 0.16432350561095035,
+                  "end_date": "2025-03-07",
+                  "metrics": {
+                    "annual_return": 0.2321349275741551,
+                    "benchmark_return": 0.13116784310277052,
+                    "excess_return": 0.09994684769825746,
+                    "max_drawdown": 0.07800638470937055,
+                    "sharpe_ratio": 1.4126702489159009,
+                    "total_return": 0.23111469080102798
+                  },
+                  "scenario": "bull",
+                  "start_date": "2024-02-22",
+                  "window_index": 4
+                },
+                {
+                  "annualized_volatility": 0.11927290949220239,
+                  "end_date": "2025-06-11",
+                  "metrics": {
+                    "annual_return": 0.15221382907510272,
+                    "benchmark_return": 0.07909092954384778,
+                    "excess_return": 0.07247525779923913,
+                    "max_drawdown": 0.07800638470937055,
+                    "sharpe_ratio": 1.2761810684684596,
+                    "total_return": 0.1515661873430869
+                  },
+                  "scenario": "mixed",
+                  "start_date": "2024-05-28",
+                  "window_index": 5
+                },
+                {
+                  "annualized_volatility": 0.11356515234303868,
+                  "end_date": "2025-09-08",
+                  "metrics": {
+                    "annual_return": 0.18918122734681253,
+                    "benchmark_return": 0.34394508599618345,
+                    "excess_return": -0.1555812106294625,
+                    "max_drawdown": 0.07800638470937055,
+                    "sharpe_ratio": 1.6658387141098068,
+                    "total_return": 0.18836387536672095
+                  },
+                  "scenario": "bull",
+                  "start_date": "2024-08-26",
+                  "window_index": 6
+                },
+                {
+                  "annualized_volatility": 0.06853142473410914,
+                  "end_date": "2025-12-12",
+                  "metrics": {
+                    "annual_return": 0.060789318483986055,
+                    "benchmark_return": 0.160429847564312,
+                    "excess_return": -0.09988891526406074,
+                    "max_drawdown": 0.07800638470937055,
+                    "sharpe_ratio": 0.8870283774172005,
+                    "total_return": 0.06054093230025126
+                  },
+                  "scenario": "bull",
+                  "start_date": "2024-12-02",
+                  "window_index": 7
+                },
+                {
+                  "annualized_volatility": 0.1348993530212747,
+                  "end_date": "2026-03-23",
+                  "metrics": {
+                    "annual_return": 0.1794031843928654,
+                    "benchmark_return": 0.12451513843228224,
+                    "excess_return": 0.05411603052554237,
+                    "max_drawdown": 0.028753121087737647,
+                    "sharpe_ratio": 1.3299039645102875,
+                    "total_return": 0.1786311689578246
+                  },
+                  "scenario": "bull",
+                  "start_date": "2025-03-10",
+                  "window_index": 8
+                }
+              ],
+              "worst_window_drawdown": 0.10524007282799995
+            },
+            "gate": "walk_forward_min_window_count",
+            "limit": 3,
+            "passed": true
+          },
+          {
+            "actual": 0.75,
+            "gate": "walk_forward_positive_excess_ratio",
+            "limit": 0.35,
+            "passed": true
+          },
+          {
+            "actual": 1.0,
+            "details": {
+              "positive_return_probability": 1.0,
+              "sample_size": 723,
+              "sharpe_ratio": {
+                "mean": 1.2520229995598515,
+                "median": 1.2227436536100231,
+                "p05": 0.19241088225240577,
+                "p95": 2.4204392871888296
+              },
+              "total_return": {
+                "mean": 0.632737747553516,
+                "median": 0.5475335652416127,
+                "p05": 0.09405650329175752,
+                "p95": 1.5172539757629786
+              },
+              "trials": 128
+            },
+            "gate": "bootstrap_positive_return_probability",
+            "limit": 0.35,
+            "passed": true
+          },
+          {
+            "actual": 3,
+            "details": {
+              "scenario_count": 1,
+              "scenarios": [
+                {
+                  "annualized_volatility": 0.14653235000703,
+                  "end_date": "2026-05-11",
+                  "metrics": {
+                    "annual_return": 0.17770156110400603,
+                    "benchmark_return": 0.2575255560124985,
+                    "excess_return": 0.34130896606550154,
+                    "max_drawdown": 0.10524007282799995,
+                    "sharpe_ratio": 1.2127121491976391,
+                    "total_return": 0.598834522078
+                  },
+                  "scenario": "bull",
+                  "start_date": "2023-05-12"
+                }
+              ]
+            },
+            "gate": "market_scenario_coverage",
+            "limit": 1,
+            "passed": true
+          }
+        ],
+        "optimization_task_id": "opt-1435cb89-a99c-4fd8-8a25-70688f68fa67",
+        "status": "approved_candidate",
+        "trial_id": "trial-opt-1435cb89-a99c-4fd8-8a25-70688f68fa67-0003"
+      }
+    },
+    "best_trial": {
+      "optimization_task_id": "opt-1435cb89-a99c-4fd8-8a25-70688f68fa67",
+      "trial_id": "trial-opt-1435cb89-a99c-4fd8-8a25-70688f68fa67-0003",
+      "backtest_task_id": "optbt-a534dd1e-41c9-442b-95c7-ffe33e0af3ee",
+      "score": 0.0682617932,
+      "parameters": {
+        "top_n": 30,
+        "rebalance": "20",
+        "combo_name": "full_icir_16f_v3",
+        "min_amount": 0.0,
+        "skip_top_pct": 0.05,
+        "kelly_fraction": 0.25,
+        "score_direction": "descending",
+        "max_position_pct": 0.08,
+        "max_gross_exposure": 1.0,
+        "kelly_lookback_days": 60,
+        "max_pairwise_correlation": 0.75,
+        "correlation_lookback_days": 60
+      },
+      "metrics": {
+        "turnover": "17.50816751397916647689572769",
+        "num_trades": 398,
+        "sharpe_ratio": "1.2108966179840325643979662447",
+        "win_rate_pct": "0.627027027027027027027027027",
+        "max_drawdown_pct": "0.1052400728280702",
+        "total_return_pct": "0.5988345220775907",
+        "annual_return_pct": "0.177435527048774",
+        "excess_return_pct": "0.3413089660650920275306467222",
+        "information_ratio": "0",
+        "benchmark_return_pct": "0.2575255560124986724693532778"
+      },
+      "constraint_violations": [],
+      "status": "completed"
+    }
+  }
+]
