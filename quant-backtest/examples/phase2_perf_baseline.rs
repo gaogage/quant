@@ -1,6 +1,4 @@
-use quant_backtest::perf_baseline::{
-    parse_phase2_perf_args, run_phase2_smoke_baseline,
-};
+use quant_backtest::perf_baseline::{parse_phase2_perf_args, run_phase2_smoke_baseline};
 
 fn main() {
     let config = match parse_phase2_perf_args(std::env::args()) {

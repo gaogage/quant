@@ -73,7 +73,13 @@ where
             "--rebalance-days" => config.rebalance_every_n_days = parse_next_usize(&mut iter, arg)?,
             "--basket-size" => config.basket_size = parse_next_usize(&mut iter, arg)?,
             "--help" | "-h" => return Err(phase2_perf_usage()),
-            unknown => return Err(format!("unknown argument `{}`\n{}", unknown, phase2_perf_usage())),
+            unknown => {
+                return Err(format!(
+                    "unknown argument `{}`\n{}",
+                    unknown,
+                    phase2_perf_usage()
+                ))
+            }
         }
     }
 
@@ -209,7 +215,11 @@ fn generate_rebalance_signals(
     let mut signals = HashMap::new();
     let weight = Decimal::new(95, 2) / Decimal::from(basket_size as u64);
 
-    for (day_idx, date) in trading_days.iter().enumerate().step_by(rebalance_every_n_days) {
+    for (day_idx, date) in trading_days
+        .iter()
+        .enumerate()
+        .step_by(rebalance_every_n_days)
+    {
         let offset = day_idx % symbols.len();
         let mut target_weights = HashMap::with_capacity(basket_size);
         for basket_idx in 0..basket_size {

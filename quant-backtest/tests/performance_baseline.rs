@@ -19,7 +19,11 @@ fn phase2_smoke_baseline_reports_fixed_workload_dimensions() {
     assert_eq!(report.equity_points, 40);
     assert!(report.signal_count > 0);
     assert!(report.trade_count > 0);
-    assert!(report.total_return.to_string().parse::<rust_decimal::Decimal>().is_ok());
+    assert!(report
+        .total_return
+        .to_string()
+        .parse::<rust_decimal::Decimal>()
+        .is_ok());
 }
 
 #[test]

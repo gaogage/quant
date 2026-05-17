@@ -822,10 +822,11 @@ pub async fn sync_financial_data_with_task(
 
                     sqlx::query(
                         "INSERT INTO market_financial_indicator (ts_code, ann_date, end_date,
-                         eps, roe, roa, gross_margin, netprofit_margin, debt_to_assets, current_ratio)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                         eps, roe, roa, gross_margin, netprofit_margin, debt_to_assets, current_ratio, quick_ratio)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                          ON CONFLICT (ts_code, end_date) DO UPDATE SET
-                         eps=$4, roe=$5, roa=$6, gross_margin=$7, netprofit_margin=$8, debt_to_assets=$9, current_ratio=$10",
+                         eps=$4, roe=$5, roa=$6, gross_margin=$7, netprofit_margin=$8,
+                         debt_to_assets=$9, current_ratio=$10, quick_ratio=$11",
                     )
                     .bind(sym).bind(ad).bind(ed)
                     .bind(item.get("eps").and_then(|v| v.as_f64()))
@@ -835,6 +836,7 @@ pub async fn sync_financial_data_with_task(
                     .bind(item.get("netprofit_margin").and_then(|v| v.as_f64()))
                     .bind(item.get("debt_to_assets").and_then(|v| v.as_f64()))
                     .bind(item.get("current_ratio").and_then(|v| v.as_f64()))
+                    .bind(item.get("quick_ratio").and_then(|v| v.as_f64()))
                     .execute(pool).await?;
                     ind_count += 1;
                 }

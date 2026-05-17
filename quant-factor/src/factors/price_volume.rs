@@ -148,6 +148,140 @@ impl VolatilityFactor {
     }
 }
 
+// ─── Downside Volatility Factor ───────────────────────────────────
+
+/// Annualized downside volatility over a lookback window.
+///
+/// Only negative daily returns contribute to the score. A lower value is a
+/// lower downside-risk alpha source for defensive or regime-aware portfolios.
+pub struct DownsideVolatilityFactor {
+    pub period: usize,
+}
+
+impl DownsideVolatilityFactor {
+    pub fn new(period: usize) -> Self {
+        Self { period }
+    }
+
+    pub fn compute(&self, input: &FactorInput) -> FactorOutput {
+        let mut values = Vec::new();
+
+        for (symbol, bars) in &input.bars {
+            if bars.len() <= self.period + 1 {
+                continue;
+            }
+
+            let returns: Vec<f64> = bars
+                .windows(2)
+                .map(|window| {
+                    let prev_close: f64 = window[0].close.try_into().unwrap_or(f64::NAN);
+                    let close: f64 = window[1].close.try_into().unwrap_or(f64::NAN);
+                    if prev_close > 0.0 {
+                        (close - prev_close) / prev_close
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+
+            for i in self.period..bars.len() {
+                let start = i - self.period;
+                let end = i;
+                if end > returns.len() {
+                    break;
+                }
+
+                let window = &returns[start..end];
+                if window.is_empty() {
+                    continue;
+                }
+
+                let downside_mean_square =
+                    window.iter().map(|ret| ret.min(0.0).powi(2)).sum::<f64>()
+                        / window.len() as f64;
+                let downside_vol = (downside_mean_square * 252.0).sqrt();
+
+                values.push(FactorValue {
+                    symbol: symbol.clone(),
+                    date: bars[i].trade_date,
+                    value: downside_vol,
+                    available_at: None,
+                });
+            }
+        }
+
+        let meta = build_metadata(
+            &values,
+            "downside_volatility",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period, "annualized": true}),
+        );
+
+        FactorOutput {
+            name: format!("downvol_{}d", self.period),
+            values,
+            metadata: meta,
+        }
+    }
+}
+
+// ─── Reversal Factor ──────────────────────────────────────────────
+
+/// Short-term reversal: positive values mean the symbol fell over the window.
+pub struct ReversalFactor {
+    pub period: usize,
+}
+
+impl ReversalFactor {
+    pub fn new(period: usize) -> Self {
+        Self { period }
+    }
+
+    pub fn compute(&self, input: &FactorInput) -> FactorOutput {
+        let mut values = Vec::new();
+
+        for (symbol, bars) in &input.bars {
+            if bars.len() <= self.period {
+                continue;
+            }
+
+            for i in self.period..bars.len() {
+                let close_t = bars[i].close;
+                let close_tn = bars[i - self.period].close;
+
+                if close_tn.is_zero() {
+                    continue;
+                }
+
+                let raw: Decimal = (close_tn - close_t) / close_tn;
+                let val: f64 = raw.try_into().unwrap_or(f64::NAN);
+
+                values.push(FactorValue {
+                    symbol: symbol.clone(),
+                    date: bars[i].trade_date,
+                    value: val,
+                    available_at: None,
+                });
+            }
+        }
+
+        let meta = build_metadata(
+            &values,
+            "reversal",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
+
+        FactorOutput {
+            name: format!("rev_{}d", self.period),
+            values,
+            metadata: meta,
+        }
+    }
+}
+
 // ─── RSI Factor ───────────────────────────────────────────────────
 
 /// Relative Strength Index (Wilder smoothing)
@@ -681,6 +815,154 @@ impl MaxDrawdownFactor {
     }
 }
 
+// ─── Amihud Illiquidity Factor ────────────────────────────────────
+
+/// Amihud illiquidity: average abs(return) / amount over the lookback window.
+///
+/// Values are scaled by 1e9 to keep the numeric range readable. Lower values
+/// mean deeper liquidity for the same return path.
+pub struct AmihudIlliquidityFactor {
+    pub period: usize,
+}
+
+impl AmihudIlliquidityFactor {
+    pub fn new(period: usize) -> Self {
+        Self { period }
+    }
+
+    pub fn compute(&self, input: &FactorInput) -> FactorOutput {
+        let mut values = Vec::new();
+
+        for (symbol, bars) in &input.bars {
+            if bars.len() <= self.period {
+                continue;
+            }
+
+            let observations: Vec<(f64, f64, NaiveDate)> = bars
+                .windows(2)
+                .map(|window| {
+                    let prev_close: f64 = window[0].close.try_into().unwrap_or(f64::NAN);
+                    let close: f64 = window[1].close.try_into().unwrap_or(f64::NAN);
+                    let amount: f64 = window[1].amount.try_into().unwrap_or(f64::NAN);
+                    let ret = if prev_close > 0.0 {
+                        ((close - prev_close) / prev_close).abs()
+                    } else {
+                        0.0
+                    };
+                    (ret, amount, window[1].trade_date)
+                })
+                .collect();
+
+            if observations.len() < self.period {
+                continue;
+            }
+
+            for end in (self.period - 1)..observations.len() {
+                let window = &observations[end + 1 - self.period..=end];
+                let mut count = 0usize;
+                let total = window
+                    .iter()
+                    .filter_map(|(ret, amount, _)| {
+                        if *amount > 0.0 && ret.is_finite() {
+                            count += 1;
+                            Some(ret / amount)
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<f64>();
+
+                if count == 0 {
+                    continue;
+                }
+
+                values.push(FactorValue {
+                    symbol: symbol.clone(),
+                    date: observations[end].2,
+                    value: total / count as f64 * 1_000_000_000.0,
+                    available_at: None,
+                });
+            }
+        }
+
+        let meta = build_metadata(
+            &values,
+            "amihud_illiquidity",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period, "scale": 1_000_000_000.0}),
+        );
+
+        FactorOutput {
+            name: format!("amihud_{}d", self.period),
+            values,
+            metadata: meta,
+        }
+    }
+}
+
+// ─── Amount Intensity Factor ──────────────────────────────────────
+
+/// Current amount divided by trailing average amount.
+pub struct AmountIntensityFactor {
+    pub period: usize,
+}
+
+impl AmountIntensityFactor {
+    pub fn new(period: usize) -> Self {
+        Self { period }
+    }
+
+    pub fn compute(&self, input: &FactorInput) -> FactorOutput {
+        let mut values = Vec::new();
+
+        for (symbol, bars) in &input.bars {
+            if bars.len() <= self.period {
+                continue;
+            }
+
+            for i in self.period..bars.len() {
+                let trailing = &bars[i - self.period..i];
+                let valid_amounts = trailing
+                    .iter()
+                    .map(|bar| bar.amount.try_into().unwrap_or(f64::NAN))
+                    .filter(|amount: &f64| amount.is_finite())
+                    .collect::<Vec<f64>>();
+                if valid_amounts.is_empty() {
+                    continue;
+                }
+                let avg_amount = valid_amounts.iter().sum::<f64>() / valid_amounts.len() as f64;
+                let current_amount: f64 = bars[i].amount.try_into().unwrap_or(f64::NAN);
+
+                if avg_amount <= 0.0 || !current_amount.is_finite() {
+                    continue;
+                }
+
+                values.push(FactorValue {
+                    symbol: symbol.clone(),
+                    date: bars[i].trade_date,
+                    value: current_amount / avg_amount,
+                    available_at: None,
+                });
+            }
+        }
+
+        let meta = build_metadata(
+            &values,
+            "amount_intensity",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({"period": self.period}),
+        );
+
+        FactorOutput {
+            name: format!("amt_intensity_{}d", self.period),
+            values,
+            metadata: meta,
+        }
+    }
+}
+
 // ─── Turnover Factor ──────────────────────────────────────────────
 
 /// Average turnover rate over a lookback window
@@ -740,6 +1022,31 @@ impl TurnoverFactor {
             values,
             metadata: meta,
         }
+    }
+}
+
+/// Compute a supported price-volume factor by parsed factor type.
+pub fn compute_price_volume_factor(
+    factor_type: &str,
+    period: usize,
+    input: &FactorInput,
+) -> Option<FactorOutput> {
+    match factor_type {
+        "momentum" => Some(MomentumFactor::new(period).compute(input)),
+        "volatility" => Some(VolatilityFactor::new(period).compute(input)),
+        "turnover" => Some(TurnoverFactor::new(period).compute(input)),
+        "rsi" => Some(RSIFactor::new(period).compute(input)),
+        "bb_position" => Some(BBandPositionFactor::new(period).compute(input)),
+        "atr" => Some(ATRFactor::new(period).compute(input)),
+        "amplitude" => Some(AmplitudeFactor::new(period).compute(input)),
+        "vol_price_corr" => Some(VolPriceCorrFactor::new(period).compute(input)),
+        "skewness" => Some(SkewnessFactor::new(period).compute(input)),
+        "max_drawdown" => Some(MaxDrawdownFactor::new(period).compute(input)),
+        "reversal" => Some(ReversalFactor::new(period).compute(input)),
+        "downside_volatility" => Some(DownsideVolatilityFactor::new(period).compute(input)),
+        "amihud_illiquidity" => Some(AmihudIlliquidityFactor::new(period).compute(input)),
+        "amount_intensity" => Some(AmountIntensityFactor::new(period).compute(input)),
+        _ => None,
     }
 }
 
@@ -908,5 +1215,96 @@ mod tests {
         assert_eq!(output.values.len(), 3);
         // day 5: 1500 / mean(1000,1200,1100,1300,900) = 1500/1100 ≈ 1.364
         assert!((output.values[0].value - 1.364).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_reversal_factor_is_positive_for_recent_losers() {
+        let factor = ReversalFactor::new(3);
+        let bars = make_bars(
+            "000001.SZ",
+            &[10.0, 11.0, 12.0, 9.0, 8.0, 7.0],
+            &[1000.0; 6],
+        );
+        let mut input_bars = HashMap::new();
+        input_bars.insert("000001.SZ".to_string(), bars);
+        let input = FactorInput {
+            bars: input_bars,
+            trade_dates: vec![],
+        };
+
+        let output = factor.compute(&input);
+
+        assert_eq!(output.name, "rev_3d");
+        assert!((output.values[0].value - 0.10).abs() < 0.001);
+        assert!(output.values[2].value > output.values[0].value);
+    }
+
+    #[test]
+    fn test_downside_volatility_ignores_upside_only_window() {
+        let factor = DownsideVolatilityFactor::new(3);
+        let bars = make_bars("000001.SZ", &[10.0, 10.5, 11.0, 11.5, 12.0], &[1000.0; 5]);
+        let mut input_bars = HashMap::new();
+        input_bars.insert("000001.SZ".to_string(), bars);
+        let input = FactorInput {
+            bars: input_bars,
+            trade_dates: vec![],
+        };
+
+        let output = factor.compute(&input);
+
+        assert_eq!(output.name, "downvol_3d");
+        assert!(!output.values.is_empty());
+        assert!(output.values.iter().all(|value| value.value == 0.0));
+    }
+
+    #[test]
+    fn test_amihud_illiquidity_is_lower_for_deeper_amount() {
+        let factor = AmihudIlliquidityFactor::new(3);
+        let closes = &[10.0, 11.0, 10.5, 12.0, 11.5];
+        let low_amount_bars = make_bars("LOW.SZ", closes, &[1000.0; 5]);
+        let high_amount_bars = make_bars("HIGH.SZ", closes, &[100000.0; 5]);
+        let mut input_bars = HashMap::new();
+        input_bars.insert("LOW.SZ".to_string(), low_amount_bars);
+        input_bars.insert("HIGH.SZ".to_string(), high_amount_bars);
+        let input = FactorInput {
+            bars: input_bars,
+            trade_dates: vec![],
+        };
+
+        let output = factor.compute(&input);
+        let low = output
+            .values
+            .iter()
+            .find(|value| value.symbol == "LOW.SZ")
+            .expect("low amount value");
+        let high = output
+            .values
+            .iter()
+            .find(|value| value.symbol == "HIGH.SZ")
+            .expect("high amount value");
+
+        assert_eq!(output.name, "amihud_3d");
+        assert!(low.value > high.value);
+    }
+
+    #[test]
+    fn test_amount_intensity_compares_current_amount_to_trailing_average() {
+        let factor = AmountIntensityFactor::new(3);
+        let bars = make_bars(
+            "000001.SZ",
+            &[10.0, 10.0, 10.0, 10.0, 10.0],
+            &[1000.0, 1000.0, 1000.0, 3000.0, 1000.0],
+        );
+        let mut input_bars = HashMap::new();
+        input_bars.insert("000001.SZ".to_string(), bars);
+        let input = FactorInput {
+            bars: input_bars,
+            trade_dates: vec![],
+        };
+
+        let output = factor.compute(&input);
+
+        assert_eq!(output.name, "amt_intensity_3d");
+        assert!((output.values[0].value - 3.0).abs() < 0.001);
     }
 }

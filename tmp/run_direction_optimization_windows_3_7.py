@@ -4,7 +4,8 @@ from pathlib import Path
 
 import run_rolling_optimization as base
 
-base.OUT = Path(__file__).with_name("direction_optimization_results.json")
+base.OUT = Path(__file__).with_name("direction_optimization_windows_3_7_results.json")
+TARGET_WINDOW_INDEXES = {3, 7}
 COMBO_VERSIONS = [
     ("full_eq_16f", "1.0.0"),
     ("full_icir_16f", "1.0.0"),
@@ -129,6 +130,8 @@ def main():
         for item in results
     }
     for idx, (start_date, end_date) in enumerate(base.WINDOWS, start=1):
+        if idx not in TARGET_WINDOW_INDEXES:
+            continue
         for combo_idx, (combo_name, version) in enumerate(COMBO_VERSIONS, start=1):
             if (idx, combo_name, version) in done:
                 continue

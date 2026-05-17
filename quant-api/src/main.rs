@@ -98,6 +98,10 @@ async fn main() {
             get(routes::sync::sync_task_status),
         )
         .route(
+            "/api/v1/quant/data/sync-tasks/{task_id}/cancel",
+            post(routes::sync::cancel_sync_task),
+        )
+        .route(
             "/api/v1/quant/data/sync/daily",
             post(routes::sync::sync_daily),
         )
@@ -108,6 +112,10 @@ async fn main() {
         .route(
             "/api/v1/quant/data/sync/tasks/{task_id}",
             get(routes::sync::sync_task_status),
+        )
+        .route(
+            "/api/v1/quant/data/sync/tasks/{task_id}/cancel",
+            post(routes::sync::cancel_sync_task),
         )
         .route(
             "/api/v1/quant/data/sync/adj-factor",
@@ -177,6 +185,14 @@ async fn main() {
             post(routes::factors::batch_sync_factors_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-price-volume-backfill/background",
+            post(routes::factors::backfill_phase7_price_volume_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-financial-quality-backfill/background",
+            post(routes::factors::backfill_phase7_financial_quality_background),
+        )
+        .route(
             "/api/v1/quant/factors/evaluate-all",
             post(routes::factors::evaluate_all_factors),
         )
@@ -239,6 +255,10 @@ async fn main() {
         .route(
             "/api/v1/quant/optimizations",
             post(routes::optimization::create_optimization),
+        )
+        .route(
+            "/api/v1/quant/optimizations/phase7-layered",
+            post(routes::optimization::create_phase7_layered_optimization),
         )
         .route(
             "/api/v1/quant/optimizations/{optimization_task_id}",

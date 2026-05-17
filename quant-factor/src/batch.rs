@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::NaiveDate;
-use tokio::sync::Mutex;
 
 use crate::factors::price_volume::*;
 use crate::standardize::standardize;
@@ -61,8 +60,6 @@ pub async fn batch_compute_factors(
     let (factor_type, period) = parse_factor(&config.factor);
     let n_chunks = (config.symbols.len() + config.chunk_size - 1) / config.chunk_size;
 
-    // We only use Mutex to avoid full Arc<Mutex<>> on the loader;
-    // actually bar_loader is Arc<Fn> so we can call it concurrently.
     for (chunk_idx, chunk) in config.symbols.chunks(config.chunk_size).enumerate() {
         let syms: Vec<String> = chunk.to_vec();
 
@@ -91,18 +88,9 @@ pub async fn batch_compute_factors(
         };
 
         // Compute factor
-        let mut output = match factor_type {
-            "momentum" => MomentumFactor::new(period).compute(&input),
-            "volatility" => VolatilityFactor::new(period).compute(&input),
-            "turnover" => TurnoverFactor::new(period).compute(&input),
-            "rsi" => RSIFactor::new(period).compute(&input),
-            "bb_position" => BBandPositionFactor::new(period).compute(&input),
-            "atr" => ATRFactor::new(period).compute(&input),
-            "amplitude" => AmplitudeFactor::new(period).compute(&input),
-            "vol_price_corr" => VolPriceCorrFactor::new(period).compute(&input),
-            "skewness" => SkewnessFactor::new(period).compute(&input),
-            "max_drawdown" => MaxDrawdownFactor::new(period).compute(&input),
-            _ => {
+        let mut output = match compute_price_volume_factor(factor_type, period, &input) {
+            Some(output) => output,
+            None => {
                 errors.push(format!("Unknown factor: {}", config.factor));
                 break;
             }
@@ -156,8 +144,25 @@ fn parse_factor(name: &str) -> (&'static str, usize) {
             "volatility",
             rest.trim_end_matches('d').parse().unwrap_or(20),
         )
+    } else if let Some(rest) = name.strip_prefix("downvol_") {
+        (
+            "downside_volatility",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
+    } else if let Some(rest) = name.strip_prefix("rev_") {
+        ("reversal", rest.trim_end_matches('d').parse().unwrap_or(5))
     } else if let Some(rest) = name.strip_prefix("turn_") {
         ("turnover", rest.trim_end_matches('d').parse().unwrap_or(20))
+    } else if let Some(rest) = name.strip_prefix("amihud_") {
+        (
+            "amihud_illiquidity",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
+    } else if let Some(rest) = name.strip_prefix("amt_intensity_") {
+        (
+            "amount_intensity",
+            rest.trim_end_matches('d').parse().unwrap_or(20),
+        )
     } else if let Some(rest) = name.strip_prefix("rsi_") {
         ("rsi", rest.trim_end_matches('d').parse().unwrap_or(14))
     } else if let Some(rest) = name.strip_prefix("bb_pos_") {

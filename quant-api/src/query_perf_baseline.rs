@@ -59,7 +59,13 @@ where
             "--iterations" => config.iterations = parse_next_usize(&mut iter, arg)?,
             "--page-size" => config.page_size = parse_next_i64(&mut iter, arg)?,
             "--help" | "-h" => return Err(query_perf_usage()),
-            unknown => return Err(format!("unknown argument `{}`\n{}", unknown, query_perf_usage())),
+            unknown => {
+                return Err(format!(
+                    "unknown argument `{}`\n{}",
+                    unknown,
+                    query_perf_usage()
+                ))
+            }
         }
     }
 

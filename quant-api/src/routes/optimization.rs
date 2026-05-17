@@ -6,6 +6,9 @@ use axum::{
     Json,
 };
 use chrono::NaiveDate;
+use quant_common::phase7::{
+    build_layered_search_plan, LayeredSearchConfig, LayeredSearchPlan, LocalResourcePlan,
+};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -14,7 +17,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
-use crate::routes::backtest::{execute_factor_backtest, RunFactorBacktestReq};
+use crate::routes::backtest::{
+    execute_factor_backtest, MarketRegimeBacktestReq, RunFactorBacktestReq,
+};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +36,17 @@ pub struct CreateOptimizationRequest {
     pub random_seed: u64,
     #[serde(default = "default_max_trials")]
     pub max_trials: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7LayeredOptimizationRequest {
+    pub strategy_version_id: String,
+    pub data_version_id: String,
+    pub objective: Value,
+    pub constraints: Option<Value>,
+    pub walk_forward: Option<Value>,
+    pub backtest_template: Option<Value>,
+    pub max_trials: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +148,12 @@ struct NormalizedPromoteRequest {
     status: String,
 }
 
+struct Phase7LayeredPlanBundle {
+    resource_plan: LocalResourcePlan,
+    plan: LayeredSearchPlan,
+    search_space: Value,
+}
+
 fn default_random_seed() -> u64 {
     42
 }
@@ -148,24 +170,58 @@ fn normalize_limit(value: Option<i64>) -> i64 {
     value.unwrap_or(100).clamp(1, 500)
 }
 
+fn build_phase7_layered_plan_bundle(
+    req: &Phase7LayeredOptimizationRequest,
+    mut resource_plan: LocalResourcePlan,
+) -> Phase7LayeredPlanBundle {
+    if let Some(max_trials) = req.max_trials {
+        resource_plan.max_trials = normalize_max_trials(max_trials);
+    }
+
+    let config = LayeredSearchConfig::local_professional_default();
+    let plan = build_layered_search_plan(&config, &resource_plan);
+    let search_space = json!({
+        "phase": "7-D",
+        "search_method": "phase7_layered_grid",
+        "config": config,
+        "resource_plan": resource_plan.clone(),
+        "requested_trials": plan.requested_trials,
+        "planned_trials": plan.planned_trials,
+        "truncated": plan.truncated,
+    });
+
+    Phase7LayeredPlanBundle {
+        resource_plan,
+        plan,
+        search_space,
+    }
+}
+
 pub async fn create_optimization(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateOptimizationRequest>,
 ) -> impl IntoResponse {
     if req.search_method != "random_search" && req.search_method != "grid_search" {
-        return Json(json!({"code": 1, "message": format!("unsupported search_method: {}", req.search_method)}));
+        return Json(
+            json!({"code": 1, "message": format!("unsupported search_method: {}", req.search_method)}),
+        );
     }
 
     let max_trials = normalize_max_trials(req.max_trials);
-    let trial_params = match generate_trial_parameters(&req.search_space, req.random_seed, max_trials) {
-        Ok(params) => params,
-        Err(message) => return Json(json!({"code": 1, "message": message})),
-    };
+    let trial_params =
+        match generate_trial_parameters(&req.search_space, req.random_seed, max_trials) {
+            Ok(params) => params,
+            Err(message) => return Json(json!({"code": 1, "message": message})),
+        };
 
     let task_id = format!("opt-{}", Uuid::new_v4());
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(error) => return Json(json!({"code": 1, "message": format!("Failed to begin optimization transaction: {}", error)})),
+        Err(error) => {
+            return Json(
+                json!({"code": 1, "message": format!("Failed to begin optimization transaction: {}", error)}),
+            )
+        }
     };
 
     let insert_task = sqlx::query(
@@ -187,7 +243,9 @@ pub async fn create_optimization(
     .await;
 
     if let Err(error) = insert_task {
-        return Json(json!({"code": 1, "message": format!("Failed to create optimization task: {}", error)}));
+        return Json(
+            json!({"code": 1, "message": format!("Failed to create optimization task: {}", error)}),
+        );
     }
 
     for (idx, params) in trial_params.iter().enumerate() {
@@ -204,12 +262,16 @@ pub async fn create_optimization(
         .execute(&mut *tx)
         .await
         {
-            return Json(json!({"code": 1, "message": format!("Failed to create optimization trial: {}", error)}));
+            return Json(
+                json!({"code": 1, "message": format!("Failed to create optimization trial: {}", error)}),
+            );
         }
     }
 
     if let Err(error) = tx.commit().await {
-        return Json(json!({"code": 1, "message": format!("Failed to commit optimization task: {}", error)}));
+        return Json(
+            json!({"code": 1, "message": format!("Failed to commit optimization task: {}", error)}),
+        );
     }
 
     Json(json!({
@@ -223,11 +285,108 @@ pub async fn create_optimization(
     }))
 }
 
+pub async fn create_phase7_layered_optimization(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7LayeredOptimizationRequest>,
+) -> impl IntoResponse {
+    let bundle = build_phase7_layered_plan_bundle(&req, LocalResourcePlan::local_mac());
+    let task_id = format!("opt-phase7-{}", Uuid::new_v4());
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            return Json(
+                json!({"code": 1, "message": format!("Failed to begin phase7 optimization transaction: {}", error)}),
+            );
+        }
+    };
+
+    let insert_task = sqlx::query(
+        "INSERT INTO optimization_task
+           (optimization_task_id, strategy_version_id, data_version_id, search_method,
+            search_space, objective, constraints, walk_forward_config, backtest_template, status, progress)
+         VALUES ($1, $2, $3, 'phase7_layered_grid', $4, $5, $6, $7, $8, 'pending', 0)",
+    )
+    .bind(&task_id)
+    .bind(&req.strategy_version_id)
+    .bind(&req.data_version_id)
+    .bind(&bundle.search_space)
+    .bind(&req.objective)
+    .bind(&req.constraints)
+    .bind(&req.walk_forward)
+    .bind(&req.backtest_template)
+    .execute(&mut *tx)
+    .await;
+
+    if let Err(error) = insert_task {
+        return Json(
+            json!({"code": 1, "message": format!("Failed to create phase7 optimization task: {}", error)}),
+        );
+    }
+
+    for trial in &bundle.plan.trials {
+        let trial_id = format!("trial-{}-{:04}", task_id, trial.trial_index + 1);
+        if let Err(error) = sqlx::query(
+            "INSERT INTO optimization_trial
+               (trial_id, optimization_task_id, trial_index, parameters, status, progress)
+             VALUES ($1, $2, $3, $4, 'pending', 0)",
+        )
+        .bind(&trial_id)
+        .bind(&task_id)
+        .bind((trial.trial_index + 1) as i32)
+        .bind(&trial.parameters)
+        .execute(&mut *tx)
+        .await
+        {
+            return Json(
+                json!({"code": 1, "message": format!("Failed to create phase7 optimization trial: {}", error)}),
+            );
+        }
+    }
+
+    if let Err(error) = tx.commit().await {
+        return Json(
+            json!({"code": 1, "message": format!("Failed to commit phase7 optimization task: {}", error)}),
+        );
+    }
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "optimization_task_id": task_id,
+            "status": "pending",
+            "search_method": "phase7_layered_grid",
+            "requested_trials": bundle.plan.requested_trials,
+            "planned_trials": bundle.plan.planned_trials,
+            "truncated": bundle.plan.truncated,
+            "batch_size": bundle.plan.batch_size,
+            "max_parallel_trials": bundle.plan.max_parallel_trials,
+            "resource_plan": bundle.resource_plan,
+        }
+    }))
+}
+
 pub async fn get_optimization(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
-    let row = sqlx::query_as::<_, (String, String, String, String, Value, Value, Option<Value>, Option<Value>, Option<Value>, String, Option<String>, i32, Option<chrono::DateTime<chrono::Utc>>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            Value,
+            Value,
+            Option<Value>,
+            Option<Value>,
+            Option<Value>,
+            String,
+            Option<String>,
+            i32,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ),
+    >(
         "SELECT optimization_task_id, strategy_version_id, data_version_id, search_method,
            search_space, objective, constraints, walk_forward_config, backtest_template, status,
            best_trial_id, progress, created_at
@@ -241,7 +400,11 @@ pub async fn get_optimization(
     let row = match row {
         Ok(Some(row)) => row,
         Ok(None) => return Json(json!({"code": 1, "message": "optimization task not found"})),
-        Err(error) => return Json(json!({"code": 1, "message": format!("Failed to get optimization task: {}", error)})),
+        Err(error) => {
+            return Json(
+                json!({"code": 1, "message": format!("Failed to get optimization task: {}", error)}),
+            )
+        }
     };
 
     let counts = sqlx::query_as::<_, (i64, i64, i64)>(
@@ -285,7 +448,14 @@ pub async fn run_optimization_trials(
     Json(req): Json<RunOptimizationRequest>,
 ) -> impl IntoResponse {
     let trial_limit = normalize_limit(req.trial_limit);
-    match execute_pending_trials(&state.db, &task_id, trial_limit, req.performance_gate.as_ref()).await {
+    match execute_pending_trials(
+        &state.db,
+        &task_id,
+        trial_limit,
+        req.performance_gate.as_ref(),
+    )
+    .await
+    {
         Ok(summary) => Json(json!({"code": 0, "data": summary})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -324,7 +494,21 @@ pub async fn list_optimization_trials(
         .filter(|value| !value.is_empty());
     let limit = normalize_limit(query.limit);
 
-    let rows = sqlx::query_as::<_, (String, i32, Value, Option<Decimal>, Option<Value>, Option<Value>, String, i32, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i32,
+            Value,
+            Option<Decimal>,
+            Option<Value>,
+            Option<Value>,
+            String,
+            i32,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         "SELECT trial_id, trial_index, parameters, score, metrics, constraint_violations,
            status, progress, backtest_task_id, error_message
          FROM optimization_trial
@@ -358,7 +542,9 @@ pub async fn list_optimization_trials(
                 })).collect::<Vec<_>>()
             }
         })),
-        Err(error) => Json(json!({"code": 1, "message": format!("Failed to list optimization trials: {}", error)})),
+        Err(error) => Json(
+            json!({"code": 1, "message": format!("Failed to list optimization trials: {}", error)}),
+        ),
     }
 }
 
@@ -477,14 +663,9 @@ async fn execute_pending_trials(
 
         match execute_factor_backtest(db, &backtest_task_id, request).await {
             Ok(output) => {
-                let scored = score_trial(&output.metrics, &task.objective, task.constraints.as_ref());
-                mark_trial_completed(
-                    db,
-                    trial_id,
-                    &backtest_task_id,
-                    &scored,
-                )
-                .await?;
+                let scored =
+                    score_trial(&output.metrics, &task.objective, task.constraints.as_ref());
+                mark_trial_completed(db, trial_id, &backtest_task_id, &scored).await?;
                 completed += 1;
             }
             Err(error) => {
@@ -694,13 +875,22 @@ async fn promote_trial(
     .map_err(|error| format!("Failed to load optimization task: {}", error))?
     .ok_or_else(|| "optimization task not found".to_string())?;
 
-    let default_trial_id = best_trial_id
-        .0
-        .as_deref()
-        .ok_or_else(|| "optimization task has no best_trial_id; run completed trials first".to_string())?;
+    let default_trial_id = best_trial_id.0.as_deref().ok_or_else(|| {
+        "optimization task has no best_trial_id; run completed trials first".to_string()
+    })?;
     let normalized = normalize_promote_request(default_trial_id, req)?;
 
-    let trial = sqlx::query_as::<_, (String, Value, Option<Value>, Option<Decimal>, Option<Value>, String)>(
+    let trial = sqlx::query_as::<
+        _,
+        (
+            String,
+            Value,
+            Option<Value>,
+            Option<Decimal>,
+            Option<Value>,
+            String,
+        ),
+    >(
         "SELECT trial_id, parameters, metrics, score, constraint_violations, status
          FROM optimization_trial
          WHERE optimization_task_id = $1 AND trial_id = $2",
@@ -807,10 +997,9 @@ async fn evaluate_and_persist_robustness(
     .map_err(|error| format!("Failed to load optimization task: {}", error))?
     .ok_or_else(|| "optimization task not found".to_string())?;
 
-    let best_trial_id = task
-        .0
-        .as_deref()
-        .ok_or_else(|| "optimization task has no best_trial_id; run completed trials first".to_string())?;
+    let best_trial_id = task.0.as_deref().ok_or_else(|| {
+        "optimization task has no best_trial_id; run completed trials first".to_string()
+    })?;
 
     let trial = sqlx::query_as::<_, (Decimal, Option<Value>, Option<Value>, Option<String>)>(
         "SELECT score, metrics, constraint_violations, backtest_task_id
@@ -838,15 +1027,17 @@ async fn evaluate_and_persist_robustness(
     .map_err(|error| format!("Failed to load runner-up optimization trial: {}", error))?
     .map(|row| row.0);
 
-    let policy = gate_policy.cloned().unwrap_or_else(|| json!({
-        "min_trade_count": 1,
-        "max_drawdown": 0.20,
-        "min_score_gap": 0.0,
-        "walk_forward_window_days": 63,
-        "walk_forward_step_days": 21,
-        "bootstrap_trials": 256,
-        "bootstrap_seed": 42
-    }));
+    let policy = gate_policy.cloned().unwrap_or_else(|| {
+        json!({
+            "min_trade_count": 1,
+            "max_drawdown": 0.20,
+            "min_score_gap": 0.0,
+            "walk_forward_window_days": 63,
+            "walk_forward_step_days": 21,
+            "bootstrap_trials": 256,
+            "bootstrap_seed": 42
+        })
+    });
     let analysis = if let Some(backtest_task_id) = trial.3.as_deref() {
         load_robustness_timeseries_analysis(db, backtest_task_id, &policy).await?
     } else {
@@ -874,7 +1065,10 @@ async fn evaluate_and_persist_robustness(
     .bind(&policy)
     .bind(&evaluation.gates)
     .bind(&evaluation.status)
-    .bind(format!("Robustness gate evaluated as {}", evaluation.status))
+    .bind(format!(
+        "Robustness gate evaluated as {}",
+        evaluation.status
+    ))
     .execute(db)
     .await
     .map_err(|error| format!("Failed to persist robustness gate result: {}", error))?;
@@ -908,7 +1102,12 @@ async fn load_robustness_timeseries_analysis(
     .bind(backtest_task_id)
     .fetch_all(db)
     .await
-    .map_err(|error| format!("Failed to load backtest equity curve for robustness: {}", error))?;
+    .map_err(|error| {
+        format!(
+            "Failed to load backtest equity curve for robustness: {}",
+            error
+        )
+    })?;
 
     if rows.len() < 3 {
         return Ok(None);
@@ -916,11 +1115,13 @@ async fn load_robustness_timeseries_analysis(
     let points = rows
         .into_iter()
         .filter(|(_, portfolio_value, _)| portfolio_value.is_finite() && *portfolio_value > 0.0)
-        .map(|(trade_date, portfolio_value, benchmark_value)| RobustnessDailyPoint {
-            trade_date,
-            portfolio_value,
-            benchmark_value: benchmark_value.filter(|value| value.is_finite() && *value > 0.0),
-        })
+        .map(
+            |(trade_date, portfolio_value, benchmark_value)| RobustnessDailyPoint {
+                trade_date,
+                portfolio_value,
+                benchmark_value: benchmark_value.filter(|value| value.is_finite() && *value > 0.0),
+            },
+        )
         .collect::<Vec<_>>();
     if points.len() < 3 {
         return Ok(None);
@@ -1106,6 +1307,14 @@ fn build_factor_trial_request(
         }
     };
 
+    let benchmark = optional_string("benchmark")?.or_else(|| Some("000300.SH".into()));
+    let market_regime = market_regime_request_from_value(
+        params
+            .get("market_regime")
+            .or_else(|| template.get("market_regime")),
+        benchmark.as_deref().unwrap_or("000300.SH"),
+    )?;
+
     Ok(RunFactorBacktestReq {
         combo_name: string_value("combo_name", None)?,
         version: string_value("version", Some("1.0.0"))?,
@@ -1127,14 +1336,76 @@ fn build_factor_trial_request(
         kelly_lookback_days: usize_value("kelly_lookback_days", 60)?,
         max_gross_exposure: f64_value("max_gross_exposure", 1.0)?,
         score_direction: string_value("score_direction", Some("descending"))?,
+        portfolio_method: string_value("portfolio_method", Some("heuristic"))?,
+        risk_budget_lookback_days: usize_value("risk_budget_lookback_days", 60)?,
+        capacity_penalty_strength: f64_value("capacity_penalty_strength", 0.0)?,
         cost_model: None,
         execution_rules: None,
-        benchmark: optional_string("benchmark")?.or_else(|| Some("000300.SH".into())),
+        benchmark,
+        market_regime,
         start_date: string_value("start_date", None)?,
         end_date: string_value("end_date", None)?,
         initial_capital: f64_value("initial_capital", 1_000_000.0)?,
         mode: optional_string("mode")?.or_else(|| Some("standard".into())),
     })
+}
+
+fn market_regime_request_from_value(
+    value: Option<&Value>,
+    default_benchmark: &str,
+) -> Result<Option<MarketRegimeBacktestReq>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(policy)) => match policy.as_str() {
+            "off" | "none" | "disabled" => Ok(None),
+            "professional_default" => Ok(Some(MarketRegimeBacktestReq {
+                enabled: Some(true),
+                benchmark: Some(default_benchmark.to_string()),
+                lookback_days: None,
+                min_observations: None,
+            })),
+            other => Err(format!("unsupported market_regime policy: {}", other)),
+        },
+        Some(Value::Object(map)) => {
+            let enabled = map
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .or_else(|| map.get("active").and_then(Value::as_bool));
+            let benchmark = map
+                .get("benchmark")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| Some(default_benchmark.to_string()));
+            let lookback_days = optional_usize_from_object(map, "lookback_days")?;
+            let min_observations = optional_usize_from_object(map, "min_observations")?;
+            Ok(Some(MarketRegimeBacktestReq {
+                enabled,
+                benchmark,
+                lookback_days,
+                min_observations,
+            }))
+        }
+        Some(_) => Err("market_regime must be a string, object, or null".to_string()),
+    }
+}
+
+fn optional_usize_from_object(
+    map: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<usize>, String> {
+    match map.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .map(|value| Some(value as usize))
+            .ok_or_else(|| format!("market_regime.{} must be a positive integer", key)),
+        Some(Value::String(value)) => value
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|_| format!("market_regime.{} must be a positive integer", key)),
+        Some(_) => Err(format!("market_regime.{} must be a positive integer", key)),
+    }
 }
 
 struct ReusableTrial {
@@ -1290,7 +1561,8 @@ fn score_trial(
     }
     if let Some(limit) = constraint_i64(constraints, "min_trade_count") {
         if (metrics.num_trades as i64) < limit {
-            score -= Decimal::new((limit - metrics.num_trades as i64).max(0), 0) * Decimal::new(1, 1);
+            score -=
+                Decimal::new((limit - metrics.num_trades as i64).max(0), 0) * Decimal::new(1, 1);
             violations.push(json!({
                 "constraint": "min_trade_count",
                 "limit": limit,
@@ -1365,7 +1637,8 @@ fn build_market_scenario_analysis(points: &[RobustnessDailyPoint]) -> Value {
         });
     }
     let summary = summarize_points(points);
-    let volatility = annualized_volatility(&daily_returns(points, |point| Some(point.portfolio_value)));
+    let volatility =
+        annualized_volatility(&daily_returns(points, |point| Some(point.portfolio_value)));
     let scenario = classify_market_scenario(&summary, volatility);
     json!({
         "scenario_count": 1,
@@ -1379,7 +1652,11 @@ fn build_market_scenario_analysis(points: &[RobustnessDailyPoint]) -> Value {
     })
 }
 
-fn build_walk_forward_analysis(points: &[RobustnessDailyPoint], window_size: usize, step_size: usize) -> Value {
+fn build_walk_forward_analysis(
+    points: &[RobustnessDailyPoint],
+    window_size: usize,
+    step_size: usize,
+) -> Value {
     if points.len() < 2 || window_size < 2 || step_size == 0 {
         return json!({
             "window_count": 0,
@@ -1394,7 +1671,8 @@ fn build_walk_forward_analysis(points: &[RobustnessDailyPoint], window_size: usi
     while idx + window_size <= points.len() {
         let slice = &points[idx..idx + window_size];
         let summary = summarize_points(slice);
-        let volatility = annualized_volatility(&daily_returns(slice, |point| Some(point.portfolio_value)));
+        let volatility =
+            annualized_volatility(&daily_returns(slice, |point| Some(point.portfolio_value)));
         windows.push(json!({
             "window_index": windows.len() + 1,
             "start_date": slice.first().map(|point| point.trade_date),
@@ -1475,7 +1753,10 @@ fn build_bootstrap_analysis(
     }))
 }
 
-fn classify_market_scenario(summary: &RobustnessMetricSummary, annualized_volatility: f64) -> &'static str {
+fn classify_market_scenario(
+    summary: &RobustnessMetricSummary,
+    annualized_volatility: f64,
+) -> &'static str {
     let benchmark_return = summary.benchmark_return.unwrap_or(summary.total_return);
     if annualized_volatility >= 0.30 {
         "high_volatility"
@@ -1493,12 +1774,22 @@ fn classify_market_scenario(summary: &RobustnessMetricSummary, annualized_volati
 fn summarize_points(points: &[RobustnessDailyPoint]) -> RobustnessMetricSummary {
     let portfolio_returns = daily_returns(points, |point| Some(point.portfolio_value));
     let benchmark_returns = daily_returns(points, |point| point.benchmark_value);
-    let mut nav = points.iter().map(|point| point.portfolio_value).collect::<Vec<_>>();
-    let total_return = ratio_return(points.first().map(|point| point.portfolio_value), points.last().map(|point| point.portfolio_value));
+    let mut nav = points
+        .iter()
+        .map(|point| point.portfolio_value)
+        .collect::<Vec<_>>();
+    let total_return = ratio_return(
+        points.first().map(|point| point.portfolio_value),
+        points.last().map(|point| point.portfolio_value),
+    );
     let benchmark_return = if benchmark_returns.is_empty() {
         None
     } else {
-        ratio_return(points.first().and_then(|point| point.benchmark_value), points.last().and_then(|point| point.benchmark_value)).into()
+        ratio_return(
+            points.first().and_then(|point| point.benchmark_value),
+            points.last().and_then(|point| point.benchmark_value),
+        )
+        .into()
     };
     let sample = summarize_return_sample(&portfolio_returns);
     RobustnessMetricSummary {
@@ -1518,7 +1809,11 @@ fn summarize_return_sample(returns: &[f64]) -> RobustnessMetricSummary {
     RobustnessMetricSummary {
         total_return,
         annual_return,
-        sharpe_ratio: if volatility > 0.0 { annual_return / volatility } else { 0.0 },
+        sharpe_ratio: if volatility > 0.0 {
+            annual_return / volatility
+        } else {
+            0.0
+        },
         max_drawdown: drawdown_from_returns(returns),
         benchmark_return: None,
         excess_return: None,
@@ -1589,7 +1884,11 @@ fn annualized_volatility(returns: &[f64]) -> f64 {
 fn max_drawdown(nav: &mut [f64]) -> f64 {
     let mut peak = None::<f64>;
     let mut max_dd = 0.0;
-    for value in nav.iter().copied().filter(|value| value.is_finite() && *value > 0.0) {
+    for value in nav
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
         let current_peak = peak.map(|peak| peak.max(value)).unwrap_or(value);
         peak = Some(current_peak);
         if current_peak > 0.0 {
@@ -1658,11 +1957,15 @@ fn evaluate_robustness_gates_with_analysis(
     analysis: Option<&RobustnessTimeSeriesAnalysis>,
 ) -> RobustnessEvaluation {
     let min_trade_count = constraint_i64(gate_policy, "min_trade_count").unwrap_or(1);
-    let max_drawdown = constraint_decimal(gate_policy, "max_drawdown").unwrap_or(Decimal::new(20, 2));
+    let max_drawdown =
+        constraint_decimal(gate_policy, "max_drawdown").unwrap_or(Decimal::new(20, 2));
     let min_score_gap = constraint_decimal(gate_policy, "min_score_gap").unwrap_or(Decimal::ZERO);
-    let min_walk_forward_windows = constraint_i64(gate_policy, "min_walk_forward_windows").unwrap_or(0);
-    let min_positive_excess_window_ratio = constraint_f64(gate_policy, "min_positive_excess_window_ratio").unwrap_or(0.0);
-    let min_bootstrap_positive_return_probability = constraint_f64(gate_policy, "min_bootstrap_positive_return_probability").unwrap_or(0.0);
+    let min_walk_forward_windows =
+        constraint_i64(gate_policy, "min_walk_forward_windows").unwrap_or(0);
+    let min_positive_excess_window_ratio =
+        constraint_f64(gate_policy, "min_positive_excess_window_ratio").unwrap_or(0.0);
+    let min_bootstrap_positive_return_probability =
+        constraint_f64(gate_policy, "min_bootstrap_positive_return_probability").unwrap_or(0.0);
     let min_market_scenarios = constraint_i64(gate_policy, "min_market_scenarios").unwrap_or(1);
 
     let num_trades = metrics
@@ -1703,8 +2006,13 @@ fn evaluate_robustness_gates_with_analysis(
     ];
     if let Some(analysis) = analysis {
         let window_count = analysis.walk_forward["window_count"].as_i64().unwrap_or(0);
-        let positive_excess_window_ratio = analysis.walk_forward["positive_excess_window_ratio"].as_f64().unwrap_or(0.0);
-        let bootstrap_positive_return_probability = analysis.bootstrap["positive_return_probability"].as_f64().unwrap_or(0.0);
+        let positive_excess_window_ratio = analysis.walk_forward["positive_excess_window_ratio"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let bootstrap_positive_return_probability = analysis.bootstrap
+            ["positive_return_probability"]
+            .as_f64()
+            .unwrap_or(0.0);
         let market_scenario_count = analysis.walk_forward["scenario_count"]
             .as_i64()
             .or_else(|| analysis.market_scenarios["scenario_count"].as_i64())
@@ -1786,10 +2094,7 @@ fn constraint_f64(constraints: Option<&Value>, name: &str) -> Option<f64> {
         .and_then(Value::as_f64)
 }
 
-async fn mark_trial_running(
-    db: &sqlx::PgPool,
-    trial_id: &str,
-) -> Result<(), String> {
+async fn mark_trial_running(db: &sqlx::PgPool, trial_id: &str) -> Result<(), String> {
     sqlx::query(
         "UPDATE optimization_trial
          SET status = 'running', progress = 10,
@@ -1846,10 +2151,7 @@ async fn mark_trial_failed(
     Ok(())
 }
 
-async fn refresh_task_progress(
-    db: &sqlx::PgPool,
-    task_id: &str,
-) -> Result<Option<String>, String> {
+async fn refresh_task_progress(db: &sqlx::PgPool, task_id: &str) -> Result<Option<String>, String> {
     let counts = sqlx::query_as::<_, (i64, i64, i64)>(
         "SELECT COUNT(*)::bigint,
            COUNT(*) FILTER (WHERE status = 'completed')::bigint,
@@ -1882,7 +2184,11 @@ async fn refresh_task_progress(
         ((finished * 100) / counts.0).clamp(0, 100) as i32
     };
     let status = if counts.0 > 0 && finished == counts.0 {
-        if counts.1 > 0 { "completed" } else { "failed" }
+        if counts.1 > 0 {
+            "completed"
+        } else {
+            "failed"
+        }
     } else if finished > 0 {
         "partial"
     } else {
@@ -1905,11 +2211,7 @@ async fn refresh_task_progress(
     Ok(best_trial_id)
 }
 
-fn sample_parameter(
-    name: &str,
-    spec: &Value,
-    rng: &mut DeterministicRng,
-) -> Result<Value, String> {
+fn sample_parameter(name: &str, spec: &Value, rng: &mut DeterministicRng) -> Result<Value, String> {
     let spec = spec
         .as_object()
         .ok_or_else(|| format!("search_space.{} must be an object", name))?;
@@ -2052,7 +2354,11 @@ mod tests {
             "max_pairwise_correlation": 0.65,
             "kelly_fraction": 0.25,
             "max_gross_exposure": 0.80,
-            "score_direction": "ascending"
+            "score_direction": "ascending",
+            "portfolio_method": "risk_budget",
+            "risk_budget_lookback_days": 80,
+            "capacity_penalty_strength": 0.75,
+            "market_regime": "professional_default"
         });
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
@@ -2069,6 +2375,39 @@ mod tests {
         assert_eq!(req.kelly_lookback_days, 60);
         assert_eq!(req.max_gross_exposure, 0.80);
         assert_eq!(req.score_direction, "ascending");
+        assert_eq!(req.portfolio_method, "risk_budget");
+        assert_eq!(req.risk_budget_lookback_days, 80);
+        assert_eq!(req.capacity_penalty_strength, 0.75);
+        assert_eq!(
+            req.market_regime.as_ref().and_then(|policy| policy.enabled),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_builds_resource_limited_plan() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160405",
+                "end_date": "20260511",
+                "initial_capital": 1000000.0
+            })),
+            max_trials: Some(7),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(bundle.plan.requested_trials, 497664);
+        assert_eq!(bundle.plan.planned_trials, 7);
+        assert!(bundle.plan.truncated);
+        assert_eq!(bundle.search_space["phase"], "7-D");
+        assert_eq!(bundle.search_space["resource_plan"]["max_trials"], 7);
     }
 
     #[test]
@@ -2116,11 +2455,8 @@ mod tests {
             notes: None,
         };
 
-        let normalized = normalize_promote_request(
-            "trial-opt-demo-0001",
-            req,
-        )
-        .expect("normalized promote request");
+        let normalized = normalize_promote_request("trial-opt-demo-0001", req)
+            .expect("normalized promote request");
 
         assert_eq!(normalized.trial_id, "trial-opt-demo-0001");
         assert_eq!(normalized.status, "candidate");
@@ -2199,7 +2535,12 @@ mod tests {
         );
 
         assert_eq!(evaluation.status, "approved_candidate");
-        assert!(evaluation.gates.as_array().unwrap().iter().all(|gate| gate["passed"] == true));
+        assert!(evaluation
+            .gates
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["passed"] == true));
     }
 
     #[test]
@@ -2326,8 +2667,14 @@ mod tests {
 
         assert_eq!(evaluation.status, "approved_candidate");
         let gates = evaluation.gates.as_array().expect("gates");
-        assert!(gates.iter().any(|gate| gate["gate"] == "walk_forward_min_window_count"));
-        assert!(gates.iter().any(|gate| gate["gate"] == "bootstrap_positive_return_probability"));
-        assert!(gates.iter().any(|gate| gate["gate"] == "market_scenario_coverage"));
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "walk_forward_min_window_count"));
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "bootstrap_positive_return_probability"));
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "market_scenario_coverage"));
     }
 }

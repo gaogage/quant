@@ -90,7 +90,13 @@ where
             "--benchmark" => config.benchmark = parse_next_string(&mut iter, arg)?,
             "--task-prefix" => config.task_prefix = parse_next_string(&mut iter, arg)?,
             "--help" | "-h" => return Err(db_perf_usage()),
-            unknown => return Err(format!("unknown argument `{}`\n{}", unknown, db_perf_usage())),
+            unknown => {
+                return Err(format!(
+                    "unknown argument `{}`\n{}",
+                    unknown,
+                    db_perf_usage()
+                ))
+            }
         }
     }
 
@@ -309,7 +315,11 @@ fn generate_rebalance_signals(
     let basket_size = basket_size.max(1).min(symbols.len());
     let weight = Decimal::new(95, 2) / Decimal::from(basket_size as u64);
 
-    for (day_idx, date) in trading_days.iter().enumerate().step_by(rebalance_every_n_days) {
+    for (day_idx, date) in trading_days
+        .iter()
+        .enumerate()
+        .step_by(rebalance_every_n_days)
+    {
         let offset = day_idx % symbols.len();
         let mut target_weights = HashMap::with_capacity(basket_size);
         for basket_idx in 0..basket_size {
@@ -406,8 +416,14 @@ mod tests {
             ..DbPerfBaselineConfig::default()
         });
 
-        assert_eq!(config.start_date, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap());
-        assert_eq!(config.end_date, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        assert_eq!(
+            config.start_date,
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()
+        );
+        assert_eq!(
+            config.end_date,
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()
+        );
     }
 
     #[test]

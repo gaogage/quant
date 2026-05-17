@@ -118,9 +118,13 @@ pub async fn paper_account_summary(
 }
 
 pub async fn paper_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let metrics = paper_metrics_inner(&state.db).await.unwrap_or_else(|error| json!({
-        "error": error
-    }));
+    let metrics = paper_metrics_inner(&state.db)
+        .await
+        .unwrap_or_else(|error| {
+            json!({
+                "error": error
+            })
+        });
     Json(json!({
         "code": 0,
         "data": {
@@ -212,11 +216,19 @@ async fn submit_paper_order_inner(
 
     write_audit_event(
         db,
-        if risk.passed { "paper_order.submit" } else { "paper_order.risk_reject" },
+        if risk.passed {
+            "paper_order.submit"
+        } else {
+            "paper_order.risk_reject"
+        },
         "paper_order",
         &order_id,
         req.operator.as_deref(),
-        if risk.passed { "Submitted paper order" } else { "Rejected paper order" },
+        if risk.passed {
+            "Submitted paper order"
+        } else {
+            "Rejected paper order"
+        },
         json!({
             "paper_account_id": req.paper_account_id,
             "strategy_version_id": req.strategy_version_id,
@@ -258,7 +270,10 @@ async fn fill_paper_order_inner(
     .map_err(|error| format!("Failed to load paper_order: {}", error))?
     .ok_or_else(|| "paper_order not found".to_string())?;
     if order.4 != "submitted" && order.4 != "partially_filled" {
-        return Err(format!("paper_order cannot be filled from status {}", order.4));
+        return Err(format!(
+            "paper_order cannot be filled from status {}",
+            order.4
+        ));
     }
 
     let fill_quantity = req.quantity.unwrap_or(order.3);
@@ -267,7 +282,11 @@ async fn fill_paper_order_inner(
     }
     let amount = fill_quantity * req.price;
     let total_cost = amount + req.commission + req.tax + req.slippage;
-    let cash_delta = if order.2 == "buy" { -total_cost } else { amount - req.commission - req.tax - req.slippage };
+    let cash_delta = if order.2 == "buy" {
+        -total_cost
+    } else {
+        amount - req.commission - req.tax - req.slippage
+    };
     let fill_id = format!("pf-{}", Uuid::new_v4());
     let fill_time: DateTime<Utc> = Utc::now();
 
@@ -413,7 +432,11 @@ struct RiskResult {
     reason: Option<String>,
 }
 
-fn evaluate_order_risk(req: &NormalizedOrderRequest, account_status: &str, cash: Decimal) -> RiskResult {
+fn evaluate_order_risk(
+    req: &NormalizedOrderRequest,
+    account_status: &str,
+    cash: Decimal,
+) -> RiskResult {
     if account_status != "active" {
         return RiskResult {
             passed: false,
@@ -453,7 +476,9 @@ fn evaluate_order_risk(req: &NormalizedOrderRequest, account_status: &str, cash:
     }
 }
 
-fn normalize_account_request(req: CreatePaperAccountRequest) -> Result<NormalizedAccountRequest, String> {
+fn normalize_account_request(
+    req: CreatePaperAccountRequest,
+) -> Result<NormalizedAccountRequest, String> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err("name must not be empty".into());
@@ -499,7 +524,8 @@ fn normalize_order_request(req: SubmitPaperOrderRequest) -> Result<NormalizedOrd
         limit_price,
         estimated_price,
         operator: normalize_optional_string(req.operator),
-        trace_id: normalize_optional_string(req.trace_id).unwrap_or_else(|| format!("trace-{}", Uuid::new_v4())),
+        trace_id: normalize_optional_string(req.trace_id)
+            .unwrap_or_else(|| format!("trace-{}", Uuid::new_v4())),
     })
 }
 
@@ -515,7 +541,8 @@ fn normalize_fill_request(req: FillPaperOrderRequest) -> Result<NormalizedFillRe
         tax: optional_decimal(req.tax, "tax")?.unwrap_or_else(Decimal::zero),
         slippage: optional_decimal(req.slippage, "slippage")?.unwrap_or_else(Decimal::zero),
         operator: normalize_optional_string(req.operator),
-        trace_id: normalize_optional_string(req.trace_id).unwrap_or_else(|| format!("trace-{}", Uuid::new_v4())),
+        trace_id: normalize_optional_string(req.trace_id)
+            .unwrap_or_else(|| format!("trace-{}", Uuid::new_v4())),
     })
 }
 
@@ -535,7 +562,9 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 }
 
 fn optional_decimal(value: Option<f64>, field: &str) -> Result<Option<Decimal>, String> {
-    value.map(|value| decimal_from_f64(value, field)).transpose()
+    value
+        .map(|value| decimal_from_f64(value, field))
+        .transpose()
 }
 
 fn decimal_from_f64(value: f64, field: &str) -> Result<Decimal, String> {

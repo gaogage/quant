@@ -29,8 +29,14 @@ fn db_perf_args_override_default_database_workload_dimensions() {
     assert_eq!(config.symbols, 80);
     assert_eq!(config.rebalance_every_n_days, 15);
     assert_eq!(config.basket_size, 20);
-    assert_eq!(config.start_date, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap());
-    assert_eq!(config.end_date, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+    assert_eq!(
+        config.start_date,
+        NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()
+    );
+    assert_eq!(
+        config.end_date,
+        NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()
+    );
     assert_eq!(config.task_prefix, "perf-test");
 }
 

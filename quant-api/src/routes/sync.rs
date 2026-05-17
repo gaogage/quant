@@ -641,6 +641,87 @@ pub async fn sync_task_status(
     }
 }
 
+fn sync_task_cancel_transition(status: &str) -> Option<&'static str> {
+    match status {
+        "pending" => Some("cancelled"),
+        "running" => Some("cancel_requested"),
+        "cancel_requested" => Some("cancel_requested"),
+        _ => None,
+    }
+}
+
+/// POST /api/v1/quant/data/sync-tasks/:task_id/cancel
+///
+/// 请求取消数据同步类后台任务。running 任务进入 cancel_requested，
+/// 由 worker 在批次边界安全停止；pending 任务直接进入 cancelled。
+pub async fn cancel_sync_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status
+         FROM data_sync_task
+         WHERE task_id = $1",
+    )
+    .bind(&task_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(status) = status else {
+        return Json(json!({"code": 1, "message": "task not found"}));
+    };
+
+    let Some(next_status) = sync_task_cancel_transition(&status) else {
+        return Json(json!({
+            "code": 1,
+            "message": format!("task cannot be cancelled from status {}", status),
+            "data": {
+                "task_id": task_id,
+                "status": status,
+            }
+        }));
+    };
+
+    let result = sqlx::query(
+        "UPDATE data_sync_task
+         SET status = $2,
+             error_message = COALESCE(error_message, 'cancel requested by user'),
+             last_heartbeat_at = now(),
+             completed_at = CASE WHEN $2 = 'cancelled' THEN now() ELSE completed_at END
+         WHERE task_id = $1 AND status = $3",
+    )
+    .bind(&task_id)
+    .bind(next_status)
+    .bind(&status)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(result) if result.rows_affected() == 1 => Json(json!({
+            "code": 0,
+            "data": {
+                "task_id": task_id,
+                "previous_status": status,
+                "status": next_status,
+            }
+        })),
+        Ok(_) => Json(json!({
+            "code": 1,
+            "message": "task status changed before cancel request was applied",
+            "data": {
+                "task_id": task_id,
+                "previous_status": status,
+            }
+        })),
+        Err(error) => Json(json!({
+            "code": 1,
+            "message": format!("Failed to cancel sync task: {}", error)
+        })),
+    }
+}
+
 /// POST /api/v1/quant/data/sync/financial
 #[derive(Debug, Deserialize)]
 pub struct SyncFinancialReq {
@@ -657,5 +738,26 @@ pub async fn sync_financial(
             Json(json!({"code": 0, "data": {"statements": stmt, "indicators": ind}}))
         }
         Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_transition_matches_task_lifecycle() {
+        assert_eq!(sync_task_cancel_transition("pending"), Some("cancelled"));
+        assert_eq!(
+            sync_task_cancel_transition("running"),
+            Some("cancel_requested")
+        );
+        assert_eq!(
+            sync_task_cancel_transition("cancel_requested"),
+            Some("cancel_requested")
+        );
+        assert_eq!(sync_task_cancel_transition("completed"), None);
+        assert_eq!(sync_task_cancel_transition("failed"), None);
+        assert_eq!(sync_task_cancel_transition("cancelled"), None);
     }
 }

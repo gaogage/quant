@@ -19,7 +19,9 @@ use quant_backtest::engine::{
 };
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::BacktestRunner;
-use quant_backtest::signal_generator::ScoreDirection;
+use quant_backtest::signal_generator::{
+    MarketRegimePolicy, PortfolioConstructionMethod, ScoreDirection,
+};
 
 use crate::AppState;
 
@@ -567,14 +569,29 @@ pub struct RunFactorBacktestReq {
     pub max_gross_exposure: f64,
     #[serde(default = "default_score_direction")]
     pub score_direction: String,
+    #[serde(default = "default_portfolio_method")]
+    pub portfolio_method: String,
+    #[serde(default = "default_risk_budget_lookback_days")]
+    pub risk_budget_lookback_days: usize,
+    #[serde(default)]
+    pub capacity_penalty_strength: f64,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
+    pub market_regime: Option<MarketRegimeBacktestReq>,
     pub start_date: String,
     pub end_date: String,
     #[serde(default = "default_capital")]
     pub initial_capital: f64,
     pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MarketRegimeBacktestReq {
+    pub enabled: Option<bool>,
+    pub benchmark: Option<String>,
+    pub lookback_days: Option<usize>,
+    pub min_observations: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -610,6 +627,12 @@ pub struct RunPredictionBacktestReq {
     pub max_gross_exposure: f64,
     #[serde(default = "default_score_direction")]
     pub score_direction: String,
+    #[serde(default = "default_portfolio_method")]
+    pub portfolio_method: String,
+    #[serde(default = "default_risk_budget_lookback_days")]
+    pub risk_budget_lookback_days: usize,
+    #[serde(default)]
+    pub capacity_penalty_strength: f64,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
@@ -663,6 +686,12 @@ fn default_max_gross_exposure() -> f64 {
 fn default_score_direction() -> String {
     "descending".into()
 }
+fn default_portfolio_method() -> String {
+    "heuristic".into()
+}
+fn default_risk_budget_lookback_days() -> usize {
+    60
+}
 fn default_capital() -> f64 {
     1_000_000.0
 }
@@ -673,6 +702,42 @@ fn parse_score_direction(value: &str) -> Result<ScoreDirection, String> {
         "ascending" | "asc" => Ok(ScoreDirection::Ascending),
         other => Err(format!("unsupported score_direction: {}", other)),
     }
+}
+
+fn parse_portfolio_method(value: &str) -> Result<PortfolioConstructionMethod, String> {
+    match value {
+        "heuristic" | "legacy" => Ok(PortfolioConstructionMethod::Heuristic),
+        "risk_budget" | "risk-budget" => Ok(PortfolioConstructionMethod::RiskBudget),
+        other => Err(format!("unsupported portfolio_method: {}", other)),
+    }
+}
+
+fn build_market_regime_policy(
+    req: Option<&MarketRegimeBacktestReq>,
+    default_benchmark: &str,
+) -> Result<Option<MarketRegimePolicy>, String> {
+    let Some(req) = req else {
+        return Ok(None);
+    };
+    if matches!(req.enabled, Some(false)) {
+        return Ok(None);
+    }
+
+    let mut policy = MarketRegimePolicy::professional_default(
+        req.benchmark
+            .as_deref()
+            .unwrap_or(default_benchmark)
+            .trim()
+            .to_string(),
+    );
+    if let Some(lookback_days) = req.lookback_days {
+        policy.lookback_days = lookback_days.max(1);
+    }
+    if let Some(min_observations) = req.min_observations {
+        policy.min_observations = min_observations.max(1);
+    }
+
+    Ok(Some(policy))
 }
 
 pub async fn run_factor_backtest(
@@ -778,6 +843,7 @@ pub(crate) async fn execute_factor_backtest(
         Ok(config) => config,
         Err(message) => return Err(message),
     };
+    let benchmark = req.benchmark.clone().unwrap_or_else(|| "000300.SH".into());
     let execution_timing = match parse_execution_timing(
         req.execution_rules
             .as_ref()
@@ -812,6 +878,7 @@ pub(crate) async fn execute_factor_backtest(
         s => s.parse::<usize>().unwrap_or(20),
     };
     let score_direction = parse_score_direction(&req.score_direction)?;
+    let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
 
     let sig_config = quant_backtest::signal_generator::SignalConfig {
         combo_name: req.combo_name.clone(),
@@ -832,21 +899,29 @@ pub(crate) async fn execute_factor_backtest(
         kelly_lookback_days: req.kelly_lookback_days,
         max_gross_exposure: req.max_gross_exposure,
         score_direction,
+        portfolio_method,
+        risk_budget_lookback_days: req.risk_budget_lookback_days,
+        capacity_penalty_strength: req.capacity_penalty_strength,
     };
 
     info!(task_id, combo=%req.combo_name, top_n=req.top_n, reb=reb_freq, "Generating factor signals");
 
-    let signals = match quant_backtest::signal_generator::generate_signals(
-        db,
-        &sig_config,
-        start,
-        end,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
+    let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
+    let signals = match regime_policy {
+        Some(ref policy) => {
+            quant_backtest::signal_generator::generate_regime_signals(
+                db,
+                &sig_config,
+                policy,
+                start,
+                end,
+            )
+            .await
+        }
+        None => {
+            quant_backtest::signal_generator::generate_signals(db, &sig_config, start, end).await
+        }
+    }?;
 
     info!(
         task_id,
@@ -862,7 +937,7 @@ pub(crate) async fn execute_factor_backtest(
 
     let config = BacktestConfig {
         initial_capital: capital,
-        benchmark: req.benchmark.unwrap_or_else(|| "000300.SH".into()),
+        benchmark,
         start_date: start,
         end_date: end,
         fee_config,
@@ -939,6 +1014,7 @@ pub(crate) async fn execute_prediction_backtest(
         s => s.parse::<usize>().unwrap_or(20),
     };
     let score_direction = parse_score_direction(&req.score_direction)?;
+    let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
 
     let sig_config = quant_backtest::signal_generator::PredictionSignalConfig {
         prediction_set_id: prediction_set_id.clone(),
@@ -958,6 +1034,9 @@ pub(crate) async fn execute_prediction_backtest(
         kelly_lookback_days: req.kelly_lookback_days,
         max_gross_exposure: req.max_gross_exposure,
         score_direction,
+        portfolio_method,
+        risk_budget_lookback_days: req.risk_budget_lookback_days,
+        capacity_penalty_strength: req.capacity_penalty_strength,
     };
 
     info!(
@@ -1112,5 +1191,26 @@ mod tests {
         assert_eq!(query.normalized_page(), 1);
         assert_eq!(query.normalized_page_size(), 200);
         assert_eq!(query.offset(), 0);
+    }
+
+    #[test]
+    fn market_regime_request_builds_professional_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            benchmark: Some("000905.SH".to_string()),
+            lookback_days: Some(126),
+            min_observations: Some(20),
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000905.SH");
+        assert_eq!(policy.lookback_days, 126);
+        assert_eq!(policy.min_observations, 20);
+        assert!(policy
+            .rules
+            .contains_key(&quant_backtest::signal_generator::MarketRegime::Bear));
     }
 }

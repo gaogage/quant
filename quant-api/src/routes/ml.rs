@@ -387,7 +387,7 @@ async fn train_linear_model_inner(
         .bind(row.available_at)
         .execute(&mut *tx)
         .await
-            .map_err(|error| format!("Failed to insert model_prediction: {}", error))?;
+        .map_err(|error| format!("Failed to insert model_prediction: {}", error))?;
     }
 
     sqlx::query(
@@ -434,7 +434,15 @@ async fn evaluate_prediction_set_inner(
 ) -> Result<Value, String> {
     let req = normalize_prediction_set_evaluation_request(&req)?;
 
-    let prediction = sqlx::query_as::<_, (Option<i64>, Option<NaiveDate>, Option<NaiveDate>, Option<i64>)>(
+    let prediction = sqlx::query_as::<
+        _,
+        (
+            Option<i64>,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<i64>,
+        ),
+    >(
         "SELECT COUNT(*)::bigint, MIN(trade_date), MAX(trade_date), COUNT(DISTINCT symbol)::bigint
          FROM model_prediction
          WHERE prediction_set_id = $1",
@@ -458,7 +466,17 @@ async fn evaluate_prediction_set_inner(
         return Err("backtest_task.prediction_set_id does not match request".into());
     }
 
-    let result = sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<i32>, Option<f64>)>(
+    let result = sqlx::query_as::<
+        _,
+        (
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<i32>,
+            Option<f64>,
+        ),
+    >(
         "SELECT total_return::double precision,
                 benchmark_return::double precision,
                 excess_return::double precision,
@@ -539,7 +557,12 @@ async fn evaluate_prediction_set_inner(
     .bind(&metrics)
     .execute(db)
     .await
-    .map_err(|error| format!("Failed to insert prediction evaluation experiment_run: {}", error))?;
+    .map_err(|error| {
+        format!(
+            "Failed to insert prediction evaluation experiment_run: {}",
+            error
+        )
+    })?;
 
     Ok(json!({
         "experiment_run_id": experiment_run_id,
@@ -1136,7 +1159,12 @@ async fn build_linear_prediction_rows(
 
     let mut predictions = Vec::new();
     for (trade_date, mut rows) in by_date {
-        rows.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        rows.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
         for (idx, (symbol, score)) in rows.into_iter().enumerate() {
             predictions.push(build_prediction_row(
                 &req.prediction_set_id,
@@ -1336,9 +1364,12 @@ mod tests {
             (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 12.1),
         ];
 
-        let label =
-            future_return_label(Some(&closes), NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(), 2)
-                .expect("label");
+        let label = future_return_label(
+            Some(&closes),
+            NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(),
+            2,
+        )
+        .expect("label");
 
         assert!((label - 0.21).abs() < 1e-9);
     }
@@ -1375,8 +1406,14 @@ mod tests {
             "hash-prediction",
         );
 
-        assert_eq!(config["training_task_id"], "train-trained_linear_alpha-phase5c-v1");
-        assert_eq!(config["prediction_set_id"], "pred-trained_linear_alpha-phase5c-v1-20250121-20250131");
+        assert_eq!(
+            config["training_task_id"],
+            "train-trained_linear_alpha-phase5c-v1"
+        );
+        assert_eq!(
+            config["prediction_set_id"],
+            "pred-trained_linear_alpha-phase5c-v1-20250121-20250131"
+        );
         assert_eq!(config["label"]["horizon_trading_days"], 1);
         assert_eq!(metrics["sample_count"], 40367);
         assert_eq!(metrics["prediction_rows"], 25418);

@@ -1,6 +1,8 @@
 /// Quant 系统统一错误类型
 use thiserror::Error;
 
+pub mod phase7;
+
 #[derive(Error, Debug)]
 pub enum QuantError {
     #[error("HTTP error: {0}")]
