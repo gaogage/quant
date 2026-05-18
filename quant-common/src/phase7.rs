@@ -209,6 +209,7 @@ pub struct PositionRiskControlProfile {
     pub take_profit_pct: Option<Decimal>,
     pub trailing_stop_pct: Option<Decimal>,
     pub time_stop_days: Option<u32>,
+    pub reentry_cooldown_days: Option<u32>,
 }
 
 impl PositionRiskControlProfile {
@@ -219,6 +220,7 @@ impl PositionRiskControlProfile {
             take_profit_pct: None,
             trailing_stop_pct: None,
             time_stop_days: None,
+            reentry_cooldown_days: None,
         }
     }
 
@@ -229,6 +231,22 @@ impl PositionRiskControlProfile {
             take_profit_pct: None,
             trailing_stop_pct: None,
             time_stop_days: None,
+            reentry_cooldown_days: None,
+        }
+    }
+
+    pub fn stop_loss_with_cooldown(
+        profile_name: impl Into<String>,
+        stop_loss_pct: Decimal,
+        reentry_cooldown_days: u32,
+    ) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            stop_loss_pct: Some(stop_loss_pct),
+            take_profit_pct: None,
+            trailing_stop_pct: None,
+            time_stop_days: None,
+            reentry_cooldown_days: Some(reentry_cooldown_days),
         }
     }
 
@@ -239,6 +257,7 @@ impl PositionRiskControlProfile {
             take_profit_pct: None,
             trailing_stop_pct: Some(trailing_stop_pct),
             time_stop_days: None,
+            reentry_cooldown_days: None,
         }
     }
 }
@@ -411,6 +430,7 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
         take_profit_pct: Option<&'a str>,
         trailing_stop_pct: Option<&'a str>,
         time_stop_days: Option<u32>,
+        reentry_cooldown_days: Option<u32>,
     }
 
     fn risk_seed(
@@ -489,6 +509,9 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             }
             if let Some(time_stop_days) = position_risk.time_stop_days {
                 seed["time_stop_days"] = json!(time_stop_days);
+            }
+            if let Some(reentry_cooldown_days) = position_risk.reentry_cooldown_days {
+                seed["reentry_cooldown_days"] = json!(reentry_cooldown_days);
             }
         }
         seed
@@ -629,66 +652,98 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
         take_profit_pct: None,
         trailing_stop_pct: Some("0.18"),
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_07 = PositionRiskSeed {
         stop_loss_pct: Some("0.07"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
+    };
+    let stop_loss_07_cooldown_5 = PositionRiskSeed {
+        stop_loss_pct: Some("0.07"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+        reentry_cooldown_days: Some(5),
+    };
+    let stop_loss_07_cooldown_10 = PositionRiskSeed {
+        stop_loss_pct: Some("0.07"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+        reentry_cooldown_days: Some(10),
+    };
+    let stop_loss_07_cooldown_20 = PositionRiskSeed {
+        stop_loss_pct: Some("0.07"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+        reentry_cooldown_days: Some(20),
     };
     let stop_loss_08 = PositionRiskSeed {
         stop_loss_pct: Some("0.08"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_085 = PositionRiskSeed {
         stop_loss_pct: Some("0.085"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_09 = PositionRiskSeed {
         stop_loss_pct: Some("0.09"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_095 = PositionRiskSeed {
         stop_loss_pct: Some("0.095"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_10 = PositionRiskSeed {
         stop_loss_pct: Some("0.10"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_11 = PositionRiskSeed {
         stop_loss_pct: Some("0.11"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_12 = PositionRiskSeed {
         stop_loss_pct: Some("0.12"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_13 = PositionRiskSeed {
         stop_loss_pct: Some("0.13"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
     let stop_loss_14 = PositionRiskSeed {
         stop_loss_pct: Some("0.14"),
         take_profit_pct: None,
         trailing_stop_pct: None,
         time_stop_days: None,
+        reentry_cooldown_days: None,
     };
 
     vec![
@@ -946,6 +1001,51 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             None,
             None,
             Some(stop_loss_07),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_07_cooldown_5),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_07_cooldown_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_07_cooldown_20),
         ),
         risk_seed(
             "phase7_financial_quality_v1",
@@ -1667,6 +1767,21 @@ impl LayeredSearchConfig {
         config.position_risk_controls = vec![
             PositionRiskControlProfile::off(),
             PositionRiskControlProfile::stop_loss("stop_loss_07", Decimal::new(7, 2)),
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_07_cooldown_5",
+                Decimal::new(7, 2),
+                5,
+            ),
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_07_cooldown_10",
+                Decimal::new(7, 2),
+                10,
+            ),
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_07_cooldown_20",
+                Decimal::new(7, 2),
+                20,
+            ),
             PositionRiskControlProfile::stop_loss("stop_loss_08", Decimal::new(8, 2)),
             PositionRiskControlProfile::stop_loss("stop_loss_085", Decimal::new(85, 3)),
             PositionRiskControlProfile::stop_loss("stop_loss_09", Decimal::new(9, 2)),
@@ -1882,6 +1997,9 @@ pub fn build_layered_search_plan(
         }
         if let Some(time_stop_days) = position_risk_control.time_stop_days {
             parameters["time_stop_days"] = serde_json::json!(time_stop_days);
+        }
+        if let Some(reentry_cooldown_days) = position_risk_control.reentry_cooldown_days {
+            parameters["reentry_cooldown_days"] = serde_json::json!(reentry_cooldown_days);
         }
         match signal_candidate {
             Some(LayeredSignalCandidate::FactorCombo(combo)) => {
@@ -2765,6 +2883,17 @@ mod tests {
             .iter()
             .any(|profile| profile.profile_name == "stop_loss_12"
                 && profile.stop_loss_pct == Some(Decimal::new(12, 2))));
+        for (profile_name, cooldown_days) in [
+            ("stop_loss_07_cooldown_5", 5),
+            ("stop_loss_07_cooldown_10", 10),
+            ("stop_loss_07_cooldown_20", 20),
+        ] {
+            assert!(config.position_risk_controls.iter().any(|profile| {
+                profile.profile_name == profile_name
+                    && profile.stop_loss_pct == Some(Decimal::new(7, 2))
+                    && profile.reentry_cooldown_days == Some(cooldown_days)
+            }));
+        }
         for (profile_name, stop_loss_pct) in [
             ("stop_loss_07", Decimal::new(7, 2)),
             ("stop_loss_08", Decimal::new(8, 2)),
@@ -2813,6 +2942,15 @@ mod tests {
                 && trial["portfolio_volatility_control"] == "off"
                 && trial["max_position_pct"] == "0.15"
                 && trial["stop_loss_pct"] == "0.07"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.07"
+                && trial["reentry_cooldown_days"] == 10
         }));
         assert!(config.seed_trials.iter().any(|trial| {
             trial["combo_name"] == "phase7_financial_quality_v1"

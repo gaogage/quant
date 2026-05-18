@@ -290,6 +290,18 @@ fn build_phase7_layered_plan_bundle(
 fn phase7_discovery_layered_request(
     req: &Phase7ProfessionalDiscoveryRequest,
 ) -> Phase7LayeredOptimizationRequest {
+    let default_backtest_template = || {
+        json!({
+            "mode": "standard",
+            "benchmark": "000300.SH",
+            "start_date": "20160304",
+            "end_date": "20260515",
+            "initial_capital": 1000000.0,
+            "signal_timing": "close",
+            "execution_timing": "next_open",
+            "execution_price": "next_open"
+        })
+    };
     Phase7LayeredOptimizationRequest {
         strategy_version_id: req.strategy_version_id.clone(),
         data_version_id: req.data_version_id.clone(),
@@ -311,7 +323,11 @@ fn phase7_discovery_layered_request(
             }))
         }),
         walk_forward: req.walk_forward.clone(),
-        backtest_template: req.backtest_template.clone(),
+        backtest_template: Some(
+            req.backtest_template
+                .clone()
+                .unwrap_or_else(default_backtest_template),
+        ),
         prediction_set_ids: req.prediction_set_ids.clone(),
         max_trials: req.max_trials,
         search_profile: Some(
@@ -1683,7 +1699,7 @@ async fn load_execution_context(
     db: &sqlx::PgPool,
     task_id: &str,
 ) -> Result<OptimizationTaskExecutionContext, String> {
-    let row = sqlx::query_as::<_, (String, String, Value, Value, Option<Value>)>(
+    let row = sqlx::query_as::<_, (String, String, Value, Option<Value>, Option<Value>)>(
         "SELECT strategy_version_id, data_version_id, objective, backtest_template, constraints
          FROM optimization_task
          WHERE optimization_task_id = $1",
@@ -1698,7 +1714,7 @@ async fn load_execution_context(
         strategy_version_id: row.0,
         data_version_id: row.1,
         objective: row.2,
-        backtest_template: row.3,
+        backtest_template: row.3.unwrap_or_else(|| json!({})),
         constraints: row.4,
     })
 }
@@ -1913,6 +1929,7 @@ fn build_factor_trial_request(
         take_profit_pct: optional_f64_value("take_profit_pct")?,
         trailing_stop_pct: optional_f64_value("trailing_stop_pct")?,
         time_stop_days: optional_u32_value("time_stop_days")?,
+        reentry_cooldown_days: optional_u32_value("reentry_cooldown_days")?,
         portfolio_drawdown_reduce_start_pct: optional_f64_value(
             "portfolio_drawdown_reduce_start_pct",
         )?,
@@ -3261,7 +3278,8 @@ mod tests {
             "stop_loss_pct": 0.12,
             "take_profit_pct": null,
             "trailing_stop_pct": 0.18,
-            "time_stop_days": "120"
+            "time_stop_days": "120",
+            "reentry_cooldown_days": "10"
         });
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
@@ -3314,6 +3332,7 @@ mod tests {
         assert_eq!(req.take_profit_pct, None);
         assert_eq!(req.trailing_stop_pct, Some(0.18));
         assert_eq!(req.time_stop_days, Some(120));
+        assert_eq!(req.reentry_cooldown_days, Some(10));
     }
 
     #[test]
@@ -3463,6 +3482,35 @@ mod tests {
                 && trial.parameters["portfolio_method"] == "risk_budget"
                 && trial.parameters["portfolio_volatility_control"] != "off"
         }));
+    }
+
+    #[test]
+    fn professional_discovery_defaults_backtest_template_to_full_history_window() {
+        let req = Phase7ProfessionalDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: None,
+            trial_batch_limit: Some(2),
+            max_batches: Some(4),
+            robustness_top_n: Some(3),
+            robustness_gate_policy: None,
+            stop_after_professional_candidate: Some(false),
+            stop_after_robust_approval: Some(true),
+        };
+
+        let layered_req = phase7_discovery_layered_request(&req);
+
+        let template = layered_req.backtest_template.expect("default template");
+        assert_eq!(template["start_date"], "20160304");
+        assert_eq!(template["end_date"], "20260515");
+        assert_eq!(template["benchmark"], "000300.SH");
+        assert_eq!(template["mode"], "standard");
     }
 
     #[test]

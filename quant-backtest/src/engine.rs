@@ -120,6 +120,10 @@ pub struct RiskControlConfig {
     /// Time stop: sell if held for more than N trading days without reaching profit target
     #[serde(default)]
     pub time_stop_days: Option<u32>,
+    /// Re-entry cooldown after a position-level risk exit. A value of 1 blocks the exit day and
+    /// the next calendar day, then allows buying again.
+    #[serde(default)]
+    pub reentry_cooldown_days: Option<u32>,
     /// Portfolio-level drawdown where target exposure starts to scale down.
     #[serde(default)]
     pub portfolio_drawdown_reduce_start_pct: Option<Decimal>,
@@ -162,6 +166,7 @@ impl Default for RiskControlConfig {
             take_profit_pct: None,
             trailing_stop_pct: None,
             time_stop_days: None,
+            reentry_cooldown_days: None,
             portfolio_drawdown_reduce_start_pct: None,
             portfolio_drawdown_reduce_full_pct: None,
             portfolio_drawdown_min_exposure: None,
@@ -257,6 +262,7 @@ pub struct BacktestEngine {
     /// Track per-symbol buy date and peak price for risk control
     position_buy_date: HashMap<String, NaiveDate>,
     position_peak_price: HashMap<String, Decimal>,
+    position_risk_cooldown_remaining: HashMap<String, u32>,
 }
 
 impl BacktestEngine {
@@ -278,6 +284,7 @@ impl BacktestEngine {
             violations: Vec::new(),
             position_buy_date: HashMap::new(),
             position_peak_price: HashMap::new(),
+            position_risk_cooldown_remaining: HashMap::new(),
         }
     }
 
@@ -346,6 +353,7 @@ impl BacktestEngine {
             }
         }
 
+        self.advance_position_risk_cooldowns();
         self.portfolio.end_of_day();
     }
 
@@ -457,6 +465,31 @@ impl BacktestEngine {
             self.position_buy_date.remove(symbol);
             self.position_peak_price.remove(symbol);
         }
+    }
+
+    fn start_position_risk_cooldown(&mut self, symbol: &str) {
+        let Some(days) = self.config.risk_control.reentry_cooldown_days else {
+            return;
+        };
+        if days == 0 {
+            return;
+        }
+        self.position_risk_cooldown_remaining
+            .insert(symbol.to_string(), days.saturating_add(1));
+    }
+
+    fn is_position_risk_cooling_down(&self, symbol: &str) -> bool {
+        self.position_risk_cooldown_remaining
+            .get(symbol)
+            .is_some_and(|remaining_days| *remaining_days > 0)
+    }
+
+    fn advance_position_risk_cooldowns(&mut self) {
+        for remaining_days in self.position_risk_cooldown_remaining.values_mut() {
+            *remaining_days = remaining_days.saturating_sub(1);
+        }
+        self.position_risk_cooldown_remaining
+            .retain(|_, remaining_days| *remaining_days > 0);
     }
 
     fn update_position_risk_state(&mut self, market: &MarketDay) {
@@ -573,6 +606,7 @@ impl BacktestEngine {
             {
                 self.annotate_last_trade_reason(reason);
                 self.cleanup_closed_position_metadata(&symbol);
+                self.start_position_risk_cooldown(&symbol);
             }
         }
     }
@@ -878,6 +912,26 @@ impl BacktestEngine {
                     if price >= ul_price {
                         continue;
                     }
+                }
+                if self.is_position_risk_cooling_down(sym) {
+                    self.violations.push(ConstraintViolation {
+                        trade_date: market.date,
+                        constraint_name: "position_risk_reentry_cooldown".into(),
+                        limit_value: Decimal::from(
+                            self.config
+                                .risk_control
+                                .reentry_cooldown_days
+                                .unwrap_or_default(),
+                        ),
+                        actual_value: Decimal::from(
+                            self.position_risk_cooldown_remaining
+                                .get(sym)
+                                .copied()
+                                .unwrap_or_default(),
+                        ),
+                        severity: "hard".into(),
+                    });
+                    continue;
                 }
                 to_buy.push((sym.clone(), diff, price, target_w));
             } else {
@@ -1555,6 +1609,67 @@ mod tests {
             trade.side == crate::portfolio::TradeSide::Sell
                 && trade.symbol == "A"
                 && trade.event_reason.as_deref() == Some("risk_stop_loss")
+        }));
+    }
+
+    #[test]
+    fn position_risk_reentry_cooldown_blocks_buy_until_cooldown_expires() {
+        let mut c = BacktestConfig::default();
+        c.max_position_pct = d("1.01");
+        c.risk_control.stop_loss_pct = Some(d("0.05"));
+        c.risk_control.reentry_cooldown_days = Some(1);
+        c.fee_config.min_commission = Decimal::zero();
+        c.fee_config.commission_rate = Decimal::zero();
+        c.fee_config.tax_rate = Decimal::zero();
+        c.fee_config.slippage_bps = Decimal::zero();
+        let mut e = BacktestEngine::new(c);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal_dated("2024-01-02", "A", "0.50")),
+        );
+        e.process_day(
+            &market("2024-01-03", ("A", "9.4"), ("A", "10")),
+            Some(&signal_dated("2024-01-03", "A", "0.50")),
+        );
+        e.process_day(
+            &market("2024-01-04", ("A", "9.5"), ("A", "9.4")),
+            Some(&signal_dated("2024-01-04", "A", "0.50")),
+        );
+        e.process_day(
+            &market("2024-01-05", ("A", "9.6"), ("A", "9.5")),
+            Some(&signal_dated("2024-01-05", "A", "0.50")),
+        );
+        let o = e.finalize();
+
+        let buys = o
+            .trades
+            .iter()
+            .filter(|trade| trade.side == crate::portfolio::TradeSide::Buy)
+            .map(|trade| trade.trade_date)
+            .collect::<Vec<_>>();
+        let sells = o
+            .trades
+            .iter()
+            .filter(|trade| trade.side == crate::portfolio::TradeSide::Sell)
+            .collect::<Vec<_>>();
+
+        assert_eq!(sells.len(), 1);
+        assert_eq!(sells[0].event_reason.as_deref(), Some("risk_stop_loss"));
+        assert_eq!(
+            buys,
+            vec![
+                NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+            ]
+        );
+        assert!(o.violations.iter().any(|violation| {
+            violation.trade_date == NaiveDate::from_ymd_opt(2024, 1, 3).unwrap()
+                && violation.constraint_name == "position_risk_reentry_cooldown"
+        }));
+        assert!(o.violations.iter().any(|violation| {
+            violation.trade_date == NaiveDate::from_ymd_opt(2024, 1, 4).unwrap()
+                && violation.constraint_name == "position_risk_reentry_cooldown"
         }));
     }
 

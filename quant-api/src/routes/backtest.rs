@@ -591,6 +591,7 @@ pub struct RunFactorBacktestReq {
     pub take_profit_pct: Option<f64>,
     pub trailing_stop_pct: Option<f64>,
     pub time_stop_days: Option<u32>,
+    pub reentry_cooldown_days: Option<u32>,
     pub portfolio_drawdown_reduce_start_pct: Option<f64>,
     pub portfolio_drawdown_reduce_full_pct: Option<f64>,
     pub portfolio_drawdown_min_exposure: Option<f64>,
@@ -908,6 +909,7 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
         take_profit_pct: optional_decimal_pct(req.take_profit_pct, "take_profit_pct")?,
         trailing_stop_pct: optional_decimal_pct(req.trailing_stop_pct, "trailing_stop_pct")?,
         time_stop_days: req.time_stop_days.filter(|days| *days > 0),
+        reentry_cooldown_days: req.reentry_cooldown_days.filter(|days| *days > 0),
         portfolio_drawdown_reduce_start_pct: start,
         portfolio_drawdown_reduce_full_pct: full,
         portfolio_drawdown_min_exposure: min_exposure,
@@ -1759,6 +1761,7 @@ mod tests {
             take_profit_pct: None,
             trailing_stop_pct: Some(0.18),
             time_stop_days: Some(120),
+            reentry_cooldown_days: Some(10),
             start_date: "20250101".to_string(),
             end_date: "20250131".to_string(),
             initial_capital: 1_000_000.0,
@@ -1823,5 +1826,6 @@ mod tests {
         assert_eq!(risk_control.trailing_stop_pct, Some(Decimal::new(18, 2)));
         assert_eq!(risk_control.take_profit_pct, None);
         assert_eq!(risk_control.time_stop_days, Some(120));
+        assert_eq!(risk_control.reentry_cooldown_days, Some(10));
     }
 }
