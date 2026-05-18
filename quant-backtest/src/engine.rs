@@ -120,6 +120,27 @@ pub struct RiskControlConfig {
     /// Time stop: sell if held for more than N trading days without reaching profit target
     #[serde(default)]
     pub time_stop_days: Option<u32>,
+    /// Portfolio-level drawdown where target exposure starts to scale down.
+    #[serde(default)]
+    pub portfolio_drawdown_reduce_start_pct: Option<Decimal>,
+    /// Portfolio-level drawdown where target exposure reaches the configured floor.
+    #[serde(default)]
+    pub portfolio_drawdown_reduce_full_pct: Option<Decimal>,
+    /// Minimum gross exposure multiplier after portfolio drawdown control is fully active.
+    #[serde(default)]
+    pub portfolio_drawdown_min_exposure: Option<Decimal>,
+    /// Optional number of recent equity points used for the portfolio drawdown high-water mark.
+    #[serde(default)]
+    pub portfolio_drawdown_peak_lookback_days: Option<usize>,
+    /// Recovery ratio where drawdown control starts restoring target exposure after a trough.
+    #[serde(default)]
+    pub portfolio_drawdown_recovery_start_pct: Option<Decimal>,
+    /// Recovery ratio where drawdown control applies the full configured recovery boost.
+    #[serde(default)]
+    pub portfolio_drawdown_recovery_full_pct: Option<Decimal>,
+    /// Maximum fraction of the gap between reduced exposure and 100% exposure to restore.
+    #[serde(default)]
+    pub portfolio_drawdown_recovery_boost: Option<Decimal>,
 }
 
 impl Default for RiskControlConfig {
@@ -129,6 +150,13 @@ impl Default for RiskControlConfig {
             take_profit_pct: None,
             trailing_stop_pct: None,
             time_stop_days: None,
+            portfolio_drawdown_reduce_start_pct: None,
+            portfolio_drawdown_reduce_full_pct: None,
+            portfolio_drawdown_min_exposure: None,
+            portfolio_drawdown_peak_lookback_days: None,
+            portfolio_drawdown_recovery_start_pct: None,
+            portfolio_drawdown_recovery_full_pct: None,
+            portfolio_drawdown_recovery_boost: None,
         }
     }
 }
@@ -384,13 +412,131 @@ impl BacktestEngine {
         }
     }
 
+    fn portfolio_equity_window_values(&self, current_value: Decimal) -> Vec<Decimal> {
+        let lookback_days = self
+            .config
+            .risk_control
+            .portfolio_drawdown_peak_lookback_days
+            .filter(|days| *days > 0);
+        let start_index = lookback_days
+            .map(|days| self.equity_curve.len().saturating_sub(days))
+            .unwrap_or_default();
+        let mut values: Vec<Decimal> = self
+            .equity_curve
+            .iter()
+            .skip(start_index)
+            .map(|(_, value)| *value)
+            .collect();
+        values.push(current_value);
+        values
+    }
+
+    fn portfolio_equity_peak(&self, current_value: Decimal) -> Decimal {
+        self.portfolio_equity_window_values(current_value)
+            .into_iter()
+            .fold(current_value, |peak, value| peak.max(value))
+    }
+
+    fn portfolio_equity_trough_since_peak(
+        &self,
+        current_value: Decimal,
+        peak_value: Decimal,
+    ) -> Decimal {
+        let values = self.portfolio_equity_window_values(current_value);
+        let peak_index = values
+            .iter()
+            .rposition(|value| *value == peak_value)
+            .unwrap_or_default();
+        values[peak_index..]
+            .iter()
+            .copied()
+            .fold(peak_value, |trough, value| trough.min(value))
+    }
+
+    fn portfolio_drawdown_recovery_exposure_scale(
+        &self,
+        current_value: Decimal,
+        peak_value: Decimal,
+        base_scale: Decimal,
+    ) -> Decimal {
+        let risk_control = &self.config.risk_control;
+        let (Some(start), Some(full)) = (
+            risk_control.portfolio_drawdown_recovery_start_pct,
+            risk_control.portfolio_drawdown_recovery_full_pct,
+        ) else {
+            return base_scale;
+        };
+        if base_scale >= Decimal::ONE || peak_value <= current_value || full <= start {
+            return base_scale;
+        }
+
+        let trough_value = self.portfolio_equity_trough_since_peak(current_value, peak_value);
+        if trough_value >= peak_value || current_value <= trough_value {
+            return base_scale;
+        }
+
+        let recovery = (current_value - trough_value) / (peak_value - trough_value);
+        if recovery <= start {
+            return base_scale;
+        }
+
+        let progress = if recovery >= full {
+            Decimal::ONE
+        } else {
+            (recovery - start) / (full - start)
+        };
+        let boost = risk_control
+            .portfolio_drawdown_recovery_boost
+            .unwrap_or(Decimal::ONE)
+            .clamp(Decimal::zero(), Decimal::ONE);
+        (base_scale + (Decimal::ONE - base_scale) * progress * boost)
+            .clamp(Decimal::zero(), Decimal::ONE)
+    }
+
+    fn portfolio_drawdown_exposure_scale(
+        &self,
+        current_value: Decimal,
+        peak_value: Decimal,
+    ) -> Decimal {
+        let risk_control = &self.config.risk_control;
+        let (Some(start), Some(full), Some(min_exposure)) = (
+            risk_control.portfolio_drawdown_reduce_start_pct,
+            risk_control.portfolio_drawdown_reduce_full_pct,
+            risk_control.portfolio_drawdown_min_exposure,
+        ) else {
+            return Decimal::ONE;
+        };
+        if peak_value <= Decimal::zero() || current_value >= peak_value || full <= start {
+            return Decimal::ONE;
+        }
+
+        let min_exposure = min_exposure.clamp(Decimal::zero(), Decimal::ONE);
+        if min_exposure >= Decimal::ONE {
+            return Decimal::ONE;
+        }
+
+        let drawdown = (peak_value - current_value) / peak_value;
+        let base_scale = if drawdown <= start {
+            Decimal::ONE
+        } else if drawdown >= full {
+            min_exposure
+        } else {
+            let progress = (drawdown - start) / (full - start);
+            Decimal::ONE - (Decimal::ONE - min_exposure) * progress
+        };
+        self.portfolio_drawdown_recovery_exposure_scale(current_value, peak_value, base_scale)
+    }
+
     fn execute_rebalance(&mut self, signal: &StrategySignal, market: &MarketDay) {
         let total_value = self.portfolio.total_value();
+        let equity_peak = self.portfolio_equity_peak(total_value);
+        let exposure_scale = self.portfolio_drawdown_exposure_scale(total_value, equity_peak);
         info!(
-            "rebalance: total_value={} targets={} close_symbols={}",
+            "rebalance: total_value={} targets={} close_symbols={} exposure_scale={}",
             total_value,
             signal.target_weights.len(),
-            market.close.len()
+            market.close.len(),
+            exposure_scale
         );
         let mut to_sell: Vec<(String, Decimal, Decimal)> = Vec::new();
         let mut to_buy: Vec<(String, Decimal, Decimal, Decimal)> = Vec::new();
@@ -414,7 +560,8 @@ impl BacktestEngine {
         }
 
         // Phase 2: 按目标权重计算买卖
-        for (sym, target_w) in &signal.target_weights {
+        for (sym, raw_target_w) in &signal.target_weights {
+            let target_w = (*raw_target_w * exposure_scale).clamp(Decimal::zero(), Decimal::ONE);
             let target_amount = total_value * target_w;
             let current_mv = self
                 .portfolio
@@ -436,9 +583,13 @@ impl BacktestEngine {
             self.targets.push(PortfolioTarget {
                 trade_date: market.date,
                 symbol: sym.clone(),
-                target_weight: *target_w,
+                target_weight: target_w,
                 target_quantity,
-                reason: Some("rebalance_signal".into()),
+                reason: Some(if exposure_scale < Decimal::ONE {
+                    "rebalance_signal_portfolio_drawdown_scaled".into()
+                } else {
+                    "rebalance_signal".into()
+                }),
             });
 
             let diff = target_amount - current_mv;
@@ -456,7 +607,7 @@ impl BacktestEngine {
                         continue;
                     }
                 }
-                to_buy.push((sym.clone(), diff, price, *target_w));
+                to_buy.push((sym.clone(), diff, price, target_w));
             } else {
                 // 卖出 — 跌停不卖
                 if let Some(dl_price) = dl {
@@ -467,7 +618,7 @@ impl BacktestEngine {
                 if let Some(h) = self.portfolio.holdings.get(sym) {
                     let sell_qty = (-diff / price).min(h.sellable_quantity);
                     if !sell_qty.is_zero() {
-                        to_sell.push((sym.clone(), sell_qty, *target_w));
+                        to_sell.push((sym.clone(), sell_qty, target_w));
                     }
                 }
             }
@@ -1009,6 +1160,100 @@ mod tests {
             "Should record constraint violation"
         );
         assert_eq!(o.violations[0].constraint_name, "position_limit");
+    }
+
+    #[test]
+    fn portfolio_drawdown_control_scales_exposure_between_thresholds() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
+        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
+        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
+        let e = BacktestEngine::new(c);
+
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("100"), d("100")),
+            Decimal::ONE
+        );
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("90"), d("100")),
+            d("0.70")
+        );
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("80"), d("100")),
+            d("0.40")
+        );
+    }
+
+    #[test]
+    fn portfolio_drawdown_control_can_use_rolling_peak_to_restore_exposure() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
+        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
+        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
+        c.risk_control.portfolio_drawdown_peak_lookback_days = Some(2);
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("80")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("90")));
+
+        let rolling_peak = e.portfolio_equity_peak(d("90"));
+
+        assert_eq!(rolling_peak, d("90"));
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("90"), rolling_peak),
+            Decimal::ONE
+        );
+    }
+
+    #[test]
+    fn portfolio_drawdown_control_recovers_exposure_after_trough() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
+        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
+        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
+        c.risk_control.portfolio_drawdown_recovery_start_pct = Some(d("0.30"));
+        c.risk_control.portfolio_drawdown_recovery_full_pct = Some(d("0.70"));
+        c.risk_control.portfolio_drawdown_recovery_boost = Some(Decimal::ONE);
+        c.risk_control.portfolio_drawdown_peak_lookback_days = Some(252);
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("80")));
+
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("90"), d("100")),
+            d("0.85")
+        );
+    }
+
+    #[test]
+    fn portfolio_drawdown_control_reduces_rebalance_targets() {
+        let mut c = BacktestConfig::default();
+        c.max_position_pct = d("1.01");
+        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
+        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
+        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
+        c.fee_config.min_commission = Decimal::zero();
+        c.fee_config.commission_rate = Decimal::zero();
+        c.fee_config.slippage_bps = Decimal::zero();
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("1000000")));
+        e.portfolio.cash = d("900000");
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "1.0")),
+        );
+        let o = e.finalize();
+
+        assert_eq!(o.targets[0].target_weight, d("0.70"));
+        assert_eq!(o.trades[0].event_reason.as_deref(), Some("rebalance_buy"));
+        assert!(o.trades[0].executed_weight.unwrap() <= d("0.71"));
     }
 
     #[test]

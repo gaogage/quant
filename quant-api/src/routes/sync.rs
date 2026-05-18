@@ -134,6 +134,38 @@ async fn execute_sync_task(
                 json!({"task_id": task_id, "dataset": "daily", "status": "completed", "count": count}),
             )
         }
+        "daily_basic" | "stock_daily_basic" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_daily_basic(
+                &state.db,
+                &state.tushare,
+                &req.symbols,
+                start,
+                end,
+                &task_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "daily_basic", "status": "completed", "count": count}),
+            )
+        }
+        "moneyflow" | "stock_moneyflow" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_moneyflow(
+                &state.db,
+                &state.tushare,
+                &req.symbols,
+                start,
+                end,
+                &task_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "moneyflow", "status": "completed", "count": count}),
+            )
+        }
         "adj_factor" => {
             if req.symbols.is_empty() {
                 return Err("symbols must not be empty for adj_factor sync".into());

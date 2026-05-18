@@ -46,6 +46,44 @@ pub struct MarketStockDailyBar {
     pub amount: Decimal,
 }
 
+/// 股票每日基础/估值数据 (market_stock_daily_basic)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockDailyBasic {
+    pub symbol: String,
+    pub trade_date: NaiveDate,
+    pub pe_ttm: Option<Decimal>,
+    pub pb: Option<Decimal>,
+    pub ps_ttm: Option<Decimal>,
+    pub dv_ttm: Option<Decimal>,
+    pub total_mv: Option<Decimal>,
+    pub circ_mv: Option<Decimal>,
+}
+
+/// 股票每日资金流向数据 (market_stock_moneyflow)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockMoneyflow {
+    pub symbol: String,
+    pub trade_date: NaiveDate,
+    pub buy_sm_vol: Option<Decimal>,
+    pub buy_sm_amount: Option<Decimal>,
+    pub sell_sm_vol: Option<Decimal>,
+    pub sell_sm_amount: Option<Decimal>,
+    pub buy_md_vol: Option<Decimal>,
+    pub buy_md_amount: Option<Decimal>,
+    pub sell_md_vol: Option<Decimal>,
+    pub sell_md_amount: Option<Decimal>,
+    pub buy_lg_vol: Option<Decimal>,
+    pub buy_lg_amount: Option<Decimal>,
+    pub sell_lg_vol: Option<Decimal>,
+    pub sell_lg_amount: Option<Decimal>,
+    pub buy_elg_vol: Option<Decimal>,
+    pub buy_elg_amount: Option<Decimal>,
+    pub sell_elg_vol: Option<Decimal>,
+    pub sell_elg_amount: Option<Decimal>,
+    pub net_mf_vol: Option<Decimal>,
+    pub net_mf_amount: Option<Decimal>,
+}
+
 /// 指数日线 (market_index_daily_bar)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketIndexDailyBar {

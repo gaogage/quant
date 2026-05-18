@@ -3,6 +3,7 @@
 use chrono::NaiveDate;
 use rust_decimal::prelude::Zero;
 use rust_decimal::Decimal;
+use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -47,6 +48,234 @@ struct TradingProfile {
     is_st: bool,
 }
 
+type DailyBarsByDate = HashMap<NaiveDate, HashMap<String, (Decimal, Decimal, Decimal, Decimal)>>;
+
+#[derive(Debug, Clone)]
+struct DailyBarRecord {
+    trade_date: NaiveDate,
+    symbol: String,
+    open: Decimal,
+    close: Decimal,
+    pre_close: Decimal,
+    amount: Decimal,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct BacktestDataCacheStats {
+    pub trading_day_hits: usize,
+    pub trading_day_misses: usize,
+    pub benchmark_data_hits: usize,
+    pub benchmark_data_misses: usize,
+    pub daily_bar_symbol_hits: usize,
+    pub daily_bar_symbol_misses: usize,
+    pub trading_profile_symbol_hits: usize,
+    pub trading_profile_symbol_misses: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct BacktestDataCache {
+    trading_days: HashMap<(NaiveDate, NaiveDate), Vec<NaiveDate>>,
+    benchmark_data: HashMap<(String, NaiveDate, NaiveDate), HashMap<NaiveDate, (Decimal, Decimal)>>,
+    daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Vec<DailyBarRecord>>>,
+    trading_profiles: HashMap<String, Option<TradingProfile>>,
+    stats: BacktestDataCacheStats,
+}
+
+impl BacktestDataCache {
+    pub fn stats(&self) -> BacktestDataCacheStats {
+        self.stats
+    }
+
+    fn cached_trading_days(&mut self, start: NaiveDate, end: NaiveDate) -> Option<Vec<NaiveDate>> {
+        match self.trading_days.get(&(start, end)) {
+            Some(days) => {
+                self.stats.trading_day_hits += 1;
+                Some(days.clone())
+            }
+            None => {
+                self.stats.trading_day_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_trading_days(
+        &mut self,
+        start: NaiveDate,
+        end: NaiveDate,
+        days: Vec<NaiveDate>,
+    ) -> Vec<NaiveDate> {
+        self.trading_days.insert((start, end), days.clone());
+        days
+    }
+
+    fn cached_benchmark_data(
+        &mut self,
+        benchmark: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Option<HashMap<NaiveDate, (Decimal, Decimal)>> {
+        let key = (benchmark.to_string(), start, end);
+        match self.benchmark_data.get(&key) {
+            Some(data) => {
+                self.stats.benchmark_data_hits += 1;
+                Some(data.clone())
+            }
+            None => {
+                self.stats.benchmark_data_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_benchmark_data(
+        &mut self,
+        benchmark: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+        data: HashMap<NaiveDate, (Decimal, Decimal)>,
+    ) -> HashMap<NaiveDate, (Decimal, Decimal)> {
+        self.benchmark_data
+            .insert((benchmark.to_string(), start, end), data.clone());
+        data
+    }
+
+    fn cached_daily_bar_symbols(
+        &mut self,
+        symbols: &[String],
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> (Vec<String>, DailyBarsByDate) {
+        let symbols = normalized_symbol_key(symbols);
+        let bucket = self.daily_bars.entry((start, end)).or_default();
+        let mut missing = Vec::new();
+        let mut cached = HashMap::new();
+
+        for symbol in symbols {
+            if let Some(records) = bucket.get(&symbol) {
+                self.stats.daily_bar_symbol_hits += 1;
+                merge_daily_bar_records(&mut cached, records);
+            } else {
+                self.stats.daily_bar_symbol_misses += 1;
+                missing.push(symbol);
+            }
+        }
+
+        (missing, cached)
+    }
+
+    fn insert_daily_bar_rows(
+        &mut self,
+        start: NaiveDate,
+        end: NaiveDate,
+        requested_symbols: &[String],
+        rows: Vec<DailyBarRecord>,
+    ) -> DailyBarsByDate {
+        let requested_symbols = normalized_symbol_key(requested_symbols);
+        let mut by_symbol: HashMap<String, Vec<DailyBarRecord>> = requested_symbols
+            .iter()
+            .map(|symbol| (symbol.clone(), Vec::new()))
+            .collect();
+
+        for row in rows {
+            by_symbol.entry(row.symbol.clone()).or_default().push(row);
+        }
+
+        let bucket = self.daily_bars.entry((start, end)).or_default();
+        let mut inserted = HashMap::new();
+        for symbol in requested_symbols {
+            let mut records = by_symbol.remove(&symbol).unwrap_or_default();
+            records.sort_by_key(|record| record.trade_date);
+            merge_daily_bar_records(&mut inserted, &records);
+            bucket.insert(symbol, records);
+        }
+
+        inserted
+    }
+
+    fn cached_trading_profiles(
+        &mut self,
+        symbols: &[String],
+    ) -> (Vec<String>, HashMap<String, TradingProfile>) {
+        let mut missing = Vec::new();
+        let mut cached = HashMap::new();
+
+        for symbol in normalized_symbol_key(symbols) {
+            match self.trading_profiles.get(&symbol) {
+                Some(Some(profile)) => {
+                    self.stats.trading_profile_symbol_hits += 1;
+                    cached.insert(symbol, profile.clone());
+                }
+                Some(None) => {
+                    self.stats.trading_profile_symbol_hits += 1;
+                }
+                None => {
+                    self.stats.trading_profile_symbol_misses += 1;
+                    missing.push(symbol);
+                }
+            }
+        }
+
+        (missing, cached)
+    }
+
+    fn insert_trading_profiles(
+        &mut self,
+        requested_symbols: &[String],
+        rows: Vec<(String, Option<String>, Option<String>, Option<bool>)>,
+    ) -> HashMap<String, TradingProfile> {
+        let requested_symbols = normalized_symbol_key(requested_symbols);
+        let mut by_symbol: HashMap<String, Option<TradingProfile>> = requested_symbols
+            .iter()
+            .map(|symbol| (symbol.clone(), None))
+            .collect();
+
+        for (symbol, exchange, market, is_st) in rows {
+            by_symbol.insert(
+                symbol,
+                Some(TradingProfile {
+                    exchange,
+                    market,
+                    is_st: is_st.unwrap_or(false),
+                }),
+            );
+        }
+
+        let mut inserted = HashMap::new();
+        for symbol in requested_symbols {
+            let profile = by_symbol.remove(&symbol).unwrap_or(None);
+            if let Some(profile) = profile.as_ref() {
+                inserted.insert(symbol.clone(), profile.clone());
+            }
+            self.trading_profiles.insert(symbol, profile);
+        }
+
+        inserted
+    }
+}
+
+fn normalized_symbol_key(symbols: &[String]) -> Vec<String> {
+    let mut symbols = symbols.to_vec();
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
+fn merge_daily_bars(target: &mut DailyBarsByDate, source: DailyBarsByDate) {
+    for (date, day) in source {
+        target.entry(date).or_default().extend(day);
+    }
+}
+
+fn merge_daily_bar_records(target: &mut DailyBarsByDate, records: &[DailyBarRecord]) {
+    for record in records {
+        target.entry(record.trade_date).or_default().insert(
+            record.symbol.clone(),
+            (record.open, record.close, record.pre_close, record.amount),
+        );
+    }
+}
+
 impl BacktestTaskInsert {
     pub fn from_config(task_id: &str, config: &BacktestConfig) -> Self {
         Self {
@@ -84,6 +313,17 @@ impl BacktestRunner {
         config: BacktestConfig,
         signals: &HashMap<NaiveDate, StrategySignal>,
     ) -> Result<BacktestOutput, Box<dyn std::error::Error>> {
+        self.run_with_cache(task_id, config, signals, None).await
+    }
+
+    /// 执行回测，并在批量 trial 场景复用调用方持有的数据缓存。
+    pub async fn run_with_cache(
+        &self,
+        task_id: &str,
+        config: BacktestConfig,
+        signals: &HashMap<NaiveDate, StrategySignal>,
+        mut data_cache: Option<&mut BacktestDataCache>,
+    ) -> Result<BacktestOutput, Box<dyn std::error::Error>> {
         info!(
             task_id,
             "回测开始: {} -> {}", config.start_date, config.end_date
@@ -93,15 +333,34 @@ impl BacktestRunner {
         self.create_task(task_id, &config).await?;
 
         // 2. 加载交易日历
-        let trading_days = self
-            .load_trading_days(config.start_date, config.end_date)
-            .await?;
+        let trading_days = match data_cache.as_mut() {
+            Some(cache) => {
+                self.load_trading_days_cached(cache, config.start_date, config.end_date)
+                    .await?
+            }
+            None => {
+                self.load_trading_days(config.start_date, config.end_date)
+                    .await?
+            }
+        };
         info!(task_id, days = trading_days.len(), "交易日已加载");
 
         // 3. 加载基准数据
-        let benchmark_data = self
-            .load_benchmark_data(&config.benchmark, config.start_date, config.end_date)
-            .await?;
+        let benchmark_data = match data_cache.as_mut() {
+            Some(cache) => {
+                self.load_benchmark_data_cached(
+                    cache,
+                    &config.benchmark,
+                    config.start_date,
+                    config.end_date,
+                )
+                .await?
+            }
+            None => {
+                self.load_benchmark_data(&config.benchmark, config.start_date, config.end_date)
+                    .await?
+            }
+        };
         info!(task_id, bm_points = benchmark_data.len(), "基准数据已加载");
 
         // 4. 加载所需股票日线
@@ -129,10 +388,23 @@ impl BacktestRunner {
             });
         }
 
-        let daily_data = self
-            .load_daily_bars(&all_symbols, config.start_date, config.end_date)
-            .await?;
-        let trading_profiles = self.load_trading_profiles(&all_symbols).await?;
+        let daily_data = match data_cache.as_mut() {
+            Some(cache) => {
+                self.load_daily_bars_cached(cache, &all_symbols, config.start_date, config.end_date)
+                    .await?
+            }
+            None => {
+                self.load_daily_bars(&all_symbols, config.start_date, config.end_date)
+                    .await?
+            }
+        };
+        let trading_profiles = match data_cache.as_mut() {
+            Some(cache) => {
+                self.load_trading_profiles_cached(cache, &all_symbols)
+                    .await?
+            }
+            None => self.load_trading_profiles(&all_symbols).await?,
+        };
         info!(
             task_id,
             symbols = all_symbols.len(),
@@ -205,6 +477,20 @@ impl BacktestRunner {
         Ok(rows.into_iter().map(|(d,)| d).collect())
     }
 
+    async fn load_trading_days_cached(
+        &self,
+        cache: &mut BacktestDataCache,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Result<Vec<NaiveDate>, sqlx::Error> {
+        if let Some(days) = cache.cached_trading_days(start, end) {
+            return Ok(days);
+        }
+
+        let days = self.load_trading_days(start, end).await?;
+        Ok(cache.insert_trading_days(start, end, days))
+    }
+
     async fn load_benchmark_data(
         &self,
         benchmark: &str,
@@ -228,15 +514,27 @@ impl BacktestRunner {
             .collect())
     }
 
+    async fn load_benchmark_data_cached(
+        &self,
+        cache: &mut BacktestDataCache,
+        benchmark: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Result<HashMap<NaiveDate, (Decimal, Decimal)>, sqlx::Error> {
+        if let Some(data) = cache.cached_benchmark_data(benchmark, start, end) {
+            return Ok(data);
+        }
+
+        let data = self.load_benchmark_data(benchmark, start, end).await?;
+        Ok(cache.insert_benchmark_data(benchmark, start, end, data))
+    }
+
     async fn load_daily_bars(
         &self,
         symbols: &[String],
         start: NaiveDate,
         end: NaiveDate,
-    ) -> Result<
-        HashMap<NaiveDate, HashMap<String, (Decimal, Decimal, Decimal, Decimal)>>,
-        sqlx::Error,
-    > {
+    ) -> Result<DailyBarsByDate, sqlx::Error> {
         let rows: Vec<(
             NaiveDate,
             String,
@@ -256,8 +554,7 @@ impl BacktestRunner {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut result: HashMap<NaiveDate, HashMap<String, (Decimal, Decimal, Decimal, Decimal)>> =
-            HashMap::new();
+        let mut result: DailyBarsByDate = HashMap::new();
         for (d, sym, o, c, pc, amount) in rows {
             result.entry(d).or_default().insert(
                 sym,
@@ -269,6 +566,55 @@ impl BacktestRunner {
                 ),
             );
         }
+        Ok(result)
+    }
+
+    async fn load_daily_bars_cached(
+        &self,
+        cache: &mut BacktestDataCache,
+        symbols: &[String],
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Result<DailyBarsByDate, sqlx::Error> {
+        let (missing_symbols, mut result) = cache.cached_daily_bar_symbols(symbols, start, end);
+        if missing_symbols.is_empty() {
+            return Ok(result);
+        }
+
+        let rows: Vec<(
+            NaiveDate,
+            String,
+            Option<Decimal>,
+            Decimal,
+            Option<Decimal>,
+            Option<Decimal>,
+        )> = sqlx::query_as(
+            "SELECT trade_date, symbol, open, close, pre_close, amount
+             FROM market_stock_daily_bar
+             WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
+             ORDER BY trade_date, symbol",
+        )
+        .bind(&missing_symbols)
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let rows = rows
+            .into_iter()
+            .map(
+                |(trade_date, symbol, open, close, pre_close, amount)| DailyBarRecord {
+                    trade_date,
+                    symbol,
+                    open: open.unwrap_or(close),
+                    close,
+                    pre_close: pre_close.unwrap_or(close),
+                    amount: amount.unwrap_or_default(),
+                },
+            )
+            .collect();
+        let inserted = cache.insert_daily_bar_rows(start, end, &missing_symbols, rows);
+        merge_daily_bars(&mut result, inserted);
         Ok(result)
     }
 
@@ -296,6 +642,26 @@ impl BacktestRunner {
                 )
             })
             .collect())
+    }
+
+    async fn load_trading_profiles_cached(
+        &self,
+        cache: &mut BacktestDataCache,
+        symbols: &[String],
+    ) -> Result<HashMap<String, TradingProfile>, sqlx::Error> {
+        let (missing_symbols, mut result) = cache.cached_trading_profiles(symbols);
+        if missing_symbols.is_empty() {
+            return Ok(result);
+        }
+
+        let rows: Vec<(String, Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
+            "SELECT symbol, exchange, market, is_st FROM market_stock WHERE symbol = ANY($1)",
+        )
+        .bind(&missing_symbols)
+        .fetch_all(&self.pool)
+        .await?;
+        result.extend(cache.insert_trading_profiles(&missing_symbols, rows));
+        Ok(result)
     }
 
     // ─── Market day builder ────────────────────────────────────
@@ -678,5 +1044,58 @@ mod tests {
             BacktestRunner::limit_rate_for("688001.SH", None),
             Decimal::new(20, 2)
         );
+    }
+
+    #[test]
+    fn backtest_data_cache_reuses_overlapping_daily_bar_symbols() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let mut cache = BacktestDataCache::default();
+
+        let first_symbols = vec!["000002.SZ".to_string(), "000001.SZ".to_string()];
+        let (missing_first, cached_first) =
+            cache.cached_daily_bar_symbols(&first_symbols, start, end);
+        assert_eq!(missing_first, vec!["000001.SZ", "000002.SZ"]);
+        assert!(cached_first.is_empty());
+
+        cache.insert_daily_bar_rows(
+            start,
+            end,
+            &missing_first,
+            vec![
+                DailyBarRecord {
+                    trade_date: start,
+                    symbol: "000001.SZ".into(),
+                    open: Decimal::new(101, 1),
+                    close: Decimal::new(102, 1),
+                    pre_close: Decimal::new(100, 1),
+                    amount: Decimal::new(1000, 0),
+                },
+                DailyBarRecord {
+                    trade_date: start,
+                    symbol: "000002.SZ".into(),
+                    open: Decimal::new(201, 1),
+                    close: Decimal::new(202, 1),
+                    pre_close: Decimal::new(200, 1),
+                    amount: Decimal::new(2000, 0),
+                },
+            ],
+        );
+
+        let second_symbols = vec!["000002.SZ".to_string(), "000003.SZ".to_string()];
+        let (missing_second, cached_second) =
+            cache.cached_daily_bar_symbols(&second_symbols, start, end);
+
+        assert_eq!(missing_second, vec!["000003.SZ"]);
+        assert_eq!(
+            cached_second
+                .get(&start)
+                .and_then(|day| day.get("000002.SZ"))
+                .map(|(_, close, _, _)| *close),
+            Some(Decimal::new(202, 1))
+        );
+        let stats = cache.stats();
+        assert_eq!(stats.daily_bar_symbol_hits, 1);
+        assert_eq!(stats.daily_bar_symbol_misses, 3);
     }
 }

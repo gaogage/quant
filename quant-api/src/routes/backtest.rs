@@ -15,12 +15,14 @@ use tracing::info;
 use uuid::Uuid;
 
 use quant_backtest::engine::{
-    BacktestConfig, BacktestMode, ExecutionPrice, ExecutionTiming, StrategySignal,
+    BacktestConfig, BacktestMode, ExecutionPrice, ExecutionTiming, RiskControlConfig,
+    StrategySignal,
 };
 use quant_backtest::portfolio::FeeConfig;
-use quant_backtest::runner::BacktestRunner;
+use quant_backtest::runner::{BacktestDataCache, BacktestRunner};
 use quant_backtest::signal_generator::{
-    MarketRegimePolicy, PortfolioConstructionMethod, ScoreDirection,
+    MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig, ScoreDirection,
+    SignalDataCache, TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -541,6 +543,8 @@ pub struct RunFactorBacktestReq {
     pub research_dataset_id: Option<String>,
     pub feature_set_version_id: Option<String>,
     pub prediction_set_id: Option<String>,
+    pub prediction_blend_weight: Option<f64>,
+    pub prediction_min_percentile: Option<f64>,
     pub portfolio_policy_id: Option<String>,
     #[serde(default = "default_top_n")]
     pub top_n: usize,
@@ -575,10 +579,21 @@ pub struct RunFactorBacktestReq {
     pub risk_budget_lookback_days: usize,
     #[serde(default)]
     pub capacity_penalty_strength: f64,
+    pub industry_max_weight_pct: Option<f64>,
+    #[serde(default)]
+    pub score_candidate_pool_size: Option<usize>,
+    pub universe_profile: Option<String>,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
     pub market_regime: Option<MarketRegimeBacktestReq>,
+    pub portfolio_drawdown_reduce_start_pct: Option<f64>,
+    pub portfolio_drawdown_reduce_full_pct: Option<f64>,
+    pub portfolio_drawdown_min_exposure: Option<f64>,
+    pub portfolio_drawdown_peak_lookback_days: Option<usize>,
+    pub portfolio_drawdown_recovery_start_pct: Option<f64>,
+    pub portfolio_drawdown_recovery_full_pct: Option<f64>,
+    pub portfolio_drawdown_recovery_boost: Option<f64>,
     pub start_date: String,
     pub end_date: String,
     #[serde(default = "default_capital")]
@@ -589,6 +604,7 @@ pub struct RunFactorBacktestReq {
 #[derive(Debug, Deserialize, Clone)]
 pub struct MarketRegimeBacktestReq {
     pub enabled: Option<bool>,
+    pub policy: Option<String>,
     pub benchmark: Option<String>,
     pub lookback_days: Option<usize>,
     pub min_observations: Option<usize>,
@@ -633,6 +649,7 @@ pub struct RunPredictionBacktestReq {
     pub risk_budget_lookback_days: usize,
     #[serde(default)]
     pub capacity_penalty_strength: f64,
+    pub industry_max_weight_pct: Option<f64>,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
@@ -712,6 +729,135 @@ fn parse_portfolio_method(value: &str) -> Result<PortfolioConstructionMethod, St
     }
 }
 
+fn parse_tradable_universe_profile(value: Option<&str>) -> Result<TradableUniverseProfile, String> {
+    value
+        .map(TradableUniverseProfile::parse)
+        .unwrap_or(Ok(TradableUniverseProfile::All))
+}
+
+fn build_prediction_blend_config(
+    prediction_set_id: Option<&String>,
+    prediction_blend_weight: Option<f64>,
+    prediction_min_percentile: Option<f64>,
+) -> Result<Option<PredictionBlendConfig>, String> {
+    let prediction_weight = prediction_blend_weight.unwrap_or(0.0);
+    if !prediction_weight.is_finite() || !(0.0..=1.0).contains(&prediction_weight) {
+        return Err("prediction_blend_weight must be between 0 and 1".into());
+    }
+    if let Some(min_percentile) = prediction_min_percentile {
+        if !min_percentile.is_finite() || !(0.0..=1.0).contains(&min_percentile) {
+            return Err("prediction_min_percentile must be between 0 and 1".into());
+        }
+    }
+    if prediction_weight <= f64::EPSILON && prediction_min_percentile.is_none() {
+        return Ok(None);
+    }
+    let prediction_set_id = prediction_set_id
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "prediction_set_id is required when prediction overlay is enabled".to_string()
+        })?;
+    Ok(Some(PredictionBlendConfig {
+        prediction_set_id: prediction_set_id.to_string(),
+        factor_weight: 1.0 - prediction_weight,
+        prediction_weight,
+        prediction_min_percentile,
+    }))
+}
+
+fn optional_unit_f64(value: Option<f64>, name: &str) -> Result<Option<f64>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(format!("{} must be between 0 and 1", name));
+    }
+    Ok(Some(value))
+}
+
+fn optional_decimal_pct(value: Option<f64>, name: &str) -> Result<Option<Decimal>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(format!("{} must be between 0 and 1", name));
+    }
+    decimal_from_f64(value, name).map(Some)
+}
+
+fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskControlConfig, String> {
+    let start = optional_decimal_pct(
+        req.portfolio_drawdown_reduce_start_pct,
+        "portfolio_drawdown_reduce_start_pct",
+    )?;
+    let full = optional_decimal_pct(
+        req.portfolio_drawdown_reduce_full_pct,
+        "portfolio_drawdown_reduce_full_pct",
+    )?;
+    let min_exposure = optional_decimal_pct(
+        req.portfolio_drawdown_min_exposure,
+        "portfolio_drawdown_min_exposure",
+    )?;
+    let recovery_start = optional_decimal_pct(
+        req.portfolio_drawdown_recovery_start_pct,
+        "portfolio_drawdown_recovery_start_pct",
+    )?;
+    let recovery_full = optional_decimal_pct(
+        req.portfolio_drawdown_recovery_full_pct,
+        "portfolio_drawdown_recovery_full_pct",
+    )?;
+    let recovery_boost = optional_decimal_pct(
+        req.portfolio_drawdown_recovery_boost,
+        "portfolio_drawdown_recovery_boost",
+    )?;
+
+    let provided = start.is_some() || full.is_some() || min_exposure.is_some();
+    let complete = start.is_some() && full.is_some() && min_exposure.is_some();
+    if provided && !complete {
+        return Err(
+            "portfolio drawdown risk control requires start_pct, full_pct, and min_exposure".into(),
+        );
+    }
+    if let (Some(start), Some(full)) = (start, full) {
+        if full <= start {
+            return Err(
+                "portfolio_drawdown_reduce_full_pct must be greater than portfolio_drawdown_reduce_start_pct"
+                    .into(),
+            );
+        }
+    }
+    let recovery_provided =
+        recovery_start.is_some() || recovery_full.is_some() || recovery_boost.is_some();
+    let recovery_complete = recovery_start.is_some() && recovery_full.is_some();
+    if recovery_provided && !recovery_complete {
+        return Err(
+            "portfolio drawdown recovery requires recovery_start_pct and recovery_full_pct".into(),
+        );
+    }
+    if let (Some(start), Some(full)) = (recovery_start, recovery_full) {
+        if full <= start {
+            return Err(
+                "portfolio_drawdown_recovery_full_pct must be greater than portfolio_drawdown_recovery_start_pct"
+                    .into(),
+            );
+        }
+    }
+
+    Ok(RiskControlConfig {
+        portfolio_drawdown_reduce_start_pct: start,
+        portfolio_drawdown_reduce_full_pct: full,
+        portfolio_drawdown_min_exposure: min_exposure,
+        portfolio_drawdown_peak_lookback_days: req
+            .portfolio_drawdown_peak_lookback_days
+            .filter(|days| *days > 0),
+        portfolio_drawdown_recovery_start_pct: recovery_start,
+        portfolio_drawdown_recovery_full_pct: recovery_full,
+        portfolio_drawdown_recovery_boost: recovery_boost,
+        ..RiskControlConfig::default()
+    })
+}
+
 fn build_market_regime_policy(
     req: Option<&MarketRegimeBacktestReq>,
     default_benchmark: &str,
@@ -723,13 +869,24 @@ fn build_market_regime_policy(
         return Ok(None);
     }
 
-    let mut policy = MarketRegimePolicy::professional_default(
-        req.benchmark
-            .as_deref()
-            .unwrap_or(default_benchmark)
-            .trim()
-            .to_string(),
-    );
+    let benchmark = req
+        .benchmark
+        .as_deref()
+        .unwrap_or(default_benchmark)
+        .trim()
+        .to_string();
+    let policy_name = req
+        .policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("professional_default");
+    let mut policy = match policy_name {
+        "professional_default" => MarketRegimePolicy::professional_default(benchmark),
+        "drawdown_control_v1" => MarketRegimePolicy::drawdown_control_v1(benchmark),
+        "drawdown_control_v2" => MarketRegimePolicy::drawdown_control_v2(benchmark),
+        other => return Err(format!("unsupported market_regime policy: {}", other)),
+    };
     if let Some(lookback_days) = req.lookback_days {
         policy.lookback_days = lookback_days.max(1);
     }
@@ -833,6 +990,25 @@ pub(crate) async fn execute_factor_backtest(
     task_id: &str,
     req: RunFactorBacktestReq,
 ) -> Result<FactorBacktestRunOutput, String> {
+    execute_factor_backtest_with_signal_cache(db, task_id, req, None).await
+}
+
+pub(crate) async fn execute_factor_backtest_with_signal_cache(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    req: RunFactorBacktestReq,
+    signal_cache: Option<&mut SignalDataCache>,
+) -> Result<FactorBacktestRunOutput, String> {
+    execute_factor_backtest_with_caches(db, task_id, req, signal_cache, None).await
+}
+
+pub(crate) async fn execute_factor_backtest_with_caches(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    req: RunFactorBacktestReq,
+    signal_cache: Option<&mut SignalDataCache>,
+    backtest_cache: Option<&mut BacktestDataCache>,
+) -> Result<FactorBacktestRunOutput, String> {
     let start = parse_yyyymmdd(&req.start_date, "start_date")?;
     let end = parse_yyyymmdd(&req.end_date, "end_date")?;
     if end < start {
@@ -879,6 +1055,9 @@ pub(crate) async fn execute_factor_backtest(
     };
     let score_direction = parse_score_direction(&req.score_direction)?;
     let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
+    let universe_profile = parse_tradable_universe_profile(req.universe_profile.as_deref())?;
+    let industry_max_weight_pct =
+        optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
 
     let sig_config = quant_backtest::signal_generator::SignalConfig {
         combo_name: req.combo_name.clone(),
@@ -902,13 +1081,32 @@ pub(crate) async fn execute_factor_backtest(
         portfolio_method,
         risk_budget_lookback_days: req.risk_budget_lookback_days,
         capacity_penalty_strength: req.capacity_penalty_strength,
+        industry_max_weight_pct,
+        score_candidate_pool_size: req.score_candidate_pool_size.filter(|size| *size > 0),
+        universe_profile,
+        prediction_blend: build_prediction_blend_config(
+            req.prediction_set_id.as_ref(),
+            req.prediction_blend_weight,
+            req.prediction_min_percentile,
+        )?,
     };
 
     info!(task_id, combo=%req.combo_name, top_n=req.top_n, reb=reb_freq, "Generating factor signals");
 
     let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
-    let signals = match regime_policy {
-        Some(ref policy) => {
+    let signals = match (regime_policy.as_ref(), signal_cache) {
+        (Some(policy), Some(cache)) => {
+            quant_backtest::signal_generator::generate_regime_signals_with_cache(
+                db,
+                &sig_config,
+                policy,
+                start,
+                end,
+                cache,
+            )
+            .await
+        }
+        (Some(policy), None) => {
             quant_backtest::signal_generator::generate_regime_signals(
                 db,
                 &sig_config,
@@ -918,7 +1116,17 @@ pub(crate) async fn execute_factor_backtest(
             )
             .await
         }
-        None => {
+        (None, Some(cache)) => {
+            quant_backtest::signal_generator::generate_signals_with_cache(
+                db,
+                &sig_config,
+                start,
+                end,
+                cache,
+            )
+            .await
+        }
+        (None, None) => {
             quant_backtest::signal_generator::generate_signals(db, &sig_config, start, end).await
         }
     }?;
@@ -959,11 +1167,14 @@ pub(crate) async fn execute_factor_backtest(
         execution_timing,
         execution_price,
         max_participation_rate,
-        risk_control: Default::default(),
+        risk_control: build_portfolio_risk_control(&req)?,
     };
 
     let runner = BacktestRunner::new(db.clone());
-    match runner.run(&task_id, config, &signals).await {
+    match runner
+        .run_with_cache(task_id, config, &signals, backtest_cache)
+        .await
+    {
         Ok(output) => Ok(FactorBacktestRunOutput {
             signals_count: signals.len(),
             trades: output.trades.len(),
@@ -1015,6 +1226,8 @@ pub(crate) async fn execute_prediction_backtest(
     };
     let score_direction = parse_score_direction(&req.score_direction)?;
     let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
+    let industry_max_weight_pct =
+        optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
 
     let sig_config = quant_backtest::signal_generator::PredictionSignalConfig {
         prediction_set_id: prediction_set_id.clone(),
@@ -1037,6 +1250,7 @@ pub(crate) async fn execute_prediction_backtest(
         portfolio_method,
         risk_budget_lookback_days: req.risk_budget_lookback_days,
         capacity_penalty_strength: req.capacity_penalty_strength,
+        industry_max_weight_pct,
     };
 
     info!(
@@ -1181,6 +1395,41 @@ mod tests {
     }
 
     #[test]
+    fn prediction_blend_requires_prediction_set_when_weight_is_positive() {
+        let err = build_prediction_blend_config(None, Some(0.25), None).unwrap_err();
+
+        assert!(err.contains("prediction_set_id"));
+    }
+
+    #[test]
+    fn prediction_blend_weight_builds_factor_prediction_weights() {
+        let prediction_set_id = " pred-quality-growth-v1 ".to_string();
+
+        let blend = build_prediction_blend_config(Some(&prediction_set_id), Some(0.35), None)
+            .expect("valid blend")
+            .expect("blend enabled");
+
+        assert_eq!(blend.prediction_set_id, "pred-quality-growth-v1");
+        assert!((blend.factor_weight - 0.65).abs() < f64::EPSILON);
+        assert!((blend.prediction_weight - 0.35).abs() < f64::EPSILON);
+        assert_eq!(blend.prediction_min_percentile, None);
+    }
+
+    #[test]
+    fn prediction_filter_can_enable_overlay_without_blend_weight() {
+        let prediction_set_id = "pred-quality-growth-v1".to_string();
+
+        let blend = build_prediction_blend_config(Some(&prediction_set_id), None, Some(0.2))
+            .expect("valid prediction filter")
+            .expect("filter enabled");
+
+        assert_eq!(blend.prediction_set_id, prediction_set_id);
+        assert_eq!(blend.factor_weight, 1.0);
+        assert_eq!(blend.prediction_weight, 0.0);
+        assert_eq!(blend.prediction_min_percentile, Some(0.2));
+    }
+
+    #[test]
     fn backtest_list_query_normalizes_page_size_bounds() {
         let query = BacktestListQuery {
             page: Some(0),
@@ -1197,6 +1446,7 @@ mod tests {
     fn market_regime_request_builds_professional_policy() {
         let req = MarketRegimeBacktestReq {
             enabled: Some(true),
+            policy: None,
             benchmark: Some("000905.SH".to_string()),
             lookback_days: Some(126),
             min_observations: Some(20),
@@ -1212,5 +1462,137 @@ mod tests {
         assert!(policy
             .rules
             .contains_key(&quant_backtest::signal_generator::MarketRegime::Bear));
+    }
+
+    #[test]
+    fn market_regime_request_builds_drawdown_control_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("drawdown_control_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.bear_drawdown_threshold, 0.12);
+        assert_eq!(policy.high_volatility_threshold, 0.24);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.35)
+        );
+    }
+
+    #[test]
+    fn market_regime_request_builds_drawdown_control_v2_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("drawdown_control_v2".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.bear_drawdown_threshold, 0.08);
+        assert_eq!(policy.high_volatility_threshold, 0.20);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.25)
+        );
+    }
+
+    #[test]
+    fn factor_request_builds_portfolio_drawdown_risk_control() {
+        let req = RunFactorBacktestReq {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            strategy_version_id: "strategy-v1".to_string(),
+            data_version_id: "data-v1".to_string(),
+            research_dataset_id: None,
+            feature_set_version_id: None,
+            prediction_set_id: None,
+            prediction_blend_weight: None,
+            prediction_min_percentile: None,
+            portfolio_policy_id: None,
+            top_n: 20,
+            rebalance: "20".to_string(),
+            entry_delay: 0,
+            min_amount: 0.0,
+            max_position_pct: 0.1,
+            skip_top_pct: 0.0,
+            max_pairwise_correlation: None,
+            correlation_lookback_days: 60,
+            kelly_fraction: 0.0,
+            kelly_lookback_days: 60,
+            max_gross_exposure: 1.0,
+            score_direction: "descending".to_string(),
+            portfolio_method: "risk_budget".to_string(),
+            risk_budget_lookback_days: 60,
+            capacity_penalty_strength: 0.0,
+            industry_max_weight_pct: None,
+            score_candidate_pool_size: None,
+            universe_profile: None,
+            cost_model: None,
+            execution_rules: None,
+            benchmark: Some("000300.SH".to_string()),
+            market_regime: None,
+            start_date: "20250101".to_string(),
+            end_date: "20250131".to_string(),
+            initial_capital: 1_000_000.0,
+            mode: Some("standard".to_string()),
+            portfolio_drawdown_reduce_start_pct: Some(0.05),
+            portfolio_drawdown_reduce_full_pct: Some(0.15),
+            portfolio_drawdown_min_exposure: Some(0.4),
+            portfolio_drawdown_peak_lookback_days: Some(252),
+            portfolio_drawdown_recovery_start_pct: Some(0.30),
+            portfolio_drawdown_recovery_full_pct: Some(0.70),
+            portfolio_drawdown_recovery_boost: Some(1.0),
+        };
+
+        let risk_control = build_portfolio_risk_control(&req).expect("valid risk control");
+
+        assert_eq!(
+            risk_control.portfolio_drawdown_reduce_start_pct,
+            Some(Decimal::new(5, 2))
+        );
+        assert_eq!(
+            risk_control.portfolio_drawdown_reduce_full_pct,
+            Some(Decimal::new(15, 2))
+        );
+        assert_eq!(
+            risk_control.portfolio_drawdown_min_exposure,
+            Some(Decimal::new(4, 1))
+        );
+        assert_eq!(
+            risk_control.portfolio_drawdown_peak_lookback_days,
+            Some(252)
+        );
+        assert_eq!(
+            risk_control.portfolio_drawdown_recovery_start_pct,
+            Some(Decimal::new(30, 2))
+        );
+        assert_eq!(
+            risk_control.portfolio_drawdown_recovery_full_pct,
+            Some(Decimal::new(70, 2))
+        );
+        assert_eq!(
+            risk_control.portfolio_drawdown_recovery_boost,
+            Some(Decimal::ONE)
+        );
     }
 }

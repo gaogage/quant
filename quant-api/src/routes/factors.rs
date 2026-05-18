@@ -6,6 +6,8 @@ use axum::{
     Json,
 };
 use chrono::NaiveDate;
+use quant_common::phase7::phase7_alpha_blend_profiles;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -92,6 +94,86 @@ pub struct Phase7FinancialQualityBackfillRequest {
     pub statement_timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Phase7RelativeStrengthBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7QualityRelativeStrengthBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7GrowthRecoveryBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7ValuationBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7MoneyflowBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7AlphaBlendSourceRequest {
+    pub combo_name: String,
+    pub version: Option<String>,
+    pub weight: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7AlphaBlendBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub allow_signed_weights: bool,
+    pub sources: Vec<Phase7AlphaBlendSourceRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7AlphaBlendProfilesBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub profile_names: Option<Vec<String>>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct Phase7AlphaBlendSourcePlan {
+    combo_name: String,
+    version: String,
+    weight: f64,
+}
+
 #[derive(Debug, Clone)]
 struct SetBasedFactorBackfillPlan {
     start_date: NaiveDate,
@@ -108,10 +190,24 @@ struct SetBasedFactorBackfillPlan {
     dependencies: &'static [&'static str],
     combo_method: &'static str,
     experiment_type: &'static str,
+    source_combos: Vec<Phase7AlphaBlendSourcePlan>,
 }
 
 type Phase7PriceVolumeBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7FinancialQualityBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7RelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7QualityRelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7GrowthRecoveryBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7ValuationBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7MoneyflowBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinancialAnnualChangeMode {
+    PercentChange,
+    Difference,
+    Decrease,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase7BackfillFactorKind {
@@ -119,9 +215,24 @@ enum Phase7BackfillFactorKind {
     DownsideVolatility,
     AmihudIlliquidity,
     AmountIntensity,
+    MarketRelativeMomentum,
+    IndustryRelativeMomentum,
     FinancialLatest {
         source_column: &'static str,
         higher_is_better: bool,
+    },
+    DailyBasicLatest {
+        source_column: &'static str,
+        higher_is_better: bool,
+        positive_only: bool,
+    },
+    MoneyflowRolling {
+        amount_expression: &'static str,
+        higher_is_better: bool,
+    },
+    FinancialAnnualChange {
+        source_column: &'static str,
+        mode: FinancialAnnualChangeMode,
     },
 }
 
@@ -268,6 +379,7 @@ impl Phase7PriceVolumeBackfillRequest {
             dependencies: &["market_stock_daily_bar"],
             combo_method: "equal_weight",
             experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
         })
     }
 }
@@ -312,7 +424,424 @@ impl Phase7FinancialQualityBackfillRequest {
             dependencies: &["market_financial_indicator", "market_trade_calendar"],
             combo_method: "equal_weight",
             experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
         })
+    }
+}
+
+impl Phase7RelativeStrengthBackfillRequest {
+    fn into_plan(self) -> Result<Phase7RelativeStrengthBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_relative_strength_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7RelativeStrengthBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_relative_strength_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_relative_strength_v1",
+            category: "relative_strength",
+            phase: "7-B/7-J",
+            dependencies: &["market_stock_daily_bar", "market_stock"],
+            combo_method: "equal_weight",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7QualityRelativeStrengthBackfillRequest {
+    fn into_plan(self) -> Result<Phase7QualityRelativeStrengthBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "phase7_quality_relative_strength_v1",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7QualityRelativeStrengthBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_quality_relative_strength_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_quality_relative_strength_v1",
+            category: "composite_alpha",
+            phase: "7-B/7-J",
+            dependencies: &[
+                "factor_value",
+                "market_financial_indicator",
+                "market_trade_calendar",
+                "market_stock_daily_bar",
+                "market_stock",
+            ],
+            combo_method: "quality_60_relative_strength_40",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7GrowthRecoveryBackfillRequest {
+    fn into_plan(self) -> Result<Phase7GrowthRecoveryBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_growth_recovery_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7GrowthRecoveryBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_growth_recovery_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_growth_recovery_v1",
+            category: "fundamental_growth",
+            phase: "7-B/7-J",
+            dependencies: &["market_financial_indicator", "market_trade_calendar"],
+            combo_method: "equal_weight_growth_recovery",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7ValuationBackfillRequest {
+    fn into_plan(self) -> Result<Phase7ValuationBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(self.combo_name, "phase7_valuation_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7ValuationBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_valuation_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_valuation_v1",
+            category: "valuation",
+            phase: "7-B/7-J",
+            dependencies: &["market_stock_daily_basic"],
+            combo_method: "equal_weight_valuation",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7MoneyflowBackfillRequest {
+    fn into_plan(self) -> Result<Phase7MoneyflowBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(self.combo_name, "phase7_moneyflow_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7MoneyflowBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_moneyflow_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_moneyflow_v1",
+            category: "moneyflow_alpha",
+            phase: "7-B/7-J",
+            dependencies: &["market_stock_moneyflow", "market_stock_daily_bar"],
+            combo_method: "equal_weight_moneyflow",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7AlphaBlendBackfillRequest {
+    fn into_plan(self) -> Result<Phase7AlphaBlendBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        if self.sources.len() < 2 {
+            return Err("sources must include at least 2 combo sources".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "phase7_value_quality_growth_rel_v1",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        let allow_signed_weights = self.allow_signed_weights;
+        let mut source_combos = Vec::with_capacity(self.sources.len());
+        for source in self.sources {
+            if !source.weight.is_finite() {
+                return Err("source weights must be finite values".to_string());
+            }
+            if allow_signed_weights {
+                if source.weight.abs() <= f64::EPSILON {
+                    return Err("signed source weights must be non-zero finite values".to_string());
+                }
+            } else if source.weight <= 0.0 {
+                return Err("source weights must be finite positive values".to_string());
+            }
+            let combo_name = trim_required(source.combo_name, "source.combo_name")?;
+            if combo_name.len() > 128 {
+                return Err("source.combo_name must be <= 128 chars".to_string());
+            }
+            let version = trim_or_default(source.version, "1.0.0", "source.version")?;
+            if version.len() > 32 {
+                return Err("source.version must be <= 32 chars".to_string());
+            }
+            source_combos.push(Phase7AlphaBlendSourcePlan {
+                combo_name,
+                version,
+                weight: source.weight,
+            });
+        }
+
+        if allow_signed_weights {
+            let weight_abs_sum = source_combos
+                .iter()
+                .map(|source| source.weight.abs())
+                .sum::<f64>();
+            if (weight_abs_sum - 1.0).abs() > 1e-9 {
+                return Err("signed source weights must have absolute sum 1.0".to_string());
+            }
+        } else {
+            let weight_sum = source_combos
+                .iter()
+                .map(|source| source.weight)
+                .sum::<f64>();
+            if (weight_sum - 1.0).abs() > 1e-9 {
+                return Err("source weights must sum to 1.0".to_string());
+            }
+        }
+
+        Ok(Phase7AlphaBlendBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_alpha_blend_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_alpha_blend_v1",
+            category: "composite_alpha",
+            phase: "7-B/7-J",
+            dependencies: &["multi_factor_value"],
+            combo_method: if allow_signed_weights {
+                "weighted_combo_blend_signed"
+            } else {
+                "weighted_combo_blend"
+            },
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos,
+        })
+    }
+}
+
+impl Phase7AlphaBlendProfilesBackfillRequest {
+    fn into_plans(self) -> Result<Vec<Phase7AlphaBlendBackfillPlan>, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version_override = match self.version {
+            Some(value) => Some(trim_required(value, "version")?),
+            None => None,
+        };
+        if matches!(version_override.as_ref(), Some(version) if version.len() > 32) {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        let selected_names = self.profile_names.map(|names| {
+            names
+                .into_iter()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+
+        let mut plans = Vec::new();
+        for profile in phase7_alpha_blend_profiles() {
+            if let Some(selected_names) = selected_names.as_ref() {
+                if !selected_names.contains(&profile.profile_name)
+                    && !selected_names.contains(&profile.combo_name)
+                {
+                    continue;
+                }
+            }
+            let version = version_override
+                .clone()
+                .unwrap_or_else(|| profile.version.clone());
+            let mut sources = Vec::with_capacity(profile.sources.len());
+            for source in profile.sources {
+                let weight = source.weight.to_f64().ok_or_else(|| {
+                    format!(
+                        "profile {} source {} weight is not representable as f64",
+                        profile.profile_name, source.combo_name
+                    )
+                })?;
+                sources.push(Phase7AlphaBlendSourcePlan {
+                    combo_name: source.combo_name,
+                    version: source.version,
+                    weight,
+                });
+            }
+            plans.push(Phase7AlphaBlendBackfillPlan {
+                start_date,
+                end_date,
+                version,
+                combo_name: profile.combo_name,
+                statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+                task_type: "phase7_alpha_blend_profiles_backfill",
+                source: "factor",
+                heartbeat_timeout_seconds: 3600,
+                bundle_name: "phase7_alpha_blend_profiles_v1",
+                category: "composite_alpha",
+                phase: "7-B/7-J",
+                dependencies: &["multi_factor_value"],
+                combo_method: "weighted_combo_blend_profile",
+                experiment_type: "phase7_factor_backfill_profile",
+                source_combos: sources,
+            });
+        }
+
+        if plans.is_empty() {
+            return Err("no alpha blend profiles selected".to_string());
+        }
+
+        Ok(plans)
     }
 }
 
@@ -453,6 +982,301 @@ fn phase7_financial_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
                 higher_is_better: false,
             },
             weight: 1.0 / 6.0,
+        },
+    ]
+}
+
+fn phase7_relative_strength_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "mkt_rel_mom_20d_std",
+            name: "Phase 7 20d market-relative momentum rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MarketRelativeMomentum,
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mkt_rel_mom_60d_std",
+            name: "Phase 7 60d market-relative momentum rank",
+            period: 60,
+            kind: Phase7BackfillFactorKind::MarketRelativeMomentum,
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ind_rel_mom_20d_std",
+            name: "Phase 7 20d industry-relative momentum rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::IndustryRelativeMomentum,
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ind_rel_mom_60d_std",
+            name: "Phase 7 60d industry-relative momentum rank",
+            period: 60,
+            kind: Phase7BackfillFactorKind::IndustryRelativeMomentum,
+            weight: 0.25,
+        },
+    ]
+}
+
+fn phase7_quality_relative_strength_combo_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_roe_daily_std",
+            name: "Phase 7 daily PIT ROE quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialLatest {
+                source_column: "roe",
+                higher_is_better: true,
+            },
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_roa_daily_std",
+            name: "Phase 7 daily PIT ROA quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialLatest {
+                source_column: "roa",
+                higher_is_better: true,
+            },
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_gross_margin_daily_std",
+            name: "Phase 7 daily PIT gross margin quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialLatest {
+                source_column: "gross_margin",
+                higher_is_better: true,
+            },
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_netprofit_margin_daily_std",
+            name: "Phase 7 daily PIT net margin quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialLatest {
+                source_column: "netprofit_margin",
+                higher_is_better: true,
+            },
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_current_ratio_daily_std",
+            name: "Phase 7 daily PIT current ratio quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialLatest {
+                source_column: "current_ratio",
+                higher_is_better: true,
+            },
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_debt_to_assets_daily_std",
+            name: "Phase 7 daily PIT low leverage quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialLatest {
+                source_column: "debt_to_assets",
+                higher_is_better: false,
+            },
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mkt_rel_mom_20d_std",
+            name: "Phase 7 20d market-relative momentum rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MarketRelativeMomentum,
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mkt_rel_mom_60d_std",
+            name: "Phase 7 60d market-relative momentum rank",
+            period: 60,
+            kind: Phase7BackfillFactorKind::MarketRelativeMomentum,
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ind_rel_mom_20d_std",
+            name: "Phase 7 20d industry-relative momentum rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::IndustryRelativeMomentum,
+            weight: 0.10,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ind_rel_mom_60d_std",
+            name: "Phase 7 60d industry-relative momentum rank",
+            period: 60,
+            kind: Phase7BackfillFactorKind::IndustryRelativeMomentum,
+            weight: 0.10,
+        },
+    ]
+}
+
+fn phase7_growth_recovery_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_eps_yoy_recovery_std",
+            name: "Phase 7 PIT EPS YoY recovery rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualChange {
+                source_column: "eps",
+                mode: FinancialAnnualChangeMode::PercentChange,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_roe_yoy_delta_std",
+            name: "Phase 7 PIT ROE YoY improvement rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualChange {
+                source_column: "roe",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_gross_margin_yoy_delta_std",
+            name: "Phase 7 PIT gross margin YoY improvement rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualChange {
+                source_column: "gross_margin",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_netprofit_margin_yoy_delta_std",
+            name: "Phase 7 PIT net margin YoY improvement rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualChange {
+                source_column: "netprofit_margin",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_debt_to_assets_yoy_improve_std",
+            name: "Phase 7 PIT leverage reduction YoY rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualChange {
+                source_column: "debt_to_assets",
+                mode: FinancialAnnualChangeMode::Decrease,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_current_ratio_yoy_delta_std",
+            name: "Phase 7 PIT current ratio YoY improvement rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualChange {
+                source_column: "current_ratio",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+    ]
+}
+
+fn phase7_valuation_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "val_pe_ttm_low_std",
+            name: "Phase 7 low PE TTM valuation rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DailyBasicLatest {
+                source_column: "pe_ttm",
+                higher_is_better: false,
+                positive_only: true,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "val_pb_low_std",
+            name: "Phase 7 low PB valuation rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DailyBasicLatest {
+                source_column: "pb",
+                higher_is_better: false,
+                positive_only: true,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "val_ps_ttm_low_std",
+            name: "Phase 7 low PS TTM valuation rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DailyBasicLatest {
+                source_column: "ps_ttm",
+                higher_is_better: false,
+                positive_only: true,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "val_dividend_yield_ttm_std",
+            name: "Phase 7 dividend yield TTM rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DailyBasicLatest {
+                source_column: "dv_ttm",
+                higher_is_better: true,
+                positive_only: false,
+            },
+            weight: 0.25,
+        },
+    ]
+}
+
+fn phase7_moneyflow_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "mf_net_amount_5d_std",
+            name: "Phase 7 5d net moneyflow intensity rank",
+            period: 5,
+            kind: Phase7BackfillFactorKind::MoneyflowRolling {
+                amount_expression: "COALESCE(mf.net_mf_amount::double precision, 0.0)",
+                higher_is_better: true,
+            },
+            weight: 0.2,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mf_net_amount_20d_std",
+            name: "Phase 7 20d net moneyflow intensity rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MoneyflowRolling {
+                amount_expression: "COALESCE(mf.net_mf_amount::double precision, 0.0)",
+                higher_is_better: true,
+            },
+            weight: 0.2,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mf_elg_net_amount_5d_std",
+            name: "Phase 7 5d extra-large order net inflow rank",
+            period: 5,
+            kind: Phase7BackfillFactorKind::MoneyflowRolling {
+                amount_expression: "COALESCE(mf.buy_elg_amount::double precision, 0.0) - COALESCE(mf.sell_elg_amount::double precision, 0.0)",
+                higher_is_better: true,
+            },
+            weight: 0.2,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mf_lg_elg_net_amount_20d_std",
+            name: "Phase 7 20d large and extra-large order net inflow rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MoneyflowRolling {
+                amount_expression: "COALESCE(mf.buy_lg_amount::double precision, 0.0) - COALESCE(mf.sell_lg_amount::double precision, 0.0) + COALESCE(mf.buy_elg_amount::double precision, 0.0) - COALESCE(mf.sell_elg_amount::double precision, 0.0)",
+                higher_is_better: true,
+            },
+            weight: 0.2,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mf_small_sell_pressure_20d_std",
+            name: "Phase 7 20d low small-order sell pressure rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MoneyflowRolling {
+                amount_expression: "COALESCE(mf.sell_sm_amount::double precision, 0.0) - COALESCE(mf.buy_sm_amount::double precision, 0.0)",
+                higher_is_better: false,
+            },
+            weight: 0.2,
         },
     ]
 }
@@ -1867,6 +2691,879 @@ pub async fn backfill_phase7_financial_quality_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-relative-strength-backfill/background
+///
+/// Set-based market/industry-relative momentum backfill for expanding Phase 7
+/// alpha sources beyond absolute price-volume and financial quality signals.
+pub async fn backfill_phase7_relative_strength_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7RelativeStrengthBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 relative strength backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_relative_strength_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = report.total_rows();
+                let total_rows = usize_to_i32(total_rows);
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_relative_strength_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 relative strength backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 relative strength backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 relative strength backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-quality-relative-strength-backfill/background
+///
+/// Combo-only backfill for the Phase 7 composite alpha candidate that blends
+/// daily PIT financial quality with market/industry relative strength.
+pub async fn backfill_phase7_quality_relative_strength_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7QualityRelativeStrengthBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 quality-relative-strength backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result =
+            run_phase7_quality_relative_strength_combo_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = report.total_rows();
+                let total_rows = usize_to_i32(total_rows);
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_quality_relative_strength_combo_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 quality-relative-strength profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    combo_rows = report.combo_rows,
+                    "Phase 7 quality-relative-strength combo backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 quality-relative-strength backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-growth-recovery-backfill/background
+///
+/// Set-based daily PIT backfill for non-momentum fundamental growth and
+/// earnings-recovery alpha sources.
+pub async fn backfill_phase7_growth_recovery_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7GrowthRecoveryBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 growth recovery backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_growth_recovery_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = report.total_rows();
+                let total_rows = usize_to_i32(total_rows);
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_growth_recovery_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 growth-recovery backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 growth-recovery backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 growth-recovery backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-valuation-backfill/background
+///
+/// Set-based daily valuation alpha backfill from `market_stock_daily_basic`.
+pub async fn backfill_phase7_valuation_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7ValuationBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 valuation backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_valuation_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_valuation_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 valuation backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 valuation backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 valuation backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-moneyflow-backfill/background
+///
+/// Set-based rolling moneyflow alpha backfill from `market_stock_moneyflow`.
+pub async fn backfill_phase7_moneyflow_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7MoneyflowBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 moneyflow backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_moneyflow_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_moneyflow_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 moneyflow backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 moneyflow backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 moneyflow backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-alpha-blend-backfill/background
+///
+/// Combo-only backfill that blends existing multi-factor alpha scores by
+/// explicit source weights.
+pub async fn backfill_phase7_alpha_blend_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7AlphaBlendBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 alpha blend backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_alpha_blend_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &[],
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 alpha blend profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    combo_rows = report.combo_rows,
+                    "Phase 7 alpha blend backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 alpha blend backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+            "sources": plan.source_combos,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-alpha-blend-profiles-backfill/background
+///
+/// Batch backfill the canonical Phase 7 alpha blend weight profiles so the
+/// optimizer can search across valuation/quality/growth/recovery/relative
+/// strength weight mixes as normal factor combos.
+pub async fn backfill_phase7_alpha_blend_profiles_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7AlphaBlendProfilesBackfillRequest>,
+) -> impl IntoResponse {
+    let plans = match req.into_plans() {
+        Ok(plans) => plans,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+    let first_plan = plans.first().expect("plans checked non-empty");
+    let last_plan = plans.last().expect("plans checked non-empty");
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', $6, 0, 0, 0, now(), $7, now())",
+    )
+    .bind(&task_id)
+    .bind(first_plan.task_type)
+    .bind(first_plan.source)
+    .bind(first_plan.start_date)
+    .bind(first_plan.end_date)
+    .bind(usize_to_i32(plans.len()))
+    .bind(first_plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 alpha blend profiles backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plans = plans.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_alpha_blend_profiles_backfill(&state.db, &tid, &task_plans).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    combo_rows = report.combo_rows,
+                    "Phase 7 alpha blend profiles backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 alpha blend profiles backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": first_plan.task_type,
+            "version": first_plan.version,
+            "start_date": first_plan.start_date,
+            "end_date": last_plan.end_date,
+            "profiles": plans.iter().map(|plan| json!({
+                "combo_name": plan.combo_name,
+                "version": plan.version,
+                "sources": plan.source_combos,
+            })).collect::<Vec<_>>(),
+        }
+    }))
+}
+
 fn background_factor_task_id() -> String {
     let ts = chrono::Utc::now().format("fs-%Y%m%d-%H%M%S%3f");
     let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -1891,6 +3588,150 @@ async fn run_phase7_financial_quality_backfill(
     let specs = phase7_financial_quality_backfill_specs();
     let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
     run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_relative_strength_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7RelativeStrengthBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_relative_strength_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_quality_relative_strength_combo_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7QualityRelativeStrengthBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let started_at = Instant::now();
+    let specs = phase7_quality_relative_strength_combo_specs();
+
+    if factor_backfill_cancel_requested(db, task_id).await? {
+        let report = SetBasedFactorBackfillReport {
+            factor_rows: 0,
+            combo_rows: 0,
+            factor_rows_by_code: Vec::new(),
+        };
+        return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+            report,
+            elapsed_millis(started_at),
+        ));
+    }
+
+    let combo_rows = execute_set_based_combo_backfill(db, &specs, plan).await?;
+    update_factor_backfill_progress(db, task_id, 1, 1, combo_rows).await?;
+
+    let report = SetBasedFactorBackfillReport {
+        factor_rows: 0,
+        combo_rows,
+        factor_rows_by_code: Vec::new(),
+    };
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
+async fn run_phase7_growth_recovery_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7GrowthRecoveryBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_growth_recovery_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_valuation_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7ValuationBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_valuation_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_moneyflow_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7MoneyflowBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_moneyflow_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_alpha_blend_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7AlphaBlendBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let started_at = Instant::now();
+
+    if factor_backfill_cancel_requested(db, task_id).await? {
+        let report = SetBasedFactorBackfillReport {
+            factor_rows: 0,
+            combo_rows: 0,
+            factor_rows_by_code: Vec::new(),
+        };
+        return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+            report,
+            elapsed_millis(started_at),
+        ));
+    }
+
+    let combo_rows = execute_phase7_alpha_blend_backfill(db, plan).await?;
+    update_factor_backfill_progress(db, task_id, 1, 1, combo_rows).await?;
+
+    let report = SetBasedFactorBackfillReport {
+        factor_rows: 0,
+        combo_rows,
+        factor_rows_by_code: Vec::new(),
+    };
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
+async fn run_phase7_alpha_blend_profiles_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plans: &[Phase7AlphaBlendBackfillPlan],
+) -> Result<Phase7BackfillCompletion, String> {
+    let started_at = Instant::now();
+    let total_steps = plans.len().max(1);
+    let mut combo_rows = 0usize;
+
+    for (index, plan) in plans.iter().enumerate() {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report = SetBasedFactorBackfillReport {
+                factor_rows: 0,
+                combo_rows,
+                factor_rows_by_code: Vec::new(),
+            };
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+        let rows = execute_phase7_alpha_blend_backfill(db, plan).await?;
+        combo_rows = combo_rows.saturating_add(rows);
+        update_factor_backfill_progress(db, task_id, index + 1, total_steps, combo_rows).await?;
+    }
+
+    let report = SetBasedFactorBackfillReport {
+        factor_rows: 0,
+        combo_rows,
+        factor_rows_by_code: Vec::new(),
+    };
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
 }
 
 async fn run_set_based_factor_backfill(
@@ -2074,6 +3915,58 @@ async fn execute_set_based_combo_backfill(
     Ok(result.rows_affected() as usize)
 }
 
+async fn execute_phase7_alpha_blend_backfill(
+    db: &sqlx::PgPool,
+    plan: &Phase7AlphaBlendBackfillPlan,
+) -> Result<usize, String> {
+    let source_records_json = alpha_blend_source_records_json(&plan.source_combos)?;
+    let weights_json = alpha_blend_weights_json(&plan.source_combos)?;
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to start alpha blend transaction: {}", error))?;
+    set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+
+    sqlx::query(
+        "INSERT INTO multi_factor_weight (combo_name, version, weights, method, status)
+         VALUES ($1, $2, $3, $4, 'active')
+         ON CONFLICT (combo_name, version) DO UPDATE SET
+           weights = EXCLUDED.weights,
+           method = EXCLUDED.method,
+           status = EXCLUDED.status,
+           created_at = NOW()",
+    )
+    .bind(&plan.combo_name)
+    .bind(&plan.version)
+    .bind(&weights_json)
+    .bind(plan.combo_method)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert alpha blend weights: {}", error))?;
+
+    let result = sqlx::query(phase7_alpha_blend_backfill_sql())
+        .bind(&plan.combo_name)
+        .bind(&plan.version)
+        .bind(&source_records_json)
+        .bind(plan.start_date)
+        .bind(plan.end_date)
+        .bind(plan.source_combos.len() as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to backfill alpha blend combo {}@{}: {}",
+                plan.combo_name, plan.version, error
+            )
+        })?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit alpha blend transaction: {}", error))?;
+
+    Ok(result.rows_affected() as usize)
+}
+
 async fn set_local_statement_timeout(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     statement_timeout_ms: u64,
@@ -2184,6 +4077,11 @@ async fn persist_factor_backfill_experiment_run(
         "category": plan.category,
         "phase": plan.phase,
         "dependencies": plan.dependencies,
+        "source_combos": plan.source_combos.iter().map(|source| json!({
+            "combo_name": source.combo_name,
+            "version": source.version,
+            "weight": source.weight,
+        })).collect::<Vec<_>>(),
         "factors": specs.iter().map(|spec| json!({
             "factor_code": spec.factor_code,
             "period": spec.period,
@@ -2226,6 +4124,27 @@ fn factor_backfill_combo_weights_json(
     serde_json::to_value(weights).map_err(|error| format!("Failed to encode weights: {}", error))
 }
 
+fn alpha_blend_source_records_json(
+    sources: &[Phase7AlphaBlendSourcePlan],
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(sources).map_err(|error| format!("Failed to encode sources: {}", error))
+}
+
+fn alpha_blend_weights_json(
+    sources: &[Phase7AlphaBlendSourcePlan],
+) -> Result<serde_json::Value, String> {
+    let weights = sources
+        .iter()
+        .map(|source| {
+            (
+                format!("{}@{}", source.combo_name, source.version),
+                source.weight,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    serde_json::to_value(weights).map_err(|error| format!("Failed to encode weights: {}", error))
+}
+
 fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
     match spec.kind {
         Phase7BackfillFactorKind::Reversal => phase7_reversal_backfill_sql(spec.period),
@@ -2236,10 +4155,29 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
         Phase7BackfillFactorKind::AmountIntensity => {
             phase7_amount_intensity_backfill_sql(spec.period)
         }
+        Phase7BackfillFactorKind::MarketRelativeMomentum => {
+            phase7_relative_momentum_backfill_sql(spec.period, false)
+        }
+        Phase7BackfillFactorKind::IndustryRelativeMomentum => {
+            phase7_relative_momentum_backfill_sql(spec.period, true)
+        }
         Phase7BackfillFactorKind::FinancialLatest {
             source_column,
             higher_is_better,
         } => phase7_financial_latest_backfill_sql(source_column, higher_is_better),
+        Phase7BackfillFactorKind::DailyBasicLatest {
+            source_column,
+            higher_is_better,
+            positive_only,
+        } => phase7_daily_basic_latest_backfill_sql(source_column, higher_is_better, positive_only),
+        Phase7BackfillFactorKind::MoneyflowRolling {
+            amount_expression,
+            higher_is_better,
+        } => phase7_moneyflow_backfill_sql(spec.period, amount_expression, higher_is_better),
+        Phase7BackfillFactorKind::FinancialAnnualChange {
+            source_column,
+            mode,
+        } => phase7_financial_annual_change_backfill_sql(source_column, mode),
     }
 }
 
@@ -2462,6 +4400,86 @@ fn phase7_amount_intensity_backfill_sql(period: i32) -> String {
     )
 }
 
+fn phase7_relative_momentum_backfill_sql(period: i32, industry_relative: bool) -> String {
+    let baseline_select = if industry_relative {
+        "trade_date, industry, AVG(stock_return) AS baseline_return"
+    } else {
+        "trade_date, AVG(stock_return) AS baseline_return"
+    };
+    let baseline_group_by = if industry_relative {
+        "trade_date, industry"
+    } else {
+        "trade_date"
+    };
+    let baseline_join = if industry_relative {
+        "bl.trade_date = sr.trade_date AND bl.industry = sr.industry"
+    } else {
+        "bl.trade_date = sr.trade_date"
+    };
+
+    format!(
+        "WITH stock_returns AS (
+            SELECT
+                bars.symbol,
+                bars.trade_date,
+                COALESCE(NULLIF(ms.industry, ''), 'UNKNOWN') AS industry,
+                CASE
+                    WHEN bars.prev_close > 0.0 THEN (bars.close - bars.prev_close) / bars.prev_close
+                    ELSE NULL
+                END AS stock_return
+            FROM (
+                SELECT
+                    symbol,
+                    trade_date,
+                    close::double precision AS close,
+                    LAG(close::double precision, {period}) OVER (
+                        PARTITION BY symbol ORDER BY trade_date
+                    ) AS prev_close
+                FROM market_stock_daily_bar
+                WHERE close IS NOT NULL
+                  AND trade_date <= $4
+            ) bars
+            JOIN market_stock ms ON ms.symbol = bars.symbol
+            WHERE ms.list_status = 'L'
+        ),
+        baseline AS (
+            SELECT {baseline_select}
+            FROM stock_returns
+            WHERE stock_return IS NOT NULL
+            GROUP BY {baseline_group_by}
+        ),
+        raw AS (
+            SELECT
+                sr.symbol,
+                sr.trade_date,
+                sr.stock_return - bl.baseline_return AS raw_value
+            FROM stock_returns sr
+            JOIN baseline bl ON {baseline_join}
+            WHERE sr.trade_date BETWEEN $3 AND $4
+              AND sr.stock_return IS NOT NULL
+              AND bl.baseline_return IS NOT NULL
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value) AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, trade_date
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
 fn phase7_financial_latest_backfill_sql(
     source_column: &'static str,
     higher_is_better: bool,
@@ -2526,6 +4544,218 @@ fn phase7_financial_latest_backfill_sql(
     )
 }
 
+fn phase7_financial_annual_change_backfill_sql(
+    source_column: &'static str,
+    mode: FinancialAnnualChangeMode,
+) -> String {
+    let raw_expression = match mode {
+        FinancialAnnualChangeMode::PercentChange => {
+            "(latest.raw_value - prev.raw_value) / NULLIF(ABS(prev.raw_value), 0.0)"
+        }
+        FinancialAnnualChangeMode::Difference => "latest.raw_value - prev.raw_value",
+        FinancialAnnualChangeMode::Decrease => "prev.raw_value - latest.raw_value",
+    };
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        symbols AS (
+            SELECT DISTINCT ts_code AS symbol
+            FROM market_financial_indicator
+            WHERE {source_column} IS NOT NULL
+        ),
+        latest AS (
+            SELECT
+                symbols.symbol,
+                td.trade_date,
+                fi.ann_date,
+                fi.end_date,
+                fi.raw_value
+            FROM symbols
+            JOIN trade_days td ON true
+            JOIN LATERAL (
+                SELECT
+                    ann_date,
+                    end_date,
+                    {source_column}::double precision AS raw_value
+                FROM market_financial_indicator fi
+                WHERE fi.ts_code = symbols.symbol
+                  AND fi.ann_date <= td.trade_date
+                  AND fi.{source_column} IS NOT NULL
+                ORDER BY fi.ann_date DESC, fi.end_date DESC
+                LIMIT 1
+            ) fi ON true
+        ),
+        matched AS (
+            SELECT
+                latest.symbol,
+                latest.trade_date,
+                latest.ann_date,
+                latest.end_date,
+                latest.raw_value AS current_raw_value,
+                prev.ann_date AS prev_ann_date,
+                prev.raw_value AS previous_raw_value,
+                {raw_expression} AS raw_value
+            FROM latest
+            JOIN LATERAL (
+                SELECT
+                    ann_date,
+                    end_date,
+                    {source_column}::double precision AS raw_value
+                FROM market_financial_indicator prev
+                WHERE prev.ts_code = latest.symbol
+                  AND prev.end_date = (latest.end_date - INTERVAL '1 year')::date
+                  AND prev.ann_date <= latest.trade_date
+                  AND prev.{source_column} IS NOT NULL
+                ORDER BY prev.ann_date DESC
+                LIMIT 1
+            ) prev ON true
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                GREATEST(ann_date, prev_ann_date) AS available_at,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value) AS normalized_value
+            FROM matched
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_daily_basic_latest_backfill_sql(
+    source_column: &'static str,
+    higher_is_better: bool,
+    positive_only: bool,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+    let positive_filter = if positive_only {
+        "AND raw_value > 0.0"
+    } else {
+        ""
+    };
+
+    format!(
+        "WITH raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                {source_column}::double precision AS raw_value
+            FROM market_stock_daily_basic
+            WHERE trade_date BETWEEN $3 AND $4
+              AND {source_column} IS NOT NULL
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order}) AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+              {positive_filter}
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, trade_date
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_moneyflow_backfill_sql(
+    period: i32,
+    amount_expression: &'static str,
+    higher_is_better: bool,
+) -> String {
+    let preceding = period - 1;
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+
+    format!(
+        "WITH observations AS (
+            SELECT
+                mf.symbol,
+                mf.trade_date,
+                {amount_expression} AS flow_amount,
+                bar.amount::double precision AS traded_amount
+            FROM market_stock_moneyflow mf
+            JOIN market_stock_daily_bar bar
+              ON bar.symbol = mf.symbol
+             AND bar.trade_date = mf.trade_date
+            WHERE mf.trade_date <= $4
+              AND bar.amount IS NOT NULL
+              AND bar.amount > 0
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                SUM(flow_amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW
+                ) / NULLIF(
+                    SUM(traded_amount) OVER (
+                        PARTITION BY symbol ORDER BY trade_date
+                        ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW
+                    ),
+                    0.0
+                ) AS raw_value,
+                COUNT(traded_amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW
+                ) AS obs_count
+            FROM observations
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order}) AS normalized_value
+            FROM raw
+            WHERE trade_date BETWEEN $3 AND $4
+              AND obs_count = {period}
+              AND raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, trade_date
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
 fn phase7_combo_backfill_sql() -> &'static str {
     "WITH weights AS (
         SELECT key AS factor_code, value::double precision AS weight
@@ -2544,6 +4774,38 @@ fn phase7_combo_backfill_sql() -> &'static str {
           AND fv.normalized_value IS NOT NULL
         GROUP BY fv.symbol, fv.trade_date
         HAVING COUNT(DISTINCT fv.factor_code) = $6
+    )
+    INSERT INTO multi_factor_value
+        (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+    SELECT $1, $2, symbol, trade_date, raw_score, raw_score, available_at
+    FROM scores
+    ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        normalized_score = EXCLUDED.normalized_score,
+        available_at = EXCLUDED.available_at,
+        created_at = NOW()"
+}
+
+fn phase7_alpha_blend_backfill_sql() -> &'static str {
+    "WITH sources AS (
+        SELECT combo_name, version, weight
+        FROM jsonb_to_recordset($3::jsonb)
+             AS sources(combo_name text, version text, weight double precision)
+    ),
+    scores AS (
+        SELECT
+            mfv.symbol,
+            mfv.trade_date,
+            SUM(mfv.normalized_score::double precision * sources.weight) AS raw_score,
+            MAX(COALESCE(mfv.available_at, mfv.trade_date)) AS available_at
+        FROM multi_factor_value mfv
+        JOIN sources
+          ON sources.combo_name = mfv.combo_name
+         AND sources.version = mfv.version
+        WHERE mfv.trade_date BETWEEN $4 AND $5
+          AND mfv.normalized_score IS NOT NULL
+        GROUP BY mfv.symbol, mfv.trade_date
+        HAVING COUNT(DISTINCT (sources.combo_name, sources.version)) = $6
     )
     INSERT INTO multi_factor_value
         (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
@@ -3520,6 +5782,251 @@ mod tests {
     }
 
     #[test]
+    fn phase7_relative_strength_backfill_request_builds_market_industry_plan() {
+        let req = Phase7RelativeStrengthBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: Some("phase7rel-test".to_string()),
+            combo_name: None,
+            statement_timeout_ms: Some(180_000),
+        };
+
+        let plan = req.into_plan().expect("valid relative strength plan");
+
+        assert_eq!(plan.bundle_name, "phase7_relative_strength_v1");
+        assert_eq!(plan.combo_name, "phase7_relative_strength_v1");
+        assert_eq!(plan.task_type, "phase7_relative_strength_backfill");
+        assert_eq!(plan.category, "relative_strength");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_daily_bar", "market_stock"]
+        );
+        assert_eq!(plan.phase, "7-B/7-J");
+        assert_eq!(plan.statement_timeout_ms, 180_000);
+    }
+
+    #[test]
+    fn phase7_quality_relative_strength_request_builds_combo_only_plan() {
+        let req = Phase7QualityRelativeStrengthBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: Some(0),
+        };
+
+        let plan = req.into_plan().expect("valid composite combo plan");
+
+        assert_eq!(plan.bundle_name, "phase7_quality_relative_strength_v1");
+        assert_eq!(plan.combo_name, "phase7_quality_relative_strength_v1");
+        assert_eq!(plan.task_type, "phase7_quality_relative_strength_backfill");
+        assert_eq!(plan.category, "composite_alpha");
+        assert_eq!(plan.combo_method, "quality_60_relative_strength_40");
+        assert!(plan.dependencies.contains(&"factor_value"));
+    }
+
+    #[test]
+    fn phase7_growth_recovery_backfill_request_builds_daily_pit_plan() {
+        let req = Phase7GrowthRecoveryBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: Some("phase7gr-test".to_string()),
+            combo_name: None,
+            statement_timeout_ms: Some(180_000),
+        };
+
+        let plan = req.into_plan().expect("valid growth recovery plan");
+
+        assert_eq!(plan.bundle_name, "phase7_growth_recovery_v1");
+        assert_eq!(plan.combo_name, "phase7_growth_recovery_v1");
+        assert_eq!(plan.task_type, "phase7_growth_recovery_backfill");
+        assert_eq!(plan.category, "fundamental_growth");
+        assert_eq!(
+            plan.dependencies,
+            &["market_financial_indicator", "market_trade_calendar"]
+        );
+        assert_eq!(plan.phase, "7-B/7-J");
+        assert_eq!(plan.statement_timeout_ms, 180_000);
+    }
+
+    #[test]
+    fn phase7_valuation_backfill_request_builds_daily_basic_plan() {
+        let req = Phase7ValuationBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: Some(180_000),
+        };
+
+        let plan = req.into_plan().expect("valid valuation plan");
+
+        assert_eq!(plan.bundle_name, "phase7_valuation_v1");
+        assert_eq!(plan.combo_name, "phase7_valuation_v1");
+        assert_eq!(plan.task_type, "phase7_valuation_backfill");
+        assert_eq!(plan.category, "valuation");
+        assert_eq!(plan.dependencies, &["market_stock_daily_basic"]);
+        assert_eq!(plan.phase, "7-B/7-J");
+        assert_eq!(plan.statement_timeout_ms, 180_000);
+    }
+
+    #[test]
+    fn phase7_moneyflow_backfill_request_builds_moneyflow_plan() {
+        let req = Phase7MoneyflowBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: Some(180_000),
+        };
+
+        let plan = req.into_plan().expect("valid moneyflow plan");
+
+        assert_eq!(plan.bundle_name, "phase7_moneyflow_v1");
+        assert_eq!(plan.combo_name, "phase7_moneyflow_v1");
+        assert_eq!(plan.task_type, "phase7_moneyflow_backfill");
+        assert_eq!(plan.category, "moneyflow_alpha");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_moneyflow", "market_stock_daily_bar"]
+        );
+        assert_eq!(plan.phase, "7-B/7-J");
+        assert_eq!(plan.statement_timeout_ms, 180_000);
+    }
+
+    #[test]
+    fn phase7_alpha_blend_request_builds_weighted_combo_plan() {
+        let req = Phase7AlphaBlendBackfillRequest {
+            start_date: Some("2016-04-05".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: Some("1.0.0".to_string()),
+            combo_name: Some("phase7_value_quality_growth_rel_v1".to_string()),
+            statement_timeout_ms: Some(180_000),
+            allow_signed_weights: false,
+            sources: vec![
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_valuation_v1".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    weight: 0.30,
+                },
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_financial_quality_v1".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    weight: 0.30,
+                },
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_growth_recovery_v1".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    weight: 0.30,
+                },
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_relative_strength_v1".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    weight: 0.10,
+                },
+            ],
+        };
+
+        let plan = req.into_plan().expect("valid alpha blend plan");
+
+        assert_eq!(plan.combo_name, "phase7_value_quality_growth_rel_v1");
+        assert_eq!(plan.bundle_name, "phase7_alpha_blend_v1");
+        assert_eq!(plan.task_type, "phase7_alpha_blend_backfill");
+        assert_eq!(plan.combo_method, "weighted_combo_blend");
+        assert_eq!(plan.source_combos.len(), 4);
+        assert!(
+            (plan
+                .source_combos
+                .iter()
+                .map(|source| source.weight)
+                .sum::<f64>()
+                - 1.0)
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
+    fn phase7_alpha_blend_request_allows_explicit_signed_weights() {
+        let req = Phase7AlphaBlendBackfillRequest {
+            start_date: Some("2016-04-05".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: Some("1.0.0".to_string()),
+            combo_name: Some("phase7_quality_moneyflow_confirm_v1".to_string()),
+            statement_timeout_ms: None,
+            allow_signed_weights: true,
+            sources: vec![
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_financial_quality_v1".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    weight: 0.90,
+                },
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_moneyflow_v1".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    weight: -0.10,
+                },
+            ],
+        };
+
+        let plan = req.into_plan().expect("valid signed alpha blend plan");
+
+        assert_eq!(plan.combo_name, "phase7_quality_moneyflow_confirm_v1");
+        assert_eq!(plan.combo_method, "weighted_combo_blend_signed");
+        assert!(
+            (plan
+                .source_combos
+                .iter()
+                .map(|source| source.weight.abs())
+                .sum::<f64>()
+                - 1.0)
+                .abs()
+                < 1e-9
+        );
+        assert!(plan.source_combos.iter().any(|source| source.weight < 0.0));
+    }
+
+    #[test]
+    fn phase7_alpha_blend_profiles_request_builds_default_weight_grid() {
+        let req = Phase7AlphaBlendProfilesBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2016-02-05".to_string()),
+            version: None,
+            profile_names: None,
+            statement_timeout_ms: Some(0),
+        };
+
+        let plans = req.into_plans().expect("valid profile plans");
+        let combo_names = plans
+            .iter()
+            .map(|plan| plan.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(plans.len(), 6);
+        assert!(combo_names.contains("phase7_value_quality_growth_rel_v1"));
+        assert!(combo_names.contains("phase7_blend_value_tilt_v1"));
+        assert!(combo_names.contains("phase7_blend_quality_growth_v1"));
+        assert!(combo_names.contains("phase7_blend_defensive_rel_v1"));
+        assert!(combo_names.contains("phase7_blend_recovery_tilt_v1"));
+        assert!(combo_names.contains("phase7_quality_moneyflow_pos_5pct_v1"));
+        for plan in plans {
+            assert_eq!(plan.task_type, "phase7_alpha_blend_profiles_backfill");
+            assert_eq!(plan.combo_method, "weighted_combo_blend_profile");
+            assert!(plan.source_combos.len() >= 2);
+            assert!(
+                (plan
+                    .source_combos
+                    .iter()
+                    .map(|source| source.weight)
+                    .sum::<f64>()
+                    - 1.0)
+                    .abs()
+                    < 1e-9
+            );
+        }
+    }
+
+    #[test]
     fn phase7_price_volume_specs_are_equal_weighted_combo_inputs() {
         let specs = phase7_price_volume_backfill_specs();
         let codes = specs
@@ -3563,6 +6070,113 @@ mod tests {
             ]
         );
         assert!((total_weight - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn phase7_relative_strength_specs_include_market_and_industry_momentum() {
+        let specs = phase7_relative_strength_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "mkt_rel_mom_20d_std",
+                "mkt_rel_mom_60d_std",
+                "ind_rel_mom_20d_std",
+                "ind_rel_mom_60d_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(specs.iter().all(|spec| (spec.weight - 0.25).abs() < 1e-12));
+    }
+
+    #[test]
+    fn phase7_quality_relative_strength_specs_blend_quality_and_relative_strength() {
+        let specs = phase7_quality_relative_strength_combo_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(specs.len(), 10);
+        assert!(codes.contains(&"fin_roe_daily_std"));
+        assert!(codes.contains(&"fin_debt_to_assets_daily_std"));
+        assert!(codes.contains(&"mkt_rel_mom_60d_std"));
+        assert!(codes.contains(&"ind_rel_mom_60d_std"));
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(specs.iter().all(|spec| (spec.weight - 0.10).abs() < 1e-12));
+    }
+
+    #[test]
+    fn phase7_growth_recovery_specs_focus_on_non_momentum_alpha_sources() {
+        let specs = phase7_growth_recovery_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "fin_eps_yoy_recovery_std",
+                "fin_roe_yoy_delta_std",
+                "fin_gross_margin_yoy_delta_std",
+                "fin_netprofit_margin_yoy_delta_std",
+                "fin_debt_to_assets_yoy_improve_std",
+                "fin_current_ratio_yoy_delta_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn phase7_valuation_specs_use_daily_basic_value_fields() {
+        let specs = phase7_valuation_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "val_pe_ttm_low_std",
+                "val_pb_low_std",
+                "val_ps_ttm_low_std",
+                "val_dividend_yield_ttm_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn phase7_moneyflow_specs_focus_on_fund_flow_alpha_sources() {
+        let specs = phase7_moneyflow_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "mf_net_amount_5d_std",
+                "mf_net_amount_20d_std",
+                "mf_elg_net_amount_5d_std",
+                "mf_lg_elg_net_amount_20d_std",
+                "mf_small_sell_pressure_20d_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(specs.iter().all(|spec| (spec.weight - 0.2).abs() < 1e-12));
     }
 
     #[test]
@@ -3624,6 +6238,117 @@ mod tests {
         assert!(roe_sql.contains("available_at"));
         assert!(roe_sql.contains("ORDER BY raw_value) AS normalized_value"));
         assert!(debt_sql.contains("ORDER BY raw_value DESC) AS normalized_value"));
+    }
+
+    #[test]
+    fn phase7_relative_strength_sql_uses_market_stock_and_relative_baseline() {
+        let specs = phase7_relative_strength_backfill_specs();
+        let market = specs
+            .iter()
+            .find(|spec| spec.factor_code == "mkt_rel_mom_20d_std")
+            .expect("market relative spec");
+        let industry = specs
+            .iter()
+            .find(|spec| spec.factor_code == "ind_rel_mom_20d_std")
+            .expect("industry relative spec");
+
+        let market_sql = phase7_factor_backfill_sql(market);
+        let industry_sql = phase7_factor_backfill_sql(industry);
+
+        assert!(market_sql.contains("JOIN market_stock ms ON ms.symbol = bars.symbol"));
+        assert!(market_sql.contains("AVG(stock_return) AS baseline_return"));
+        assert!(market_sql.contains("sr.stock_return - bl.baseline_return AS raw_value"));
+        assert!(
+            market_sql.contains("percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value)")
+        );
+        assert!(industry_sql.contains("COALESCE(NULLIF(ms.industry, ''), 'UNKNOWN') AS industry"));
+        assert!(industry_sql.contains("GROUP BY trade_date, industry"));
+        assert!(
+            industry_sql.contains("bl.trade_date = sr.trade_date AND bl.industry = sr.industry")
+        );
+    }
+
+    #[test]
+    fn phase7_growth_recovery_sql_uses_ann_date_pit_and_same_quarter_yoy() {
+        let specs = phase7_growth_recovery_backfill_specs();
+        let eps = specs
+            .iter()
+            .find(|spec| spec.factor_code == "fin_eps_yoy_recovery_std")
+            .expect("eps yoy spec");
+        let debt = specs
+            .iter()
+            .find(|spec| spec.factor_code == "fin_debt_to_assets_yoy_improve_std")
+            .expect("debt improvement spec");
+
+        let eps_sql = phase7_factor_backfill_sql(eps);
+        let debt_sql = phase7_factor_backfill_sql(debt);
+
+        assert!(eps_sql.contains("market_financial_indicator"));
+        assert!(eps_sql.contains("fi.ann_date <= td.trade_date"));
+        assert!(eps_sql.contains("prev.end_date = (latest.end_date - INTERVAL '1 year')::date"));
+        assert!(eps_sql.contains("available_at"));
+        assert!(eps_sql
+            .contains("(latest.raw_value - prev.raw_value) / NULLIF(ABS(prev.raw_value), 0.0)"));
+        assert!(debt_sql.contains("prev.raw_value - latest.raw_value AS raw_value"));
+    }
+
+    #[test]
+    fn phase7_valuation_sql_uses_daily_basic_and_value_direction() {
+        let specs = phase7_valuation_backfill_specs();
+        let pe = specs
+            .iter()
+            .find(|spec| spec.factor_code == "val_pe_ttm_low_std")
+            .expect("pe spec");
+        let dividend = specs
+            .iter()
+            .find(|spec| spec.factor_code == "val_dividend_yield_ttm_std")
+            .expect("dividend spec");
+
+        let pe_sql = phase7_factor_backfill_sql(pe);
+        let dividend_sql = phase7_factor_backfill_sql(dividend);
+
+        assert!(pe_sql.contains("market_stock_daily_basic"));
+        assert!(pe_sql.contains("pe_ttm::double precision AS raw_value"));
+        assert!(pe_sql.contains("raw_value > 0.0"));
+        assert!(pe_sql.contains("ORDER BY raw_value DESC) AS normalized_value"));
+        assert!(dividend_sql.contains("dv_ttm::double precision AS raw_value"));
+        assert!(dividend_sql.contains("ORDER BY raw_value) AS normalized_value"));
+    }
+
+    #[test]
+    fn phase7_moneyflow_sql_uses_moneyflow_pit_and_amount_normalization() {
+        let specs = phase7_moneyflow_backfill_specs();
+        let net = specs
+            .iter()
+            .find(|spec| spec.factor_code == "mf_net_amount_20d_std")
+            .expect("net moneyflow spec");
+        let pressure = specs
+            .iter()
+            .find(|spec| spec.factor_code == "mf_small_sell_pressure_20d_std")
+            .expect("small sell pressure spec");
+
+        let net_sql = phase7_factor_backfill_sql(net);
+        let pressure_sql = phase7_factor_backfill_sql(pressure);
+
+        assert!(net_sql.contains("market_stock_moneyflow mf"));
+        assert!(net_sql.contains("JOIN market_stock_daily_bar bar"));
+        assert!(net_sql.contains("mf.net_mf_amount::double precision"));
+        assert!(net_sql.contains("SUM(flow_amount) OVER"));
+        assert!(net_sql.contains("SUM(traded_amount) OVER"));
+        assert!(net_sql.contains("ROWS BETWEEN 19 PRECEDING AND CURRENT ROW"));
+        assert!(net_sql.contains("normalized_value, trade_date"));
+        assert!(pressure_sql.contains("mf.sell_sm_amount::double precision"));
+        assert!(pressure_sql.contains("ORDER BY raw_value DESC) AS normalized_value"));
+    }
+
+    #[test]
+    fn phase7_alpha_blend_sql_combines_existing_combo_scores_by_weight() {
+        let sql = phase7_alpha_blend_backfill_sql();
+
+        assert!(sql.contains("jsonb_to_recordset($3::jsonb)"));
+        assert!(sql.contains("FROM multi_factor_value mfv"));
+        assert!(sql.contains("SUM(mfv.normalized_score::double precision * sources.weight)"));
+        assert!(sql.contains("HAVING COUNT(DISTINCT (sources.combo_name, sources.version)) = $6"));
     }
 
     #[test]

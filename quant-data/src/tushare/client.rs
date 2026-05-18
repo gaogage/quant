@@ -186,6 +186,130 @@ impl TushareClient {
             .await
     }
 
+    /// 获取每日基础/估值数据，支持按交易日或按单只股票区间分页拉取。
+    pub async fn daily_basic(
+        &self,
+        ts_code: Option<&str>,
+        trade_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = trade_date {
+            params.push(("trade_date", date));
+        }
+        if let Some(sd) = start_date {
+            params.push(("start_date", sd));
+        }
+        if let Some(ed) = end_date {
+            params.push(("end_date", ed));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "daily_basic",
+            params,
+            &[
+                "ts_code",
+                "trade_date",
+                "pe_ttm",
+                "pb",
+                "ps_ttm",
+                "dv_ttm",
+                "total_mv",
+                "circ_mv",
+            ],
+        )
+        .await
+    }
+
+    /// 获取个股资金流向数据，支持按交易日或按单只股票区间分页拉取。
+    pub async fn moneyflow(
+        &self,
+        ts_code: Option<&str>,
+        trade_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = trade_date {
+            params.push(("trade_date", date));
+        }
+        if let Some(sd) = start_date {
+            params.push(("start_date", sd));
+        }
+        if let Some(ed) = end_date {
+            params.push(("end_date", ed));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "moneyflow",
+            params,
+            &[
+                "ts_code",
+                "trade_date",
+                "buy_sm_vol",
+                "buy_sm_amount",
+                "sell_sm_vol",
+                "sell_sm_amount",
+                "buy_md_vol",
+                "buy_md_amount",
+                "sell_md_vol",
+                "sell_md_amount",
+                "buy_lg_vol",
+                "buy_lg_amount",
+                "sell_lg_vol",
+                "sell_lg_amount",
+                "buy_elg_vol",
+                "buy_elg_amount",
+                "sell_elg_vol",
+                "sell_elg_amount",
+                "net_mf_vol",
+                "net_mf_amount",
+            ],
+        )
+        .await
+    }
+
     /// 获取交易日历
     pub async fn trade_cal(
         &self,

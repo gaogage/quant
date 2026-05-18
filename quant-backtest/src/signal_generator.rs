@@ -7,6 +7,7 @@
 //! assign equal weight.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{Duration, NaiveDate};
 use rust_decimal::prelude::*;
@@ -58,6 +59,15 @@ pub struct SignalConfig {
     pub risk_budget_lookback_days: usize,
     /// Capacity penalty strength for risk-budget weights.
     pub capacity_penalty_strength: f64,
+    /// Optional max aggregate target weight for any single industry.
+    pub industry_max_weight_pct: Option<f64>,
+    /// Optional per-trade-date score preselection size before in-memory portfolio filtering.
+    /// None or 0 keeps the legacy full-universe score load.
+    pub score_candidate_pool_size: Option<usize>,
+    /// Tradable universe pruning profile applied while loading combo scores.
+    pub universe_profile: TradableUniverseProfile,
+    /// Optional persisted prediction set to blend with factor combo scores.
+    pub prediction_blend: Option<PredictionBlendConfig>,
 }
 
 /// Signal generation parameters for persisted model predictions.
@@ -95,6 +105,18 @@ pub struct PredictionSignalConfig {
     pub risk_budget_lookback_days: usize,
     /// Capacity penalty strength for risk-budget weights.
     pub capacity_penalty_strength: f64,
+    /// Optional max aggregate target weight for any single industry.
+    pub industry_max_weight_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredictionBlendConfig {
+    pub prediction_set_id: String,
+    pub factor_weight: f64,
+    pub prediction_weight: f64,
+    /// Keep only stocks whose same-day prediction percentile is at least this threshold.
+    /// Percentile is computed cross-sectionally per date, with higher prediction scores better.
+    pub prediction_min_percentile: Option<f64>,
 }
 
 impl Default for PredictionSignalConfig {
@@ -116,6 +138,7 @@ impl Default for PredictionSignalConfig {
             portfolio_method: PortfolioConstructionMethod::Heuristic,
             risk_budget_lookback_days: 60,
             capacity_penalty_strength: 0.0,
+            industry_max_weight_pct: None,
         }
     }
 }
@@ -126,6 +149,318 @@ struct PredictionScoreRow {
     trade_date: NaiveDate,
     score: f64,
     rank: Option<i32>,
+}
+
+type FactorScoresByDate = HashMap<NaiveDate, Vec<(String, f64)>>;
+type SymbolReturnHistory = HashMap<String, Vec<(NaiveDate, f64)>>;
+type AverageAmounts = HashMap<String, f64>;
+type IndustryMap = HashMap<String, String>;
+type BenchmarkReturns = Vec<(NaiveDate, f64)>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SignalDataCacheKey {
+    ComboScores {
+        combo_name: String,
+        version: String,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        score_direction: Option<ScoreDirection>,
+        score_candidate_pool_size: Option<usize>,
+        universe_profile: TradableUniverseProfile,
+    },
+    TradingDays {
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    },
+    ReturnHistory {
+        symbols: Vec<String>,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    },
+    AverageAmounts {
+        symbols: Vec<String>,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    },
+    IndustryClassifications {
+        symbols: Vec<String>,
+    },
+    BenchmarkReturns {
+        benchmark: String,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    },
+}
+
+impl SignalDataCacheKey {
+    fn combo_scores(
+        combo_name: &str,
+        version: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        score_direction: ScoreDirection,
+        score_candidate_pool_size: Option<usize>,
+        universe_profile: TradableUniverseProfile,
+    ) -> Self {
+        let score_candidate_pool_size =
+            normalize_score_candidate_pool_size(score_candidate_pool_size);
+        Self::ComboScores {
+            combo_name: combo_name.to_string(),
+            version: version.to_string(),
+            start_date,
+            end_date,
+            score_direction: score_candidate_pool_size.map(|_| score_direction),
+            score_candidate_pool_size,
+            universe_profile,
+        }
+    }
+
+    fn trading_days(start_date: NaiveDate, end_date: NaiveDate) -> Self {
+        Self::TradingDays {
+            start_date,
+            end_date,
+        }
+    }
+
+    fn return_history(
+        symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> Self {
+        Self::ReturnHistory {
+            symbols: normalized_symbol_key(symbols),
+            start_date,
+            end_date,
+            lookback_days,
+        }
+    }
+
+    fn average_amounts(symbols: &[String], start_date: NaiveDate, end_date: NaiveDate) -> Self {
+        Self::AverageAmounts {
+            symbols: normalized_symbol_key(symbols),
+            start_date,
+            end_date,
+        }
+    }
+
+    fn industry_classifications(symbols: &[String]) -> Self {
+        Self::IndustryClassifications {
+            symbols: normalized_symbol_key(symbols),
+        }
+    }
+
+    fn benchmark_returns(
+        benchmark: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> Self {
+        Self::BenchmarkReturns {
+            benchmark: benchmark.to_string(),
+            start_date,
+            end_date,
+            lookback_days,
+        }
+    }
+}
+
+fn normalized_symbol_key(symbols: &[String]) -> Vec<String> {
+    let mut symbols = symbols.to_vec();
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SignalDataCacheStats {
+    pub combo_score_hits: usize,
+    pub combo_score_misses: usize,
+    pub trading_day_hits: usize,
+    pub trading_day_misses: usize,
+    pub return_history_hits: usize,
+    pub return_history_misses: usize,
+    pub average_amount_hits: usize,
+    pub average_amount_misses: usize,
+    pub industry_classification_hits: usize,
+    pub industry_classification_misses: usize,
+    pub benchmark_return_hits: usize,
+    pub benchmark_return_misses: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct SignalDataCache {
+    combo_scores: HashMap<SignalDataCacheKey, Arc<FactorScoresByDate>>,
+    trading_days: HashMap<SignalDataCacheKey, Arc<Vec<NaiveDate>>>,
+    return_history: HashMap<SignalDataCacheKey, Arc<SymbolReturnHistory>>,
+    average_amounts: HashMap<SignalDataCacheKey, Arc<AverageAmounts>>,
+    industry_classifications: HashMap<SignalDataCacheKey, Arc<IndustryMap>>,
+    benchmark_returns: HashMap<SignalDataCacheKey, Arc<BenchmarkReturns>>,
+    stats: SignalDataCacheStats,
+}
+
+impl SignalDataCache {
+    pub fn stats(&self) -> SignalDataCacheStats {
+        self.stats
+    }
+
+    pub(crate) fn cached_combo_scores(
+        &mut self,
+        key: &SignalDataCacheKey,
+    ) -> Option<Arc<FactorScoresByDate>> {
+        match self.combo_scores.get(key) {
+            Some(value) => {
+                self.stats.combo_score_hits += 1;
+                Some(Arc::clone(value))
+            }
+            None => {
+                self.stats.combo_score_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_combo_scores(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: FactorScoresByDate,
+    ) -> Arc<FactorScoresByDate> {
+        let value = Arc::new(value);
+        self.combo_scores.insert(key, Arc::clone(&value));
+        value
+    }
+
+    fn cached_trading_days(&mut self, key: &SignalDataCacheKey) -> Option<Arc<Vec<NaiveDate>>> {
+        match self.trading_days.get(key) {
+            Some(value) => {
+                self.stats.trading_day_hits += 1;
+                Some(Arc::clone(value))
+            }
+            None => {
+                self.stats.trading_day_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_trading_days(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: Vec<NaiveDate>,
+    ) -> Arc<Vec<NaiveDate>> {
+        let value = Arc::new(value);
+        self.trading_days.insert(key, Arc::clone(&value));
+        value
+    }
+
+    fn cached_return_history(
+        &mut self,
+        key: &SignalDataCacheKey,
+    ) -> Option<Arc<SymbolReturnHistory>> {
+        match self.return_history.get(key) {
+            Some(value) => {
+                self.stats.return_history_hits += 1;
+                Some(Arc::clone(value))
+            }
+            None => {
+                self.stats.return_history_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_return_history(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: SymbolReturnHistory,
+    ) -> Arc<SymbolReturnHistory> {
+        let value = Arc::new(value);
+        self.return_history.insert(key, Arc::clone(&value));
+        value
+    }
+
+    fn cached_average_amounts(&mut self, key: &SignalDataCacheKey) -> Option<Arc<AverageAmounts>> {
+        match self.average_amounts.get(key) {
+            Some(value) => {
+                self.stats.average_amount_hits += 1;
+                Some(Arc::clone(value))
+            }
+            None => {
+                self.stats.average_amount_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_average_amounts(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: AverageAmounts,
+    ) -> Arc<AverageAmounts> {
+        let value = Arc::new(value);
+        self.average_amounts.insert(key, Arc::clone(&value));
+        value
+    }
+
+    fn cached_industry_classifications(
+        &mut self,
+        key: &SignalDataCacheKey,
+    ) -> Option<Arc<IndustryMap>> {
+        match self.industry_classifications.get(key) {
+            Some(value) => {
+                self.stats.industry_classification_hits += 1;
+                Some(Arc::clone(value))
+            }
+            None => {
+                self.stats.industry_classification_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_industry_classifications(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: IndustryMap,
+    ) -> Arc<IndustryMap> {
+        let value = Arc::new(value);
+        self.industry_classifications
+            .insert(key, Arc::clone(&value));
+        value
+    }
+
+    fn cached_benchmark_returns(
+        &mut self,
+        key: &SignalDataCacheKey,
+    ) -> Option<Arc<BenchmarkReturns>> {
+        match self.benchmark_returns.get(key) {
+            Some(value) => {
+                self.stats.benchmark_return_hits += 1;
+                Some(Arc::clone(value))
+            }
+            None => {
+                self.stats.benchmark_return_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_benchmark_returns(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: BenchmarkReturns,
+    ) -> Arc<BenchmarkReturns> {
+        let value = Arc::new(value);
+        self.benchmark_returns.insert(key, Arc::clone(&value));
+        value
+    }
+
+    #[cfg(test)]
+    fn store_combo_scores_for_test(&mut self, key: SignalDataCacheKey, value: FactorScoresByDate) {
+        self.combo_scores.insert(key, Arc::new(value));
+    }
 }
 
 impl Default for SignalConfig {
@@ -148,11 +483,15 @@ impl Default for SignalConfig {
             portfolio_method: PortfolioConstructionMethod::Heuristic,
             risk_budget_lookback_days: 60,
             capacity_penalty_strength: 0.0,
+            industry_max_weight_pct: None,
+            score_candidate_pool_size: None,
+            universe_profile: TradableUniverseProfile::All,
+            prediction_blend: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreDirection {
     Descending,
@@ -164,6 +503,25 @@ pub enum ScoreDirection {
 pub enum PortfolioConstructionMethod {
     Heuristic,
     RiskBudget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradableUniverseProfile {
+    All,
+    ListedNonSt,
+    MainBoardNonSt,
+}
+
+impl TradableUniverseProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "all" | "full" => Ok(Self::All),
+            "listed_non_st" | "listed-non-st" => Ok(Self::ListedNonSt),
+            "main_board_non_st" | "main-board-non-st" => Ok(Self::MainBoardNonSt),
+            other => Err(format!("unsupported universe_profile: {}", other)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -294,6 +652,147 @@ impl MarketRegimePolicy {
         }
     }
 
+    pub fn drawdown_control_v1(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                top_n: Some(80),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(1.0),
+                score_direction: Some(ScoreDirection::Descending),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                top_n: Some(20),
+                rebalance_freq_days: Some(60),
+                max_gross_exposure: Some(0.35),
+                score_direction: Some(ScoreDirection::Ascending),
+                skip_top_pct: Some(0.10),
+                max_position_pct: Some(Decimal::new(5, 2)),
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                top_n: Some(20),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.25),
+                score_direction: Some(ScoreDirection::Ascending),
+                skip_top_pct: Some(0.05),
+                max_position_pct: Some(Decimal::new(5, 2)),
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                top_n: Some(50),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.65),
+                max_position_pct: Some(Decimal::new(8, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                top_n: Some(50),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.65),
+                max_position_pct: Some(Decimal::new(8, 2)),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 63,
+            min_observations: 10,
+            high_volatility_threshold: 0.24,
+            bear_return_threshold: -0.015,
+            bear_drawdown_threshold: 0.12,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
+    pub fn drawdown_control_v2(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                top_n: Some(80),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(1.0),
+                score_direction: Some(ScoreDirection::Descending),
+                max_position_pct: Some(Decimal::new(8, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                top_n: Some(15),
+                rebalance_freq_days: Some(60),
+                max_gross_exposure: Some(0.25),
+                score_direction: Some(ScoreDirection::Ascending),
+                skip_top_pct: Some(0.15),
+                max_position_pct: Some(Decimal::new(4, 2)),
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                top_n: Some(15),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.18),
+                score_direction: Some(ScoreDirection::Ascending),
+                skip_top_pct: Some(0.10),
+                max_position_pct: Some(Decimal::new(4, 2)),
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                top_n: Some(40),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.55),
+                max_position_pct: Some(Decimal::new(6, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                top_n: Some(40),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.55),
+                max_position_pct: Some(Decimal::new(6, 2)),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 63,
+            min_observations: 10,
+            high_volatility_threshold: 0.20,
+            bear_return_threshold: -0.01,
+            bear_drawdown_threshold: 0.08,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.10,
+            sideways_volatility_threshold: 0.09,
+            sideways_abs_return_threshold: 0.035,
+            rules,
+        }
+    }
+
     pub fn apply(&self, base: &SignalConfig, regime: MarketRegime) -> SignalConfig {
         self.rules
             .get(&regime)
@@ -315,6 +814,7 @@ struct PortfolioConstructionConfig {
     portfolio_method: PortfolioConstructionMethod,
     risk_budget_lookback_days: usize,
     capacity_penalty_strength: f64,
+    max_industry_weight_pct: Option<f64>,
 }
 
 impl Default for PortfolioConstructionConfig {
@@ -330,6 +830,7 @@ impl Default for PortfolioConstructionConfig {
             portfolio_method: PortfolioConstructionMethod::Heuristic,
             risk_budget_lookback_days: 60,
             capacity_penalty_strength: 0.0,
+            max_industry_weight_pct: None,
         }
     }
 }
@@ -337,7 +838,7 @@ impl Default for PortfolioConstructionConfig {
 impl From<&SignalConfig> for PortfolioConstructionConfig {
     fn from(config: &SignalConfig) -> Self {
         Self {
-            top_n: config.top_n,
+            top_n: capped_portfolio_top_n(config.top_n, config.portfolio_method),
             max_position_pct: config.max_position_pct,
             max_pairwise_correlation: config.max_pairwise_correlation,
             correlation_lookback_days: config.correlation_lookback_days,
@@ -347,6 +848,7 @@ impl From<&SignalConfig> for PortfolioConstructionConfig {
             portfolio_method: config.portfolio_method,
             risk_budget_lookback_days: config.risk_budget_lookback_days,
             capacity_penalty_strength: config.capacity_penalty_strength,
+            max_industry_weight_pct: config.industry_max_weight_pct,
         }
     }
 }
@@ -354,7 +856,7 @@ impl From<&SignalConfig> for PortfolioConstructionConfig {
 impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
     fn from(config: &PredictionSignalConfig) -> Self {
         Self {
-            top_n: config.top_n,
+            top_n: capped_portfolio_top_n(config.top_n, config.portfolio_method),
             max_position_pct: config.max_position_pct,
             max_pairwise_correlation: config.max_pairwise_correlation,
             correlation_lookback_days: config.correlation_lookback_days,
@@ -364,7 +866,15 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
             portfolio_method: config.portfolio_method,
             risk_budget_lookback_days: config.risk_budget_lookback_days,
             capacity_penalty_strength: config.capacity_penalty_strength,
+            max_industry_weight_pct: config.industry_max_weight_pct,
         }
+    }
+}
+
+fn capped_portfolio_top_n(top_n: usize, method: PortfolioConstructionMethod) -> usize {
+    match method {
+        PortfolioConstructionMethod::RiskBudget => top_n.min(50),
+        PortfolioConstructionMethod::Heuristic => top_n,
     }
 }
 
@@ -382,87 +892,55 @@ pub async fn generate_signals(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
-    // 1. Load combo scores
-    let rows: Vec<(String, NaiveDate, Option<f64>)> = sqlx::query_as(
-        "SELECT symbol, trade_date, raw_score
-         FROM multi_factor_value
-         WHERE combo_name = $1 AND version = $2
-           AND trade_date >= $3 AND trade_date <= $4
-           AND (available_at IS NULL OR available_at <= trade_date)
-         ORDER BY trade_date, symbol",
-    )
-    .bind(&config.combo_name)
-    .bind(&config.version)
-    .bind(start_date)
-    .bind(end_date)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load combo scores: {}", e))?;
+    let mut cache = SignalDataCache::default();
+    generate_signals_with_cache(pool, config, start_date, end_date, &mut cache).await
+}
 
-    if rows.is_empty() {
-        return Err("No combo scores found".into());
-    }
-
-    // Group by date
-    let mut scores_by_date: HashMap<NaiveDate, Vec<(String, f64)>> = HashMap::new();
-    for (sym, date, score) in rows {
-        let val = score.unwrap_or(0.0);
-        if val.is_finite() {
-            scores_by_date.entry(date).or_default().push((sym, val));
-        }
-    }
-
-    // Sort each day's scores according to the configured alpha direction.
-    for items in scores_by_date.values_mut() {
-        sort_factor_scores(items, config.score_direction);
-    }
-
-    // 2. Liquidity filter: remove stocks with low average daily trading amount
-    if let Some(min_amount) = config.min_daily_amount_cny {
-        // Collect symbols and date range
-        let all_symbols: Vec<String> = scores_by_date
-            .values()
-            .flat_map(|v| v.iter().map(|(s, _)| s.clone()))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        if !all_symbols.is_empty() {
-            // Note: tushare amount is in 千元 (thousands of CNY). Convert threshold.
-            let min_amount_1k = min_amount / 1000.0;
-            // Single efficient SQL: avg daily amount per symbol
-            let liquid_rows: Vec<(String,)> = sqlx::query_as(
-                "SELECT symbol FROM (
-                    SELECT symbol, AVG(amount) as avg_amt
-                    FROM market_stock_daily_bar
-                    WHERE symbol = ANY($1)
-                      AND trade_date >= $2 AND trade_date <= $3
-                      AND amount > 0
-                    GROUP BY symbol
-                    HAVING AVG(amount) >= $4
-                ) sub",
-            )
-            .bind(&all_symbols)
-            .bind(start_date)
-            .bind(end_date)
-            .bind(min_amount_1k)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Failed to load liquidity data: {}", e))?;
-
-            let liquid_set: HashSet<String> = liquid_rows.into_iter().map(|(s,)| s).collect();
-            let before: usize = scores_by_date.values().flatten().count();
-            for stocks in scores_by_date.values_mut() {
-                stocks.retain(|(sym, _)| liquid_set.contains(sym));
+/// Generate factor signals using a caller-owned cache for repeated trial batches.
+pub async fn generate_signals_with_cache(
+    pool: &PgPool,
+    config: &SignalConfig,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    cache: &mut SignalDataCache,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
+    let score_cache = load_combo_scores_cached(pool, cache, config, start_date, end_date).await?;
+    let mut adjusted_scores;
+    let scores_by_date: &FactorScoresByDate =
+        if config.min_daily_amount_cny.is_some() || config.prediction_blend.is_some() {
+            adjusted_scores = Arc::as_ref(&score_cache).clone();
+            if config.min_daily_amount_cny.is_some() {
+                apply_factor_liquidity_filter(
+                    pool,
+                    cache,
+                    &mut adjusted_scores,
+                    config,
+                    start_date,
+                    end_date,
+                )
+                .await?;
             }
-            let after: usize = scores_by_date.values().flatten().count();
-            info!("Liquidity filter (min ~{} CNY/day): kept {}/{} stock-date pairs ({} unique symbols)",
-                min_amount as u64, after, before, liquid_set.len());
-        }
-    }
+            if let Some(blend) = config.prediction_blend.as_ref() {
+                let prediction_scores = load_prediction_scores_by_date(
+                    pool,
+                    &blend.prediction_set_id,
+                    start_date,
+                    end_date,
+                )
+                .await?;
+                blend_factor_prediction_scores(
+                    &mut adjusted_scores,
+                    &prediction_scores,
+                    blend,
+                    config.score_direction,
+                );
+            }
+            &adjusted_scores
+        } else {
+            score_cache.as_ref()
+        };
 
-    // 3. Load trading calendar
-    let trading_days = load_open_trading_days(pool, start_date, end_date).await?;
+    let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
 
     let all_symbols: Vec<String> = scores_by_date
         .values()
@@ -470,33 +948,37 @@ pub async fn generate_signals(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let return_history = load_symbol_return_history(
+    let portfolio_config = PortfolioConstructionConfig::from(config);
+    let return_history = load_symbol_return_history_cached(
         pool,
+        cache,
         &all_symbols,
         start_date,
         end_date,
-        portfolio_history_lookback_days(&PortfolioConstructionConfig::from(config)),
+        portfolio_history_lookback_days(&portfolio_config),
     )
     .await?;
-    let average_amounts = load_portfolio_capacity_inputs(
+    let average_amounts = load_portfolio_capacity_inputs_cached(
         pool,
+        cache,
         &all_symbols,
         start_date,
         end_date,
-        &PortfolioConstructionConfig::from(config),
+        &portfolio_config,
     )
     .await?;
+    let industry_by_symbol =
+        load_portfolio_industry_inputs_cached(pool, cache, &all_symbols, &portfolio_config).await?;
 
-    let signals = build_rebalance_factor_signals(
-        &trading_days,
-        &scores_by_date,
+    build_rebalance_factor_signals(
+        trading_days.as_ref(),
+        scores_by_date,
         config,
-        &return_history,
-        &average_amounts,
+        return_history.as_ref(),
+        average_amounts.as_ref(),
+        industry_by_symbol.as_ref(),
         |_day, base| base.clone(),
-    )?;
-
-    Ok(signals)
+    )
 }
 
 /// Generate factor signals with market-regime-aware parameter overlays.
@@ -507,99 +989,104 @@ pub async fn generate_regime_signals(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
-    let rows: Vec<(String, NaiveDate, Option<f64>)> = sqlx::query_as(
-        "SELECT symbol, trade_date, raw_score
-         FROM multi_factor_value
-         WHERE combo_name = $1 AND version = $2
-           AND trade_date >= $3 AND trade_date <= $4
-           AND (available_at IS NULL OR available_at <= trade_date)
-         ORDER BY trade_date, symbol",
-    )
-    .bind(&config.combo_name)
-    .bind(&config.version)
-    .bind(start_date)
-    .bind(end_date)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load combo scores: {}", e))?;
+    let mut cache = SignalDataCache::default();
+    generate_regime_signals_with_cache(pool, config, policy, start_date, end_date, &mut cache).await
+}
 
-    if rows.is_empty() {
-        return Err("No combo scores found".into());
-    }
-
-    let mut scores_by_date: HashMap<NaiveDate, Vec<(String, f64)>> = HashMap::new();
-    for (sym, date, score) in rows {
-        let val = score.unwrap_or(0.0);
-        if val.is_finite() {
-            scores_by_date.entry(date).or_default().push((sym, val));
-        }
-    }
-
-    if let Some(min_amount) = config.min_daily_amount_cny {
-        let all_symbols: Vec<String> = scores_by_date
-            .values()
-            .flat_map(|v| v.iter().map(|(s, _)| s.clone()))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        if !all_symbols.is_empty() {
-            let min_amount_1k = min_amount / 1000.0;
-            let liquid_rows: Vec<(String,)> = sqlx::query_as(
-                "SELECT symbol FROM (
-                    SELECT symbol, AVG(amount) as avg_amt
-                    FROM market_stock_daily_bar
-                    WHERE symbol = ANY($1)
-                      AND trade_date >= $2 AND trade_date <= $3
-                      AND amount > 0
-                    GROUP BY symbol
-                    HAVING AVG(amount) >= $4
-                ) sub",
-            )
-            .bind(&all_symbols)
-            .bind(start_date)
-            .bind(end_date)
-            .bind(min_amount_1k)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Failed to load liquidity data: {}", e))?;
-            let liquid_set: HashSet<String> = liquid_rows.into_iter().map(|(s,)| s).collect();
-            for stocks in scores_by_date.values_mut() {
-                stocks.retain(|(sym, _)| liquid_set.contains(sym));
+/// Generate regime-aware factor signals using a caller-owned cache for repeated trial batches.
+pub async fn generate_regime_signals_with_cache(
+    pool: &PgPool,
+    config: &SignalConfig,
+    policy: &MarketRegimePolicy,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    cache: &mut SignalDataCache,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
+    let score_cache = load_combo_scores_cached(pool, cache, config, start_date, end_date).await?;
+    let mut adjusted_scores;
+    let scores_by_date: &FactorScoresByDate =
+        if config.min_daily_amount_cny.is_some() || config.prediction_blend.is_some() {
+            adjusted_scores = Arc::as_ref(&score_cache).clone();
+            if config.min_daily_amount_cny.is_some() {
+                apply_factor_liquidity_filter(
+                    pool,
+                    cache,
+                    &mut adjusted_scores,
+                    config,
+                    start_date,
+                    end_date,
+                )
+                .await?;
             }
-        }
-    }
+            if let Some(blend) = config.prediction_blend.as_ref() {
+                let prediction_scores = load_prediction_scores_by_date(
+                    pool,
+                    &blend.prediction_set_id,
+                    start_date,
+                    end_date,
+                )
+                .await?;
+                blend_factor_prediction_scores(
+                    &mut adjusted_scores,
+                    &prediction_scores,
+                    blend,
+                    config.score_direction,
+                );
+            }
+            &adjusted_scores
+        } else {
+            score_cache.as_ref()
+        };
 
-    let trading_days = load_open_trading_days(pool, start_date, end_date).await?;
+    let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
     let all_symbols: Vec<String> = scores_by_date
         .values()
         .flat_map(|v| v.iter().map(|(s, _)| s.clone()))
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let max_lookback = portfolio_history_lookback_days(&PortfolioConstructionConfig::from(config))
-        .max(policy.lookback_days);
-    let return_history =
-        load_symbol_return_history(pool, &all_symbols, start_date, end_date, max_lookback).await?;
-    let average_amounts = load_portfolio_capacity_inputs(
+    let portfolio_config = PortfolioConstructionConfig::from(config);
+    let max_lookback = portfolio_history_lookback_days(&portfolio_config).max(policy.lookback_days);
+    let return_history = load_symbol_return_history_cached(
         pool,
+        cache,
         &all_symbols,
         start_date,
         end_date,
-        &PortfolioConstructionConfig::from(config),
+        max_lookback,
     )
     .await?;
-    let benchmark_returns =
-        load_benchmark_return_history(pool, &policy.benchmark, start_date, end_date, max_lookback)
-            .await?;
+    let average_amounts = load_portfolio_capacity_inputs_cached(
+        pool,
+        cache,
+        &all_symbols,
+        start_date,
+        end_date,
+        &portfolio_config,
+    )
+    .await?;
+    let industry_by_symbol =
+        load_portfolio_industry_inputs_cached(pool, cache, &all_symbols, &portfolio_config).await?;
+    let benchmark_returns = load_benchmark_return_history_cached(
+        pool,
+        cache,
+        &policy.benchmark,
+        start_date,
+        end_date,
+        max_lookback,
+    )
+    .await?;
 
     build_rebalance_factor_signals(
-        &trading_days,
-        &scores_by_date,
+        trading_days.as_ref(),
+        scores_by_date,
         config,
-        &return_history,
-        &average_amounts,
+        return_history.as_ref(),
+        average_amounts.as_ref(),
+        industry_by_symbol.as_ref(),
         |day, base| {
-            let returns = trailing_market_returns(&benchmark_returns, day, policy.lookback_days);
+            let returns =
+                trailing_market_returns(benchmark_returns.as_ref(), day, policy.lookback_days);
             let regime = classify_market_regime(&returns, policy);
             policy.apply(base, regime)
         },
@@ -617,6 +1104,7 @@ pub async fn generate_prediction_signals(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
+    let prediction_start_date = prediction_load_start_date(start_date, config.entry_delay_days);
     let rows: Vec<(String, NaiveDate, f64, Option<i32>)> = sqlx::query_as(
         "SELECT symbol, trade_date, score, rank
          FROM model_prediction
@@ -626,7 +1114,7 @@ pub async fn generate_prediction_signals(
          ORDER BY trade_date, rank NULLS LAST, score DESC, symbol",
     )
     .bind(&config.prediction_set_id)
-    .bind(start_date)
+    .bind(prediction_start_date)
     .bind(end_date)
     .fetch_all(pool)
     .await
@@ -649,6 +1137,11 @@ pub async fn generate_prediction_signals(
     build_prediction_signals_from_rows(pool, config, start_date, end_date, prediction_rows).await
 }
 
+fn prediction_load_start_date(start_date: NaiveDate, entry_delay_days: usize) -> NaiveDate {
+    let calendar_buffer_days = 30 + (entry_delay_days as i64 * 3);
+    start_date - chrono::Duration::days(calendar_buffer_days)
+}
+
 async fn build_prediction_signals_from_rows(
     pool: &PgPool,
     config: &PredictionSignalConfig,
@@ -666,7 +1159,7 @@ async fn build_prediction_signals_from_rows(
         }
     }
 
-    sort_prediction_scores(&mut scores_by_date);
+    sort_prediction_scores(&mut scores_by_date, config.score_direction);
     apply_prediction_liquidity_filter(pool, &mut scores_by_date, config, start_date, end_date)
         .await?;
 
@@ -693,6 +1186,12 @@ async fn build_prediction_signals_from_rows(
         &PortfolioConstructionConfig::from(config),
     )
     .await?;
+    let industry_by_symbol = load_portfolio_industry_inputs(
+        pool,
+        &all_symbols,
+        &PortfolioConstructionConfig::from(config),
+    )
+    .await?;
 
     build_rebalance_prediction_signals(
         &trading_days,
@@ -700,23 +1199,23 @@ async fn build_prediction_signals_from_rows(
         config,
         &return_history,
         &average_amounts,
+        &industry_by_symbol,
     )
 }
 
 fn sort_prediction_scores(
     scores_by_date: &mut HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
+    direction: ScoreDirection,
 ) {
     for items in scores_by_date.values_mut() {
         items.sort_by(|left, right| {
-            left.2
-                .unwrap_or(i32::MAX)
-                .cmp(&right.2.unwrap_or(i32::MAX))
-                .then_with(|| {
-                    right
-                        .1
-                        .partial_cmp(&left.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+            let score_order = match direction {
+                ScoreDirection::Descending => right.1.partial_cmp(&left.1),
+                ScoreDirection::Ascending => left.1.partial_cmp(&right.1),
+            }
+            .unwrap_or(std::cmp::Ordering::Equal);
+            score_order
+                .then_with(|| left.2.unwrap_or(i32::MAX).cmp(&right.2.unwrap_or(i32::MAX)))
                 .then_with(|| left.0.cmp(&right.0))
         });
     }
@@ -733,12 +1232,359 @@ fn sort_factor_scores(items: &mut [(String, f64)], direction: ScoreDirection) {
     });
 }
 
+async fn load_prediction_scores_by_date(
+    pool: &PgPool,
+    prediction_set_id: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>, String> {
+    let rows: Vec<(String, NaiveDate, f64, Option<i32>)> = sqlx::query_as(
+        "SELECT symbol, trade_date, score, rank
+         FROM model_prediction
+         WHERE prediction_set_id = $1
+           AND trade_date >= $2 AND trade_date <= $3
+           AND available_at <= trade_date
+         ORDER BY trade_date, symbol",
+    )
+    .bind(prediction_set_id)
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load model predictions for blend: {}", e))?;
+
+    if rows.is_empty() {
+        return Err(format!(
+            "No model predictions found for blend prediction_set_id={}",
+            prediction_set_id
+        ));
+    }
+
+    let mut scores_by_date = HashMap::new();
+    for (symbol, trade_date, score, rank) in rows {
+        if score.is_finite() {
+            scores_by_date
+                .entry(trade_date)
+                .or_insert_with(Vec::new)
+                .push((symbol, score, rank));
+        }
+    }
+    Ok(scores_by_date)
+}
+
+fn blend_factor_prediction_scores(
+    factor_scores: &mut FactorScoresByDate,
+    prediction_scores: &HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
+    blend: &PredictionBlendConfig,
+    score_direction: ScoreDirection,
+) {
+    let factor_weight = blend.factor_weight.max(0.0);
+    let prediction_weight = blend.prediction_weight.max(0.0);
+    let gross_weight = factor_weight + prediction_weight;
+    if gross_weight <= f64::EPSILON {
+        return;
+    }
+    let factor_weight = factor_weight / gross_weight;
+    let prediction_weight = prediction_weight / gross_weight;
+
+    factor_scores.retain(|date, rows| {
+        let Some(predictions) = prediction_scores.get(date) else {
+            return false;
+        };
+        let prediction_percentiles = prediction_percentiles_by_symbol(
+            predictions
+                .iter()
+                .map(|(symbol, score, _)| (symbol.as_str(), *score)),
+        );
+        let min_prediction_percentile = blend
+            .prediction_min_percentile
+            .map(|value| value.clamp(0.0, 1.0));
+        let paired = rows
+            .iter()
+            .filter_map(|(symbol, factor_score)| {
+                let (prediction_score, prediction_percentile) =
+                    prediction_percentiles.get(symbol.as_str())?;
+                if min_prediction_percentile
+                    .map(|threshold| *prediction_percentile < threshold)
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
+                if factor_score.is_finite() && prediction_score.is_finite() {
+                    Some((symbol.clone(), *factor_score, *prediction_score))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if paired.is_empty() {
+            return false;
+        }
+
+        let factor_stats = score_stats(paired.iter().map(|(_, score, _)| *score));
+        let prediction_stats = score_stats(paired.iter().map(|(_, _, score)| *score));
+        *rows = paired
+            .into_iter()
+            .map(|(symbol, factor_score, prediction_score)| {
+                let prediction_score = standard_score(prediction_score, prediction_stats);
+                let prediction_score = match score_direction {
+                    ScoreDirection::Descending => prediction_score,
+                    ScoreDirection::Ascending => -prediction_score,
+                };
+                let score = factor_weight * standard_score(factor_score, factor_stats)
+                    + prediction_weight * prediction_score;
+                (symbol, score)
+            })
+            .collect();
+        true
+    });
+}
+
+fn prediction_percentiles_by_symbol<'a>(
+    predictions: impl Iterator<Item = (&'a str, f64)>,
+) -> HashMap<&'a str, (f64, f64)> {
+    let mut finite = predictions
+        .filter(|(_, score)| score.is_finite())
+        .collect::<Vec<_>>();
+    finite.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let denominator = finite.len().saturating_sub(1).max(1) as f64;
+    finite
+        .into_iter()
+        .enumerate()
+        .map(|(index, (symbol, score))| (symbol, (score, index as f64 / denominator)))
+        .collect()
+}
+
+fn score_stats(values: impl Iterator<Item = f64>) -> (f64, f64) {
+    let values = values.filter(|value| value.is_finite()).collect::<Vec<_>>();
+    if values.is_empty() {
+        return (0.0, 1.0);
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| {
+            let diff = *value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / values.len().max(1) as f64;
+    let std_dev = variance.sqrt();
+    (mean, if std_dev > f64::EPSILON { std_dev } else { 1.0 })
+}
+
+fn standard_score(value: f64, (mean, std_dev): (f64, f64)) -> f64 {
+    (value - mean) / std_dev
+}
+
+async fn load_combo_scores_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    config: &SignalConfig,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Arc<FactorScoresByDate>, String> {
+    let score_candidate_pool_size =
+        normalize_score_candidate_pool_size(config.score_candidate_pool_size);
+    let key = SignalDataCacheKey::combo_scores(
+        &config.combo_name,
+        &config.version,
+        start_date,
+        end_date,
+        config.score_direction,
+        score_candidate_pool_size,
+        config.universe_profile,
+    );
+    if let Some(scores) = cache.cached_combo_scores(&key) {
+        return Ok(scores);
+    }
+
+    let sql = combo_score_load_sql(
+        config.score_direction,
+        score_candidate_pool_size,
+        config.universe_profile,
+    );
+    let mut query = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(&sql)
+        .bind(&config.combo_name)
+        .bind(&config.version)
+        .bind(start_date)
+        .bind(end_date);
+    if let Some(limit) = score_candidate_pool_size {
+        query = query.bind(limit as i64);
+    }
+    let rows = query
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to load combo scores: {}", e))?;
+
+    if rows.is_empty() {
+        return Err("No combo scores found".into());
+    }
+
+    let mut scores_by_date: FactorScoresByDate = HashMap::new();
+    for (sym, date, score) in rows {
+        let val = score.unwrap_or(0.0);
+        if val.is_finite() {
+            scores_by_date.entry(date).or_default().push((sym, val));
+        }
+    }
+
+    Ok(cache.insert_combo_scores(key, scores_by_date))
+}
+
+fn normalize_score_candidate_pool_size(value: Option<usize>) -> Option<usize> {
+    value.filter(|size| *size > 0)
+}
+
+fn combo_score_load_sql(
+    score_direction: ScoreDirection,
+    score_candidate_pool_size: Option<usize>,
+    universe_profile: TradableUniverseProfile,
+) -> String {
+    let universe_join = tradable_universe_join_sql(universe_profile);
+    let universe_filter = tradable_universe_filter_sql(universe_profile)
+        .map(|filter| format!("\n           AND {filter}"))
+        .unwrap_or_default();
+    let Some(_) = normalize_score_candidate_pool_size(score_candidate_pool_size) else {
+        return format!(
+            "SELECT mfv.symbol, mfv.trade_date, mfv.raw_score
+         FROM multi_factor_value mfv{universe_join}
+         WHERE mfv.combo_name = $1 AND mfv.version = $2
+           AND mfv.trade_date >= $3 AND mfv.trade_date <= $4
+           AND (mfv.available_at IS NULL OR mfv.available_at <= mfv.trade_date){universe_filter}
+         ORDER BY mfv.trade_date, mfv.symbol"
+        );
+    };
+
+    let score_order = match score_direction {
+        ScoreDirection::Descending => "COALESCE(mfv.raw_score, 0.0) DESC",
+        ScoreDirection::Ascending => "COALESCE(mfv.raw_score, 0.0) ASC",
+    };
+    format!(
+        "SELECT symbol, trade_date, raw_score
+         FROM (
+             SELECT mfv.symbol, mfv.trade_date, mfv.raw_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY mfv.trade_date
+                        ORDER BY {score_order}, mfv.symbol ASC
+                    ) AS score_rank
+             FROM multi_factor_value mfv{universe_join}
+             WHERE mfv.combo_name = $1 AND mfv.version = $2
+               AND mfv.trade_date >= $3 AND mfv.trade_date <= $4
+               AND (mfv.available_at IS NULL OR mfv.available_at <= mfv.trade_date){universe_filter}
+         ) ranked
+         WHERE score_rank <= $5
+         ORDER BY trade_date, score_rank, symbol"
+    )
+}
+
+fn tradable_universe_join_sql(profile: TradableUniverseProfile) -> &'static str {
+    match profile {
+        TradableUniverseProfile::All => "",
+        TradableUniverseProfile::ListedNonSt | TradableUniverseProfile::MainBoardNonSt => {
+            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol"
+        }
+    }
+}
+
+fn tradable_universe_filter_sql(profile: TradableUniverseProfile) -> Option<&'static str> {
+    match profile {
+        TradableUniverseProfile::All => None,
+        TradableUniverseProfile::ListedNonSt => {
+            Some("ms.list_status = 'L' AND COALESCE(ms.is_st, false) = false")
+        }
+        TradableUniverseProfile::MainBoardNonSt => Some(
+            "ms.list_status = 'L'
+           AND COALESCE(ms.is_st, false) = false
+           AND ms.exchange IN ('SSE', 'SZSE')
+           AND COALESCE(ms.market, '') NOT ILIKE '%创业%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%北交%'",
+        ),
+    }
+}
+
+async fn apply_factor_liquidity_filter(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    scores_by_date: &mut FactorScoresByDate,
+    config: &SignalConfig,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<(), String> {
+    let Some(min_amount) = config.min_daily_amount_cny else {
+        return Ok(());
+    };
+    let all_symbols: Vec<String> = scores_by_date
+        .values()
+        .flat_map(|v| v.iter().map(|(s, _)| s.clone()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if all_symbols.is_empty() {
+        return Ok(());
+    }
+
+    let average_amounts =
+        load_average_amounts_cached(pool, cache, &all_symbols, start_date, end_date).await?;
+    let stats =
+        retain_scores_with_min_average_amount(scores_by_date, min_amount, average_amounts.as_ref());
+
+    info!(
+        "Liquidity filter (min ~{} CNY/day): kept {}/{} stock-date pairs ({} unique symbols)",
+        min_amount as u64, stats.after, stats.before, stats.liquid_symbols
+    );
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiquidityFilterStats {
+    before: usize,
+    after: usize,
+    liquid_symbols: usize,
+}
+
+fn retain_scores_with_min_average_amount(
+    scores_by_date: &mut FactorScoresByDate,
+    min_amount_cny: f64,
+    average_amounts: &AverageAmounts,
+) -> LiquidityFilterStats {
+    let min_amount_1k = min_amount_cny / 1000.0;
+    let liquid_symbols: HashSet<&str> = average_amounts
+        .iter()
+        .filter_map(|(symbol, amount)| {
+            if *amount >= min_amount_1k {
+                Some(symbol.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let before: usize = scores_by_date.values().flatten().count();
+    for stocks in scores_by_date.values_mut() {
+        stocks.retain(|(symbol, _)| liquid_symbols.contains(symbol.as_str()));
+    }
+    let after: usize = scores_by_date.values().flatten().count();
+
+    LiquidityFilterStats {
+        before,
+        after,
+        liquid_symbols: liquid_symbols.len(),
+    }
+}
+
 fn build_rebalance_factor_signals<F>(
     trading_days: &[NaiveDate],
     scores_by_date: &HashMap<NaiveDate, Vec<(String, f64)>>,
     base_config: &SignalConfig,
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     average_amounts: &HashMap<String, f64>,
+    industry_by_symbol: &HashMap<String, String>,
     active_config_for_day: F,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String>
 where
@@ -786,6 +1632,7 @@ where
             &candidates,
             return_history,
             average_amounts,
+            industry_by_symbol,
             &portfolio_config,
         );
         if target_weights.len() < active_config.top_n.min(5) {
@@ -889,6 +1736,20 @@ async fn load_open_trading_days(
     .map_err(|e| format!("Failed to load calendar: {}", e))
 }
 
+async fn load_open_trading_days_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Arc<Vec<NaiveDate>>, String> {
+    let key = SignalDataCacheKey::trading_days(start_date, end_date);
+    if let Some(days) = cache.cached_trading_days(&key) {
+        return Ok(days);
+    }
+    let days = load_open_trading_days(pool, start_date, end_date).await?;
+    Ok(cache.insert_trading_days(key, days))
+}
+
 fn classify_market_regime(returns: &[f64], policy: &MarketRegimePolicy) -> MarketRegime {
     let returns = returns
         .iter()
@@ -977,6 +1838,7 @@ fn build_rebalance_prediction_signals(
     config: &PredictionSignalConfig,
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     average_amounts: &HashMap<String, f64>,
+    industry_by_symbol: &HashMap<String, String>,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
     let min_idx = 1 + config.entry_delay_days;
     let mut signals = HashMap::new();
@@ -1013,6 +1875,7 @@ fn build_rebalance_prediction_signals(
             &candidates,
             return_history,
             average_amounts,
+            industry_by_symbol,
             &PortfolioConstructionConfig::from(config),
         );
         if target_weights.len() < config.top_n.min(5) {
@@ -1136,6 +1999,23 @@ async fn load_symbol_return_history(
     Ok(returns_by_symbol)
 }
 
+async fn load_symbol_return_history_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    lookback_days: usize,
+) -> Result<Arc<SymbolReturnHistory>, String> {
+    let key = SignalDataCacheKey::return_history(symbols, start_date, end_date, lookback_days);
+    if let Some(history) = cache.cached_return_history(&key) {
+        return Ok(history);
+    }
+    let history =
+        load_symbol_return_history(pool, symbols, start_date, end_date, lookback_days).await?;
+    Ok(cache.insert_return_history(key, history))
+}
+
 async fn load_average_amounts(
     pool: &PgPool,
     symbols: &[String],
@@ -1172,6 +2052,60 @@ async fn load_average_amounts(
         .collect())
 }
 
+async fn load_average_amounts_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Arc<AverageAmounts>, String> {
+    let key = SignalDataCacheKey::average_amounts(symbols, start_date, end_date);
+    if let Some(amounts) = cache.cached_average_amounts(&key) {
+        return Ok(amounts);
+    }
+    let amounts = load_average_amounts(pool, symbols, start_date, end_date).await?;
+    Ok(cache.insert_average_amounts(key, amounts))
+}
+
+async fn load_industry_classifications(
+    pool: &PgPool,
+    symbols: &[String],
+) -> Result<HashMap<String, String>, String> {
+    if symbols.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT symbol, industry
+         FROM market_stock
+         WHERE symbol = ANY($1)
+           AND industry IS NOT NULL
+           AND trim(industry) <> ''",
+    )
+    .bind(symbols)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load industry classifications: {}", e))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(symbol, industry)| (symbol, industry.trim().to_string()))
+        .collect())
+}
+
+async fn load_industry_classifications_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    symbols: &[String],
+) -> Result<Arc<IndustryMap>, String> {
+    let key = SignalDataCacheKey::industry_classifications(symbols);
+    if let Some(industries) = cache.cached_industry_classifications(&key) {
+        return Ok(industries);
+    }
+    let industries = load_industry_classifications(pool, symbols).await?;
+    Ok(cache.insert_industry_classifications(key, industries))
+}
+
 async fn load_portfolio_capacity_inputs(
     pool: &PgPool,
     symbols: &[String],
@@ -1183,6 +2117,46 @@ async fn load_portfolio_capacity_inputs(
         Ok(HashMap::new())
     } else {
         load_average_amounts(pool, symbols, start_date, end_date).await
+    }
+}
+
+async fn load_portfolio_capacity_inputs_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    config: &PortfolioConstructionConfig,
+) -> Result<Arc<AverageAmounts>, String> {
+    if config.portfolio_method != PortfolioConstructionMethod::RiskBudget {
+        Ok(Arc::new(HashMap::new()))
+    } else {
+        load_average_amounts_cached(pool, cache, symbols, start_date, end_date).await
+    }
+}
+
+async fn load_portfolio_industry_inputs(
+    pool: &PgPool,
+    symbols: &[String],
+    config: &PortfolioConstructionConfig,
+) -> Result<HashMap<String, String>, String> {
+    if config.max_industry_weight_pct.is_none() {
+        Ok(HashMap::new())
+    } else {
+        load_industry_classifications(pool, symbols).await
+    }
+}
+
+async fn load_portfolio_industry_inputs_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    symbols: &[String],
+    config: &PortfolioConstructionConfig,
+) -> Result<Arc<IndustryMap>, String> {
+    if config.max_industry_weight_pct.is_none() {
+        Ok(Arc::new(HashMap::new()))
+    } else {
+        load_industry_classifications_cached(pool, cache, symbols).await
     }
 }
 
@@ -1233,11 +2207,29 @@ async fn load_benchmark_return_history(
     Ok(returns)
 }
 
+async fn load_benchmark_return_history_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    benchmark: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    lookback_days: usize,
+) -> Result<Arc<BenchmarkReturns>, String> {
+    let key = SignalDataCacheKey::benchmark_returns(benchmark, start_date, end_date, lookback_days);
+    if let Some(returns) = cache.cached_benchmark_returns(&key) {
+        return Ok(returns);
+    }
+    let returns =
+        load_benchmark_return_history(pool, benchmark, start_date, end_date, lookback_days).await?;
+    Ok(cache.insert_benchmark_returns(key, returns))
+}
+
 fn build_portfolio_weights(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     average_amounts: &HashMap<String, f64>,
+    industry_by_symbol: &HashMap<String, String>,
     config: &PortfolioConstructionConfig,
 ) -> HashMap<String, Decimal> {
     let selected = select_uncorrelated_candidates(score_day, candidates, return_history, config);
@@ -1262,7 +2254,9 @@ fn build_portfolio_weights(
         ),
     };
 
-    normalize_and_cap_weights(&selected, &raw_weights, config)
+    let mut weights = normalize_and_cap_weights(&selected, &raw_weights, config);
+    apply_industry_cap(&mut weights, industry_by_symbol, config);
+    weights
 }
 
 fn select_uncorrelated_candidates(
@@ -1394,6 +2388,60 @@ fn normalize_and_cap_weights(
         }
     }
     target_weights
+}
+
+fn apply_industry_cap(
+    weights: &mut HashMap<String, Decimal>,
+    industry_by_symbol: &HashMap<String, String>,
+    config: &PortfolioConstructionConfig,
+) {
+    let Some(cap) = config.max_industry_weight_pct else {
+        return;
+    };
+    if weights.is_empty() || industry_by_symbol.is_empty() || !cap.is_finite() {
+        return;
+    }
+    let cap = cap.clamp(0.0, 1.0);
+    if cap >= 1.0 {
+        return;
+    }
+    let cap = Decimal::from_f64(cap).unwrap_or(Decimal::ONE);
+
+    let mut industry_totals: HashMap<&str, Decimal> = HashMap::new();
+    for (symbol, weight) in weights.iter() {
+        if let Some(industry) = industry_by_symbol
+            .get(symbol)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            *industry_totals.entry(industry).or_default() += *weight;
+        }
+    }
+
+    let industry_scales: HashMap<&str, Decimal> = industry_totals
+        .into_iter()
+        .filter_map(|(industry, total)| {
+            if total > cap && !total.is_zero() {
+                Some((industry, cap / total))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if industry_scales.is_empty() {
+        return;
+    }
+
+    for (symbol, weight) in weights.iter_mut() {
+        if let Some(scale) = industry_by_symbol
+            .get(symbol)
+            .map(|value| value.trim())
+            .and_then(|industry| industry_scales.get(industry))
+        {
+            *weight *= *scale;
+        }
+    }
+    weights.retain(|_, weight| !weight.is_zero());
 }
 
 fn sample_volatility(returns: &[f64]) -> Option<f64> {
@@ -1596,7 +2644,7 @@ mod tests {
                 ("000005.SZ".to_string(), 0.6, Some(5)),
             ],
         );
-        sort_prediction_scores(&mut scores_by_date);
+        sort_prediction_scores(&mut scores_by_date, ScoreDirection::Descending);
 
         let signals = build_rebalance_prediction_signals(
             &trading_days,
@@ -1609,6 +2657,7 @@ mod tests {
                 max_position_pct: Decimal::new(20, 2),
                 ..Default::default()
             },
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -1624,6 +2673,158 @@ mod tests {
             signal.target_weights["000001.SZ"],
             Decimal::from_f64(0.2).unwrap()
         );
+    }
+
+    #[test]
+    fn prediction_query_loads_prior_scores_for_first_signal_day() {
+        let start_date = NaiveDate::from_ymd_opt(2025, 1, 21).unwrap();
+
+        let load_start = prediction_load_start_date(start_date, 1);
+
+        assert!(load_start < start_date);
+        assert_eq!(load_start, NaiveDate::from_ymd_opt(2024, 12, 19).unwrap());
+    }
+
+    #[test]
+    fn sort_prediction_scores_honors_ascending_direction() {
+        let day = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let mut scores_by_date = HashMap::from([(
+            day,
+            vec![
+                ("AAA".to_string(), 3.0, Some(1)),
+                ("BBB".to_string(), 1.0, Some(3)),
+                ("CCC".to_string(), 2.0, Some(2)),
+            ],
+        )]);
+
+        sort_prediction_scores(&mut scores_by_date, ScoreDirection::Ascending);
+
+        let sorted = scores_by_date.get(&day).unwrap();
+        assert_eq!(sorted[0].0, "BBB");
+        assert_eq!(sorted[1].0, "CCC");
+        assert_eq!(sorted[2].0, "AAA");
+    }
+
+    #[test]
+    fn prediction_blend_keeps_intersection_and_combines_normalized_scores() {
+        let day = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let mut factor_scores = HashMap::from([(
+            day,
+            vec![
+                ("AAA".to_string(), 10.0),
+                ("BBB".to_string(), 20.0),
+                ("CCC".to_string(), 30.0),
+            ],
+        )]);
+        let prediction_scores = HashMap::from([(
+            day,
+            vec![
+                ("AAA".to_string(), 0.1, None),
+                ("BBB".to_string(), 0.2, None),
+            ],
+        )]);
+        let blend = PredictionBlendConfig {
+            prediction_set_id: "pred-quality-growth".to_string(),
+            factor_weight: 0.5,
+            prediction_weight: 0.5,
+            prediction_min_percentile: None,
+        };
+
+        blend_factor_prediction_scores(
+            &mut factor_scores,
+            &prediction_scores,
+            &blend,
+            ScoreDirection::Descending,
+        );
+
+        let blended = factor_scores.get(&day).unwrap();
+        assert_eq!(blended.len(), 2);
+        assert_eq!(blended[0].0, "AAA");
+        assert_eq!(blended[1].0, "BBB");
+        assert!(blended[1].1 > blended[0].1);
+    }
+
+    #[test]
+    fn prediction_blend_aligns_prediction_direction_for_ascending_factor_scores() {
+        let day = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let mut factor_scores = HashMap::from([(
+            day,
+            vec![
+                ("LOW_PRED".to_string(), 10.0),
+                ("HIGH_PRED".to_string(), 10.0),
+            ],
+        )]);
+        let prediction_scores = HashMap::from([(
+            day,
+            vec![
+                ("LOW_PRED".to_string(), 0.1, None),
+                ("HIGH_PRED".to_string(), 0.9, None),
+            ],
+        )]);
+        let blend = PredictionBlendConfig {
+            prediction_set_id: "pred-quality-growth".to_string(),
+            factor_weight: 0.0,
+            prediction_weight: 1.0,
+            prediction_min_percentile: None,
+        };
+
+        blend_factor_prediction_scores(
+            &mut factor_scores,
+            &prediction_scores,
+            &blend,
+            ScoreDirection::Ascending,
+        );
+        sort_factor_scores(
+            factor_scores.get_mut(&day).unwrap(),
+            ScoreDirection::Ascending,
+        );
+
+        let blended = factor_scores.get(&day).unwrap();
+        assert_eq!(blended[0].0, "HIGH_PRED");
+        assert!(blended[0].1 < blended[1].1);
+    }
+
+    #[test]
+    fn prediction_blend_can_filter_low_prediction_percentiles_without_reweighting() {
+        let day = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let mut factor_scores = HashMap::from([(
+            day,
+            vec![
+                ("LOW_FACTOR_BAD_PRED".to_string(), 1.0),
+                ("MID_FACTOR_GOOD_PRED".to_string(), 2.0),
+                ("HIGH_FACTOR_GOOD_PRED".to_string(), 3.0),
+            ],
+        )]);
+        let prediction_scores = HashMap::from([(
+            day,
+            vec![
+                ("LOW_FACTOR_BAD_PRED".to_string(), 0.1, None),
+                ("MID_FACTOR_GOOD_PRED".to_string(), 0.8, None),
+                ("HIGH_FACTOR_GOOD_PRED".to_string(), 0.9, None),
+            ],
+        )]);
+        let blend = PredictionBlendConfig {
+            prediction_set_id: "pred-quality-growth".to_string(),
+            factor_weight: 1.0,
+            prediction_weight: 0.0,
+            prediction_min_percentile: Some(0.5),
+        };
+
+        blend_factor_prediction_scores(
+            &mut factor_scores,
+            &prediction_scores,
+            &blend,
+            ScoreDirection::Ascending,
+        );
+        sort_factor_scores(
+            factor_scores.get_mut(&day).unwrap(),
+            ScoreDirection::Ascending,
+        );
+
+        let blended = factor_scores.get(&day).unwrap();
+        assert_eq!(blended.len(), 2);
+        assert_eq!(blended[0].0, "MID_FACTOR_GOOD_PRED");
+        assert_eq!(blended[1].0, "HIGH_FACTOR_GOOD_PRED");
     }
 
     #[test]
@@ -1672,6 +2873,7 @@ mod tests {
             &candidates,
             &return_history,
             &HashMap::new(),
+            &HashMap::new(),
             &config,
         );
 
@@ -1704,6 +2906,7 @@ mod tests {
             &candidates,
             &return_history,
             &HashMap::new(),
+            &HashMap::new(),
             &config,
         );
 
@@ -1713,6 +2916,27 @@ mod tests {
         assert!(weights
             .values()
             .all(|weight| *weight <= Decimal::new(60, 2)));
+    }
+
+    #[test]
+    fn risk_budget_portfolio_config_caps_large_top_n_for_local_search() {
+        let config = SignalConfig {
+            top_n: 80,
+            portfolio_method: PortfolioConstructionMethod::RiskBudget,
+            ..Default::default()
+        };
+        let portfolio_config = PortfolioConstructionConfig::from(&config);
+
+        assert_eq!(portfolio_config.top_n, 50);
+
+        let heuristic_config = SignalConfig {
+            top_n: 80,
+            portfolio_method: PortfolioConstructionMethod::Heuristic,
+            ..Default::default()
+        };
+        let portfolio_config = PortfolioConstructionConfig::from(&heuristic_config);
+
+        assert_eq!(portfolio_config.top_n, 80);
     }
 
     #[test]
@@ -1751,6 +2975,7 @@ mod tests {
             &candidates,
             &return_history,
             &average_amounts,
+            &HashMap::new(),
             &config,
         );
 
@@ -1758,6 +2983,224 @@ mod tests {
         assert!(weights["LOW_RISK"] <= Decimal::new(80, 2));
         let gross: Decimal = weights.values().copied().sum();
         assert!(gross <= Decimal::ONE);
+    }
+
+    #[test]
+    fn industry_cap_scales_overweight_industry_exposure() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("BANK_A".to_string(), 3.0),
+            ("BANK_B".to_string(), 2.0),
+            ("TECH_A".to_string(), 1.0),
+        ];
+        let industries = HashMap::from([
+            ("BANK_A".to_string(), "bank".to_string()),
+            ("BANK_B".to_string(), "bank".to_string()),
+            ("TECH_A".to_string(), "tech".to_string()),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::ONE,
+            max_gross_exposure: 1.0,
+            max_industry_weight_pct: Some(0.50),
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &HashMap::new(),
+            &industries,
+            &config,
+        );
+
+        let bank_weight = weights["BANK_A"] + weights["BANK_B"];
+
+        assert!(bank_weight <= Decimal::new(50, 2));
+        assert!(weights["BANK_A"] < weights["TECH_A"]);
+        assert!(weights["BANK_B"] < weights["TECH_A"]);
+    }
+
+    #[test]
+    fn signal_data_cache_normalizes_symbol_order_for_portfolio_inputs() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let left_symbols = vec!["BBB".to_string(), "AAA".to_string()];
+        let right_symbols = vec!["AAA".to_string(), "BBB".to_string()];
+
+        let left_key = SignalDataCacheKey::return_history(&left_symbols, start, end, 60);
+        let right_key = SignalDataCacheKey::return_history(&right_symbols, start, end, 60);
+
+        assert_eq!(left_key, right_key);
+    }
+
+    #[test]
+    fn combo_score_cache_key_is_direction_aware_only_when_candidate_pool_is_pruned() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+
+        let full_desc = SignalDataCacheKey::combo_scores(
+            "phase7_price_volume_expanded_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            None,
+            TradableUniverseProfile::All,
+        );
+        let full_asc = SignalDataCacheKey::combo_scores(
+            "phase7_price_volume_expanded_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Ascending,
+            None,
+            TradableUniverseProfile::All,
+        );
+        let pruned_desc = SignalDataCacheKey::combo_scores(
+            "phase7_price_volume_expanded_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(200),
+            TradableUniverseProfile::All,
+        );
+        let pruned_asc = SignalDataCacheKey::combo_scores(
+            "phase7_price_volume_expanded_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Ascending,
+            Some(200),
+            TradableUniverseProfile::All,
+        );
+
+        assert_eq!(full_desc, full_asc);
+        assert_ne!(pruned_desc, pruned_asc);
+    }
+
+    #[test]
+    fn combo_score_pruned_query_uses_directional_daily_window_rank() {
+        let descending = combo_score_load_sql(
+            ScoreDirection::Descending,
+            Some(200),
+            TradableUniverseProfile::All,
+        );
+        let ascending = combo_score_load_sql(
+            ScoreDirection::Ascending,
+            Some(200),
+            TradableUniverseProfile::All,
+        );
+
+        assert!(descending.contains("ROW_NUMBER() OVER"));
+        assert!(descending.contains("PARTITION BY mfv.trade_date"));
+        assert!(descending.contains("COALESCE(mfv.raw_score, 0.0) DESC"));
+        assert!(descending.contains("score_rank <= $5"));
+        assert!(ascending.contains("COALESCE(mfv.raw_score, 0.0) ASC"));
+    }
+
+    #[test]
+    fn combo_score_query_filters_tradable_universe_before_daily_ranking() {
+        let sql = combo_score_load_sql(
+            ScoreDirection::Descending,
+            Some(200),
+            TradableUniverseProfile::ListedNonSt,
+        );
+
+        assert!(sql.contains("JOIN market_stock ms ON ms.symbol = mfv.symbol"));
+        assert!(sql.contains("ms.list_status = 'L'"));
+        assert!(sql.contains("COALESCE(ms.is_st, false) = false"));
+        assert!(sql.contains("ROW_NUMBER() OVER"));
+        assert!(sql.contains("score_rank <= $5"));
+    }
+
+    #[test]
+    fn combo_score_cache_key_separates_universe_profiles() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+
+        let all = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(500),
+            TradableUniverseProfile::All,
+        );
+        let listed_non_st = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(500),
+            TradableUniverseProfile::ListedNonSt,
+        );
+
+        assert_ne!(all, listed_non_st);
+    }
+
+    #[test]
+    fn signal_data_cache_tracks_hits_for_reused_combo_scores() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            None,
+            TradableUniverseProfile::All,
+        );
+        let mut cache = SignalDataCache::default();
+        let mut scores = HashMap::new();
+        scores.insert(
+            start,
+            vec![("AAA".to_string(), 0.1), ("BBB".to_string(), 0.2)],
+        );
+
+        cache.store_combo_scores_for_test(key.clone(), scores);
+        let first = cache.cached_combo_scores(&key).expect("first hit");
+        let second = cache.cached_combo_scores(&key).expect("second hit");
+
+        assert_eq!(first.len(), second.len());
+        assert_eq!(cache.stats().combo_score_hits, 2);
+        assert_eq!(cache.stats().combo_score_misses, 0);
+    }
+
+    #[test]
+    fn liquidity_filter_uses_cached_average_amount_inputs() {
+        let trade_date = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let mut scores_by_date = HashMap::from([(
+            trade_date,
+            vec![
+                ("LIQUID".to_string(), 0.9),
+                ("THIN".to_string(), 0.8),
+                ("MISSING".to_string(), 0.7),
+            ],
+        )]);
+        let average_amounts = HashMap::from([
+            ("LIQUID".to_string(), 5_000.0),
+            ("THIN".to_string(), 1_000.0),
+        ]);
+
+        let stats = retain_scores_with_min_average_amount(
+            &mut scores_by_date,
+            3_000_000.0,
+            &average_amounts,
+        );
+
+        assert_eq!(stats.before, 3);
+        assert_eq!(stats.after, 1);
+        assert_eq!(stats.liquid_symbols, 1);
+        assert_eq!(
+            scores_by_date[&trade_date],
+            vec![("LIQUID".to_string(), 0.9)]
+        );
     }
 
     #[test]
@@ -1783,6 +3226,66 @@ mod tests {
     }
 
     #[test]
+    fn drawdown_control_policy_deleverages_bear_and_high_volatility() {
+        let base = SignalConfig {
+            top_n: 80,
+            rebalance_freq_days: 20,
+            max_gross_exposure: 1.0,
+            score_direction: ScoreDirection::Descending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::drawdown_control_v1("000300.SH");
+
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(policy.bear_drawdown_threshold, 0.12);
+        assert_eq!(policy.high_volatility_threshold, 0.24);
+        assert_eq!(bear.top_n, 20);
+        assert_eq!(bear.rebalance_freq_days, 60);
+        assert_eq!(bear.max_gross_exposure, 0.35);
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.skip_top_pct, 0.10);
+        assert_eq!(high_volatility.max_gross_exposure, 0.25);
+    }
+
+    #[test]
+    fn drawdown_control_v2_is_stricter_than_v1() {
+        let base = SignalConfig {
+            top_n: 80,
+            rebalance_freq_days: 20,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(10, 2),
+            score_direction: ScoreDirection::Descending,
+            ..Default::default()
+        };
+        let v1 = MarketRegimePolicy::drawdown_control_v1("000300.SH");
+        let v2 = MarketRegimePolicy::drawdown_control_v2("000300.SH");
+
+        let bear_v1 = v1.apply(&base, MarketRegime::Bear);
+        let bear_v2 = v2.apply(&base, MarketRegime::Bear);
+        let high_volatility_v1 = v1.apply(&base, MarketRegime::HighVolatility);
+        let high_volatility_v2 = v2.apply(&base, MarketRegime::HighVolatility);
+        let sideways_v2 = v2.apply(&base, MarketRegime::Sideways);
+
+        assert!(v2.bear_drawdown_threshold < v1.bear_drawdown_threshold);
+        assert!(v2.high_volatility_threshold < v1.high_volatility_threshold);
+        assert_eq!(v2.min_observations, 10);
+        assert_eq!(bear_v2.top_n, 15);
+        assert_eq!(bear_v2.max_gross_exposure, 0.25);
+        assert_eq!(bear_v2.max_position_pct, Decimal::new(4, 2));
+        assert_eq!(bear_v2.skip_top_pct, 0.15);
+        assert_eq!(bear_v2.score_direction, ScoreDirection::Ascending);
+        assert!(bear_v2.max_gross_exposure < bear_v1.max_gross_exposure);
+        assert_eq!(high_volatility_v2.top_n, 15);
+        assert_eq!(high_volatility_v2.max_gross_exposure, 0.18);
+        assert_eq!(high_volatility_v2.max_position_pct, Decimal::new(4, 2));
+        assert!(high_volatility_v2.max_gross_exposure < high_volatility_v1.max_gross_exposure);
+        assert_eq!(sideways_v2.max_gross_exposure, 0.55);
+        assert_eq!(sideways_v2.max_position_pct, Decimal::new(6, 2));
+    }
+
+    #[test]
     fn regime_aware_factor_signals_use_dynamic_direction_and_exposure() {
         let d1 = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
         let d2 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
@@ -1804,6 +3307,7 @@ mod tests {
             &trading_days,
             &scores_by_date,
             &base,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             |day, base| {

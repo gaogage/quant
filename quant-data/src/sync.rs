@@ -1,6 +1,6 @@
 //! 数据同步服务 — Tushare → 标准化 → PostgreSQL
 
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockDailyBar,
-    MarketTradeCalendar,
+    MarketStockDailyBasic, MarketStockMoneyflow, MarketTradeCalendar,
 };
 use crate::repository;
 use crate::tushare::client::TushareClient;
@@ -35,6 +35,9 @@ fn get_i64(m: &Map<String, Value>, key: &str) -> Option<i64> {
 fn to_decimal(v: Option<f64>) -> Decimal {
     v.and_then(|v| Decimal::from_f64_retain(v))
         .unwrap_or_default()
+}
+fn to_opt_decimal(v: Option<f64>) -> Option<Decimal> {
+    v.and_then(Decimal::from_f64_retain)
 }
 fn to_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y%m%d").ok()
@@ -326,6 +329,534 @@ fn days_in_month(year: i32, month: u32) -> u32 {
         }
         _ => 30,
     }
+}
+
+// ─── sync_daily_basic ────────────────────────────────────────────
+
+fn daily_basic_row_from_map(item: &Map<String, Value>) -> Option<MarketStockDailyBasic> {
+    Some(MarketStockDailyBasic {
+        symbol: get_str(item, "ts_code"),
+        trade_date: to_date(&get_str(item, "trade_date"))?,
+        pe_ttm: to_opt_decimal(get_f64(item, "pe_ttm")),
+        pb: to_opt_decimal(get_f64(item, "pb")),
+        ps_ttm: to_opt_decimal(get_f64(item, "ps_ttm")),
+        dv_ttm: to_opt_decimal(get_f64(item, "dv_ttm")),
+        total_mv: to_opt_decimal(get_f64(item, "total_mv")),
+        circ_mv: to_opt_decimal(get_f64(item, "circ_mv")),
+    })
+}
+
+pub async fn sync_daily_basic(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "daily_basic",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "daily basic valuation sync",
+        "tushare",
+        &["market_stock_daily_basic"],
+        s,
+        e,
+    )
+    .await?;
+
+    let page_limit = 6000usize;
+    let mut total_rows = 0usize;
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+
+    if symbols.is_empty() {
+        let months = months_in_range(s, e);
+        for (m_start, m_end) in &months {
+            let sd = m_start.format("%Y%m%d").to_string();
+            let ed = m_end.format("%Y%m%d").to_string();
+            let mut offset = 0usize;
+
+            loop {
+                match client
+                    .daily_basic(
+                        None,
+                        None,
+                        Some(&sd),
+                        Some(&ed),
+                        Some(page_limit),
+                        Some(offset),
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        let rows: Vec<MarketStockDailyBasic> =
+                            maps.iter().filter_map(daily_basic_row_from_map).collect();
+                        if !rows.is_empty() {
+                            total_rows += rows.len();
+                            repository::upsert_daily_basic_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                        }
+                        if row_count < page_limit {
+                            break;
+                        }
+                        offset += page_limit;
+                    }
+                    Err(error) => {
+                        warn!("daily_basic {}..{} failed: {}", sd, ed, error);
+                        let mut day = *m_start;
+                        let mut fallback_failed = false;
+                        while day <= *m_end {
+                            let trade_date = day.format("%Y%m%d").to_string();
+                            let mut offset = 0usize;
+                            loop {
+                                match client
+                                    .daily_basic(
+                                        None,
+                                        Some(&trade_date),
+                                        None,
+                                        None,
+                                        Some(page_limit),
+                                        Some(offset),
+                                    )
+                                    .await
+                                {
+                                    Ok(resp) => {
+                                        let maps = resp
+                                            .data
+                                            .map(|data| data.to_maps())
+                                            .unwrap_or_default();
+                                        let row_count = maps.len();
+                                        let rows: Vec<MarketStockDailyBasic> = maps
+                                            .iter()
+                                            .filter_map(daily_basic_row_from_map)
+                                            .collect();
+                                        if !rows.is_empty() {
+                                            total_rows += rows.len();
+                                            repository::upsert_daily_basic_batch(
+                                                pool, &rows, dv_id, "tushare",
+                                            )
+                                            .await?;
+                                        }
+                                        if row_count < page_limit {
+                                            break;
+                                        }
+                                        offset += page_limit;
+                                    }
+                                    Err(day_error) => {
+                                        warn!("daily_basic {} failed: {}", trade_date, day_error);
+                                        failed += 1;
+                                        fallback_failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            day += Duration::days(1);
+                        }
+                        if !fallback_failed {
+                            info!("daily_basic {}..{} recovered by daily fallback", sd, ed);
+                        }
+                        break;
+                    }
+                }
+            }
+            ok += 1;
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                months.len() as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+            if total_rows % 500_000 < page_limit {
+                info!("daily_basic range sync: {} rows", total_rows);
+            }
+            if ok % 12 == 0 {
+                repository::update_sync_task(
+                    pool,
+                    &task_id,
+                    "running",
+                    months.len() as i32,
+                    ok as i32,
+                    failed as i32,
+                )
+                .await?;
+            }
+        }
+
+        repository::update_sync_task(
+            pool,
+            &task_id,
+            if failed > 0 { "partial" } else { "completed" },
+            months.len() as i32,
+            ok as i32,
+            failed as i32,
+        )
+        .await?;
+    } else {
+        for symbol in symbols {
+            let mut offset = 0usize;
+            let mut symbol_failed = false;
+            loop {
+                match client
+                    .daily_basic(
+                        Some(symbol),
+                        None,
+                        Some(start),
+                        Some(end),
+                        Some(page_limit),
+                        Some(offset),
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        let rows: Vec<MarketStockDailyBasic> =
+                            maps.iter().filter_map(daily_basic_row_from_map).collect();
+                        if !rows.is_empty() {
+                            total_rows += rows.len();
+                            repository::upsert_daily_basic_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                        }
+                        if row_count < page_limit {
+                            break;
+                        }
+                        offset += page_limit;
+                    }
+                    Err(error) => {
+                        warn!("{} daily_basic failed: {}", symbol, error);
+                        failed += 1;
+                        symbol_failed = true;
+                        break;
+                    }
+                }
+            }
+            if !symbol_failed {
+                ok += 1;
+            }
+            if ok % 100 == 0 {
+                repository::update_sync_task(
+                    pool,
+                    &task_id,
+                    "running",
+                    symbols.len() as i32,
+                    ok as i32,
+                    failed as i32,
+                )
+                .await?;
+            }
+        }
+
+        repository::update_sync_task(
+            pool,
+            &task_id,
+            if failed > 0 { "partial" } else { "completed" },
+            symbols.len() as i32,
+            ok as i32,
+            failed as i32,
+        )
+        .await?;
+    }
+
+    info!(
+        "daily_basic 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
+}
+
+// ─── sync_moneyflow ─────────────────────────────────────────────
+
+fn moneyflow_row_from_map(item: &Map<String, Value>) -> Option<MarketStockMoneyflow> {
+    Some(MarketStockMoneyflow {
+        symbol: get_str(item, "ts_code"),
+        trade_date: to_date(&get_str(item, "trade_date"))?,
+        buy_sm_vol: to_opt_decimal(get_f64(item, "buy_sm_vol")),
+        buy_sm_amount: to_opt_decimal(get_f64(item, "buy_sm_amount")),
+        sell_sm_vol: to_opt_decimal(get_f64(item, "sell_sm_vol")),
+        sell_sm_amount: to_opt_decimal(get_f64(item, "sell_sm_amount")),
+        buy_md_vol: to_opt_decimal(get_f64(item, "buy_md_vol")),
+        buy_md_amount: to_opt_decimal(get_f64(item, "buy_md_amount")),
+        sell_md_vol: to_opt_decimal(get_f64(item, "sell_md_vol")),
+        sell_md_amount: to_opt_decimal(get_f64(item, "sell_md_amount")),
+        buy_lg_vol: to_opt_decimal(get_f64(item, "buy_lg_vol")),
+        buy_lg_amount: to_opt_decimal(get_f64(item, "buy_lg_amount")),
+        sell_lg_vol: to_opt_decimal(get_f64(item, "sell_lg_vol")),
+        sell_lg_amount: to_opt_decimal(get_f64(item, "sell_lg_amount")),
+        buy_elg_vol: to_opt_decimal(get_f64(item, "buy_elg_vol")),
+        buy_elg_amount: to_opt_decimal(get_f64(item, "buy_elg_amount")),
+        sell_elg_vol: to_opt_decimal(get_f64(item, "sell_elg_vol")),
+        sell_elg_amount: to_opt_decimal(get_f64(item, "sell_elg_amount")),
+        net_mf_vol: to_opt_decimal(get_f64(item, "net_mf_vol")),
+        net_mf_amount: to_opt_decimal(get_f64(item, "net_mf_amount")),
+    })
+}
+
+pub async fn sync_moneyflow(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "moneyflow",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "daily moneyflow sync",
+        "tushare",
+        &["market_stock_moneyflow"],
+        s,
+        e,
+    )
+    .await?;
+
+    let page_limit = 6000usize;
+    let mut total_rows = 0usize;
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+
+    if symbols.is_empty() {
+        let months = months_in_range(s, e);
+        for (m_start, m_end) in &months {
+            let sd = m_start.format("%Y%m%d").to_string();
+            let ed = m_end.format("%Y%m%d").to_string();
+            let mut offset = 0usize;
+
+            loop {
+                match client
+                    .moneyflow(
+                        None,
+                        None,
+                        Some(&sd),
+                        Some(&ed),
+                        Some(page_limit),
+                        Some(offset),
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        let rows: Vec<MarketStockMoneyflow> =
+                            maps.iter().filter_map(moneyflow_row_from_map).collect();
+                        if !rows.is_empty() {
+                            total_rows += rows.len();
+                            repository::upsert_moneyflow_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                        }
+                        if row_count < page_limit {
+                            break;
+                        }
+                        offset += page_limit;
+                    }
+                    Err(error) => {
+                        warn!("moneyflow {}..{} failed: {}", sd, ed, error);
+                        let mut day = *m_start;
+                        let mut fallback_failed = false;
+                        while day <= *m_end {
+                            let trade_date = day.format("%Y%m%d").to_string();
+                            let mut offset = 0usize;
+                            loop {
+                                match client
+                                    .moneyflow(
+                                        None,
+                                        Some(&trade_date),
+                                        None,
+                                        None,
+                                        Some(page_limit),
+                                        Some(offset),
+                                    )
+                                    .await
+                                {
+                                    Ok(resp) => {
+                                        let maps = resp
+                                            .data
+                                            .map(|data| data.to_maps())
+                                            .unwrap_or_default();
+                                        let row_count = maps.len();
+                                        let rows: Vec<MarketStockMoneyflow> = maps
+                                            .iter()
+                                            .filter_map(moneyflow_row_from_map)
+                                            .collect();
+                                        if !rows.is_empty() {
+                                            total_rows += rows.len();
+                                            repository::upsert_moneyflow_batch(
+                                                pool, &rows, dv_id, "tushare",
+                                            )
+                                            .await?;
+                                        }
+                                        if row_count < page_limit {
+                                            break;
+                                        }
+                                        offset += page_limit;
+                                    }
+                                    Err(day_error) => {
+                                        warn!("moneyflow {} failed: {}", trade_date, day_error);
+                                        failed += 1;
+                                        fallback_failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            day += Duration::days(1);
+                        }
+                        if !fallback_failed {
+                            info!("moneyflow {}..{} recovered by daily fallback", sd, ed);
+                        }
+                        break;
+                    }
+                }
+            }
+            ok += 1;
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                months.len() as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+            if total_rows % 500_000 < page_limit {
+                info!("moneyflow range sync: {} rows", total_rows);
+            }
+            if ok % 12 == 0 {
+                repository::update_sync_task(
+                    pool,
+                    &task_id,
+                    "running",
+                    months.len() as i32,
+                    ok as i32,
+                    failed as i32,
+                )
+                .await?;
+            }
+        }
+
+        repository::update_sync_task(
+            pool,
+            &task_id,
+            if failed > 0 { "partial" } else { "completed" },
+            months.len() as i32,
+            ok as i32,
+            failed as i32,
+        )
+        .await?;
+    } else {
+        for symbol in symbols {
+            let mut offset = 0usize;
+            let mut symbol_failed = false;
+            loop {
+                match client
+                    .moneyflow(
+                        Some(symbol),
+                        None,
+                        Some(start),
+                        Some(end),
+                        Some(page_limit),
+                        Some(offset),
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        let rows: Vec<MarketStockMoneyflow> =
+                            maps.iter().filter_map(moneyflow_row_from_map).collect();
+                        if !rows.is_empty() {
+                            total_rows += rows.len();
+                            repository::upsert_moneyflow_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                        }
+                        if row_count < page_limit {
+                            break;
+                        }
+                        offset += page_limit;
+                    }
+                    Err(error) => {
+                        warn!("{} moneyflow failed: {}", symbol, error);
+                        failed += 1;
+                        symbol_failed = true;
+                        break;
+                    }
+                }
+            }
+            if !symbol_failed {
+                ok += 1;
+            }
+            if ok % 100 == 0 {
+                repository::update_sync_task(
+                    pool,
+                    &task_id,
+                    "running",
+                    symbols.len() as i32,
+                    ok as i32,
+                    failed as i32,
+                )
+                .await?;
+            }
+        }
+
+        repository::update_sync_task(
+            pool,
+            &task_id,
+            if failed > 0 { "partial" } else { "completed" },
+            symbols.len() as i32,
+            ok as i32,
+            failed as i32,
+        )
+        .await?;
+    }
+
+    info!(
+        "moneyflow 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
 }
 
 // ─── sync_trade_calendar ─────────────────────────────────────────
@@ -861,4 +1392,92 @@ pub async fn sync_financial_data_with_task(
         stmt_count, ind_count
     );
     Ok((stmt_count, ind_count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn months_in_range_splits_by_calendar_month() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 30).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
+
+        let months = months_in_range(start, end);
+
+        assert_eq!(
+            months,
+            vec![
+                (
+                    NaiveDate::from_ymd_opt(2026, 1, 30).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 1, 31).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 3, 2).unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn daily_basic_row_maps_valuation_fields() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("trade_date".to_string(), json!("20260511"));
+        item.insert("pe_ttm".to_string(), json!(6.8));
+        item.insert("pb".to_string(), json!(0.72));
+        item.insert("ps_ttm".to_string(), json!(1.15));
+        item.insert("dv_ttm".to_string(), json!(4.2));
+        item.insert("total_mv".to_string(), json!(123456.7));
+        item.insert("circ_mv".to_string(), json!(98765.4));
+
+        let row = daily_basic_row_from_map(&item).expect("daily basic row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(
+            row.trade_date,
+            NaiveDate::from_ymd_opt(2026, 5, 11).unwrap()
+        );
+        assert_eq!(row.pe_ttm, Decimal::from_f64_retain(6.8));
+        assert_eq!(row.pb, Decimal::from_f64_retain(0.72));
+        assert_eq!(row.ps_ttm, Decimal::from_f64_retain(1.15));
+        assert_eq!(row.dv_ttm, Decimal::from_f64_retain(4.2));
+        assert_eq!(row.total_mv, Decimal::from_f64_retain(123456.7));
+        assert_eq!(row.circ_mv, Decimal::from_f64_retain(98765.4));
+    }
+
+    #[test]
+    fn moneyflow_row_maps_fund_flow_fields() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("trade_date".to_string(), json!("20260511"));
+        item.insert("buy_sm_amount".to_string(), json!(123.4));
+        item.insert("sell_sm_amount".to_string(), json!(100.1));
+        item.insert("buy_lg_amount".to_string(), json!(456.7));
+        item.insert("sell_lg_amount".to_string(), json!(321.2));
+        item.insert("buy_elg_amount".to_string(), json!(789.0));
+        item.insert("sell_elg_amount".to_string(), json!(654.3));
+        item.insert("net_mf_amount".to_string(), json!(293.5));
+
+        let row = moneyflow_row_from_map(&item).expect("moneyflow row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(
+            row.trade_date,
+            NaiveDate::from_ymd_opt(2026, 5, 11).unwrap()
+        );
+        assert_eq!(row.buy_sm_amount, Decimal::from_f64_retain(123.4));
+        assert_eq!(row.sell_sm_amount, Decimal::from_f64_retain(100.1));
+        assert_eq!(row.buy_lg_amount, Decimal::from_f64_retain(456.7));
+        assert_eq!(row.sell_lg_amount, Decimal::from_f64_retain(321.2));
+        assert_eq!(row.buy_elg_amount, Decimal::from_f64_retain(789.0));
+        assert_eq!(row.sell_elg_amount, Decimal::from_f64_retain(654.3));
+        assert_eq!(row.net_mf_amount, Decimal::from_f64_retain(293.5));
+    }
 }

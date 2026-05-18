@@ -18,9 +18,12 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::routes::backtest::{
-    execute_factor_backtest, MarketRegimeBacktestReq, RunFactorBacktestReq,
+    execute_factor_backtest_with_caches, execute_prediction_backtest, MarketRegimeBacktestReq,
+    RunFactorBacktestReq, RunPredictionBacktestReq,
 };
 use crate::AppState;
+use quant_backtest::runner::BacktestDataCache;
+use quant_backtest::signal_generator::SignalDataCache;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateOptimizationRequest {
@@ -46,6 +49,7 @@ pub struct Phase7LayeredOptimizationRequest {
     pub constraints: Option<Value>,
     pub walk_forward: Option<Value>,
     pub backtest_template: Option<Value>,
+    pub prediction_set_ids: Option<Vec<String>>,
     pub max_trials: Option<usize>,
 }
 
@@ -154,6 +158,11 @@ struct Phase7LayeredPlanBundle {
     search_space: Value,
 }
 
+enum OptimizationTrialBacktestRequest {
+    Factor(RunFactorBacktestReq),
+    Prediction(RunPredictionBacktestReq),
+}
+
 fn default_random_seed() -> u64 {
     42
 }
@@ -178,7 +187,10 @@ fn build_phase7_layered_plan_bundle(
         resource_plan.max_trials = normalize_max_trials(max_trials);
     }
 
-    let config = LayeredSearchConfig::local_professional_default();
+    let mut config = LayeredSearchConfig::local_professional_default();
+    if let Some(prediction_set_ids) = req.prediction_set_ids.as_ref() {
+        config.prediction_set_ids = normalize_prediction_set_ids(prediction_set_ids);
+    }
     let plan = build_layered_search_plan(&config, &resource_plan);
     let search_space = json!({
         "phase": "7-D",
@@ -195,6 +207,15 @@ fn build_phase7_layered_plan_bundle(
         plan,
         search_space,
     }
+}
+
+fn normalize_prediction_set_ids(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub async fn create_optimization(
@@ -611,6 +632,8 @@ async fn execute_pending_trials(
             &gate_policy,
             &gates,
             gate_status,
+            None,
+            None,
         )
         .await?;
         return Ok(json!({
@@ -638,6 +661,8 @@ async fn execute_pending_trials(
 
     let mut completed = 0;
     let mut failed = 0;
+    let mut signal_cache = SignalDataCache::default();
+    let mut backtest_cache = BacktestDataCache::default();
     for (trial_id, _trial_index, params) in pending_trials.iter() {
         let backtest_task_id = format!("optbt-{}", Uuid::new_v4());
         if let Err(error) = mark_trial_running(db, trial_id).await {
@@ -652,7 +677,7 @@ async fn execute_pending_trials(
             continue;
         }
 
-        let request = match build_factor_trial_request(&task, params) {
+        let request = match build_optimization_trial_request(&task, params) {
             Ok(request) => request,
             Err(error) => {
                 failed += 1;
@@ -661,7 +686,23 @@ async fn execute_pending_trials(
             }
         };
 
-        match execute_factor_backtest(db, &backtest_task_id, request).await {
+        let execution_result = match request {
+            OptimizationTrialBacktestRequest::Factor(request) => {
+                execute_factor_backtest_with_caches(
+                    db,
+                    &backtest_task_id,
+                    request,
+                    Some(&mut signal_cache),
+                    Some(&mut backtest_cache),
+                )
+                .await
+            }
+            OptimizationTrialBacktestRequest::Prediction(request) => {
+                execute_prediction_backtest(db, &backtest_task_id, request).await
+            }
+        };
+
+        match execution_result {
             Ok(output) => {
                 let scored =
                     score_trial(&output.metrics, &task.objective, task.constraints.as_ref());
@@ -677,6 +718,8 @@ async fn execute_pending_trials(
 
     let best_trial_id = refresh_task_progress(db, task_id).await?;
     let elapsed_ms = started.elapsed().as_millis() as i64;
+    let signal_cache_stats = json!(signal_cache.stats());
+    let backtest_cache_stats = json!(backtest_cache.stats());
     let gates = evaluate_optimization_performance_gates(
         pending_trials.len() as i64,
         completed,
@@ -698,6 +741,8 @@ async fn execute_pending_trials(
         &gate_policy,
         &gates,
         gate_status,
+        Some(&signal_cache_stats),
+        Some(&backtest_cache_stats),
     )
     .await?;
 
@@ -711,6 +756,8 @@ async fn execute_pending_trials(
         "experiment_run_id": experiment_run_id,
         "performance_gate_status": gate_status,
         "performance_gates": gates,
+        "signal_cache": signal_cache_stats,
+        "backtest_cache": backtest_cache_stats,
     }))
 }
 
@@ -806,6 +853,8 @@ async fn persist_optimization_experiment_run(
     policy: &OptimizationPerformanceGatePolicy,
     gates: &Value,
     gate_status: &str,
+    signal_cache_stats: Option<&Value>,
+    backtest_cache_stats: Option<&Value>,
 ) -> Result<String, String> {
     let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let throughput = if elapsed_ms > 0 {
@@ -831,6 +880,8 @@ async fn persist_optimization_experiment_run(
         "best_trial_id": best_trial_id,
         "gate_status": gate_status,
         "gates": gates,
+        "signal_cache": signal_cache_stats,
+        "backtest_cache": backtest_cache_stats,
     });
     let experiment_status = if gate_status == "passed" {
         "completed"
@@ -1234,6 +1285,70 @@ async fn load_execution_context(
     })
 }
 
+fn build_optimization_trial_request(
+    task: &OptimizationTaskExecutionContext,
+    parameters: &Value,
+) -> Result<OptimizationTrialBacktestRequest, String> {
+    match trial_signal_source(task, parameters)?.as_deref() {
+        Some("prediction") | Some("model_prediction") | Some("ml_prediction") => {
+            build_prediction_trial_request(task, parameters)
+                .map(OptimizationTrialBacktestRequest::Prediction)
+        }
+        Some("factor") | Some("factor_combo") | None => {
+            build_factor_trial_request(task, parameters)
+                .map(OptimizationTrialBacktestRequest::Factor)
+        }
+        Some(other) => Err(format!("unsupported signal_source: {}", other)),
+    }
+}
+
+fn trial_signal_source(
+    task: &OptimizationTaskExecutionContext,
+    parameters: &Value,
+) -> Result<Option<String>, String> {
+    let template = task
+        .backtest_template
+        .as_object()
+        .ok_or_else(|| "backtest_template must be a JSON object".to_string())?;
+    let params = parameters
+        .as_object()
+        .ok_or_else(|| "trial parameters must be a JSON object".to_string())?;
+
+    match params
+        .get("signal_source")
+        .or_else(|| template.get("signal_source"))
+    {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value.to_string()))
+            }
+        }
+        Some(Value::Null) | None => {
+            let has_prediction = params
+                .get("prediction_set_id")
+                .or_else(|| template.get("prediction_set_id"))
+                .and_then(Value::as_str)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            let has_combo = params
+                .get("combo_name")
+                .or_else(|| template.get("combo_name"))
+                .and_then(Value::as_str)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            if has_prediction && !has_combo {
+                Ok(Some("model_prediction".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(_) => Err("signal_source must be a string or null".to_string()),
+    }
+}
+
 fn build_factor_trial_request(
     task: &OptimizationTaskExecutionContext,
     parameters: &Value,
@@ -1323,6 +1438,8 @@ fn build_factor_trial_request(
         research_dataset_id: optional_string("research_dataset_id")?,
         feature_set_version_id: optional_string("feature_set_version_id")?,
         prediction_set_id: optional_string("prediction_set_id")?,
+        prediction_blend_weight: optional_f64_value("prediction_blend_weight")?,
+        prediction_min_percentile: optional_f64_value("prediction_min_percentile")?,
         portfolio_policy_id: optional_string("portfolio_policy_id")?,
         top_n: usize_value("top_n", 20)?,
         rebalance: string_value("rebalance", Some("monthly"))?,
@@ -1339,10 +1456,160 @@ fn build_factor_trial_request(
         portfolio_method: string_value("portfolio_method", Some("heuristic"))?,
         risk_budget_lookback_days: usize_value("risk_budget_lookback_days", 60)?,
         capacity_penalty_strength: f64_value("capacity_penalty_strength", 0.0)?,
+        industry_max_weight_pct: optional_f64_value("industry_max_weight_pct")?,
+        score_candidate_pool_size: match params
+            .get("score_candidate_pool_size")
+            .or_else(|| template.get("score_candidate_pool_size"))
+        {
+            None | Some(Value::Null) => None,
+            Some(_) => {
+                let size = usize_value("score_candidate_pool_size", 0)?;
+                if size == 0 {
+                    None
+                } else {
+                    Some(size)
+                }
+            }
+        },
+        universe_profile: optional_string("universe_profile")?,
         cost_model: None,
         execution_rules: None,
         benchmark,
         market_regime,
+        portfolio_drawdown_reduce_start_pct: optional_f64_value(
+            "portfolio_drawdown_reduce_start_pct",
+        )?,
+        portfolio_drawdown_reduce_full_pct: optional_f64_value(
+            "portfolio_drawdown_reduce_full_pct",
+        )?,
+        portfolio_drawdown_min_exposure: optional_f64_value("portfolio_drawdown_min_exposure")?,
+        portfolio_drawdown_peak_lookback_days: match params
+            .get("portfolio_drawdown_peak_lookback_days")
+            .or_else(|| template.get("portfolio_drawdown_peak_lookback_days"))
+        {
+            None | Some(Value::Null) => None,
+            Some(_) => {
+                let days = usize_value("portfolio_drawdown_peak_lookback_days", 0)?;
+                if days == 0 {
+                    None
+                } else {
+                    Some(days)
+                }
+            }
+        },
+        portfolio_drawdown_recovery_start_pct: optional_f64_value(
+            "portfolio_drawdown_recovery_start_pct",
+        )?,
+        portfolio_drawdown_recovery_full_pct: optional_f64_value(
+            "portfolio_drawdown_recovery_full_pct",
+        )?,
+        portfolio_drawdown_recovery_boost: optional_f64_value("portfolio_drawdown_recovery_boost")?,
+        start_date: string_value("start_date", None)?,
+        end_date: string_value("end_date", None)?,
+        initial_capital: f64_value("initial_capital", 1_000_000.0)?,
+        mode: optional_string("mode")?.or_else(|| Some("standard".into())),
+    })
+}
+
+fn build_prediction_trial_request(
+    task: &OptimizationTaskExecutionContext,
+    parameters: &Value,
+) -> Result<RunPredictionBacktestReq, String> {
+    let template = task
+        .backtest_template
+        .as_object()
+        .ok_or_else(|| "backtest_template must be a JSON object".to_string())?;
+    let params = parameters
+        .as_object()
+        .ok_or_else(|| "trial parameters must be a JSON object".to_string())?;
+
+    let string_value = |name: &str, default: Option<&str>| -> Result<String, String> {
+        if let Some(value) = params.get(name).or_else(|| template.get(name)) {
+            match value {
+                Value::String(value) => Ok(value.clone()),
+                Value::Number(value) => Ok(value.to_string()),
+                _ => Err(format!("{} must be a string or number", name)),
+            }
+        } else if let Some(default) = default {
+            Ok(default.to_string())
+        } else {
+            Err(format!("backtest_template.{} is required", name))
+        }
+    };
+    let optional_string = |name: &str| -> Result<Option<String>, String> {
+        match params.get(name).or_else(|| template.get(name)) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            Some(Value::Number(value)) => Ok(Some(value.to_string())),
+            _ => Err(format!("{} must be a string or number", name)),
+        }
+    };
+    let usize_value = |name: &str, default: usize| -> Result<usize, String> {
+        match params.get(name).or_else(|| template.get(name)) {
+            None | Some(Value::Null) => Ok(default),
+            Some(Value::Number(value)) => value
+                .as_u64()
+                .map(|value| value as usize)
+                .ok_or_else(|| format!("{} must be a positive integer", name)),
+            Some(Value::String(value)) => value
+                .parse::<usize>()
+                .map_err(|_| format!("{} must be a positive integer", name)),
+            _ => Err(format!("{} must be a positive integer", name)),
+        }
+    };
+    let f64_value = |name: &str, default: f64| -> Result<f64, String> {
+        match params.get(name).or_else(|| template.get(name)) {
+            None | Some(Value::Null) => Ok(default),
+            Some(Value::Number(value)) => value
+                .as_f64()
+                .ok_or_else(|| format!("{} must be a finite number", name)),
+            Some(Value::String(value)) => value
+                .parse::<f64>()
+                .map_err(|_| format!("{} must be a finite number", name)),
+            _ => Err(format!("{} must be a finite number", name)),
+        }
+    };
+    let optional_f64_value = |name: &str| -> Result<Option<f64>, String> {
+        match params.get(name).or_else(|| template.get(name)) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(value)) => value
+                .as_f64()
+                .map(Some)
+                .ok_or_else(|| format!("{} must be a finite number", name)),
+            Some(Value::String(value)) => value
+                .parse::<f64>()
+                .map(Some)
+                .map_err(|_| format!("{} must be a finite number", name)),
+            _ => Err(format!("{} must be a finite number", name)),
+        }
+    };
+
+    Ok(RunPredictionBacktestReq {
+        prediction_set_id: string_value("prediction_set_id", None)?,
+        strategy_version_id: task.strategy_version_id.clone(),
+        data_version_id: task.data_version_id.clone(),
+        research_dataset_id: optional_string("research_dataset_id")?,
+        feature_set_version_id: optional_string("feature_set_version_id")?,
+        portfolio_policy_id: optional_string("portfolio_policy_id")?,
+        top_n: usize_value("top_n", 20)?,
+        rebalance: string_value("rebalance", Some("monthly"))?,
+        entry_delay: usize_value("entry_delay", 0)?,
+        min_amount: f64_value("min_amount", 0.0)?,
+        max_position_pct: f64_value("max_position_pct", 0.10)?,
+        skip_top_pct: f64_value("skip_top_pct", 0.0)?,
+        max_pairwise_correlation: optional_f64_value("max_pairwise_correlation")?,
+        correlation_lookback_days: usize_value("correlation_lookback_days", 60)?,
+        kelly_fraction: f64_value("kelly_fraction", 0.0)?,
+        kelly_lookback_days: usize_value("kelly_lookback_days", 60)?,
+        max_gross_exposure: f64_value("max_gross_exposure", 1.0)?,
+        score_direction: string_value("score_direction", Some("descending"))?,
+        portfolio_method: string_value("portfolio_method", Some("heuristic"))?,
+        risk_budget_lookback_days: usize_value("risk_budget_lookback_days", 60)?,
+        capacity_penalty_strength: f64_value("capacity_penalty_strength", 0.0)?,
+        industry_max_weight_pct: optional_f64_value("industry_max_weight_pct")?,
+        cost_model: None,
+        execution_rules: None,
+        benchmark: optional_string("benchmark")?.or_else(|| Some("000300.SH".into())),
         start_date: string_value("start_date", None)?,
         end_date: string_value("end_date", None)?,
         initial_capital: f64_value("initial_capital", 1_000_000.0)?,
@@ -1358,12 +1625,15 @@ fn market_regime_request_from_value(
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(policy)) => match policy.as_str() {
             "off" | "none" | "disabled" => Ok(None),
-            "professional_default" => Ok(Some(MarketRegimeBacktestReq {
-                enabled: Some(true),
-                benchmark: Some(default_benchmark.to_string()),
-                lookback_days: None,
-                min_observations: None,
-            })),
+            "professional_default" | "drawdown_control_v1" | "drawdown_control_v2" => {
+                Ok(Some(MarketRegimeBacktestReq {
+                    enabled: Some(true),
+                    policy: Some(policy.to_string()),
+                    benchmark: Some(default_benchmark.to_string()),
+                    lookback_days: None,
+                    min_observations: None,
+                }))
+            }
             other => Err(format!("unsupported market_regime policy: {}", other)),
         },
         Some(Value::Object(map)) => {
@@ -1377,10 +1647,17 @@ fn market_regime_request_from_value(
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .or_else(|| Some(default_benchmark.to_string()));
+            let policy = map
+                .get("policy")
+                .or_else(|| map.get("name"))
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
             let lookback_days = optional_usize_from_object(map, "lookback_days")?;
             let min_observations = optional_usize_from_object(map, "min_observations")?;
             Ok(Some(MarketRegimeBacktestReq {
                 enabled,
+                policy,
                 benchmark,
                 lookback_days,
                 min_observations,
@@ -2291,7 +2568,7 @@ impl DeterministicRng {
     }
 
     fn gen_usize(&mut self, upper_exclusive: usize) -> usize {
-        (self.next_u64() as usize) % upper_exclusive
+        ((self.next_u64() >> 32) as usize) % upper_exclusive
     }
 }
 
@@ -2328,6 +2605,37 @@ mod tests {
     }
 
     #[test]
+    fn random_search_choice_sampling_does_not_collapse_power_of_two_choices() {
+        let search_space = json!({
+            "prediction_blend_weight": {"type": "choice", "values": [0.0, 0.02, 0.05, 0.1]},
+            "prediction_min_percentile": {"type": "choice", "values": [null, 0.1, 0.2, 0.3]}
+        });
+
+        let trials = generate_trial_parameters(&search_space, 20260520, 16).expect("trial params");
+        let unique_pairs = trials
+            .iter()
+            .map(|params| {
+                format!(
+                    "{}|{}",
+                    params
+                        .get("prediction_blend_weight")
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "missing".into()),
+                    params
+                        .get("prediction_min_percentile")
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "missing".into())
+                )
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            unique_pairs.len() >= 8,
+            "expected broad choice coverage, got {unique_pairs:?}"
+        );
+    }
+
+    #[test]
     fn trial_backtest_request_applies_parameter_overrides() {
         let task = OptimizationTaskExecutionContext {
             strategy_version_id: "factor-combo-v1".into(),
@@ -2358,7 +2666,19 @@ mod tests {
             "portfolio_method": "risk_budget",
             "risk_budget_lookback_days": 80,
             "capacity_penalty_strength": 0.75,
-            "market_regime": "professional_default"
+            "industry_max_weight_pct": 0.35,
+            "score_candidate_pool_size": 300,
+            "universe_profile": "listed_non_st",
+            "prediction_set_id": "pred-quality-growth-v1",
+            "prediction_blend_weight": 0.35,
+            "market_regime": "drawdown_control_v2",
+            "portfolio_drawdown_reduce_start_pct": 0.10,
+            "portfolio_drawdown_reduce_full_pct": 0.25,
+            "portfolio_drawdown_min_exposure": 0.50,
+            "portfolio_drawdown_peak_lookback_days": 252,
+            "portfolio_drawdown_recovery_start_pct": 0.30,
+            "portfolio_drawdown_recovery_full_pct": 0.70,
+            "portfolio_drawdown_recovery_boost": 1.0
         });
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
@@ -2378,10 +2698,75 @@ mod tests {
         assert_eq!(req.portfolio_method, "risk_budget");
         assert_eq!(req.risk_budget_lookback_days, 80);
         assert_eq!(req.capacity_penalty_strength, 0.75);
+        assert_eq!(req.industry_max_weight_pct, Some(0.35));
+        assert_eq!(req.score_candidate_pool_size, Some(300));
+        assert_eq!(req.universe_profile.as_deref(), Some("listed_non_st"));
+        assert_eq!(
+            req.prediction_set_id.as_deref(),
+            Some("pred-quality-growth-v1")
+        );
+        assert_eq!(req.prediction_blend_weight, Some(0.35));
         assert_eq!(
             req.market_regime.as_ref().and_then(|policy| policy.enabled),
             Some(true)
         );
+        assert_eq!(
+            req.market_regime
+                .as_ref()
+                .and_then(|policy| policy.policy.as_deref()),
+            Some("drawdown_control_v2")
+        );
+        assert_eq!(req.portfolio_drawdown_reduce_start_pct, Some(0.10));
+        assert_eq!(req.portfolio_drawdown_reduce_full_pct, Some(0.25));
+        assert_eq!(req.portfolio_drawdown_min_exposure, Some(0.50));
+        assert_eq!(req.portfolio_drawdown_peak_lookback_days, Some(252));
+        assert_eq!(req.portfolio_drawdown_recovery_start_pct, Some(0.30));
+        assert_eq!(req.portfolio_drawdown_recovery_full_pct, Some(0.70));
+        assert_eq!(req.portfolio_drawdown_recovery_boost, Some(1.0));
+    }
+
+    #[test]
+    fn optimization_trial_request_routes_model_prediction_source() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "prediction-strategy-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "signal_source": "model_prediction",
+                "prediction_set_id": "pred-linear-v1",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "5",
+                "max_position_pct": 0.08,
+                "portfolio_method": "risk_budget"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "top_n": 10,
+            "kelly_fraction": 0.25,
+            "risk_budget_lookback_days": 120
+        });
+
+        let req = build_optimization_trial_request(&task, &params).expect("prediction request");
+
+        match req {
+            OptimizationTrialBacktestRequest::Prediction(req) => {
+                assert_eq!(req.prediction_set_id, "pred-linear-v1");
+                assert_eq!(req.strategy_version_id, "prediction-strategy-v1");
+                assert_eq!(req.top_n, 10);
+                assert_eq!(req.rebalance, "5");
+                assert_eq!(req.max_position_pct, 0.08);
+                assert_eq!(req.portfolio_method, "risk_budget");
+                assert_eq!(req.kelly_fraction, 0.25);
+                assert_eq!(req.risk_budget_lookback_days, 120);
+            }
+            OptimizationTrialBacktestRequest::Factor(_) => {
+                panic!("expected model prediction request")
+            }
+        }
     }
 
     #[test]
@@ -2397,17 +2782,48 @@ mod tests {
                 "end_date": "20260511",
                 "initial_capital": 1000000.0
             })),
+            prediction_set_ids: None,
             max_trials: Some(7),
         };
         let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
-        assert_eq!(bundle.plan.requested_trials, 497664);
+        assert_eq!(bundle.plan.requested_trials, 429_981_696);
         assert_eq!(bundle.plan.planned_trials, 7);
         assert!(bundle.plan.truncated);
         assert_eq!(bundle.search_space["phase"], "7-D");
         assert_eq!(bundle.search_space["resource_plan"]["max_trials"], 7);
+    }
+
+    #[test]
+    fn phase7_layered_request_can_include_prediction_candidates() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec![" pred-linear-v1 ".to_string(), "".to_string()]),
+            max_trials: Some(40),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"][0],
+            "pred-linear-v1"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["signal_source"] == "model_prediction"
+                && trial.parameters["prediction_set_id"] == "pred-linear-v1"
+        }));
     }
 
     #[test]

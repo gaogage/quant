@@ -9,7 +9,7 @@ use tracing::{debug, info};
 
 use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockDailyBar,
-    MarketTradeCalendar,
+    MarketStockDailyBasic, MarketStockMoneyflow, MarketTradeCalendar,
 };
 
 // ─── market_stock ────────────────────────────────────────────────
@@ -125,6 +125,243 @@ pub async fn get_daily_date_range(
     .fetch_optional(pool)
     .await?;
     Ok(row.unwrap_or((None, None)))
+}
+
+// ─── market_stock_daily_basic ────────────────────────────────────
+
+pub async fn upsert_daily_basic(
+    pool: &PgPool,
+    row: &MarketStockDailyBasic,
+    data_version_id: &str,
+    source: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO market_stock_daily_basic
+             (symbol, trade_date, pe_ttm, pb, ps_ttm, dv_ttm, total_mv, circ_mv,
+              source, data_version_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (symbol, trade_date) DO UPDATE SET
+             pe_ttm = EXCLUDED.pe_ttm,
+             pb = EXCLUDED.pb,
+             ps_ttm = EXCLUDED.ps_ttm,
+             dv_ttm = EXCLUDED.dv_ttm,
+             total_mv = EXCLUDED.total_mv,
+             circ_mv = EXCLUDED.circ_mv,
+             source = EXCLUDED.source,
+             data_version_id = EXCLUDED.data_version_id"#,
+    )
+    .bind(&row.symbol)
+    .bind(row.trade_date)
+    .bind(row.pe_ttm)
+    .bind(row.pb)
+    .bind(row.ps_ttm)
+    .bind(row.dv_ttm)
+    .bind(row.total_mv)
+    .bind(row.circ_mv)
+    .bind(source)
+    .bind(data_version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_daily_basic_batch(
+    pool: &PgPool,
+    rows: &[MarketStockDailyBasic],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut saved = 0usize;
+    for chunk in rows.chunks(2_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_daily_basic \
+             (symbol, trade_date, pe_ttm, pb, ps_ttm, dv_ttm, total_mv, circ_mv, \
+              source, data_version_id) ",
+        );
+
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.trade_date)
+                .push_bind(item.pe_ttm)
+                .push_bind(item.pb)
+                .push_bind(item.ps_ttm)
+                .push_bind(item.dv_ttm)
+                .push_bind(item.total_mv)
+                .push_bind(item.circ_mv)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+
+        builder.push(
+            " ON CONFLICT (symbol, trade_date) DO UPDATE SET \
+              pe_ttm = EXCLUDED.pe_ttm, \
+              pb = EXCLUDED.pb, \
+              ps_ttm = EXCLUDED.ps_ttm, \
+              dv_ttm = EXCLUDED.dv_ttm, \
+              total_mv = EXCLUDED.total_mv, \
+              circ_mv = EXCLUDED.circ_mv, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id",
+        );
+
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+
+    info!("批量 upsert {} 条每日估值基础数据", saved);
+    Ok(saved)
+}
+
+// ─── market_stock_moneyflow ─────────────────────────────────────
+
+pub async fn upsert_moneyflow(
+    pool: &PgPool,
+    row: &MarketStockMoneyflow,
+    data_version_id: &str,
+    source: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO market_stock_moneyflow
+             (symbol, trade_date,
+              buy_sm_vol, buy_sm_amount, sell_sm_vol, sell_sm_amount,
+              buy_md_vol, buy_md_amount, sell_md_vol, sell_md_amount,
+              buy_lg_vol, buy_lg_amount, sell_lg_vol, sell_lg_amount,
+              buy_elg_vol, buy_elg_amount, sell_elg_vol, sell_elg_amount,
+              net_mf_vol, net_mf_amount, source, data_version_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                   $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+           ON CONFLICT (symbol, trade_date) DO UPDATE SET
+             buy_sm_vol = EXCLUDED.buy_sm_vol,
+             buy_sm_amount = EXCLUDED.buy_sm_amount,
+             sell_sm_vol = EXCLUDED.sell_sm_vol,
+             sell_sm_amount = EXCLUDED.sell_sm_amount,
+             buy_md_vol = EXCLUDED.buy_md_vol,
+             buy_md_amount = EXCLUDED.buy_md_amount,
+             sell_md_vol = EXCLUDED.sell_md_vol,
+             sell_md_amount = EXCLUDED.sell_md_amount,
+             buy_lg_vol = EXCLUDED.buy_lg_vol,
+             buy_lg_amount = EXCLUDED.buy_lg_amount,
+             sell_lg_vol = EXCLUDED.sell_lg_vol,
+             sell_lg_amount = EXCLUDED.sell_lg_amount,
+             buy_elg_vol = EXCLUDED.buy_elg_vol,
+             buy_elg_amount = EXCLUDED.buy_elg_amount,
+             sell_elg_vol = EXCLUDED.sell_elg_vol,
+             sell_elg_amount = EXCLUDED.sell_elg_amount,
+             net_mf_vol = EXCLUDED.net_mf_vol,
+             net_mf_amount = EXCLUDED.net_mf_amount,
+             source = EXCLUDED.source,
+             data_version_id = EXCLUDED.data_version_id"#,
+    )
+    .bind(&row.symbol)
+    .bind(row.trade_date)
+    .bind(row.buy_sm_vol)
+    .bind(row.buy_sm_amount)
+    .bind(row.sell_sm_vol)
+    .bind(row.sell_sm_amount)
+    .bind(row.buy_md_vol)
+    .bind(row.buy_md_amount)
+    .bind(row.sell_md_vol)
+    .bind(row.sell_md_amount)
+    .bind(row.buy_lg_vol)
+    .bind(row.buy_lg_amount)
+    .bind(row.sell_lg_vol)
+    .bind(row.sell_lg_amount)
+    .bind(row.buy_elg_vol)
+    .bind(row.buy_elg_amount)
+    .bind(row.sell_elg_vol)
+    .bind(row.sell_elg_amount)
+    .bind(row.net_mf_vol)
+    .bind(row.net_mf_amount)
+    .bind(source)
+    .bind(data_version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_moneyflow_batch(
+    pool: &PgPool,
+    rows: &[MarketStockMoneyflow],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut saved = 0usize;
+    for chunk in rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_moneyflow \
+             (symbol, trade_date, \
+              buy_sm_vol, buy_sm_amount, sell_sm_vol, sell_sm_amount, \
+              buy_md_vol, buy_md_amount, sell_md_vol, sell_md_amount, \
+              buy_lg_vol, buy_lg_amount, sell_lg_vol, sell_lg_amount, \
+              buy_elg_vol, buy_elg_amount, sell_elg_vol, sell_elg_amount, \
+              net_mf_vol, net_mf_amount, source, data_version_id) ",
+        );
+
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.trade_date)
+                .push_bind(item.buy_sm_vol)
+                .push_bind(item.buy_sm_amount)
+                .push_bind(item.sell_sm_vol)
+                .push_bind(item.sell_sm_amount)
+                .push_bind(item.buy_md_vol)
+                .push_bind(item.buy_md_amount)
+                .push_bind(item.sell_md_vol)
+                .push_bind(item.sell_md_amount)
+                .push_bind(item.buy_lg_vol)
+                .push_bind(item.buy_lg_amount)
+                .push_bind(item.sell_lg_vol)
+                .push_bind(item.sell_lg_amount)
+                .push_bind(item.buy_elg_vol)
+                .push_bind(item.buy_elg_amount)
+                .push_bind(item.sell_elg_vol)
+                .push_bind(item.sell_elg_amount)
+                .push_bind(item.net_mf_vol)
+                .push_bind(item.net_mf_amount)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+
+        builder.push(
+            " ON CONFLICT (symbol, trade_date) DO UPDATE SET \
+              buy_sm_vol = EXCLUDED.buy_sm_vol, \
+              buy_sm_amount = EXCLUDED.buy_sm_amount, \
+              sell_sm_vol = EXCLUDED.sell_sm_vol, \
+              sell_sm_amount = EXCLUDED.sell_sm_amount, \
+              buy_md_vol = EXCLUDED.buy_md_vol, \
+              buy_md_amount = EXCLUDED.buy_md_amount, \
+              sell_md_vol = EXCLUDED.sell_md_vol, \
+              sell_md_amount = EXCLUDED.sell_md_amount, \
+              buy_lg_vol = EXCLUDED.buy_lg_vol, \
+              buy_lg_amount = EXCLUDED.buy_lg_amount, \
+              sell_lg_vol = EXCLUDED.sell_lg_vol, \
+              sell_lg_amount = EXCLUDED.sell_lg_amount, \
+              buy_elg_vol = EXCLUDED.buy_elg_vol, \
+              buy_elg_amount = EXCLUDED.buy_elg_amount, \
+              sell_elg_vol = EXCLUDED.sell_elg_vol, \
+              sell_elg_amount = EXCLUDED.sell_elg_amount, \
+              net_mf_vol = EXCLUDED.net_mf_vol, \
+              net_mf_amount = EXCLUDED.net_mf_amount, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id",
+        );
+
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+
+    info!("批量 upsert {} 条每日资金流数据", saved);
+    Ok(saved)
 }
 
 // ─── market_index_daily_bar ──────────────────────────────────────

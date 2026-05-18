@@ -58,6 +58,12 @@ if schema_sql.exists():
     for required in [
         "CREATE TABLE IF NOT EXISTS public.market_financial_statement",
         "CREATE TABLE IF NOT EXISTS public.market_financial_indicator",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_daily_basic",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_moneyflow",
+        "idx_market_stock_daily_basic_symbol_date",
+        "idx_market_stock_moneyflow_symbol_date",
+        "fk_market_stock_daily_basic_data_version",
+        "fk_market_stock_moneyflow_data_version",
         "ann_date DATE NOT NULL",
         "idx_fin_ind_ann_date",
         "CREATE TABLE IF NOT EXISTS public.factor_evaluation",
@@ -94,6 +100,30 @@ if factor_routes.exists():
         "sync_financial_factor_values(",
         "parse_financial_factor(",
         "FinancialIndicatorRow",
+        "Phase7RelativeStrengthBackfillRequest",
+        "Phase7QualityRelativeStrengthBackfillRequest",
+        "Phase7GrowthRecoveryBackfillRequest",
+        "Phase7ValuationBackfillRequest",
+        "Phase7MoneyflowBackfillRequest",
+        "Phase7AlphaBlendBackfillRequest",
+        "Phase7AlphaBlendProfilesBackfillRequest",
+        "phase7_relative_strength_backfill_specs",
+        "phase7_quality_relative_strength_combo_specs",
+        "phase7_growth_recovery_backfill_specs",
+        "phase7_valuation_backfill_specs",
+        "phase7_moneyflow_backfill_specs",
+        "phase7_alpha_blend_backfill_sql",
+        "phase7_relative_momentum_backfill_sql",
+        "phase7_financial_annual_change_backfill_sql",
+        "phase7_daily_basic_latest_backfill_sql",
+        "phase7_moneyflow_backfill_sql",
+        "backfill_phase7_relative_strength_background",
+        "backfill_phase7_quality_relative_strength_background",
+        "backfill_phase7_growth_recovery_background",
+        "backfill_phase7_valuation_background",
+        "backfill_phase7_moneyflow_background",
+        "backfill_phase7_alpha_blend_background",
+        "backfill_phase7_alpha_blend_profiles_background",
     ]:
         if required not in factor_routes_text:
             failed.append(("factor_definition API handlers must exist", str(factor_routes.relative_to(ROOT)), [required]))
@@ -116,6 +146,13 @@ if main_routes.exists():
         '"/api/v1/quant/factor-definitions/{factor_code}/{version}"',
         '"/api/v1/quant/factors"',
         '"/api/v1/quant/factors/sync-financial"',
+        '"/api/v1/quant/factors/phase7-relative-strength-backfill/background"',
+        '"/api/v1/quant/factors/phase7-quality-relative-strength-backfill/background"',
+        '"/api/v1/quant/factors/phase7-growth-recovery-backfill/background"',
+        '"/api/v1/quant/factors/phase7-valuation-backfill/background"',
+        '"/api/v1/quant/factors/phase7-moneyflow-backfill/background"',
+        '"/api/v1/quant/factors/phase7-alpha-blend-backfill/background"',
+        '"/api/v1/quant/factors/phase7-alpha-blend-profiles-backfill/background"',
         '"/api/v1/quant/optimizations"',
         '"/api/v1/quant/optimizations/{optimization_task_id}"',
         '"/api/v1/quant/optimizations/{optimization_task_id}/trials"',
@@ -124,6 +161,7 @@ if main_routes.exists():
         '"/api/v1/quant/optimizations/{optimization_task_id}/robustness-gates"',
         '"/api/v1/quant/ml/prediction-sets/linear-smoke"',
         '"/api/v1/quant/ml/training-tasks/linear"',
+        '"/api/v1/quant/ml/prediction-sets/walk-forward-linear"',
         '"/api/v1/quant/ml/prediction-sets/evaluate"',
     ]:
         if required not in main_routes_text:
@@ -142,6 +180,11 @@ if optimization_routes.exists():
         "evaluate_robustness_gates(",
         "execute_pending_trials(",
         "build_factor_trial_request(",
+        "build_prediction_trial_request(",
+        "build_optimization_trial_request(",
+        "execute_prediction_backtest(",
+        "signal_source",
+        "model_prediction",
         "max_pairwise_correlation",
         "correlation_lookback_days",
         "kelly_fraction",
@@ -208,6 +251,84 @@ if schema_sql.exists():
 else:
     failed.append(("optimization routes module must exist", "quant-api/src/routes/optimization.rs", ["missing file"]))
 
+sync_rs = ROOT / "quant-data/src/sync.rs"
+if sync_rs.exists():
+    sync_text = sync_rs.read_text(encoding="utf-8")
+    for required in [
+        "MarketStockDailyBasic",
+        "daily_basic_row_from_map",
+        "sync_daily_basic",
+        "market_stock_daily_basic",
+        ".daily_basic(",
+    ]:
+        if required not in sync_text:
+            failed.append(("daily_basic sync path must exist", str(sync_rs.relative_to(ROOT)), [required]))
+    for required in [
+        "MarketStockMoneyflow",
+        "moneyflow_row_from_map",
+        "sync_moneyflow",
+        "market_stock_moneyflow",
+        ".moneyflow(",
+    ]:
+        if required not in sync_text:
+            failed.append(("moneyflow sync path must exist", str(sync_rs.relative_to(ROOT)), [required]))
+
+tushare_client = ROOT / "quant-data/src/tushare/client.rs"
+if tushare_client.exists():
+    client_text = tushare_client.read_text(encoding="utf-8")
+    for required in [
+        "pub async fn daily_basic(",
+        "\"daily_basic\"",
+        "\"pe_ttm\"",
+        "\"ps_ttm\"",
+        "\"dv_ttm\"",
+    ]:
+        if required not in client_text:
+            failed.append(("Tushare daily_basic client must expose valuation fields", str(tushare_client.relative_to(ROOT)), [required]))
+    for required in [
+        "pub async fn moneyflow(",
+        "\"moneyflow\"",
+        "\"buy_elg_amount\"",
+        "\"sell_elg_amount\"",
+        "\"net_mf_amount\"",
+    ]:
+        if required not in client_text:
+            failed.append(("Tushare moneyflow client must expose fund-flow fields", str(tushare_client.relative_to(ROOT)), [required]))
+
+repository_rs = ROOT / "quant-data/src/repository.rs"
+if repository_rs.exists():
+    repository_text = repository_rs.read_text(encoding="utf-8")
+    for required in [
+        "upsert_daily_basic",
+        "upsert_daily_basic_batch",
+        "INSERT INTO market_stock_daily_basic",
+    ]:
+        if required not in repository_text:
+            failed.append(("daily_basic repository upsert must exist", str(repository_rs.relative_to(ROOT)), [required]))
+    for required in [
+        "upsert_moneyflow",
+        "upsert_moneyflow_batch",
+        "INSERT INTO market_stock_moneyflow",
+    ]:
+        if required not in repository_text:
+            failed.append(("moneyflow repository upsert must exist", str(repository_rs.relative_to(ROOT)), [required]))
+
+sync_routes = ROOT / "quant-api/src/routes/sync.rs"
+if sync_routes.exists():
+    sync_routes_text = sync_routes.read_text(encoding="utf-8")
+    for required in [
+        '"daily_basic" | "stock_daily_basic"',
+        "sync_daily_basic",
+    ]:
+        if required not in sync_routes_text:
+            failed.append(("daily_basic dataset must be routed", str(sync_routes.relative_to(ROOT)), [required]))
+    for required in [
+        '"moneyflow" | "stock_moneyflow"',
+        "sync_moneyflow",
+    ]:
+        if required not in sync_routes_text:
+            failed.append(("moneyflow dataset must be routed", str(sync_routes.relative_to(ROOT)), [required]))
+
 combine_rs = ROOT / "quant-factor/src/combine.rs"
 if combine_rs.exists():
     combine_text = combine_rs.read_text(encoding="utf-8")
@@ -224,9 +345,9 @@ if signal_generator.exists():
     signal_text = signal_generator.read_text(encoding="utf-8")
     for required in [
         "score_day_for_signal(",
-        "available_at IS NULL OR available_at <= trade_date",
         "generate_prediction_signals(",
         "model_prediction",
+        "prediction_load_start_date(",
         "available_at <= trade_date",
         "prediction_score_day_for_signal(",
         "build_portfolio_weights(",
@@ -238,9 +359,19 @@ if signal_generator.exists():
         "load_symbol_return_history(",
         "ScoreDirection",
         "sort_factor_scores(",
+        "drawdown_control_v1(",
     ]:
         if required not in signal_text:
             failed.append(("factor signal generation must preserve PIT score timing", str(signal_generator.relative_to(ROOT)), [required]))
+    if (
+        "available_at IS NULL OR available_at <= trade_date" not in signal_text
+        and "mfv.available_at IS NULL OR mfv.available_at <= mfv.trade_date" not in signal_text
+    ):
+        failed.append((
+            "factor signal generation must preserve PIT score timing",
+            str(signal_generator.relative_to(ROOT)),
+            ["available_at IS NULL OR available_at <= trade_date"],
+        ))
 
 backtest_routes = ROOT / "quant-api/src/routes/backtest.rs"
 if backtest_routes.exists():
@@ -301,6 +432,10 @@ if ml_routes.exists():
     for required in [
         "create_linear_prediction_set(",
         "train_linear_model(",
+        "create_walk_forward_linear_prediction_set(",
+        "WalkForwardLinearPredictionSetRequest",
+        "walk_forward_covariance_linear_v1",
+        "ml_walk_forward_linear",
         "INSERT INTO model_training_task",
         "INSERT INTO training_dataset",
         "INSERT INTO model_registry",

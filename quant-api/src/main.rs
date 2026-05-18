@@ -193,6 +193,34 @@ async fn main() {
             post(routes::factors::backfill_phase7_financial_quality_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-relative-strength-backfill/background",
+            post(routes::factors::backfill_phase7_relative_strength_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-quality-relative-strength-backfill/background",
+            post(routes::factors::backfill_phase7_quality_relative_strength_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-growth-recovery-backfill/background",
+            post(routes::factors::backfill_phase7_growth_recovery_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-valuation-backfill/background",
+            post(routes::factors::backfill_phase7_valuation_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-moneyflow-backfill/background",
+            post(routes::factors::backfill_phase7_moneyflow_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-alpha-blend-backfill/background",
+            post(routes::factors::backfill_phase7_alpha_blend_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-alpha-blend-profiles-backfill/background",
+            post(routes::factors::backfill_phase7_alpha_blend_profiles_background),
+        )
+        .route(
             "/api/v1/quant/factors/evaluate-all",
             post(routes::factors::evaluate_all_factors),
         )
@@ -216,6 +244,10 @@ async fn main() {
         .route(
             "/api/v1/quant/ml/training-tasks/linear",
             post(routes::ml::train_linear_model),
+        )
+        .route(
+            "/api/v1/quant/ml/prediction-sets/walk-forward-linear",
+            post(routes::ml::create_walk_forward_linear_prediction_set),
         )
         .route(
             "/api/v1/quant/ml/prediction-sets/evaluate",
