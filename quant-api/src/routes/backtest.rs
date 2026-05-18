@@ -587,6 +587,10 @@ pub struct RunFactorBacktestReq {
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
     pub market_regime: Option<MarketRegimeBacktestReq>,
+    pub stop_loss_pct: Option<f64>,
+    pub take_profit_pct: Option<f64>,
+    pub trailing_stop_pct: Option<f64>,
+    pub time_stop_days: Option<u32>,
     pub portfolio_drawdown_reduce_start_pct: Option<f64>,
     pub portfolio_drawdown_reduce_full_pct: Option<f64>,
     pub portfolio_drawdown_min_exposure: Option<f64>,
@@ -900,6 +904,10 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
     }
 
     Ok(RiskControlConfig {
+        stop_loss_pct: optional_decimal_pct(req.stop_loss_pct, "stop_loss_pct")?,
+        take_profit_pct: optional_decimal_pct(req.take_profit_pct, "take_profit_pct")?,
+        trailing_stop_pct: optional_decimal_pct(req.trailing_stop_pct, "trailing_stop_pct")?,
+        time_stop_days: req.time_stop_days.filter(|days| *days > 0),
         portfolio_drawdown_reduce_start_pct: start,
         portfolio_drawdown_reduce_full_pct: full,
         portfolio_drawdown_min_exposure: min_exposure,
@@ -946,6 +954,8 @@ fn build_market_regime_policy(
         "drawdown_control_v2" => MarketRegimePolicy::drawdown_control_v2(benchmark),
         "quality_risk_off_v1" => MarketRegimePolicy::quality_risk_off_v1(benchmark),
         "quality_crash_guard_v1" => MarketRegimePolicy::quality_crash_guard_v1(benchmark),
+        "quality_crash_guard_v2" => MarketRegimePolicy::quality_crash_guard_v2(benchmark),
+        "quality_crash_guard_v3" => MarketRegimePolicy::quality_crash_guard_v3(benchmark),
         other => return Err(format!("unsupported market_regime policy: {}", other)),
     };
     if let Some(lookback_days) = req.lookback_days {
@@ -986,6 +996,7 @@ pub async fn run_factor_backtest(
                     "total_return_pct": output.metrics.total_return_pct,
                     "annual_return_pct": output.metrics.annual_return_pct,
                     "sharpe_ratio": output.metrics.sharpe_ratio,
+                    "sortino_ratio": output.metrics.sortino_ratio,
                     "max_drawdown_pct": output.metrics.max_drawdown_pct,
                     "calmar_ratio": output.metrics.calmar_ratio,
                     "benchmark_return_pct": output.metrics.benchmark_return_pct,
@@ -1030,6 +1041,7 @@ pub async fn run_prediction_backtest(
                     "total_return_pct": output.metrics.total_return_pct,
                     "annual_return_pct": output.metrics.annual_return_pct,
                     "sharpe_ratio": output.metrics.sharpe_ratio,
+                    "sortino_ratio": output.metrics.sortino_ratio,
                     "max_drawdown_pct": output.metrics.max_drawdown_pct,
                     "calmar_ratio": output.metrics.calmar_ratio,
                     "benchmark_return_pct": output.metrics.benchmark_return_pct,
@@ -1643,6 +1655,72 @@ mod tests {
     }
 
     #[test]
+    fn market_regime_request_builds_quality_crash_guard_v2_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_crash_guard_v2".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.bear_drawdown_threshold, 0.22);
+        assert_eq!(policy.high_volatility_threshold, 0.45);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.75)
+        );
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.score_direction),
+            None
+        );
+    }
+
+    #[test]
+    fn market_regime_request_builds_quality_crash_guard_v3_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_crash_guard_v3".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.bear_drawdown_threshold, 0.25);
+        assert_eq!(policy.high_volatility_threshold, 0.50);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.80)
+        );
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::HighVolatility)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.68)
+        );
+    }
+
+    #[test]
     fn factor_request_builds_portfolio_drawdown_risk_control() {
         let req = RunFactorBacktestReq {
             combo_name: "phase7_financial_quality_v1".to_string(),
@@ -1677,6 +1755,10 @@ mod tests {
             execution_rules: None,
             benchmark: Some("000300.SH".to_string()),
             market_regime: None,
+            stop_loss_pct: Some(0.12),
+            take_profit_pct: None,
+            trailing_stop_pct: Some(0.18),
+            time_stop_days: Some(120),
             start_date: "20250101".to_string(),
             end_date: "20250131".to_string(),
             initial_capital: 1_000_000.0,
@@ -1737,5 +1819,9 @@ mod tests {
             risk_control.portfolio_volatility_max_exposure,
             Some(Decimal::ONE)
         );
+        assert_eq!(risk_control.stop_loss_pct, Some(Decimal::new(12, 2)));
+        assert_eq!(risk_control.trailing_stop_pct, Some(Decimal::new(18, 2)));
+        assert_eq!(risk_control.take_profit_pct, None);
+        assert_eq!(risk_control.time_stop_days, Some(120));
     }
 }

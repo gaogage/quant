@@ -292,6 +292,8 @@ impl BacktestEngine {
 
         let previous_value = self.equity_curve.last().map(|(_, value)| *value);
         self.portfolio.mark_to_market(&market.close);
+        self.update_position_risk_state(market);
+        self.execute_position_risk_controls(market);
 
         if let Some(sig) = signal {
             self.execute_rebalance(sig, market);
@@ -425,6 +427,153 @@ impl BacktestEngine {
             trade.event_reason = Some(reason.into());
             trade.target_weight = Some(target_weight);
             trade.executed_weight = Some(executed_weight);
+        }
+    }
+
+    fn annotate_last_trade_reason(&mut self, reason: &str) {
+        if let Some(trade) = self.portfolio.trades.last_mut() {
+            trade.signal_type = Some("risk_control".into());
+            trade.event_reason = Some(reason.into());
+        }
+    }
+
+    fn update_position_metadata_after_buy(
+        &mut self,
+        symbol: &str,
+        trade_date: NaiveDate,
+        price: Decimal,
+    ) {
+        self.position_buy_date
+            .entry(symbol.to_string())
+            .or_insert(trade_date);
+        self.position_peak_price
+            .entry(symbol.to_string())
+            .and_modify(|peak| *peak = (*peak).max(price))
+            .or_insert(price);
+    }
+
+    fn cleanup_closed_position_metadata(&mut self, symbol: &str) {
+        if !self.portfolio.holdings.contains_key(symbol) {
+            self.position_buy_date.remove(symbol);
+            self.position_peak_price.remove(symbol);
+        }
+    }
+
+    fn update_position_risk_state(&mut self, market: &MarketDay) {
+        let held_symbols = self
+            .portfolio
+            .holdings
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.position_buy_date
+            .retain(|symbol, _| held_symbols.contains(symbol));
+        self.position_peak_price
+            .retain(|symbol, _| held_symbols.contains(symbol));
+
+        for symbol in held_symbols {
+            if let Some(price) = market.close.get(&symbol).copied() {
+                self.position_peak_price
+                    .entry(symbol)
+                    .and_modify(|peak| *peak = (*peak).max(price))
+                    .or_insert(price);
+            }
+        }
+    }
+
+    fn position_risk_exit_reason(
+        &self,
+        symbol: &str,
+        price: Decimal,
+        trade_date: NaiveDate,
+    ) -> Option<&'static str> {
+        let holding = self.portfolio.holdings.get(symbol)?;
+        let risk_control = &self.config.risk_control;
+
+        if let Some(stop_loss) = risk_control.stop_loss_pct {
+            if stop_loss > Decimal::zero() && price <= holding.avg_cost * (Decimal::ONE - stop_loss)
+            {
+                return Some("risk_stop_loss");
+            }
+        }
+        if let Some(take_profit) = risk_control.take_profit_pct {
+            if take_profit > Decimal::zero()
+                && price >= holding.avg_cost * (Decimal::ONE + take_profit)
+            {
+                return Some("risk_take_profit");
+            }
+        }
+        if let Some(trailing_stop) = risk_control.trailing_stop_pct {
+            if trailing_stop > Decimal::zero() {
+                if let Some(peak_price) = self.position_peak_price.get(symbol).copied() {
+                    if peak_price > Decimal::zero()
+                        && price <= peak_price * (Decimal::ONE - trailing_stop)
+                    {
+                        return Some("risk_trailing_stop");
+                    }
+                }
+            }
+        }
+        if let Some(time_stop_days) = risk_control.time_stop_days {
+            if let Some(buy_date) = self.position_buy_date.get(symbol).copied() {
+                if (trade_date - buy_date).num_days() >= i64::from(time_stop_days) {
+                    return Some("risk_time_stop");
+                }
+            }
+        }
+
+        None
+    }
+
+    fn execute_position_risk_controls(&mut self, market: &MarketDay) {
+        let mut exits = self
+            .portfolio
+            .holdings
+            .iter()
+            .filter_map(|(symbol, holding)| {
+                if holding.sellable_quantity.is_zero() || market.suspended.contains(symbol) {
+                    return None;
+                }
+                let price = self.execution_price_for(market, symbol);
+                if price.is_zero() {
+                    return None;
+                }
+                if let Some(down_limit) = market.down_limit.get(symbol) {
+                    if price <= *down_limit {
+                        return None;
+                    }
+                }
+                self.position_risk_exit_reason(symbol, price, market.date)
+                    .map(|reason| (symbol.clone(), holding.sellable_quantity, price, reason))
+            })
+            .collect::<Vec<_>>();
+        exits.sort_by(|left, right| left.0.cmp(&right.0));
+
+        for (symbol, quantity, price, reason) in exits {
+            let desired_amount = quantity * price;
+            let capped_amount = self.cap_order_amount(market, &symbol, desired_amount);
+            if capped_amount.is_zero() {
+                continue;
+            }
+            let capped_quantity = (capped_amount / price).floor().min(quantity);
+            if capped_quantity.is_zero() {
+                continue;
+            }
+            let participation_rate = self.participation_rate_for(market, &symbol, capped_amount);
+            if self
+                .portfolio
+                .sell_with_cost(
+                    market.date,
+                    &symbol,
+                    capped_quantity,
+                    price,
+                    participation_rate,
+                )
+                .is_some()
+            {
+                self.annotate_last_trade_reason(reason);
+                self.cleanup_closed_position_metadata(&symbol);
+            }
         }
     }
 
@@ -773,6 +922,7 @@ impl BacktestEngine {
             {
                 let executed_weight = (capped_qty * price) / total_value;
                 self.annotate_last_trade(*target_w, executed_weight, "rebalance_sell");
+                self.cleanup_closed_position_metadata(sym);
             }
         }
         for (sym, amount, price, target_w) in &to_buy {
@@ -840,6 +990,7 @@ impl BacktestEngine {
                 {
                     let executed_weight = (qty * *price) / total_value;
                     self.annotate_last_trade(*target_w, executed_weight, "rebalance_buy");
+                    self.update_position_metadata_after_buy(sym, market.date, *price);
                 }
             }
         }
@@ -1377,6 +1528,62 @@ mod tests {
         assert_eq!(o.targets[0].target_weight, d("0.70"));
         assert_eq!(o.trades[0].event_reason.as_deref(), Some("rebalance_buy"));
         assert!(o.trades[0].executed_weight.unwrap() <= d("0.71"));
+    }
+
+    #[test]
+    fn position_stop_loss_sells_without_rebalance_signal() {
+        let mut c = BacktestConfig::default();
+        c.max_position_pct = d("1.01");
+        c.risk_control.stop_loss_pct = Some(d("0.05"));
+        c.fee_config.min_commission = Decimal::zero();
+        c.fee_config.commission_rate = Decimal::zero();
+        c.fee_config.tax_rate = Decimal::zero();
+        c.fee_config.slippage_bps = Decimal::zero();
+        let mut e = BacktestEngine::new(c);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+        assert!(e.position_buy_date.contains_key("A"));
+        assert_eq!(e.position_peak_price.get("A"), Some(&d("10")));
+
+        e.process_day(&market("2024-01-03", ("A", "9.4"), ("A", "10")), None);
+        let o = e.finalize();
+
+        assert!(o.trades.iter().any(|trade| {
+            trade.side == crate::portfolio::TradeSide::Sell
+                && trade.symbol == "A"
+                && trade.event_reason.as_deref() == Some("risk_stop_loss")
+        }));
+    }
+
+    #[test]
+    fn position_trailing_stop_uses_peak_price_since_buy() {
+        let mut c = BacktestConfig::default();
+        c.max_position_pct = d("1.01");
+        c.risk_control.trailing_stop_pct = Some(d("0.08"));
+        c.fee_config.min_commission = Decimal::zero();
+        c.fee_config.commission_rate = Decimal::zero();
+        c.fee_config.tax_rate = Decimal::zero();
+        c.fee_config.slippage_bps = Decimal::zero();
+        let mut e = BacktestEngine::new(c);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+        e.process_day(&market("2024-01-03", ("A", "12"), ("A", "10")), None);
+        assert_eq!(e.position_peak_price.get("A"), Some(&d("12")));
+
+        e.process_day(&market("2024-01-04", ("A", "10.9"), ("A", "12")), None);
+        let o = e.finalize();
+
+        assert!(o.trades.iter().any(|trade| {
+            trade.side == crate::portfolio::TradeSide::Sell
+                && trade.symbol == "A"
+                && trade.event_reason.as_deref() == Some("risk_trailing_stop")
+        }));
     }
 
     #[test]

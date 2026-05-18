@@ -1839,6 +1839,21 @@ fn build_factor_trial_request(
             _ => Err(format!("{} must be a finite number", name)),
         }
     };
+    let optional_u32_value = |name: &str| -> Result<Option<u32>, String> {
+        match params.get(name).or_else(|| template.get(name)) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(value)) => value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .map(Some)
+                .ok_or_else(|| format!("{} must be a positive integer", name)),
+            Some(Value::String(value)) => value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| format!("{} must be a positive integer", name)),
+            _ => Err(format!("{} must be a positive integer", name)),
+        }
+    };
 
     let benchmark = optional_string("benchmark")?.or_else(|| Some("000300.SH".into()));
     let market_regime = market_regime_request_from_value(
@@ -1894,6 +1909,10 @@ fn build_factor_trial_request(
         execution_rules: None,
         benchmark,
         market_regime,
+        stop_loss_pct: optional_f64_value("stop_loss_pct")?,
+        take_profit_pct: optional_f64_value("take_profit_pct")?,
+        trailing_stop_pct: optional_f64_value("trailing_stop_pct")?,
+        time_stop_days: optional_u32_value("time_stop_days")?,
         portfolio_drawdown_reduce_start_pct: optional_f64_value(
             "portfolio_drawdown_reduce_start_pct",
         )?,
@@ -2064,7 +2083,9 @@ fn market_regime_request_from_value(
             | "drawdown_control_v1"
             | "drawdown_control_v2"
             | "quality_risk_off_v1"
-            | "quality_crash_guard_v1" => Ok(Some(MarketRegimeBacktestReq {
+            | "quality_crash_guard_v1"
+            | "quality_crash_guard_v2"
+            | "quality_crash_guard_v3" => Ok(Some(MarketRegimeBacktestReq {
                 enabled: Some(true),
                 policy: Some(policy.to_string()),
                 benchmark: Some(default_benchmark.to_string()),
@@ -3225,7 +3246,7 @@ mod tests {
             "universe_profile": "listed_non_st",
             "prediction_set_id": "pred-quality-growth-v1",
             "prediction_blend_weight": 0.35,
-            "market_regime": "quality_crash_guard_v1",
+            "market_regime": "quality_crash_guard_v3",
             "portfolio_drawdown_reduce_start_pct": 0.10,
             "portfolio_drawdown_reduce_full_pct": 0.25,
             "portfolio_drawdown_min_exposure": 0.50,
@@ -3236,7 +3257,11 @@ mod tests {
             "portfolio_volatility_target_pct": 0.16,
             "portfolio_volatility_lookback_days": 60,
             "portfolio_volatility_min_exposure": 0.45,
-            "portfolio_volatility_max_exposure": 1.0
+            "portfolio_volatility_max_exposure": 1.0,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": null,
+            "trailing_stop_pct": 0.18,
+            "time_stop_days": "120"
         });
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
@@ -3272,7 +3297,7 @@ mod tests {
             req.market_regime
                 .as_ref()
                 .and_then(|policy| policy.policy.as_deref()),
-            Some("quality_crash_guard_v1")
+            Some("quality_crash_guard_v3")
         );
         assert_eq!(req.portfolio_drawdown_reduce_start_pct, Some(0.10));
         assert_eq!(req.portfolio_drawdown_reduce_full_pct, Some(0.25));
@@ -3285,6 +3310,10 @@ mod tests {
         assert_eq!(req.portfolio_volatility_lookback_days, Some(60));
         assert_eq!(req.portfolio_volatility_min_exposure, Some(0.45));
         assert_eq!(req.portfolio_volatility_max_exposure, Some(1.0));
+        assert_eq!(req.stop_loss_pct, Some(0.12));
+        assert_eq!(req.take_profit_pct, None);
+        assert_eq!(req.trailing_stop_pct, Some(0.18));
+        assert_eq!(req.time_stop_days, Some(120));
     }
 
     #[test]

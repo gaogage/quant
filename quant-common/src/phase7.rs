@@ -202,6 +202,47 @@ impl PortfolioVolatilityControlProfile {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PositionRiskControlProfile {
+    pub profile_name: String,
+    pub stop_loss_pct: Option<Decimal>,
+    pub take_profit_pct: Option<Decimal>,
+    pub trailing_stop_pct: Option<Decimal>,
+    pub time_stop_days: Option<u32>,
+}
+
+impl PositionRiskControlProfile {
+    pub fn off() -> Self {
+        Self {
+            profile_name: "off".to_string(),
+            stop_loss_pct: None,
+            take_profit_pct: None,
+            trailing_stop_pct: None,
+            time_stop_days: None,
+        }
+    }
+
+    pub fn stop_loss(profile_name: impl Into<String>, stop_loss_pct: Decimal) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            stop_loss_pct: Some(stop_loss_pct),
+            take_profit_pct: None,
+            trailing_stop_pct: None,
+            time_stop_days: None,
+        }
+    }
+
+    pub fn trailing_stop(profile_name: impl Into<String>, trailing_stop_pct: Decimal) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            stop_loss_pct: None,
+            take_profit_pct: None,
+            trailing_stop_pct: Some(trailing_stop_pct),
+            time_stop_days: None,
+        }
+    }
+}
+
 pub fn phase7_alpha_blend_profiles() -> Vec<AlphaBlendProfile> {
     let source = |combo: &str, weight: Decimal| AlphaBlendSource::new(combo, "1.0.0", weight);
     vec![
@@ -364,6 +405,14 @@ fn professional_breakthrough_seed_trials() -> Vec<Value> {
 }
 
 fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
+    #[derive(Clone, Copy)]
+    struct PositionRiskSeed<'a> {
+        stop_loss_pct: Option<&'a str>,
+        take_profit_pct: Option<&'a str>,
+        trailing_stop_pct: Option<&'a str>,
+        time_stop_days: Option<u32>,
+    }
+
     fn risk_seed(
         combo_name: &str,
         market_regime: &str,
@@ -373,8 +422,11 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
         max_gross_exposure: &str,
         risk_budget_lookback_days: usize,
         capacity_penalty_strength: &str,
+        industry_max_weight_pct: Option<&str>,
         drawdown_profile: (&str, &str, &str, &str, usize, &str, &str, &str),
-        volatility_profile: (&str, &str, usize, &str, &str),
+        volatility_profile: Option<(&str, &str, usize, &str, &str)>,
+        prediction_overlay: Option<(&str, &str, Option<&str>)>,
+        position_risk: Option<PositionRiskSeed<'_>>,
     ) -> Value {
         let mut seed = json!({
             "market_regime": market_regime,
@@ -391,11 +443,13 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             "portfolio_method": "risk_budget",
             "risk_budget_lookback_days": risk_budget_lookback_days,
             "capacity_penalty_strength": capacity_penalty_strength,
-            "industry_max_weight_pct": "0.20",
+            "industry_max_weight_pct": industry_max_weight_pct,
             "score_candidate_pool_size": 500,
             "universe_profile": "all",
             "portfolio_drawdown_control": drawdown_profile.0,
-            "portfolio_volatility_control": volatility_profile.0,
+            "portfolio_volatility_control": volatility_profile
+                .map(|profile| profile.0)
+                .unwrap_or("off"),
             "benchmark": "000300.SH",
             "signal_source": "factor_combo",
             "combo_name": combo_name,
@@ -408,10 +462,70 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
         seed["portfolio_drawdown_recovery_start_pct"] = json!(drawdown_profile.5);
         seed["portfolio_drawdown_recovery_full_pct"] = json!(drawdown_profile.6);
         seed["portfolio_drawdown_recovery_boost"] = json!(drawdown_profile.7);
-        seed["portfolio_volatility_target_pct"] = json!(volatility_profile.1);
-        seed["portfolio_volatility_lookback_days"] = json!(volatility_profile.2);
-        seed["portfolio_volatility_min_exposure"] = json!(volatility_profile.3);
-        seed["portfolio_volatility_max_exposure"] = json!(volatility_profile.4);
+        if let Some(volatility_profile) = volatility_profile {
+            seed["portfolio_volatility_target_pct"] = json!(volatility_profile.1);
+            seed["portfolio_volatility_lookback_days"] = json!(volatility_profile.2);
+            seed["portfolio_volatility_min_exposure"] = json!(volatility_profile.3);
+            seed["portfolio_volatility_max_exposure"] = json!(volatility_profile.4);
+        }
+        if let Some((prediction_set_id, prediction_blend_weight, prediction_min_percentile)) =
+            prediction_overlay
+        {
+            seed["prediction_set_id"] = json!(prediction_set_id);
+            seed["prediction_blend_weight"] = json!(prediction_blend_weight);
+            if let Some(prediction_min_percentile) = prediction_min_percentile {
+                seed["prediction_min_percentile"] = json!(prediction_min_percentile);
+            }
+        }
+        if let Some(position_risk) = position_risk {
+            if let Some(stop_loss_pct) = position_risk.stop_loss_pct {
+                seed["stop_loss_pct"] = json!(stop_loss_pct);
+            }
+            if let Some(take_profit_pct) = position_risk.take_profit_pct {
+                seed["take_profit_pct"] = json!(take_profit_pct);
+            }
+            if let Some(trailing_stop_pct) = position_risk.trailing_stop_pct {
+                seed["trailing_stop_pct"] = json!(trailing_stop_pct);
+            }
+            if let Some(time_stop_days) = position_risk.time_stop_days {
+                seed["time_stop_days"] = json!(time_stop_days);
+            }
+        }
+        seed
+    }
+
+    fn risk_seed_with_direction(
+        combo_name: &str,
+        market_regime: &str,
+        score_direction: &str,
+        top_n: usize,
+        rebalance: usize,
+        max_position_pct: &str,
+        max_gross_exposure: &str,
+        risk_budget_lookback_days: usize,
+        capacity_penalty_strength: &str,
+        industry_max_weight_pct: Option<&str>,
+        drawdown_profile: (&str, &str, &str, &str, usize, &str, &str, &str),
+        volatility_profile: Option<(&str, &str, usize, &str, &str)>,
+        prediction_overlay: Option<(&str, &str, Option<&str>)>,
+        position_risk: Option<PositionRiskSeed<'_>>,
+    ) -> Value {
+        let mut seed = risk_seed(
+            combo_name,
+            market_regime,
+            top_n,
+            rebalance,
+            max_position_pct,
+            max_gross_exposure,
+            risk_budget_lookback_days,
+            capacity_penalty_strength,
+            industry_max_weight_pct,
+            drawdown_profile,
+            volatility_profile,
+            prediction_overlay,
+            position_risk,
+        );
+        seed["score_direction"] = json!(score_direction);
         seed
     }
 
@@ -445,10 +559,137 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
         "0.70",
         "1",
     );
+    let recover_10_25 = (
+        "recover252_10_25_50_30_70",
+        "0.10",
+        "0.25",
+        "0.50",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    let recover_10_24 = (
+        "recover252_10_24_50_30_70",
+        "0.10",
+        "0.24",
+        "0.50",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    let recover_10_26 = (
+        "recover252_10_26_50_30_70",
+        "0.10",
+        "0.26",
+        "0.50",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    let recover_09_26 = (
+        "recover252_09_26_50_30_70",
+        "0.09",
+        "0.26",
+        "0.50",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    let recover_09_24_45 = (
+        "recover252_09_24_45_30_70",
+        "0.09",
+        "0.24",
+        "0.45",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    let recover_08_24_45 = (
+        "recover252_08_24_45_30_70",
+        "0.08",
+        "0.24",
+        "0.45",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
     let vol120_24 = ("vol120_24_70_100", "0.24", 120, "0.70", "1");
     let vol60_25 = ("vol60_25_75_100", "0.25", 60, "0.75", "1");
     let vol120_30 = ("vol120_30_85_100", "0.30", 120, "0.85", "1");
-    let vol60_30 = ("vol60_30_85_100", "0.30", 60, "0.85", "1");
+    let vol60_30 = ("vol60_30_90_100", "0.30", 60, "0.90", "1");
+    let wide_prediction_set = "pred-p7-wf-wide-qgvrel-v1-201602-202605";
+    let trailing_stop_18 = PositionRiskSeed {
+        stop_loss_pct: None,
+        take_profit_pct: None,
+        trailing_stop_pct: Some("0.18"),
+        time_stop_days: None,
+    };
+    let stop_loss_07 = PositionRiskSeed {
+        stop_loss_pct: Some("0.07"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_08 = PositionRiskSeed {
+        stop_loss_pct: Some("0.08"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_085 = PositionRiskSeed {
+        stop_loss_pct: Some("0.085"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_09 = PositionRiskSeed {
+        stop_loss_pct: Some("0.09"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_095 = PositionRiskSeed {
+        stop_loss_pct: Some("0.095"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_10 = PositionRiskSeed {
+        stop_loss_pct: Some("0.10"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_11 = PositionRiskSeed {
+        stop_loss_pct: Some("0.11"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_12 = PositionRiskSeed {
+        stop_loss_pct: Some("0.12"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_13 = PositionRiskSeed {
+        stop_loss_pct: Some("0.13"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
+    let stop_loss_14 = PositionRiskSeed {
+        stop_loss_pct: Some("0.14"),
+        take_profit_pct: None,
+        trailing_stop_pct: None,
+        time_stop_days: None,
+    };
 
     vec![
         risk_seed(
@@ -460,8 +701,11 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             "0.90",
             180,
             "1",
+            Some("0.20"),
             recover_08_25,
-            vol120_24,
+            Some(vol120_24),
+            None,
+            None,
         ),
         risk_seed(
             "phase7_financial_quality_v1",
@@ -472,8 +716,11 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             "1",
             120,
             "0.75",
+            Some("0.20"),
             recover_10_30,
-            vol120_24,
+            Some(vol120_24),
+            None,
+            None,
         ),
         risk_seed(
             "phase7_financial_quality_v1",
@@ -484,8 +731,11 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             "0.90",
             180,
             "1",
+            Some("0.20"),
             recover_10_27,
-            vol60_25,
+            Some(vol60_25),
+            None,
+            None,
         ),
         risk_seed(
             "phase7_financial_quality_v1",
@@ -496,8 +746,11 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             "1",
             120,
             "0.75",
+            Some("0.20"),
             recover_10_27,
-            vol120_30,
+            Some(vol120_30),
+            None,
+            None,
         ),
         risk_seed(
             "phase7_financial_quality_v1",
@@ -508,8 +761,463 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             "1",
             120,
             "0.75",
+            Some("0.20"),
             recover_10_27,
-            vol60_30,
+            Some(vol60_30),
+            None,
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.14",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_26,
+            None,
+            None,
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_09_26,
+            None,
+            None,
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v2",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v3",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            Some((wide_prediction_set, "0.02", None)),
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            Some((wide_prediction_set, "0.05", Some("0.20"))),
+            None,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(trailing_stop_18),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_25,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_07),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_08),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_085),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_09),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_24,
+            None,
+            None,
+            Some(stop_loss_095),
+        ),
+        risk_seed(
+            "phase7_quality_moneyflow_pos_5pct_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_value_quality_growth_rel_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_blend_quality_growth_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_blend_defensive_rel_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_blend_recovery_tilt_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed_with_direction(
+            "phase7_value_quality_growth_rel_v1",
+            "quality_crash_guard_v1",
+            "descending",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed_with_direction(
+            "phase7_blend_recovery_tilt_v1",
+            "quality_crash_guard_v1",
+            "descending",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.14",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_09_26,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.13",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_09_24_45,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.12",
+            "0.90",
+            120,
+            "0.75",
+            None,
+            recover_08_24_45,
+            None,
+            None,
+            Some(stop_loss_10),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_11),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_12),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_13),
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            None,
+            recover_10_27,
+            None,
+            None,
+            Some(stop_loss_14),
         ),
         risk_seed(
             "phase7_quality_moneyflow_pos_5pct_v1",
@@ -520,8 +1228,11 @@ fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
             "0.90",
             120,
             "1",
+            Some("0.20"),
             recover_08_25,
-            vol120_24,
+            Some(vol120_24),
+            None,
+            None,
         ),
     ]
 }
@@ -563,6 +1274,7 @@ pub struct LayeredSearchConfig {
     pub universe_profiles: Vec<String>,
     pub portfolio_drawdown_controls: Vec<PortfolioDrawdownControlProfile>,
     pub portfolio_volatility_controls: Vec<PortfolioVolatilityControlProfile>,
+    pub position_risk_controls: Vec<PositionRiskControlProfile>,
     pub seed_trials: Vec<Value>,
     pub correlation_lookback_days: usize,
     pub kelly_lookback_days: usize,
@@ -705,6 +1417,7 @@ impl LayeredSearchConfig {
                     Decimal::ONE,
                 ),
             ],
+            position_risk_controls: vec![PositionRiskControlProfile::off()],
             seed_trials: Vec::new(),
             correlation_lookback_days: 60,
             kelly_lookback_days: 60,
@@ -789,6 +1502,7 @@ impl LayeredSearchConfig {
                 Decimal::ONE,
             ),
         ];
+        config.position_risk_controls = vec![PositionRiskControlProfile::off()];
         config.seed_trials = professional_breakthrough_seed_trials();
         config
     }
@@ -796,10 +1510,20 @@ impl LayeredSearchConfig {
     pub fn professional_risk_breakthrough_default() -> Self {
         let mut config = Self::professional_breakthrough_default();
         config.market_regime_policies = vec!["quality_crash_guard_v1".to_string()];
+        config
+            .market_regime_policies
+            .push("quality_crash_guard_v2".to_string());
+        config
+            .market_regime_policies
+            .push("quality_crash_guard_v3".to_string());
         config.combo_versions = vec![
             ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
             ComboVersion::new("phase7_quality_moneyflow_pos_5pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_value_quality_growth_rel_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_value_tilt_v1", "1.0.0"),
             ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_defensive_rel_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_recovery_tilt_v1", "1.0.0"),
         ];
         config.top_n = vec![20, 25, 30];
         config.rebalance_days = vec![50, 60, 70, 80];
@@ -858,8 +1582,59 @@ impl LayeredSearchConfig {
                 Decimal::new(70, 2),
                 Decimal::ONE,
             ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_26_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(26, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_24_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(24, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_09_26_50_30_70",
+                Decimal::new(9, 2),
+                Decimal::new(26, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_09_24_45_30_70",
+                Decimal::new(9, 2),
+                Decimal::new(24, 2),
+                Decimal::new(45, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_08_24_45_30_70",
+                Decimal::new(8, 2),
+                Decimal::new(24, 2),
+                Decimal::new(45, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
         ];
         config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::off(),
             PortfolioVolatilityControlProfile::target(
                 "vol120_24_70_100",
                 Decimal::new(24, 2),
@@ -882,12 +1657,24 @@ impl LayeredSearchConfig {
                 Decimal::ONE,
             ),
             PortfolioVolatilityControlProfile::target(
-                "vol60_30_85_100",
+                "vol60_30_90_100",
                 Decimal::new(30, 2),
                 60,
-                Decimal::new(85, 2),
+                Decimal::new(90, 2),
                 Decimal::ONE,
             ),
+        ];
+        config.position_risk_controls = vec![
+            PositionRiskControlProfile::off(),
+            PositionRiskControlProfile::stop_loss("stop_loss_07", Decimal::new(7, 2)),
+            PositionRiskControlProfile::stop_loss("stop_loss_08", Decimal::new(8, 2)),
+            PositionRiskControlProfile::stop_loss("stop_loss_085", Decimal::new(85, 3)),
+            PositionRiskControlProfile::stop_loss("stop_loss_09", Decimal::new(9, 2)),
+            PositionRiskControlProfile::stop_loss("stop_loss_095", Decimal::new(95, 3)),
+            PositionRiskControlProfile::stop_loss("stop_loss_10", Decimal::new(10, 2)),
+            PositionRiskControlProfile::stop_loss("stop_loss_12", Decimal::new(12, 2)),
+            PositionRiskControlProfile::stop_loss("stop_loss_14", Decimal::new(14, 2)),
+            PositionRiskControlProfile::trailing_stop("trailing_stop_18", Decimal::new(18, 2)),
         ];
         config.seed_trials = professional_risk_breakthrough_seed_trials();
         config
@@ -913,6 +1700,7 @@ impl LayeredSearchConfig {
             self.universe_profiles.len(),
             self.portfolio_drawdown_controls.len(),
             self.portfolio_volatility_controls.len(),
+            self.position_risk_controls.len(),
         ]
         .into_iter()
         .fold(1usize, |total, size| total.saturating_mul(size))
@@ -1014,6 +1802,7 @@ pub fn build_layered_search_plan(
             &config.portfolio_drawdown_controls[indices.portfolio_drawdown_control];
         let portfolio_volatility_control =
             &config.portfolio_volatility_controls[indices.portfolio_volatility_control];
+        let position_risk_control = &config.position_risk_controls[indices.position_risk_control];
 
         let trial_index = trials.len();
         let mut parameters = serde_json::json!({
@@ -1036,6 +1825,7 @@ pub fn build_layered_search_plan(
             "universe_profile": universe_profile,
             "portfolio_drawdown_control": portfolio_drawdown_control.profile_name,
             "portfolio_volatility_control": portfolio_volatility_control.profile_name,
+            "position_risk_control": position_risk_control.profile_name,
             "benchmark": config.benchmark,
         });
         if let (Some(start), Some(full), Some(min_exposure)) = (
@@ -1080,6 +1870,18 @@ pub fn build_layered_search_plan(
         if let Some(max_exposure) = portfolio_volatility_control.max_exposure {
             parameters["portfolio_volatility_max_exposure"] =
                 serde_json::json!(decimal_string(max_exposure));
+        }
+        if let Some(stop_loss_pct) = position_risk_control.stop_loss_pct {
+            parameters["stop_loss_pct"] = serde_json::json!(decimal_string(stop_loss_pct));
+        }
+        if let Some(take_profit_pct) = position_risk_control.take_profit_pct {
+            parameters["take_profit_pct"] = serde_json::json!(decimal_string(take_profit_pct));
+        }
+        if let Some(trailing_stop_pct) = position_risk_control.trailing_stop_pct {
+            parameters["trailing_stop_pct"] = serde_json::json!(decimal_string(trailing_stop_pct));
+        }
+        if let Some(time_stop_days) = position_risk_control.time_stop_days {
+            parameters["time_stop_days"] = serde_json::json!(time_stop_days);
         }
         match signal_candidate {
             Some(LayeredSignalCandidate::FactorCombo(combo)) => {
@@ -1132,6 +1934,7 @@ struct LayeredTrialIndices {
     universe_profile: usize,
     portfolio_drawdown_control: usize,
     portfolio_volatility_control: usize,
+    position_risk_control: usize,
 }
 
 impl LayeredTrialIndices {
@@ -1149,6 +1952,8 @@ impl LayeredTrialIndices {
             take_axis_index(&mut index, config.portfolio_drawdown_controls.len())?;
         let portfolio_volatility_control =
             take_axis_index(&mut index, config.portfolio_volatility_controls.len())?;
+        let position_risk_control =
+            take_axis_index(&mut index, config.position_risk_controls.len())?;
         let risk_budget_lookback_days =
             take_axis_index(&mut index, config.risk_budget_lookback_days.len())?;
         let portfolio_method = take_axis_index(&mut index, config.portfolio_methods.len())?;
@@ -1182,6 +1987,7 @@ impl LayeredTrialIndices {
             universe_profile,
             portfolio_drawdown_control,
             portfolio_volatility_control,
+            position_risk_control,
         })
     }
 }
@@ -1571,6 +2377,7 @@ mod tests {
                     Decimal::ONE,
                 ),
             ],
+            position_risk_controls: vec![PositionRiskControlProfile::off()],
             seed_trials: Vec::new(),
             correlation_lookback_days: 60,
             kelly_lookback_days: 60,
@@ -1771,6 +2578,17 @@ mod tests {
     fn professional_risk_breakthrough_config_focuses_on_drawdown_sortino_neighborhood() {
         let config = LayeredSearchConfig::professional_risk_breakthrough_default();
 
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(combo_names.contains("phase7_value_quality_growth_rel_v1"));
+        assert!(combo_names.contains("phase7_blend_value_tilt_v1"));
+        assert!(combo_names.contains("phase7_blend_quality_growth_v1"));
+        assert!(combo_names.contains("phase7_blend_defensive_rel_v1"));
+        assert!(combo_names.contains("phase7_blend_recovery_tilt_v1"));
+        assert!(combo_names.contains("phase7_quality_moneyflow_pos_5pct_v1"));
         assert!(config
             .market_regime_policies
             .contains(&"quality_crash_guard_v1".to_string()));
@@ -1790,6 +2608,26 @@ mod tests {
             .portfolio_drawdown_controls
             .iter()
             .any(|profile| profile.profile_name == "recover252_10_30_55_25_75"));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_10_26_50_30_70"));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_10_24_50_30_70"));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_09_26_50_30_70"));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_09_24_45_30_70"));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_08_24_45_30_70"));
         assert!(config
             .portfolio_volatility_controls
             .iter()
@@ -1814,6 +2652,175 @@ mod tests {
                 && trial["portfolio_volatility_control"] == "vol120_30_85_100"
                 && trial["max_gross_exposure"] == "1"
                 && trial["portfolio_volatility_min_exposure"] == "0.85"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "vol60_30_90_100"
+                && trial["max_gross_exposure"] == "1"
+                && trial["portfolio_volatility_min_exposure"] == "0.90"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["max_gross_exposure"] == "1"
+                && trial["industry_max_weight_pct"].is_null()
+                && trial.get("portfolio_volatility_target_pct").is_none()
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_26_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.14"
+                && trial["industry_max_weight_pct"].is_null()
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v2"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["industry_max_weight_pct"].is_null()
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v3"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["industry_max_weight_pct"].is_null()
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["prediction_set_id"] == "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+                && trial["prediction_blend_weight"] == "0.02"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["prediction_set_id"] == "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+                && trial["prediction_blend_weight"] == "0.05"
+                && trial["prediction_min_percentile"] == "0.20"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["trailing_stop_pct"] == "0.18"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.12"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_25_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.14"
+        }));
+        assert!(config
+            .position_risk_controls
+            .iter()
+            .any(|profile| profile.profile_name == "stop_loss_12"
+                && profile.stop_loss_pct == Some(Decimal::new(12, 2))));
+        for (profile_name, stop_loss_pct) in [
+            ("stop_loss_07", Decimal::new(7, 2)),
+            ("stop_loss_08", Decimal::new(8, 2)),
+            ("stop_loss_085", Decimal::new(85, 3)),
+            ("stop_loss_09", Decimal::new(9, 2)),
+            ("stop_loss_095", Decimal::new(95, 3)),
+        ] {
+            assert!(config.position_risk_controls.iter().any(|profile| {
+                profile.profile_name == profile_name && profile.stop_loss_pct == Some(stop_loss_pct)
+            }));
+        }
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_09_24_45_30_70"
+                && trial["max_position_pct"] == "0.13"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_08_24_45_30_70"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_moneyflow_pos_5pct_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_blend_defensive_rel_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_blend_recovery_tilt_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["stop_loss_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.07"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+                && trial["portfolio_volatility_control"] == "off"
+                && trial["max_position_pct"] == "0.15"
+                && trial["stop_loss_pct"] == "0.09"
         }));
     }
 
@@ -1865,6 +2872,7 @@ mod tests {
         config.universe_profiles = vec!["listed_non_st".to_string()];
         config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::off()];
         config.portfolio_volatility_controls = vec![PortfolioVolatilityControlProfile::off()];
+        config.position_risk_controls = vec![PositionRiskControlProfile::off()];
         let mut resource_plan = LocalResourcePlan::for_machine(4, 16);
         resource_plan.max_trials = 1;
 
