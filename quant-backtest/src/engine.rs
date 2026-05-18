@@ -5,7 +5,7 @@
 //! audit:  standard + 可复现 hash 校验
 
 use chrono::NaiveDate;
-use rust_decimal::prelude::Zero;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive, Zero};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -141,6 +141,18 @@ pub struct RiskControlConfig {
     /// Maximum fraction of the gap between reduced exposure and 100% exposure to restore.
     #[serde(default)]
     pub portfolio_drawdown_recovery_boost: Option<Decimal>,
+    /// Annualized portfolio volatility target where target exposure starts scaling down.
+    #[serde(default)]
+    pub portfolio_volatility_target_pct: Option<Decimal>,
+    /// Number of recent daily returns used for realized portfolio volatility.
+    #[serde(default)]
+    pub portfolio_volatility_lookback_days: Option<usize>,
+    /// Minimum gross exposure multiplier after volatility targeting is fully active.
+    #[serde(default)]
+    pub portfolio_volatility_min_exposure: Option<Decimal>,
+    /// Maximum gross exposure multiplier after volatility targeting. Defaults to 100%, no leverage.
+    #[serde(default)]
+    pub portfolio_volatility_max_exposure: Option<Decimal>,
 }
 
 impl Default for RiskControlConfig {
@@ -157,6 +169,10 @@ impl Default for RiskControlConfig {
             portfolio_drawdown_recovery_start_pct: None,
             portfolio_drawdown_recovery_full_pct: None,
             portfolio_drawdown_recovery_boost: None,
+            portfolio_volatility_target_pct: None,
+            portfolio_volatility_lookback_days: None,
+            portfolio_volatility_min_exposure: None,
+            portfolio_volatility_max_exposure: None,
         }
     }
 }
@@ -527,15 +543,114 @@ impl BacktestEngine {
         self.portfolio_drawdown_recovery_exposure_scale(current_value, peak_value, base_scale)
     }
 
+    fn portfolio_recent_returns(
+        &self,
+        current_value: Decimal,
+        lookback_days: usize,
+    ) -> Vec<Decimal> {
+        let start_index = self.equity_curve.len().saturating_sub(lookback_days);
+        let mut values: Vec<Decimal> = self
+            .equity_curve
+            .iter()
+            .skip(start_index)
+            .map(|(_, value)| *value)
+            .collect();
+        values.push(current_value);
+        values
+            .windows(2)
+            .filter_map(|window| {
+                let previous = window[0];
+                if previous.is_zero() {
+                    None
+                } else {
+                    Some((window[1] - previous) / previous)
+                }
+            })
+            .collect()
+    }
+
+    fn portfolio_volatility_exposure_scale(&self, current_value: Decimal) -> Decimal {
+        let risk_control = &self.config.risk_control;
+        let Some(target_volatility) = risk_control.portfolio_volatility_target_pct else {
+            return Decimal::ONE;
+        };
+        if target_volatility <= Decimal::zero() {
+            return Decimal::ONE;
+        }
+
+        let lookback_days = risk_control
+            .portfolio_volatility_lookback_days
+            .unwrap_or(60)
+            .max(2);
+        let returns = self.portfolio_recent_returns(current_value, lookback_days);
+        if returns.len() < lookback_days {
+            return Decimal::ONE;
+        }
+
+        let min_exposure = risk_control
+            .portfolio_volatility_min_exposure
+            .unwrap_or(Decimal::new(50, 2))
+            .clamp(Decimal::zero(), Decimal::ONE);
+        let max_exposure = risk_control
+            .portfolio_volatility_max_exposure
+            .unwrap_or(Decimal::ONE)
+            .clamp(min_exposure, Decimal::ONE);
+
+        let daily_returns: Vec<f64> = returns
+            .iter()
+            .filter_map(|value| value.to_f64())
+            .filter(|value| value.is_finite())
+            .collect();
+        if daily_returns.len() < lookback_days {
+            return Decimal::ONE;
+        }
+
+        let mean = daily_returns.iter().sum::<f64>() / daily_returns.len() as f64;
+        let variance = daily_returns
+            .iter()
+            .map(|value| {
+                let diff = value - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / (daily_returns.len() - 1) as f64;
+        let realized_volatility = variance.sqrt() * 252.0_f64.sqrt();
+        if !realized_volatility.is_finite() || realized_volatility <= f64::EPSILON {
+            return max_exposure;
+        }
+
+        let Some(target_volatility) = target_volatility.to_f64() else {
+            return Decimal::ONE;
+        };
+        let raw_scale = target_volatility / realized_volatility;
+        Decimal::from_f64(raw_scale)
+            .unwrap_or(Decimal::ONE)
+            .clamp(min_exposure, max_exposure)
+    }
+
+    fn portfolio_risk_exposure_scale(
+        &self,
+        current_value: Decimal,
+        peak_value: Decimal,
+    ) -> (Decimal, Decimal, Decimal) {
+        let drawdown_scale = self.portfolio_drawdown_exposure_scale(current_value, peak_value);
+        let volatility_scale = self.portfolio_volatility_exposure_scale(current_value);
+        let exposure_scale = drawdown_scale.min(volatility_scale);
+        (drawdown_scale, volatility_scale, exposure_scale)
+    }
+
     fn execute_rebalance(&mut self, signal: &StrategySignal, market: &MarketDay) {
         let total_value = self.portfolio.total_value();
         let equity_peak = self.portfolio_equity_peak(total_value);
-        let exposure_scale = self.portfolio_drawdown_exposure_scale(total_value, equity_peak);
+        let (drawdown_scale, volatility_scale, exposure_scale) =
+            self.portfolio_risk_exposure_scale(total_value, equity_peak);
         info!(
-            "rebalance: total_value={} targets={} close_symbols={} exposure_scale={}",
+            "rebalance: total_value={} targets={} close_symbols={} drawdown_scale={} volatility_scale={} exposure_scale={}",
             total_value,
             signal.target_weights.len(),
             market.close.len(),
+            drawdown_scale,
+            volatility_scale,
             exposure_scale
         );
         let mut to_sell: Vec<(String, Decimal, Decimal)> = Vec::new();
@@ -549,6 +664,8 @@ impl BacktestEngine {
             .filter(|s| !signal.target_weights.contains_key(*s))
             .cloned()
             .collect();
+        let mut symbols_to_remove = symbols_to_remove;
+        symbols_to_remove.sort();
 
         for sym in &symbols_to_remove {
             if let Some(h) = self.portfolio.holdings.get(sym) {
@@ -560,7 +677,9 @@ impl BacktestEngine {
         }
 
         // Phase 2: 按目标权重计算买卖
-        for (sym, raw_target_w) in &signal.target_weights {
+        let mut signal_targets = signal.target_weights.iter().collect::<Vec<_>>();
+        signal_targets.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (sym, raw_target_w) in signal_targets {
             let target_w = (*raw_target_w * exposure_scale).clamp(Decimal::zero(), Decimal::ONE);
             let target_amount = total_value * target_w;
             let current_mv = self
@@ -585,10 +704,14 @@ impl BacktestEngine {
                 symbol: sym.clone(),
                 target_weight: target_w,
                 target_quantity,
-                reason: Some(if exposure_scale < Decimal::ONE {
+                reason: Some(if exposure_scale >= Decimal::ONE {
+                    "rebalance_signal".into()
+                } else if volatility_scale < drawdown_scale {
+                    "rebalance_signal_portfolio_volatility_scaled".into()
+                } else if drawdown_scale < Decimal::ONE {
                     "rebalance_signal_portfolio_drawdown_scaled".into()
                 } else {
-                    "rebalance_signal".into()
+                    "rebalance_signal_portfolio_risk_scaled".into()
                 }),
             });
 
@@ -1254,6 +1377,143 @@ mod tests {
         assert_eq!(o.targets[0].target_weight, d("0.70"));
         assert_eq!(o.trades[0].event_reason.as_deref(), Some("rebalance_buy"));
         assert!(o.trades[0].executed_weight.unwrap() <= d("0.71"));
+    }
+
+    #[test]
+    fn portfolio_volatility_control_waits_for_full_lookback() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_volatility_target_pct = Some(d("0.15"));
+        c.risk_control.portfolio_volatility_lookback_days = Some(3);
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("102")));
+
+        assert_eq!(
+            e.portfolio_volatility_exposure_scale(d("101")),
+            Decimal::ONE
+        );
+    }
+
+    #[test]
+    fn portfolio_volatility_control_reduces_high_realized_volatility() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_volatility_target_pct = Some(d("0.10"));
+        c.risk_control.portfolio_volatility_lookback_days = Some(3);
+        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.30"));
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("112")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("88")));
+
+        assert_eq!(e.portfolio_volatility_exposure_scale(d("105")), d("0.30"));
+    }
+
+    #[test]
+    fn portfolio_volatility_control_respects_max_exposure_without_leverage() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_volatility_target_pct = Some(d("0.20"));
+        c.risk_control.portfolio_volatility_lookback_days = Some(3);
+        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.20"));
+        c.risk_control.portfolio_volatility_max_exposure = Some(d("0.80"));
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("100.1")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("100.2")));
+
+        assert_eq!(e.portfolio_volatility_exposure_scale(d("100.3")), d("0.80"));
+    }
+
+    #[test]
+    fn portfolio_risk_control_uses_more_conservative_scale() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
+        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
+        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
+        c.risk_control.portfolio_volatility_target_pct = Some(d("0.10"));
+        c.risk_control.portfolio_volatility_lookback_days = Some(3);
+        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.50"));
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("112")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("88")));
+
+        let (drawdown_scale, volatility_scale, exposure_scale) =
+            e.portfolio_risk_exposure_scale(d("90"), d("100"));
+
+        assert_eq!(drawdown_scale, d("0.70"));
+        assert_eq!(volatility_scale, d("0.50"));
+        assert_eq!(exposure_scale, d("0.50"));
+    }
+
+    #[test]
+    fn portfolio_volatility_control_reduces_rebalance_targets() {
+        let mut c = BacktestConfig::default();
+        c.max_position_pct = d("1.01");
+        c.risk_control.portfolio_volatility_target_pct = Some(d("0.10"));
+        c.risk_control.portfolio_volatility_lookback_days = Some(3);
+        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.50"));
+        c.fee_config.min_commission = Decimal::zero();
+        c.fee_config.commission_rate = Decimal::zero();
+        c.fee_config.slippage_bps = Decimal::zero();
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("1000000")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("1120000")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("880000")));
+        e.portfolio.cash = d("1050000");
+
+        e.process_day(
+            &market("2024-01-04", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "1.0")),
+        );
+        let o = e.finalize();
+
+        assert_eq!(o.targets[0].target_weight, d("0.50"));
+        assert_eq!(
+            o.targets[0].reason.as_deref(),
+            Some("rebalance_signal_portfolio_volatility_scaled")
+        );
+        assert!(o.trades[0].executed_weight.unwrap() <= d("0.51"));
+    }
+
+    #[test]
+    fn rebalance_targets_are_recorded_in_deterministic_symbol_order() {
+        let mut c = BacktestConfig::default();
+        c.max_position_pct = d("1.01");
+        c.fee_config.min_commission = Decimal::zero();
+        c.fee_config.commission_rate = Decimal::zero();
+        c.fee_config.slippage_bps = Decimal::zero();
+        let mut e = BacktestEngine::new(c);
+        let mut m = market("2024-01-02", ("B", "10"), ("B", "10"));
+        m.open.insert("A".into(), d("10"));
+        m.close.insert("A".into(), d("10"));
+        m.pre_close.insert("A".into(), d("10"));
+        m.amount.insert("A".into(), d("100000000"));
+        m.up_limit.insert("A".into(), d("11"));
+        m.down_limit.insert("A".into(), d("9"));
+        let signal = StrategySignal {
+            date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            target_weights: HashMap::from([("B".into(), d("0.40")), ("A".into(), d("0.40"))]),
+        };
+
+        e.process_day(&m, Some(&signal));
+        let o = e.finalize();
+
+        assert_eq!(o.targets[0].symbol, "A");
+        assert_eq!(o.targets[1].symbol, "B");
     }
 
     #[test]

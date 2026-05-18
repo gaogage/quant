@@ -1,7 +1,7 @@
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalResourcePlan {
@@ -165,6 +165,43 @@ impl PortfolioDrawdownControlProfile {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortfolioVolatilityControlProfile {
+    pub profile_name: String,
+    pub target_pct: Option<Decimal>,
+    pub lookback_days: Option<usize>,
+    pub min_exposure: Option<Decimal>,
+    pub max_exposure: Option<Decimal>,
+}
+
+impl PortfolioVolatilityControlProfile {
+    pub fn off() -> Self {
+        Self {
+            profile_name: "off".to_string(),
+            target_pct: None,
+            lookback_days: None,
+            min_exposure: None,
+            max_exposure: None,
+        }
+    }
+
+    pub fn target(
+        profile_name: impl Into<String>,
+        target_pct: Decimal,
+        lookback_days: usize,
+        min_exposure: Decimal,
+        max_exposure: Decimal,
+    ) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            target_pct: Some(target_pct),
+            lookback_days: Some(lookback_days),
+            min_exposure: Some(min_exposure),
+            max_exposure: Some(max_exposure),
+        }
+    }
+}
+
 pub fn phase7_alpha_blend_profiles() -> Vec<AlphaBlendProfile> {
     let source = |combo: &str, weight: Decimal| AlphaBlendSource::new(combo, "1.0.0", weight);
     vec![
@@ -246,6 +283,249 @@ pub fn phase7_alpha_blend_profiles() -> Vec<AlphaBlendProfile> {
     ]
 }
 
+fn professional_breakthrough_seed_trials() -> Vec<Value> {
+    fn quality_seed(
+        market_regime: &str,
+        max_pairwise_correlation: &str,
+        drawdown_profile: Option<(&str, &str, &str, &str, usize)>,
+        recovery: Option<(&str, &str, &str)>,
+    ) -> Value {
+        let mut seed = json!({
+            "market_regime": market_regime,
+            "top_n": 20,
+            "rebalance": "60",
+            "score_direction": "ascending",
+            "skip_top_pct": "0.10",
+            "max_pairwise_correlation": max_pairwise_correlation,
+            "correlation_lookback_days": 60,
+            "kelly_fraction": "0",
+            "kelly_lookback_days": 60,
+            "max_position_pct": "0.15",
+            "max_gross_exposure": "1",
+            "portfolio_method": "risk_budget",
+            "risk_budget_lookback_days": 120,
+            "capacity_penalty_strength": "0.75",
+            "industry_max_weight_pct": null,
+            "score_candidate_pool_size": 500,
+            "universe_profile": "all",
+            "portfolio_drawdown_control": drawdown_profile
+                .map(|profile| profile.0)
+                .unwrap_or("off"),
+            "portfolio_volatility_control": "off",
+            "benchmark": "000300.SH",
+            "signal_source": "factor_combo",
+            "combo_name": "phase7_financial_quality_v1",
+            "version": "1.0.0",
+        });
+        if let Some((_name, reduce_start, reduce_full, min_exposure, lookback_days)) =
+            drawdown_profile
+        {
+            seed["portfolio_drawdown_reduce_start_pct"] = json!(reduce_start);
+            seed["portfolio_drawdown_reduce_full_pct"] = json!(reduce_full);
+            seed["portfolio_drawdown_min_exposure"] = json!(min_exposure);
+            seed["portfolio_drawdown_peak_lookback_days"] = json!(lookback_days);
+        }
+        if let Some((recovery_start, recovery_full, boost)) = recovery {
+            seed["portfolio_drawdown_recovery_start_pct"] = json!(recovery_start);
+            seed["portfolio_drawdown_recovery_full_pct"] = json!(recovery_full);
+            seed["portfolio_drawdown_recovery_boost"] = json!(boost);
+        }
+        seed
+    }
+
+    vec![
+        quality_seed("off", "0.75", None, None),
+        quality_seed("quality_crash_guard_v1", "0.75", None, None),
+        quality_seed(
+            "quality_crash_guard_v1",
+            "0.75",
+            Some(("recover252_10_25_50_30_70", "0.10", "0.25", "0.50", 252)),
+            Some(("0.30", "0.70", "1")),
+        ),
+        quality_seed(
+            "quality_crash_guard_v1",
+            "0.75",
+            Some(("recover252_10_27_50_30_70", "0.10", "0.27", "0.50", 252)),
+            Some(("0.30", "0.70", "1")),
+        ),
+        quality_seed(
+            "quality_crash_guard_v1",
+            "0.75",
+            Some(("rolling504_15_35_70", "0.15", "0.35", "0.70", 504)),
+            None,
+        ),
+        quality_seed(
+            "quality_crash_guard_v1",
+            "0.90",
+            Some(("recover252_10_27_50_30_70", "0.10", "0.27", "0.50", 252)),
+            Some(("0.30", "0.70", "1")),
+        ),
+    ]
+}
+
+fn professional_risk_breakthrough_seed_trials() -> Vec<Value> {
+    fn risk_seed(
+        combo_name: &str,
+        market_regime: &str,
+        top_n: usize,
+        rebalance: usize,
+        max_position_pct: &str,
+        max_gross_exposure: &str,
+        risk_budget_lookback_days: usize,
+        capacity_penalty_strength: &str,
+        drawdown_profile: (&str, &str, &str, &str, usize, &str, &str, &str),
+        volatility_profile: (&str, &str, usize, &str, &str),
+    ) -> Value {
+        let mut seed = json!({
+            "market_regime": market_regime,
+            "top_n": top_n,
+            "rebalance": rebalance.to_string(),
+            "score_direction": "ascending",
+            "skip_top_pct": "0.10",
+            "max_pairwise_correlation": "0.75",
+            "correlation_lookback_days": 60,
+            "kelly_fraction": "0",
+            "kelly_lookback_days": 60,
+            "max_position_pct": max_position_pct,
+            "max_gross_exposure": max_gross_exposure,
+            "portfolio_method": "risk_budget",
+            "risk_budget_lookback_days": risk_budget_lookback_days,
+            "capacity_penalty_strength": capacity_penalty_strength,
+            "industry_max_weight_pct": "0.20",
+            "score_candidate_pool_size": 500,
+            "universe_profile": "all",
+            "portfolio_drawdown_control": drawdown_profile.0,
+            "portfolio_volatility_control": volatility_profile.0,
+            "benchmark": "000300.SH",
+            "signal_source": "factor_combo",
+            "combo_name": combo_name,
+            "version": "1.0.0",
+        });
+        seed["portfolio_drawdown_reduce_start_pct"] = json!(drawdown_profile.1);
+        seed["portfolio_drawdown_reduce_full_pct"] = json!(drawdown_profile.2);
+        seed["portfolio_drawdown_min_exposure"] = json!(drawdown_profile.3);
+        seed["portfolio_drawdown_peak_lookback_days"] = json!(drawdown_profile.4);
+        seed["portfolio_drawdown_recovery_start_pct"] = json!(drawdown_profile.5);
+        seed["portfolio_drawdown_recovery_full_pct"] = json!(drawdown_profile.6);
+        seed["portfolio_drawdown_recovery_boost"] = json!(drawdown_profile.7);
+        seed["portfolio_volatility_target_pct"] = json!(volatility_profile.1);
+        seed["portfolio_volatility_lookback_days"] = json!(volatility_profile.2);
+        seed["portfolio_volatility_min_exposure"] = json!(volatility_profile.3);
+        seed["portfolio_volatility_max_exposure"] = json!(volatility_profile.4);
+        seed
+    }
+
+    let recover_08_25 = (
+        "recover252_08_25_60_25_75",
+        "0.08",
+        "0.25",
+        "0.60",
+        252,
+        "0.25",
+        "0.75",
+        "1",
+    );
+    let recover_10_30 = (
+        "recover252_10_30_55_25_75",
+        "0.10",
+        "0.30",
+        "0.55",
+        252,
+        "0.25",
+        "0.75",
+        "1",
+    );
+    let recover_10_27 = (
+        "recover252_10_27_50_30_70",
+        "0.10",
+        "0.27",
+        "0.50",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    let vol120_24 = ("vol120_24_70_100", "0.24", 120, "0.70", "1");
+    let vol60_25 = ("vol60_25_75_100", "0.25", 60, "0.75", "1");
+    let vol120_30 = ("vol120_30_85_100", "0.30", 120, "0.85", "1");
+    let vol60_30 = ("vol60_30_85_100", "0.30", 60, "0.85", "1");
+
+    vec![
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.10",
+            "0.90",
+            180,
+            "1",
+            recover_08_25,
+            vol120_24,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.12",
+            "1",
+            120,
+            "0.75",
+            recover_10_30,
+            vol120_24,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            25,
+            70,
+            "0.10",
+            "0.90",
+            180,
+            "1",
+            recover_10_27,
+            vol60_25,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.12",
+            "1",
+            120,
+            "0.75",
+            recover_10_27,
+            vol120_30,
+        ),
+        risk_seed(
+            "phase7_financial_quality_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.15",
+            "1",
+            120,
+            "0.75",
+            recover_10_27,
+            vol60_30,
+        ),
+        risk_seed(
+            "phase7_quality_moneyflow_pos_5pct_v1",
+            "quality_crash_guard_v1",
+            20,
+            60,
+            "0.10",
+            "0.90",
+            120,
+            "1",
+            recover_08_25,
+            vol120_24,
+        ),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreDirection {
@@ -282,6 +562,8 @@ pub struct LayeredSearchConfig {
     pub score_candidate_pool_sizes: Vec<usize>,
     pub universe_profiles: Vec<String>,
     pub portfolio_drawdown_controls: Vec<PortfolioDrawdownControlProfile>,
+    pub portfolio_volatility_controls: Vec<PortfolioVolatilityControlProfile>,
+    pub seed_trials: Vec<Value>,
     pub correlation_lookback_days: usize,
     pub kelly_lookback_days: usize,
     pub benchmark: String,
@@ -314,6 +596,8 @@ impl LayeredSearchConfig {
                 "professional_default".to_string(),
                 "drawdown_control_v1".to_string(),
                 "drawdown_control_v2".to_string(),
+                "quality_risk_off_v1".to_string(),
+                "quality_crash_guard_v1".to_string(),
             ],
             combo_versions,
             prediction_set_ids: Vec::new(),
@@ -377,6 +661,16 @@ impl LayeredSearchConfig {
                     Decimal::ONE,
                 ),
                 PortfolioDrawdownControlProfile::recover(
+                    "recover252_10_27_50_30_70",
+                    Decimal::new(10, 2),
+                    Decimal::new(27, 2),
+                    Decimal::new(50, 2),
+                    Some(252),
+                    Decimal::new(30, 2),
+                    Decimal::new(70, 2),
+                    Decimal::ONE,
+                ),
+                PortfolioDrawdownControlProfile::recover(
                     "recover252_12_30_60_30_70",
                     Decimal::new(12, 2),
                     Decimal::new(30, 2),
@@ -387,10 +681,216 @@ impl LayeredSearchConfig {
                     Decimal::ONE,
                 ),
             ],
+            portfolio_volatility_controls: vec![
+                PortfolioVolatilityControlProfile::off(),
+                PortfolioVolatilityControlProfile::target(
+                    "vol252_16_45_100",
+                    Decimal::new(16, 2),
+                    252,
+                    Decimal::new(45, 2),
+                    Decimal::ONE,
+                ),
+                PortfolioVolatilityControlProfile::target(
+                    "vol120_18_50_100",
+                    Decimal::new(18, 2),
+                    120,
+                    Decimal::new(50, 2),
+                    Decimal::ONE,
+                ),
+                PortfolioVolatilityControlProfile::target(
+                    "vol60_20_60_100",
+                    Decimal::new(20, 2),
+                    60,
+                    Decimal::new(60, 2),
+                    Decimal::ONE,
+                ),
+            ],
+            seed_trials: Vec::new(),
             correlation_lookback_days: 60,
             kelly_lookback_days: 60,
             benchmark: "000300.SH".to_string(),
         }
+    }
+
+    pub fn professional_breakthrough_default() -> Self {
+        let mut config = Self::local_professional_default();
+        config.market_regime_policies = vec![
+            "off".to_string(),
+            "quality_risk_off_v1".to_string(),
+            "quality_crash_guard_v1".to_string(),
+        ];
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_moneyflow_pos_5pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_recovery_tilt_v1", "1.0.0"),
+        ];
+        config.top_n = vec![20, 30, 50];
+        config.rebalance_days = vec![40, 60, 80];
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.skip_top_pct = vec![Decimal::new(10, 2), Decimal::new(15, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2), Decimal::new(90, 2)];
+        config.kelly_fraction = vec![Decimal::ZERO, Decimal::new(25, 2), Decimal::new(50, 2)];
+        config.max_position_pct = vec![
+            Decimal::new(8, 2),
+            Decimal::new(10, 2),
+            Decimal::new(12, 2),
+            Decimal::new(15, 2),
+        ];
+        config.max_gross_exposure = vec![Decimal::ONE];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.risk_budget_lookback_days = vec![60, 120];
+        config.capacity_penalty_strength = vec![Decimal::ZERO, Decimal::new(75, 2)];
+        config.industry_max_weight_pct =
+            vec![None, Some(Decimal::new(20, 2)), Some(Decimal::new(35, 2))];
+        config.score_candidate_pool_sizes = vec![500, 800, 1200];
+        config.universe_profiles = vec![
+            "all".to_string(),
+            "listed_non_st".to_string(),
+            "main_board_non_st".to_string(),
+        ];
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::off(),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_25_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(25, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_27_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(27, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::off(),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_50_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol60_20_60_100",
+                Decimal::new(20, 2),
+                60,
+                Decimal::new(60, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.seed_trials = professional_breakthrough_seed_trials();
+        config
+    }
+
+    pub fn professional_risk_breakthrough_default() -> Self {
+        let mut config = Self::professional_breakthrough_default();
+        config.market_regime_policies = vec!["quality_crash_guard_v1".to_string()];
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_moneyflow_pos_5pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0"),
+        ];
+        config.top_n = vec![20, 25, 30];
+        config.rebalance_days = vec![50, 60, 70, 80];
+        config.skip_top_pct = vec![
+            Decimal::new(10, 2),
+            Decimal::new(12, 2),
+            Decimal::new(15, 2),
+        ];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(65, 2),
+            Decimal::new(75, 2),
+            Decimal::new(90, 2),
+        ];
+        config.kelly_fraction = vec![Decimal::ZERO, Decimal::new(25, 2)];
+        config.max_position_pct =
+            vec![Decimal::new(8, 2), Decimal::new(10, 2), Decimal::new(12, 2)];
+        config.max_gross_exposure = vec![Decimal::new(80, 2), Decimal::new(90, 2), Decimal::ONE];
+        config.risk_budget_lookback_days = vec![120, 180];
+        config.capacity_penalty_strength =
+            vec![Decimal::new(75, 2), Decimal::ONE, Decimal::new(125, 2)];
+        config.industry_max_weight_pct = vec![
+            Some(Decimal::new(20, 2)),
+            Some(Decimal::new(25, 2)),
+            Some(Decimal::new(30, 2)),
+        ];
+        config.score_candidate_pool_sizes = vec![500, 800];
+        config.universe_profiles = vec!["all".to_string(), "listed_non_st".to_string()];
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_08_25_60_25_75",
+                Decimal::new(8, 2),
+                Decimal::new(25, 2),
+                Decimal::new(60, 2),
+                Some(252),
+                Decimal::new(25, 2),
+                Decimal::new(75, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_30_55_25_75",
+                Decimal::new(10, 2),
+                Decimal::new(30, 2),
+                Decimal::new(55, 2),
+                Some(252),
+                Decimal::new(25, 2),
+                Decimal::new(75, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_27_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(27, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_24_70_100",
+                Decimal::new(24, 2),
+                120,
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol60_25_75_100",
+                Decimal::new(25, 2),
+                60,
+                Decimal::new(75, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_30_85_100",
+                Decimal::new(30, 2),
+                120,
+                Decimal::new(85, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol60_30_85_100",
+                Decimal::new(30, 2),
+                60,
+                Decimal::new(85, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.seed_trials = professional_risk_breakthrough_seed_trials();
+        config
     }
 
     pub fn search_space_size(&self) -> usize {
@@ -412,6 +912,7 @@ impl LayeredSearchConfig {
             self.score_candidate_pool_sizes.len(),
             self.universe_profiles.len(),
             self.portfolio_drawdown_controls.len(),
+            self.portfolio_volatility_controls.len(),
         ]
         .into_iter()
         .fold(1usize, |total, size| total.saturating_mul(size))
@@ -466,12 +967,24 @@ pub fn build_layered_search_plan(
     config: &LayeredSearchConfig,
     resource_plan: &LocalResourcePlan,
 ) -> LayeredSearchPlan {
-    let requested_trials = config.search_space_size();
+    let cartesian_trials = config.search_space_size();
+    let requested_trials = cartesian_trials.saturating_add(config.seed_trials.len());
     let max_trials = resource_plan.max_trials;
     let batch_size = resource_plan.batch_size.max(1);
     let mut trials = Vec::with_capacity(requested_trials.min(max_trials));
 
-    for source_index in selected_cartesian_indices(requested_trials, max_trials) {
+    for seed in config.seed_trials.iter().take(max_trials) {
+        let trial_index = trials.len();
+        trials.push(LayeredSearchTrial {
+            trial_id: format!("phase7d-{:06}", trial_index + 1),
+            trial_index,
+            batch_index: trial_index / batch_size + 1,
+            parameters: seed.clone(),
+        });
+    }
+
+    let remaining_trials = max_trials.saturating_sub(trials.len());
+    for source_index in selected_cartesian_indices(cartesian_trials, remaining_trials) {
         let Some(indices) = LayeredTrialIndices::from_flat_index(config, source_index) else {
             continue;
         };
@@ -499,6 +1012,8 @@ pub fn build_layered_search_plan(
         let universe_profile = &config.universe_profiles[indices.universe_profile];
         let portfolio_drawdown_control =
             &config.portfolio_drawdown_controls[indices.portfolio_drawdown_control];
+        let portfolio_volatility_control =
+            &config.portfolio_volatility_controls[indices.portfolio_volatility_control];
 
         let trial_index = trials.len();
         let mut parameters = serde_json::json!({
@@ -520,6 +1035,7 @@ pub fn build_layered_search_plan(
             "score_candidate_pool_size": score_candidate_pool_size,
             "universe_profile": universe_profile,
             "portfolio_drawdown_control": portfolio_drawdown_control.profile_name,
+            "portfolio_volatility_control": portfolio_volatility_control.profile_name,
             "benchmark": config.benchmark,
         });
         if let (Some(start), Some(full), Some(min_exposure)) = (
@@ -549,6 +1065,21 @@ pub fn build_layered_search_plan(
         if let Some(boost) = portfolio_drawdown_control.recovery_boost {
             parameters["portfolio_drawdown_recovery_boost"] =
                 serde_json::json!(decimal_string(boost));
+        }
+        if let Some(target_pct) = portfolio_volatility_control.target_pct {
+            parameters["portfolio_volatility_target_pct"] =
+                serde_json::json!(decimal_string(target_pct));
+        }
+        if let Some(lookback_days) = portfolio_volatility_control.lookback_days {
+            parameters["portfolio_volatility_lookback_days"] = serde_json::json!(lookback_days);
+        }
+        if let Some(min_exposure) = portfolio_volatility_control.min_exposure {
+            parameters["portfolio_volatility_min_exposure"] =
+                serde_json::json!(decimal_string(min_exposure));
+        }
+        if let Some(max_exposure) = portfolio_volatility_control.max_exposure {
+            parameters["portfolio_volatility_max_exposure"] =
+                serde_json::json!(decimal_string(max_exposure));
         }
         match signal_candidate {
             Some(LayeredSignalCandidate::FactorCombo(combo)) => {
@@ -600,6 +1131,7 @@ struct LayeredTrialIndices {
     score_candidate_pool_size: usize,
     universe_profile: usize,
     portfolio_drawdown_control: usize,
+    portfolio_volatility_control: usize,
 }
 
 impl LayeredTrialIndices {
@@ -615,6 +1147,8 @@ impl LayeredTrialIndices {
         let universe_profile = take_axis_index(&mut index, config.universe_profiles.len())?;
         let portfolio_drawdown_control =
             take_axis_index(&mut index, config.portfolio_drawdown_controls.len())?;
+        let portfolio_volatility_control =
+            take_axis_index(&mut index, config.portfolio_volatility_controls.len())?;
         let risk_budget_lookback_days =
             take_axis_index(&mut index, config.risk_budget_lookback_days.len())?;
         let portfolio_method = take_axis_index(&mut index, config.portfolio_methods.len())?;
@@ -647,6 +1181,7 @@ impl LayeredTrialIndices {
             score_candidate_pool_size,
             universe_profile,
             portfolio_drawdown_control,
+            portfolio_volatility_control,
         })
     }
 }
@@ -682,6 +1217,7 @@ pub struct CandidateTargets {
     pub min_annual_return: Decimal,
     pub min_excess_return: Decimal,
     pub min_sharpe: Decimal,
+    pub min_sortino: Decimal,
     pub max_drawdown: Decimal,
 }
 
@@ -691,7 +1227,8 @@ impl Default for CandidateTargets {
             min_annual_return: Decimal::new(15, 2),
             min_excess_return: Decimal::ZERO,
             min_sharpe: Decimal::ONE,
-            max_drawdown: Decimal::new(25, 2),
+            min_sortino: Decimal::new(15, 1),
+            max_drawdown: Decimal::new(35, 2),
         }
     }
 }
@@ -700,8 +1237,9 @@ impl CandidateTargets {
     pub fn classify(&self, metrics: &CandidateMetrics) -> CandidateType {
         if metrics.annual_return >= self.min_annual_return
             && metrics.excess_return > self.min_excess_return
-            && metrics.sharpe >= self.min_sharpe
-            && metrics.max_drawdown <= self.max_drawdown
+            && metrics.sharpe > self.min_sharpe
+            && metrics.sortino >= self.min_sortino
+            && metrics.max_drawdown < self.max_drawdown
         {
             CandidateType::Professional
         } else if metrics.annual_return >= self.min_annual_return
@@ -736,6 +1274,7 @@ pub struct CandidateMetrics {
     pub annual_return: Decimal,
     pub excess_return: Decimal,
     pub sharpe: Decimal,
+    pub sortino: Decimal,
     pub max_drawdown: Decimal,
     pub total_return: Decimal,
     pub benchmark_return: Decimal,
@@ -749,6 +1288,7 @@ impl Default for CandidateMetrics {
             annual_return: Decimal::ZERO,
             excess_return: Decimal::ZERO,
             sharpe: Decimal::ZERO,
+            sortino: Decimal::ZERO,
             max_drawdown: Decimal::ZERO,
             total_return: Decimal::ZERO,
             benchmark_return: Decimal::ZERO,
@@ -764,6 +1304,7 @@ impl CandidateMetrics {
             annual_return: decimal_field(metrics, "annual_return_pct"),
             excess_return: decimal_field(metrics, "excess_return_pct"),
             sharpe: decimal_field(metrics, "sharpe_ratio"),
+            sortino: decimal_field(metrics, "sortino_ratio"),
             max_drawdown: decimal_field(metrics, "max_drawdown_pct"),
             total_return: decimal_field(metrics, "total_return_pct"),
             benchmark_return: decimal_field(metrics, "benchmark_return_pct"),
@@ -836,6 +1377,7 @@ fn candidate_row_order(
         .cmp(&candidate_type_rank(right.candidate_type))
         .then_with(|| right.metrics.annual_return.cmp(&left.metrics.annual_return))
         .then_with(|| right.metrics.sharpe.cmp(&left.metrics.sharpe))
+        .then_with(|| right.metrics.sortino.cmp(&left.metrics.sortino))
         .then_with(|| right.metrics.excess_return.cmp(&left.metrics.excess_return))
         .then_with(|| left.metrics.max_drawdown.cmp(&right.metrics.max_drawdown))
 }
@@ -901,6 +1443,7 @@ mod tests {
             annual_return: Decimal::new(18, 2),
             excess_return: Decimal::new(5, 2),
             sharpe: Decimal::new(12, 1),
+            sortino: Decimal::new(16, 1),
             max_drawdown: Decimal::new(20, 2),
             ..CandidateMetrics::default()
         };
@@ -908,6 +1451,23 @@ mod tests {
         assert_eq!(
             CandidateTargets::default().classify(&metrics),
             CandidateType::Professional
+        );
+    }
+
+    #[test]
+    fn candidate_screening_requires_sortino_for_professional_candidate() {
+        let metrics = CandidateMetrics {
+            annual_return: Decimal::new(18, 2),
+            excess_return: Decimal::new(5, 2),
+            sharpe: Decimal::new(12, 1),
+            sortino: Decimal::new(10, 1),
+            max_drawdown: Decimal::new(20, 2),
+            ..CandidateMetrics::default()
+        };
+
+        assert_eq!(
+            CandidateTargets::default().classify(&metrics),
+            CandidateType::ReviewRequired
         );
     }
 
@@ -937,6 +1497,7 @@ mod tests {
                         "annual_return_pct": "0.02",
                         "excess_return_pct": "-0.10",
                         "sharpe_ratio": "0.10",
+                        "sortino_ratio": "0.12",
                         "max_drawdown_pct": "0.20",
                         "num_trades": 30
                     }
@@ -950,6 +1511,7 @@ mod tests {
                         "annual_return_pct": "0.16",
                         "excess_return_pct": "0.03",
                         "sharpe_ratio": "1.10",
+                        "sortino_ratio": "1.60",
                         "max_drawdown_pct": "0.22",
                         "num_trades": 80
                     }
@@ -999,6 +1561,17 @@ mod tests {
                     Some(252),
                 ),
             ],
+            portfolio_volatility_controls: vec![
+                PortfolioVolatilityControlProfile::off(),
+                PortfolioVolatilityControlProfile::target(
+                    "vol120_18_50_100",
+                    Decimal::new(18, 2),
+                    120,
+                    Decimal::new(50, 2),
+                    Decimal::ONE,
+                ),
+            ],
+            seed_trials: Vec::new(),
             correlation_lookback_days: 60,
             kelly_lookback_days: 60,
             benchmark: "000300.SH".to_string(),
@@ -1008,7 +1581,7 @@ mod tests {
 
         let plan = build_layered_search_plan(&config, &resource_plan);
 
-        assert_eq!(plan.requested_trials, 768);
+        assert_eq!(plan.requested_trials, 1536);
         assert_eq!(plan.trials.len(), 5);
         assert!(plan.truncated);
         assert_eq!(plan.trials[0].trial_id, "phase7d-000001");
@@ -1018,6 +1591,10 @@ mod tests {
         assert!(plan.trials[0].parameters["industry_max_weight_pct"].is_null());
         assert_eq!(
             plan.trials[0].parameters["portfolio_drawdown_control"],
+            "off"
+        );
+        assert_eq!(
+            plan.trials[0].parameters["portfolio_volatility_control"],
             "off"
         );
         let market_regimes = plan
@@ -1097,6 +1674,12 @@ mod tests {
         assert!(config
             .market_regime_policies
             .contains(&"drawdown_control_v2".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_risk_off_v1".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_crash_guard_v1".to_string()));
         assert!(config.kelly_fraction.contains(&Decimal::new(25, 2)));
         assert!(config
             .max_pairwise_correlation
@@ -1133,6 +1716,105 @@ mod tests {
             .portfolio_drawdown_controls
             .iter()
             .any(|profile| profile.profile_name == "recover252_10_25_50_30_70"));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_10_27_50_30_70"));
+        assert!(config
+            .portfolio_volatility_controls
+            .iter()
+            .any(|profile| profile.profile_name == "vol252_16_45_100"));
+        assert!(config
+            .portfolio_volatility_controls
+            .iter()
+            .any(|profile| profile.profile_name == "vol120_18_50_100"));
+        assert!(config
+            .portfolio_volatility_controls
+            .iter()
+            .any(|profile| profile.profile_name == "vol60_20_60_100"));
+    }
+
+    #[test]
+    fn professional_breakthrough_config_focuses_on_high_return_neighborhood() {
+        let config = LayeredSearchConfig::professional_breakthrough_default();
+
+        assert!(config
+            .combo_versions
+            .iter()
+            .any(|combo| combo.combo_name == "phase7_financial_quality_v1"));
+        assert!(config
+            .combo_versions
+            .iter()
+            .any(|combo| combo.combo_name == "phase7_quality_moneyflow_pos_5pct_v1"));
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert!(config.top_n.contains(&20));
+        assert!(config.rebalance_days.contains(&60));
+        assert!(config.max_position_pct.contains(&Decimal::new(15, 2)));
+        assert!(config
+            .portfolio_methods
+            .contains(&"risk_budget".to_string()));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_10_25_50_30_70"));
+        assert!(config.seed_trials.len() >= 3);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["risk_budget_lookback_days"] == 120
+                && trial["capacity_penalty_strength"] == "0.75"
+        }));
+    }
+
+    #[test]
+    fn professional_risk_breakthrough_config_focuses_on_drawdown_sortino_neighborhood() {
+        let config = LayeredSearchConfig::professional_risk_breakthrough_default();
+
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_crash_guard_v1".to_string()));
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert!(config.top_n.contains(&20));
+        assert!(config.top_n.contains(&25));
+        assert!(config.rebalance_days.contains(&60));
+        assert!(config.max_position_pct.contains(&Decimal::new(10, 2)));
+        assert!(config.max_gross_exposure.contains(&Decimal::new(90, 2)));
+        assert!(config.risk_budget_lookback_days.contains(&180));
+        assert!(config.capacity_penalty_strength.contains(&Decimal::ONE));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_08_25_60_25_75"));
+        assert!(config
+            .portfolio_drawdown_controls
+            .iter()
+            .any(|profile| profile.profile_name == "recover252_10_30_55_25_75"));
+        assert!(config
+            .portfolio_volatility_controls
+            .iter()
+            .any(|profile| profile.profile_name == "vol120_24_70_100"));
+        assert!(config
+            .portfolio_volatility_controls
+            .iter()
+            .any(|profile| profile.profile_name == "vol120_30_85_100"));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["portfolio_drawdown_control"] == "recover252_08_25_60_25_75"
+                && trial["portfolio_volatility_control"] == "vol120_24_70_100"
+                && trial["max_position_pct"] == "0.10"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_10_27_50_30_70"
+                && trial["portfolio_volatility_control"] == "vol120_30_85_100"
+                && trial["max_gross_exposure"] == "1"
+                && trial["portfolio_volatility_min_exposure"] == "0.85"
+        }));
     }
 
     #[test]
@@ -1182,6 +1864,7 @@ mod tests {
         config.score_candidate_pool_sizes = vec![0];
         config.universe_profiles = vec!["listed_non_st".to_string()];
         config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::off()];
+        config.portfolio_volatility_controls = vec![PortfolioVolatilityControlProfile::off()];
         let mut resource_plan = LocalResourcePlan::for_machine(4, 16);
         resource_plan.max_trials = 1;
 
@@ -1222,7 +1905,7 @@ mod tests {
             .filter_map(|trial| trial.parameters["top_n"].as_u64())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(plan.requested_trials, 456_855_552);
+        assert_eq!(plan.requested_trials, 3_197_988_864);
         assert_eq!(plan.planned_trials, 8);
         assert!(plan
             .trials

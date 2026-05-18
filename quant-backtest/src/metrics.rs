@@ -95,11 +95,40 @@ impl BacktestMetrics {
             daily_vol * Decimal::from_f64(252.0_f64.sqrt()).unwrap()
         };
 
+        // Sortino uses downside deviation only. A strictly non-decreasing NAV has
+        // effectively unbounded downside-adjusted return, capped for storage.
+        let downside_vol = if daily.len() <= 1 {
+            Decimal::zero()
+        } else {
+            let downside_sum = daily
+                .iter()
+                .filter(|value| **value < Decimal::zero())
+                .map(|value| *value * *value)
+                .sum::<Decimal>();
+            if downside_sum.is_zero() {
+                Decimal::zero()
+            } else {
+                let variance = downside_sum / Decimal::from(daily.len() - 1);
+                let daily_downside =
+                    Decimal::from_f64(variance.to_f64().unwrap_or(0.0).sqrt()).unwrap_or_default();
+                daily_downside * Decimal::from_f64(252.0_f64.sqrt()).unwrap()
+            }
+        };
+
         // 夏普
         let sharpe = if annual_vol.is_zero() {
             Decimal::zero()
         } else {
             annual_return_pct / annual_vol
+        };
+        let sortino = if downside_vol.is_zero() {
+            if annual_return_pct > Decimal::zero() {
+                Decimal::new(999, 0)
+            } else {
+                Decimal::zero()
+            }
+        } else {
+            annual_return_pct / downside_vol
         };
 
         // 最大回撤
@@ -131,7 +160,7 @@ impl BacktestMetrics {
             annual_volatility_pct: annual_vol,
             annualized_volatility: annual_vol,
             sharpe_ratio: sharpe,
-            sortino_ratio: Decimal::zero(),
+            sortino_ratio: sortino,
             calmar_ratio: Decimal::zero(),
             benchmark_return_pct: bm_return,
             excess_return_pct: excess,
@@ -146,5 +175,25 @@ impl BacktestMetrics {
 
     fn empty() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(raw: &str) -> Decimal {
+        raw.parse().expect("valid decimal")
+    }
+
+    #[test]
+    fn computes_sortino_ratio_from_downside_returns() {
+        let nav = vec![d("100"), d("103"), d("101"), d("106"), d("104"), d("110")];
+        let bm_nav = vec![d("100"), d("101"), d("100"), d("102"), d("101"), d("103")];
+
+        let metrics = BacktestMetrics::compute(&nav, &bm_nav, d("100"));
+
+        assert!(metrics.sortino_ratio > Decimal::ZERO);
+        assert!(metrics.sortino_ratio > metrics.sharpe_ratio);
     }
 }

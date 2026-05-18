@@ -594,6 +594,10 @@ pub struct RunFactorBacktestReq {
     pub portfolio_drawdown_recovery_start_pct: Option<f64>,
     pub portfolio_drawdown_recovery_full_pct: Option<f64>,
     pub portfolio_drawdown_recovery_boost: Option<f64>,
+    pub portfolio_volatility_target_pct: Option<f64>,
+    pub portfolio_volatility_lookback_days: Option<usize>,
+    pub portfolio_volatility_min_exposure: Option<f64>,
+    pub portfolio_volatility_max_exposure: Option<f64>,
     pub start_date: String,
     pub end_date: String,
     #[serde(default = "default_capital")]
@@ -786,6 +790,19 @@ fn optional_decimal_pct(value: Option<f64>, name: &str) -> Result<Option<Decimal
     decimal_from_f64(value, name).map(Some)
 }
 
+fn optional_positive_decimal_pct(
+    value: Option<f64>,
+    name: &str,
+) -> Result<Option<Decimal>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) || value <= 0.0 {
+        return Err(format!("{} must be greater than 0 and at most 1", name));
+    }
+    decimal_from_f64(value, name).map(Some)
+}
+
 fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskControlConfig, String> {
     let start = optional_decimal_pct(
         req.portfolio_drawdown_reduce_start_pct,
@@ -810,6 +827,18 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
     let recovery_boost = optional_decimal_pct(
         req.portfolio_drawdown_recovery_boost,
         "portfolio_drawdown_recovery_boost",
+    )?;
+    let volatility_target = optional_positive_decimal_pct(
+        req.portfolio_volatility_target_pct,
+        "portfolio_volatility_target_pct",
+    )?;
+    let volatility_min_exposure = optional_decimal_pct(
+        req.portfolio_volatility_min_exposure,
+        "portfolio_volatility_min_exposure",
+    )?;
+    let volatility_max_exposure = optional_decimal_pct(
+        req.portfolio_volatility_max_exposure,
+        "portfolio_volatility_max_exposure",
     )?;
 
     let provided = start.is_some() || full.is_some() || min_exposure.is_some();
@@ -843,6 +872,32 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
             );
         }
     }
+    let volatility_lookback_days = match req.portfolio_volatility_lookback_days {
+        Some(days) if days < 2 => {
+            return Err("portfolio_volatility_lookback_days must be at least 2".into());
+        }
+        Some(days) => Some(days),
+        None => None,
+    };
+    let volatility_provided = volatility_target.is_some()
+        || volatility_lookback_days.is_some()
+        || volatility_min_exposure.is_some()
+        || volatility_max_exposure.is_some();
+    if volatility_provided && volatility_target.is_none() {
+        return Err(
+            "portfolio volatility risk control requires portfolio_volatility_target_pct".into(),
+        );
+    }
+    if let (Some(min_exposure), Some(max_exposure)) =
+        (volatility_min_exposure, volatility_max_exposure)
+    {
+        if max_exposure < min_exposure {
+            return Err(
+                "portfolio_volatility_max_exposure must be greater than or equal to portfolio_volatility_min_exposure"
+                    .into(),
+            );
+        }
+    }
 
     Ok(RiskControlConfig {
         portfolio_drawdown_reduce_start_pct: start,
@@ -854,6 +909,10 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
         portfolio_drawdown_recovery_start_pct: recovery_start,
         portfolio_drawdown_recovery_full_pct: recovery_full,
         portfolio_drawdown_recovery_boost: recovery_boost,
+        portfolio_volatility_target_pct: volatility_target,
+        portfolio_volatility_lookback_days: volatility_lookback_days,
+        portfolio_volatility_min_exposure: volatility_min_exposure,
+        portfolio_volatility_max_exposure: volatility_max_exposure,
         ..RiskControlConfig::default()
     })
 }
@@ -885,6 +944,8 @@ fn build_market_regime_policy(
         "professional_default" => MarketRegimePolicy::professional_default(benchmark),
         "drawdown_control_v1" => MarketRegimePolicy::drawdown_control_v1(benchmark),
         "drawdown_control_v2" => MarketRegimePolicy::drawdown_control_v2(benchmark),
+        "quality_risk_off_v1" => MarketRegimePolicy::quality_risk_off_v1(benchmark),
+        "quality_crash_guard_v1" => MarketRegimePolicy::quality_crash_guard_v1(benchmark),
         other => return Err(format!("unsupported market_regime policy: {}", other)),
     };
     if let Some(lookback_days) = req.lookback_days {
@@ -1517,6 +1578,71 @@ mod tests {
     }
 
     #[test]
+    fn market_regime_request_builds_quality_risk_off_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_risk_off_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.bear_drawdown_threshold, 0.12);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.80)
+        );
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.score_direction),
+            None
+        );
+    }
+
+    #[test]
+    fn market_regime_request_builds_quality_crash_guard_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_crash_guard_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.bear_drawdown_threshold, 0.25);
+        assert_eq!(policy.high_volatility_threshold, 0.50);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.85)
+        );
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.score_direction),
+            None
+        );
+    }
+
+    #[test]
     fn factor_request_builds_portfolio_drawdown_risk_control() {
         let req = RunFactorBacktestReq {
             combo_name: "phase7_financial_quality_v1".to_string(),
@@ -1562,6 +1688,10 @@ mod tests {
             portfolio_drawdown_recovery_start_pct: Some(0.30),
             portfolio_drawdown_recovery_full_pct: Some(0.70),
             portfolio_drawdown_recovery_boost: Some(1.0),
+            portfolio_volatility_target_pct: Some(0.16),
+            portfolio_volatility_lookback_days: Some(60),
+            portfolio_volatility_min_exposure: Some(0.45),
+            portfolio_volatility_max_exposure: Some(1.0),
         };
 
         let risk_control = build_portfolio_risk_control(&req).expect("valid risk control");
@@ -1592,6 +1722,19 @@ mod tests {
         );
         assert_eq!(
             risk_control.portfolio_drawdown_recovery_boost,
+            Some(Decimal::ONE)
+        );
+        assert_eq!(
+            risk_control.portfolio_volatility_target_pct,
+            Some(Decimal::new(16, 2))
+        );
+        assert_eq!(risk_control.portfolio_volatility_lookback_days, Some(60));
+        assert_eq!(
+            risk_control.portfolio_volatility_min_exposure,
+            Some(Decimal::new(45, 2))
+        );
+        assert_eq!(
+            risk_control.portfolio_volatility_max_exposure,
             Some(Decimal::ONE)
         );
     }

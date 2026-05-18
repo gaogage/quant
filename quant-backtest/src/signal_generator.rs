@@ -793,6 +793,123 @@ impl MarketRegimePolicy {
         }
     }
 
+    /// Risk-off overlay for quality/value style alpha where the score direction
+    /// itself is the edge. Unlike the generic policies, this never flips
+    /// `score_direction`; it only scales exposure and position caps in weak
+    /// markets.
+    pub fn quality_risk_off_v1(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.80),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.65),
+                max_position_pct: Some(Decimal::new(12, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 63,
+            min_observations: 10,
+            high_volatility_threshold: 0.24,
+            bear_return_threshold: -0.015,
+            bear_drawdown_threshold: 0.12,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
+    /// Tail-risk guard for quality/value style alpha. It keeps the stock
+    /// selection shape intact and only reduces exposure in severe market
+    /// stress, so high-return quality candidates are not diluted in normal
+    /// sideways or mild risk-off regimes.
+    pub fn quality_crash_guard_v1(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.85),
+                max_position_pct: Some(Decimal::new(12, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.75),
+                max_position_pct: Some(Decimal::new(10, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 63,
+            min_observations: 10,
+            high_volatility_threshold: 0.50,
+            bear_return_threshold: -0.08,
+            bear_drawdown_threshold: 0.25,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
     pub fn apply(&self, base: &SignalConfig, regime: MarketRegime) -> SignalConfig {
         self.rules
             .get(&regime)
@@ -3283,6 +3400,69 @@ mod tests {
         assert!(high_volatility_v2.max_gross_exposure < high_volatility_v1.max_gross_exposure);
         assert_eq!(sideways_v2.max_gross_exposure, 0.55);
         assert_eq!(sideways_v2.max_position_pct, Decimal::new(6, 2));
+    }
+
+    #[test]
+    fn quality_risk_off_keeps_alpha_direction_while_reducing_exposure() {
+        let base = SignalConfig {
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_risk_off_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(bull.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bull.top_n, 20);
+        assert_eq!(bull.rebalance_freq_days, 60);
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.top_n, 20);
+        assert_eq!(bear.max_gross_exposure, 0.80);
+        assert_eq!(bear.max_position_pct, Decimal::new(15, 2));
+        assert_eq!(high_volatility.score_direction, ScoreDirection::Ascending);
+        assert_eq!(high_volatility.max_gross_exposure, 0.65);
+        assert_eq!(high_volatility.max_position_pct, Decimal::new(12, 2));
+    }
+
+    #[test]
+    fn quality_crash_guard_preserves_alpha_shape_and_only_scales_tail_regimes() {
+        let base = SignalConfig {
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_crash_guard_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let sideways = policy.apply(&base, MarketRegime::Sideways);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(policy.bear_drawdown_threshold, 0.25);
+        assert_eq!(policy.high_volatility_threshold, 0.50);
+        assert_eq!(bull.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bull.top_n, 20);
+        assert_eq!(bull.rebalance_freq_days, 60);
+        assert_eq!(bull.skip_top_pct, 0.10);
+        assert_eq!(sideways.max_gross_exposure, 1.0);
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.top_n, 20);
+        assert_eq!(bear.rebalance_freq_days, 60);
+        assert_eq!(bear.skip_top_pct, 0.10);
+        assert_eq!(bear.max_gross_exposure, 0.85);
+        assert_eq!(bear.max_position_pct, Decimal::new(12, 2));
+        assert_eq!(high_volatility.max_gross_exposure, 0.75);
+        assert_eq!(high_volatility.max_position_pct, Decimal::new(10, 2));
     }
 
     #[test]

@@ -7,7 +7,8 @@ use axum::{
 };
 use chrono::NaiveDate;
 use quant_common::phase7::{
-    build_layered_search_plan, LayeredSearchConfig, LayeredSearchPlan, LocalResourcePlan,
+    build_layered_search_plan, CandidateMetrics, CandidateTargets, CandidateType,
+    LayeredSearchConfig, LayeredSearchPlan, LocalResourcePlan,
 };
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -51,6 +52,26 @@ pub struct Phase7LayeredOptimizationRequest {
     pub backtest_template: Option<Value>,
     pub prediction_set_ids: Option<Vec<String>>,
     pub max_trials: Option<usize>,
+    pub search_profile: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7ProfessionalDiscoveryRequest {
+    pub strategy_version_id: String,
+    pub data_version_id: String,
+    pub objective: Option<Value>,
+    pub constraints: Option<Value>,
+    pub walk_forward: Option<Value>,
+    pub backtest_template: Option<Value>,
+    pub prediction_set_ids: Option<Vec<String>>,
+    pub max_trials: Option<usize>,
+    pub search_profile: Option<String>,
+    pub trial_batch_limit: Option<i64>,
+    pub max_batches: Option<usize>,
+    pub robustness_top_n: Option<usize>,
+    pub robustness_gate_policy: Option<Value>,
+    pub stop_after_professional_candidate: Option<bool>,
+    pub stop_after_robust_approval: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +142,7 @@ struct RobustnessMetricSummary {
     total_return: f64,
     annual_return: f64,
     sharpe_ratio: f64,
+    sortino_ratio: f64,
     max_drawdown: f64,
     benchmark_return: Option<f64>,
     excess_return: Option<f64>,
@@ -158,6 +180,17 @@ struct Phase7LayeredPlanBundle {
     search_space: Value,
 }
 
+#[derive(Debug, Clone)]
+struct DiscoveryCandidate {
+    trial_id: String,
+    backtest_task_id: Option<String>,
+    score: Option<Decimal>,
+    candidate_type: CandidateType,
+    professional_gap_score: Decimal,
+    metrics: CandidateMetrics,
+    parameters: Value,
+}
+
 enum OptimizationTrialBacktestRequest {
     Factor(RunFactorBacktestReq),
     Prediction(RunPredictionBacktestReq),
@@ -179,6 +212,50 @@ fn normalize_limit(value: Option<i64>) -> i64 {
     value.unwrap_or(100).clamp(1, 500)
 }
 
+fn default_professional_robustness_policy() -> Value {
+    json!({
+        "min_trade_count": 1,
+        "min_annual_return": 0.15,
+        "min_excess_return": 0.0,
+        "min_sharpe": 1.0,
+        "min_sortino": 1.5,
+        "max_drawdown": 0.35,
+        "min_score_gap": 0.0,
+        "walk_forward_window_days": 756,
+        "walk_forward_step_days": 63,
+        "min_walk_forward_windows": 4,
+        "min_positive_excess_window_ratio": 0.50,
+        "min_bootstrap_positive_return_probability": 0.70,
+        "min_market_scenarios": 2,
+        "bootstrap_trials": 512,
+        "bootstrap_seed": 42
+    })
+}
+
+fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchConfig) {
+    match search_profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("local_professional")
+    {
+        "professional_risk_breakthrough"
+        | "risk_breakthrough"
+        | "drawdown_sortino_breakthrough"
+        | "phase7_risk_breakthrough" => (
+            "professional_risk_breakthrough".to_string(),
+            LayeredSearchConfig::professional_risk_breakthrough_default(),
+        ),
+        "professional_breakthrough" | "breakthrough" | "phase7_breakthrough" => (
+            "professional_breakthrough".to_string(),
+            LayeredSearchConfig::professional_breakthrough_default(),
+        ),
+        _ => (
+            "local_professional".to_string(),
+            LayeredSearchConfig::local_professional_default(),
+        ),
+    }
+}
+
 fn build_phase7_layered_plan_bundle(
     req: &Phase7LayeredOptimizationRequest,
     mut resource_plan: LocalResourcePlan,
@@ -187,7 +264,7 @@ fn build_phase7_layered_plan_bundle(
         resource_plan.max_trials = normalize_max_trials(max_trials);
     }
 
-    let mut config = LayeredSearchConfig::local_professional_default();
+    let (search_profile, mut config) = phase7_search_config(req.search_profile.as_deref());
     if let Some(prediction_set_ids) = req.prediction_set_ids.as_ref() {
         config.prediction_set_ids = normalize_prediction_set_ids(prediction_set_ids);
     }
@@ -195,6 +272,7 @@ fn build_phase7_layered_plan_bundle(
     let search_space = json!({
         "phase": "7-D",
         "search_method": "phase7_layered_grid",
+        "search_profile": search_profile,
         "config": config,
         "resource_plan": resource_plan.clone(),
         "requested_trials": plan.requested_trials,
@@ -206,6 +284,44 @@ fn build_phase7_layered_plan_bundle(
         resource_plan,
         plan,
         search_space,
+    }
+}
+
+fn phase7_discovery_layered_request(
+    req: &Phase7ProfessionalDiscoveryRequest,
+) -> Phase7LayeredOptimizationRequest {
+    Phase7LayeredOptimizationRequest {
+        strategy_version_id: req.strategy_version_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        objective: req.objective.clone().unwrap_or_else(|| {
+            json!({
+                "type": "professional_candidate",
+                "benchmark": "000300.SH",
+                "maximize": true
+            })
+        }),
+        constraints: req.constraints.clone().or_else(|| {
+            Some(json!({
+                "min_annual_return": 0.15,
+                "min_excess_return": 0.0,
+                "min_sharpe": 1.0,
+                "min_sortino": 1.5,
+                "max_drawdown": 0.35,
+                "min_trade_count": 1
+            }))
+        }),
+        walk_forward: req.walk_forward.clone(),
+        backtest_template: req.backtest_template.clone(),
+        prediction_set_ids: req.prediction_set_ids.clone(),
+        max_trials: req.max_trials,
+        search_profile: Some(
+            req.search_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("professional_risk_breakthrough")
+                .to_string(),
+        ),
     }
 }
 
@@ -310,16 +426,38 @@ pub async fn create_phase7_layered_optimization(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7LayeredOptimizationRequest>,
 ) -> impl IntoResponse {
-    let bundle = build_phase7_layered_plan_bundle(&req, LocalResourcePlan::local_mac());
+    match insert_phase7_layered_optimization(&state.db, &req, LocalResourcePlan::local_mac()).await
+    {
+        Ok((task_id, bundle)) => Json(json!({
+            "code": 0,
+            "data": {
+                "optimization_task_id": task_id,
+                "status": "pending",
+                "search_method": "phase7_layered_grid",
+                "requested_trials": bundle.plan.requested_trials,
+                "planned_trials": bundle.plan.planned_trials,
+                "truncated": bundle.plan.truncated,
+                "batch_size": bundle.plan.batch_size,
+                "max_parallel_trials": bundle.plan.max_parallel_trials,
+                "resource_plan": bundle.resource_plan,
+                "search_profile": bundle.search_space["search_profile"],
+            }
+        })),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn insert_phase7_layered_optimization(
+    db: &sqlx::PgPool,
+    req: &Phase7LayeredOptimizationRequest,
+    resource_plan: LocalResourcePlan,
+) -> Result<(String, Phase7LayeredPlanBundle), String> {
+    let bundle = build_phase7_layered_plan_bundle(req, resource_plan);
     let task_id = format!("opt-phase7-{}", Uuid::new_v4());
-    let mut tx = match state.db.begin().await {
-        Ok(tx) => tx,
-        Err(error) => {
-            return Json(
-                json!({"code": 1, "message": format!("Failed to begin phase7 optimization transaction: {}", error)}),
-            );
-        }
-    };
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin phase7 optimization transaction: {}", error))?;
 
     let insert_task = sqlx::query(
         "INSERT INTO optimization_task
@@ -339,9 +477,10 @@ pub async fn create_phase7_layered_optimization(
     .await;
 
     if let Err(error) = insert_task {
-        return Json(
-            json!({"code": 1, "message": format!("Failed to create phase7 optimization task: {}", error)}),
-        );
+        return Err(format!(
+            "Failed to create phase7 optimization task: {}",
+            error
+        ));
     }
 
     for trial in &bundle.plan.trials {
@@ -358,32 +497,18 @@ pub async fn create_phase7_layered_optimization(
         .execute(&mut *tx)
         .await
         {
-            return Json(
-                json!({"code": 1, "message": format!("Failed to create phase7 optimization trial: {}", error)}),
-            );
+            return Err(format!(
+                "Failed to create phase7 optimization trial: {}",
+                error
+            ));
         }
     }
 
-    if let Err(error) = tx.commit().await {
-        return Json(
-            json!({"code": 1, "message": format!("Failed to commit phase7 optimization task: {}", error)}),
-        );
-    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit phase7 optimization task: {}", error))?;
 
-    Json(json!({
-        "code": 0,
-        "data": {
-            "optimization_task_id": task_id,
-            "status": "pending",
-            "search_method": "phase7_layered_grid",
-            "requested_trials": bundle.plan.requested_trials,
-            "planned_trials": bundle.plan.planned_trials,
-            "truncated": bundle.plan.truncated,
-            "batch_size": bundle.plan.batch_size,
-            "max_parallel_trials": bundle.plan.max_parallel_trials,
-            "resource_plan": bundle.resource_plan,
-        }
-    }))
+    Ok((task_id, bundle))
 }
 
 pub async fn get_optimization(
@@ -482,6 +607,16 @@ pub async fn run_optimization_trials(
     }
 }
 
+pub async fn run_phase7_professional_discovery(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7ProfessionalDiscoveryRequest>,
+) -> impl IntoResponse {
+    match execute_phase7_professional_discovery(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
 pub async fn promote_optimization_trial(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -491,6 +626,153 @@ pub async fn promote_optimization_trial(
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
+}
+
+async fn execute_phase7_professional_discovery(
+    db: &sqlx::PgPool,
+    req: Phase7ProfessionalDiscoveryRequest,
+) -> Result<Value, String> {
+    let layered_req = phase7_discovery_layered_request(&req);
+    let (task_id, bundle) =
+        insert_phase7_layered_optimization(db, &layered_req, LocalResourcePlan::local_mac())
+            .await?;
+    let trial_batch_limit = req
+        .trial_batch_limit
+        .unwrap_or(bundle.plan.batch_size as i64)
+        .clamp(1, 500);
+    let max_batches = req.max_batches.unwrap_or_else(|| {
+        let planned = bundle.plan.planned_trials.max(1);
+        let batch = trial_batch_limit.max(1) as usize;
+        planned.div_ceil(batch)
+    });
+    let max_batches = max_batches.clamp(1, 10_000);
+    let robustness_top_n = req.robustness_top_n.unwrap_or(3).clamp(1, 20);
+    let targets = CandidateTargets::default();
+    let gate_policy = req
+        .robustness_gate_policy
+        .clone()
+        .unwrap_or_else(default_professional_robustness_policy);
+    let stop_after_professional = req.stop_after_professional_candidate.unwrap_or(true);
+    let stop_after_robust_approval = req.stop_after_robust_approval.unwrap_or(true);
+
+    let mut batch_summaries = Vec::new();
+    let mut robustness_results = Vec::new();
+    let mut evaluated_robustness_trials = BTreeSet::new();
+    let mut approved_candidate_found = false;
+    let mut stop_reason = "planned_trials_exhausted";
+    for _ in 0..max_batches {
+        let summary = execute_pending_trials(db, &task_id, trial_batch_limit, None).await?;
+        let executed = summary["executed"].as_i64().unwrap_or(0);
+        batch_summaries.push(summary);
+        let candidates =
+            load_discovery_candidates(db, &task_id, &targets, robustness_top_n).await?;
+        if stop_after_professional
+            && candidates
+                .iter()
+                .any(|candidate| candidate.candidate_type == CandidateType::Professional)
+        {
+            let professional_candidates = candidates
+                .iter()
+                .filter(|candidate| candidate.candidate_type == CandidateType::Professional)
+                .cloned()
+                .collect::<Vec<_>>();
+            let batch_robustness_results = evaluate_discovery_candidates(
+                db,
+                &task_id,
+                &professional_candidates,
+                &gate_policy,
+                &mut evaluated_robustness_trials,
+            )
+            .await?;
+            approved_candidate_found = batch_robustness_results
+                .iter()
+                .any(robustness_result_is_approved);
+            robustness_results.extend(batch_robustness_results);
+            if stop_after_robust_approval {
+                if approved_candidate_found {
+                    stop_reason = "robust_professional_candidate_approved";
+                    break;
+                }
+            } else {
+                stop_reason = "professional_candidate_found_before_robust_approval";
+                break;
+            }
+        }
+        if executed == 0 {
+            stop_reason = "no_pending_trials";
+            break;
+        }
+    }
+
+    let candidates = load_discovery_candidates(db, &task_id, &targets, robustness_top_n).await?;
+    let final_robustness_results = evaluate_discovery_candidates(
+        db,
+        &task_id,
+        &candidates,
+        &gate_policy,
+        &mut evaluated_robustness_trials,
+    )
+    .await?;
+    approved_candidate_found = approved_candidate_found
+        || final_robustness_results
+            .iter()
+            .any(robustness_result_is_approved);
+    robustness_results.extend(final_robustness_results);
+
+    Ok(json!({
+        "optimization_task_id": task_id,
+        "search_method": "phase7_professional_discovery",
+        "search_profile": bundle.search_space["search_profile"],
+        "requested_trials": bundle.plan.requested_trials,
+        "planned_trials": bundle.plan.planned_trials,
+        "trial_batch_limit": trial_batch_limit,
+        "executed_batches": batch_summaries.len(),
+        "batch_summaries": batch_summaries,
+        "stop_reason": stop_reason,
+        "stop_after_robust_approval": stop_after_robust_approval,
+        "approved_candidate_found": approved_candidate_found,
+        "robustness_top_n": robustness_top_n,
+        "robustness_gate_policy": gate_policy,
+        "robustness_candidates": candidates
+            .iter()
+            .map(discovery_candidate_json)
+            .collect::<Vec<_>>(),
+        "robustness_results": robustness_results,
+    }))
+}
+
+async fn evaluate_discovery_candidates(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    candidates: &[DiscoveryCandidate],
+    gate_policy: &Value,
+    evaluated_trial_ids: &mut BTreeSet<String>,
+) -> Result<Vec<Value>, String> {
+    let mut results = Vec::new();
+    for candidate in candidates {
+        if !evaluated_trial_ids.insert(candidate.trial_id.clone()) {
+            continue;
+        }
+        results.push(
+            evaluate_and_persist_robustness_for_trial(
+                db,
+                task_id,
+                &candidate.trial_id,
+                Some(gate_policy),
+                "Professional discovery robustness gate evaluated",
+            )
+            .await?,
+        );
+    }
+    Ok(results)
+}
+
+fn robustness_result_is_approved(result: &Value) -> bool {
+    result
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|status| status == "approved_candidate")
+        .unwrap_or(false)
 }
 
 pub async fn evaluate_optimization_robustness(
@@ -1052,13 +1334,30 @@ async fn evaluate_and_persist_robustness(
         "optimization task has no best_trial_id; run completed trials first".to_string()
     })?;
 
+    evaluate_and_persist_robustness_for_trial(
+        db,
+        task_id,
+        best_trial_id,
+        gate_policy,
+        "Robustness gate evaluated",
+    )
+    .await
+}
+
+async fn evaluate_and_persist_robustness_for_trial(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    trial_id: &str,
+    gate_policy: Option<&Value>,
+    summary_prefix: &str,
+) -> Result<Value, String> {
     let trial = sqlx::query_as::<_, (Decimal, Option<Value>, Option<Value>, Option<String>)>(
         "SELECT score, metrics, constraint_violations, backtest_task_id
          FROM optimization_trial
          WHERE optimization_task_id = $1 AND trial_id = $2 AND status = 'completed'",
     )
     .bind(task_id)
-    .bind(best_trial_id)
+    .bind(trial_id)
     .fetch_optional(db)
     .await
     .map_err(|error| format!("Failed to load best optimization trial: {}", error))?
@@ -1072,23 +1371,15 @@ async fn evaluate_and_persist_robustness(
          LIMIT 1",
     )
     .bind(task_id)
-    .bind(best_trial_id)
+    .bind(trial_id)
     .fetch_optional(db)
     .await
     .map_err(|error| format!("Failed to load runner-up optimization trial: {}", error))?
     .map(|row| row.0);
 
-    let policy = gate_policy.cloned().unwrap_or_else(|| {
-        json!({
-            "min_trade_count": 1,
-            "max_drawdown": 0.20,
-            "min_score_gap": 0.0,
-            "walk_forward_window_days": 63,
-            "walk_forward_step_days": 21,
-            "bootstrap_trials": 256,
-            "bootstrap_seed": 42
-        })
-    });
+    let policy = gate_policy
+        .cloned()
+        .unwrap_or_else(|| default_professional_robustness_policy());
     let analysis = if let Some(backtest_task_id) = trial.3.as_deref() {
         load_robustness_timeseries_analysis(db, backtest_task_id, &policy).await?
     } else {
@@ -1112,14 +1403,11 @@ async fn evaluate_and_persist_robustness(
     )
     .bind(&gate_result_id)
     .bind(task_id)
-    .bind(best_trial_id)
+    .bind(trial_id)
     .bind(&policy)
     .bind(&evaluation.gates)
     .bind(&evaluation.status)
-    .bind(format!(
-        "Robustness gate evaluated as {}",
-        evaluation.status
-    ))
+    .bind(format!("{} as {}", summary_prefix, evaluation.status))
     .execute(db)
     .await
     .map_err(|error| format!("Failed to persist robustness gate result: {}", error))?;
@@ -1127,10 +1415,140 @@ async fn evaluate_and_persist_robustness(
     Ok(json!({
         "gate_result_id": gate_result_id,
         "optimization_task_id": task_id,
-        "trial_id": best_trial_id,
+        "trial_id": trial_id,
         "status": evaluation.status,
         "gate_results": evaluation.gates,
     }))
+}
+
+async fn load_discovery_candidates(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    targets: &CandidateTargets,
+    limit: usize,
+) -> Result<Vec<DiscoveryCandidate>, String> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<Decimal>,
+            Option<Value>,
+            Option<Value>,
+            Option<String>,
+            Value,
+        ),
+    >(
+        "SELECT trial_id, score, metrics, constraint_violations, backtest_task_id, parameters
+         FROM optimization_trial
+         WHERE optimization_task_id = $1 AND status = 'completed' AND metrics IS NOT NULL",
+    )
+    .bind(task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to load professional discovery candidates: {}",
+            error
+        )
+    })?;
+
+    let mut candidates = rows
+        .into_iter()
+        .filter_map(
+            |(trial_id, score, metrics, _violations, backtest_task_id, parameters)| {
+                let metrics_json = metrics?;
+                let candidate_metrics = CandidateMetrics::from_optimization_metrics(&metrics_json);
+                if candidate_metrics.annual_return < targets.min_annual_return
+                    || candidate_metrics.excess_return <= targets.min_excess_return
+                {
+                    return None;
+                }
+                let candidate_type = targets.classify(&candidate_metrics);
+                let professional_gap_score =
+                    professional_candidate_gap_score(&candidate_metrics, targets);
+                Some(DiscoveryCandidate {
+                    trial_id,
+                    backtest_task_id,
+                    score,
+                    candidate_type,
+                    professional_gap_score,
+                    metrics: candidate_metrics,
+                    parameters,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+    candidates.sort_by(discovery_candidate_order);
+    candidates.truncate(limit);
+    Ok(candidates)
+}
+
+fn discovery_candidate_order(
+    left: &DiscoveryCandidate,
+    right: &DiscoveryCandidate,
+) -> std::cmp::Ordering {
+    discovery_candidate_rank(left.candidate_type)
+        .cmp(&discovery_candidate_rank(right.candidate_type))
+        .then_with(|| {
+            left.professional_gap_score
+                .cmp(&right.professional_gap_score)
+        })
+        .then_with(|| left.metrics.max_drawdown.cmp(&right.metrics.max_drawdown))
+        .then_with(|| right.metrics.sortino.cmp(&left.metrics.sortino))
+        .then_with(|| right.metrics.sharpe.cmp(&left.metrics.sharpe))
+        .then_with(|| right.metrics.annual_return.cmp(&left.metrics.annual_return))
+}
+
+fn professional_candidate_gap_score(
+    metrics: &CandidateMetrics,
+    targets: &CandidateTargets,
+) -> Decimal {
+    let annual_gap = positive_gap(targets.min_annual_return, metrics.annual_return);
+    let excess_gap = positive_gap(targets.min_excess_return, metrics.excess_return);
+    let sharpe_gap = positive_gap(targets.min_sharpe, metrics.sharpe);
+    let sortino_gap = positive_gap(targets.min_sortino, metrics.sortino);
+    let drawdown_gap = positive_gap(metrics.max_drawdown, targets.max_drawdown);
+
+    annual_gap * Decimal::new(4, 0)
+        + excess_gap * Decimal::new(2, 0)
+        + sharpe_gap
+        + sortino_gap
+        + drawdown_gap * Decimal::new(5, 0)
+}
+
+fn positive_gap(limit: Decimal, actual: Decimal) -> Decimal {
+    (limit - actual).max(Decimal::ZERO)
+}
+
+fn discovery_candidate_rank(candidate_type: CandidateType) -> u8 {
+    match candidate_type {
+        CandidateType::Professional => 0,
+        CandidateType::ReviewRequired => 1,
+        CandidateType::Defensive => 2,
+        CandidateType::Research => 3,
+    }
+}
+
+fn discovery_candidate_json(candidate: &DiscoveryCandidate) -> Value {
+    json!({
+        "trial_id": candidate.trial_id,
+        "backtest_task_id": candidate.backtest_task_id,
+        "score": candidate.score,
+        "candidate_type": candidate.candidate_type,
+        "professional_gap_score": candidate.professional_gap_score,
+        "metrics": {
+            "annual_return_pct": candidate.metrics.annual_return,
+            "excess_return_pct": candidate.metrics.excess_return,
+            "sharpe_ratio": candidate.metrics.sharpe,
+            "sortino_ratio": candidate.metrics.sortino,
+            "max_drawdown_pct": candidate.metrics.max_drawdown,
+            "total_return_pct": candidate.metrics.total_return,
+            "benchmark_return_pct": candidate.metrics.benchmark_return,
+            "turnover": candidate.metrics.turnover,
+            "num_trades": candidate.metrics.num_trades,
+        },
+        "parameters": candidate.parameters,
+    })
 }
 
 async fn load_robustness_timeseries_analysis(
@@ -1504,6 +1922,23 @@ fn build_factor_trial_request(
             "portfolio_drawdown_recovery_full_pct",
         )?,
         portfolio_drawdown_recovery_boost: optional_f64_value("portfolio_drawdown_recovery_boost")?,
+        portfolio_volatility_target_pct: optional_f64_value("portfolio_volatility_target_pct")?,
+        portfolio_volatility_lookback_days: match params
+            .get("portfolio_volatility_lookback_days")
+            .or_else(|| template.get("portfolio_volatility_lookback_days"))
+        {
+            None | Some(Value::Null) => None,
+            Some(_) => {
+                let days = usize_value("portfolio_volatility_lookback_days", 0)?;
+                if days == 0 {
+                    None
+                } else {
+                    Some(days)
+                }
+            }
+        },
+        portfolio_volatility_min_exposure: optional_f64_value("portfolio_volatility_min_exposure")?,
+        portfolio_volatility_max_exposure: optional_f64_value("portfolio_volatility_max_exposure")?,
         start_date: string_value("start_date", None)?,
         end_date: string_value("end_date", None)?,
         initial_capital: f64_value("initial_capital", 1_000_000.0)?,
@@ -1625,15 +2060,17 @@ fn market_regime_request_from_value(
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(policy)) => match policy.as_str() {
             "off" | "none" | "disabled" => Ok(None),
-            "professional_default" | "drawdown_control_v1" | "drawdown_control_v2" => {
-                Ok(Some(MarketRegimeBacktestReq {
-                    enabled: Some(true),
-                    policy: Some(policy.to_string()),
-                    benchmark: Some(default_benchmark.to_string()),
-                    lookback_days: None,
-                    min_observations: None,
-                }))
-            }
+            "professional_default"
+            | "drawdown_control_v1"
+            | "drawdown_control_v2"
+            | "quality_risk_off_v1"
+            | "quality_crash_guard_v1" => Ok(Some(MarketRegimeBacktestReq {
+                enabled: Some(true),
+                policy: Some(policy.to_string()),
+                benchmark: Some(default_benchmark.to_string()),
+                lookback_days: None,
+                min_observations: None,
+            })),
             other => Err(format!("unsupported market_regime policy: {}", other)),
         },
         Some(Value::Object(map)) => {
@@ -1824,6 +2261,54 @@ fn score_trial(
             }));
         }
     }
+    if let Some(limit) = constraint_decimal(constraints, "min_annual_return") {
+        if metrics.annual_return_pct < limit {
+            let gap = limit - metrics.annual_return_pct;
+            score -= gap * Decimal::new(4, 1);
+            violations.push(json!({
+                "constraint": "min_annual_return",
+                "limit": limit,
+                "actual": metrics.annual_return_pct,
+                "severity": "hard"
+            }));
+        }
+    }
+    if let Some(limit) = constraint_decimal(constraints, "min_excess_return") {
+        if metrics.excess_return_pct <= limit {
+            let gap = limit - metrics.excess_return_pct;
+            score -= gap.max(Decimal::ZERO) * Decimal::new(2, 1);
+            violations.push(json!({
+                "constraint": "min_excess_return",
+                "limit": limit,
+                "actual": metrics.excess_return_pct,
+                "severity": "hard"
+            }));
+        }
+    }
+    if let Some(limit) = constraint_decimal(constraints, "min_sharpe") {
+        if metrics.sharpe_ratio <= limit {
+            let gap = limit - metrics.sharpe_ratio;
+            score -= gap.max(Decimal::ZERO);
+            violations.push(json!({
+                "constraint": "min_sharpe",
+                "limit": limit,
+                "actual": metrics.sharpe_ratio,
+                "severity": "hard"
+            }));
+        }
+    }
+    if let Some(limit) = constraint_decimal(constraints, "min_sortino") {
+        if metrics.sortino_ratio < limit {
+            let gap = limit - metrics.sortino_ratio;
+            score -= gap;
+            violations.push(json!({
+                "constraint": "min_sortino",
+                "limit": limit,
+                "actual": metrics.sortino_ratio,
+                "severity": "hard"
+            }));
+        }
+    }
     if let Some(limit) = constraint_decimal(constraints, "max_turnover") {
         if metrics.turnover > limit {
             let excess = metrics.turnover - limit;
@@ -1867,6 +2352,7 @@ fn score_trial(
             "total_return_pct": metrics.total_return_pct,
             "annual_return_pct": metrics.annual_return_pct,
             "sharpe_ratio": metrics.sharpe_ratio,
+            "sortino_ratio": metrics.sortino_ratio,
             "max_drawdown_pct": metrics.max_drawdown_pct,
             "benchmark_return_pct": metrics.benchmark_return_pct,
             "excess_return_pct": metrics.excess_return_pct,
@@ -2007,6 +2493,7 @@ fn build_bootstrap_analysis(
     let mut rng = DeterministicRng::new(seed);
     let mut total_returns = Vec::with_capacity(trials);
     let mut sharpes = Vec::with_capacity(trials);
+    let mut sortinos = Vec::with_capacity(trials);
     let mut positive = 0usize;
 
     for _ in 0..trials {
@@ -2019,6 +2506,7 @@ fn build_bootstrap_analysis(
         }
         total_returns.push(summary.total_return);
         sharpes.push(summary.sharpe_ratio);
+        sortinos.push(summary.sortino_ratio);
     }
 
     Ok(json!({
@@ -2026,7 +2514,8 @@ fn build_bootstrap_analysis(
         "sample_size": returns.len(),
         "positive_return_probability": positive as f64 / trials as f64,
         "total_return": distribution_summary(&mut total_returns),
-        "sharpe_ratio": distribution_summary(&mut sharpes)
+        "sharpe_ratio": distribution_summary(&mut sharpes),
+        "sortino_ratio": distribution_summary(&mut sortinos)
     }))
 }
 
@@ -2073,6 +2562,7 @@ fn summarize_points(points: &[RobustnessDailyPoint]) -> RobustnessMetricSummary 
         total_return,
         annual_return: annualized_return(total_return, points.len().saturating_sub(1)),
         sharpe_ratio: sample.sharpe_ratio,
+        sortino_ratio: sample.sortino_ratio,
         max_drawdown: max_drawdown(&mut nav),
         benchmark_return,
         excess_return: benchmark_return.map(|value| total_return - value),
@@ -2091,6 +2581,7 @@ fn summarize_return_sample(returns: &[f64]) -> RobustnessMetricSummary {
         } else {
             0.0
         },
+        sortino_ratio: sortino_ratio(annual_return, returns),
         max_drawdown: drawdown_from_returns(returns),
         benchmark_return: None,
         excess_return: None,
@@ -2102,6 +2593,7 @@ fn metric_summary_json(summary: &RobustnessMetricSummary) -> Value {
         "total_return": summary.total_return,
         "annual_return": summary.annual_return,
         "sharpe_ratio": summary.sharpe_ratio,
+        "sortino_ratio": summary.sortino_ratio,
         "max_drawdown": summary.max_drawdown,
         "benchmark_return": summary.benchmark_return,
         "excess_return": summary.excess_return
@@ -2156,6 +2648,26 @@ fn annualized_volatility(returns: &[f64]) -> f64 {
         .sum::<f64>()
         / (returns.len() - 1) as f64;
     variance.sqrt() * 252.0_f64.sqrt()
+}
+
+fn sortino_ratio(annual_return: f64, returns: &[f64]) -> f64 {
+    if returns.len() < 2 {
+        return 0.0;
+    }
+    let downside_sum = returns
+        .iter()
+        .filter(|value| **value < 0.0)
+        .map(|value| value * value)
+        .sum::<f64>();
+    if downside_sum <= 0.0 {
+        return if annual_return > 0.0 { 999.0 } else { 0.0 };
+    }
+    let downside_deviation = (downside_sum / (returns.len() - 1) as f64).sqrt() * 252.0_f64.sqrt();
+    if downside_deviation > 0.0 {
+        annual_return / downside_deviation
+    } else {
+        0.0
+    }
 }
 
 fn max_drawdown(nav: &mut [f64]) -> f64 {
@@ -2234,6 +2746,10 @@ fn evaluate_robustness_gates_with_analysis(
     analysis: Option<&RobustnessTimeSeriesAnalysis>,
 ) -> RobustnessEvaluation {
     let min_trade_count = constraint_i64(gate_policy, "min_trade_count").unwrap_or(1);
+    let min_annual_return = constraint_decimal(gate_policy, "min_annual_return");
+    let min_excess_return = constraint_decimal(gate_policy, "min_excess_return");
+    let min_sharpe = constraint_decimal(gate_policy, "min_sharpe");
+    let min_sortino = constraint_decimal(gate_policy, "min_sortino");
     let max_drawdown =
         constraint_decimal(gate_policy, "max_drawdown").unwrap_or(Decimal::new(20, 2));
     let min_score_gap = constraint_decimal(gate_policy, "min_score_gap").unwrap_or(Decimal::ZERO);
@@ -2249,6 +2765,12 @@ fn evaluate_robustness_gates_with_analysis(
         .get("num_trades")
         .and_then(Value::as_i64)
         .unwrap_or(0);
+    let annual_return =
+        decimal_from_json(metrics.get("annual_return_pct")).unwrap_or(Decimal::ZERO);
+    let excess_return =
+        decimal_from_json(metrics.get("excess_return_pct")).unwrap_or(Decimal::ZERO);
+    let sharpe = decimal_from_json(metrics.get("sharpe_ratio")).unwrap_or(Decimal::ZERO);
+    let sortino = decimal_from_json(metrics.get("sortino_ratio")).unwrap_or(Decimal::ZERO);
     let drawdown = decimal_from_json(metrics.get("max_drawdown_pct")).unwrap_or(Decimal::ZERO);
     let hard_violations = constraint_violations
         .as_array()
@@ -2270,7 +2792,7 @@ fn evaluate_robustness_gates_with_analysis(
         }),
         json!({
             "gate": "max_drawdown",
-            "passed": drawdown <= max_drawdown,
+            "passed": drawdown < max_drawdown,
             "limit": max_drawdown,
             "actual": drawdown,
         }),
@@ -2281,6 +2803,38 @@ fn evaluate_robustness_gates_with_analysis(
             "actual": score_gap,
         }),
     ];
+    if let Some(limit) = min_annual_return {
+        gates.push(json!({
+            "gate": "min_annual_return",
+            "passed": annual_return >= limit,
+            "limit": limit,
+            "actual": annual_return,
+        }));
+    }
+    if let Some(limit) = min_excess_return {
+        gates.push(json!({
+            "gate": "min_excess_return",
+            "passed": excess_return > limit,
+            "limit": limit,
+            "actual": excess_return,
+        }));
+    }
+    if let Some(limit) = min_sharpe {
+        gates.push(json!({
+            "gate": "min_sharpe",
+            "passed": sharpe > limit,
+            "limit": limit,
+            "actual": sharpe,
+        }));
+    }
+    if let Some(limit) = min_sortino {
+        gates.push(json!({
+            "gate": "min_sortino",
+            "passed": sortino >= limit,
+            "limit": limit,
+            "actual": sortino,
+        }));
+    }
     if let Some(analysis) = analysis {
         let window_count = analysis.walk_forward["window_count"].as_i64().unwrap_or(0);
         let positive_excess_window_ratio = analysis.walk_forward["positive_excess_window_ratio"]
@@ -2671,14 +3225,18 @@ mod tests {
             "universe_profile": "listed_non_st",
             "prediction_set_id": "pred-quality-growth-v1",
             "prediction_blend_weight": 0.35,
-            "market_regime": "drawdown_control_v2",
+            "market_regime": "quality_crash_guard_v1",
             "portfolio_drawdown_reduce_start_pct": 0.10,
             "portfolio_drawdown_reduce_full_pct": 0.25,
             "portfolio_drawdown_min_exposure": 0.50,
             "portfolio_drawdown_peak_lookback_days": 252,
             "portfolio_drawdown_recovery_start_pct": 0.30,
             "portfolio_drawdown_recovery_full_pct": 0.70,
-            "portfolio_drawdown_recovery_boost": 1.0
+            "portfolio_drawdown_recovery_boost": 1.0,
+            "portfolio_volatility_target_pct": 0.16,
+            "portfolio_volatility_lookback_days": 60,
+            "portfolio_volatility_min_exposure": 0.45,
+            "portfolio_volatility_max_exposure": 1.0
         });
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
@@ -2714,7 +3272,7 @@ mod tests {
             req.market_regime
                 .as_ref()
                 .and_then(|policy| policy.policy.as_deref()),
-            Some("drawdown_control_v2")
+            Some("quality_crash_guard_v1")
         );
         assert_eq!(req.portfolio_drawdown_reduce_start_pct, Some(0.10));
         assert_eq!(req.portfolio_drawdown_reduce_full_pct, Some(0.25));
@@ -2723,6 +3281,10 @@ mod tests {
         assert_eq!(req.portfolio_drawdown_recovery_start_pct, Some(0.30));
         assert_eq!(req.portfolio_drawdown_recovery_full_pct, Some(0.70));
         assert_eq!(req.portfolio_drawdown_recovery_boost, Some(1.0));
+        assert_eq!(req.portfolio_volatility_target_pct, Some(0.16));
+        assert_eq!(req.portfolio_volatility_lookback_days, Some(60));
+        assert_eq!(req.portfolio_volatility_min_exposure, Some(0.45));
+        assert_eq!(req.portfolio_volatility_max_exposure, Some(1.0));
     }
 
     #[test]
@@ -2784,12 +3346,13 @@ mod tests {
             })),
             prediction_set_ids: None,
             max_trials: Some(7),
+            search_profile: None,
         };
         let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
-        assert_eq!(bundle.plan.requested_trials, 429_981_696);
+        assert_eq!(bundle.plan.requested_trials, 3_197_988_864);
         assert_eq!(bundle.plan.planned_trials, 7);
         assert!(bundle.plan.truncated);
         assert_eq!(bundle.search_space["phase"], "7-D");
@@ -2811,6 +3374,7 @@ mod tests {
             })),
             prediction_set_ids: Some(vec![" pred-linear-v1 ".to_string(), "".to_string()]),
             max_trials: Some(40),
+            search_profile: None,
         };
         let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
 
@@ -2824,6 +3388,106 @@ mod tests {
             trial.parameters["signal_source"] == "model_prediction"
                 && trial.parameters["prediction_set_id"] == "pred-linear-v1"
         }));
+    }
+
+    #[test]
+    fn professional_discovery_defaults_to_risk_breakthrough_search_profile() {
+        let req = Phase7ProfessionalDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(12),
+            search_profile: None,
+            trial_batch_limit: Some(4),
+            max_batches: Some(2),
+            robustness_top_n: Some(3),
+            robustness_gate_policy: None,
+            stop_after_professional_candidate: Some(true),
+            stop_after_robust_approval: Some(true),
+        };
+        let layered_req = phase7_discovery_layered_request(&req);
+        let bundle = build_phase7_layered_plan_bundle(
+            &layered_req,
+            quant_common::phase7::LocalResourcePlan::for_machine(10, 32),
+        );
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_risk_breakthrough"
+        );
+        assert_eq!(bundle.plan.planned_trials, 12);
+        assert_eq!(
+            layered_req.constraints.as_ref().unwrap()["min_sortino"],
+            1.5
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+                && trial.parameters["score_direction"] == "ascending"
+                && trial.parameters["portfolio_method"] == "risk_budget"
+                && trial.parameters["portfolio_volatility_control"] != "off"
+        }));
+    }
+
+    #[test]
+    fn discovery_candidate_order_prefers_lower_professional_gap_over_raw_return() {
+        let high_return_high_drawdown = DiscoveryCandidate {
+            trial_id: "high-return".to_string(),
+            backtest_task_id: None,
+            score: Some(Decimal::new(2, 1)),
+            candidate_type: CandidateType::ReviewRequired,
+            professional_gap_score: Decimal::new(75, 2),
+            metrics: CandidateMetrics {
+                annual_return: Decimal::new(19, 2),
+                excess_return: Decimal::new(4, 2),
+                sharpe: Decimal::new(60, 2),
+                sortino: Decimal::new(11, 1),
+                max_drawdown: Decimal::new(55, 2),
+                ..CandidateMetrics::default()
+            },
+            parameters: json!({}),
+        };
+        let lower_return_better_risk = DiscoveryCandidate {
+            trial_id: "better-risk".to_string(),
+            backtest_task_id: None,
+            score: Some(Decimal::new(1, 1)),
+            candidate_type: CandidateType::ReviewRequired,
+            professional_gap_score: Decimal::new(25, 2),
+            metrics: CandidateMetrics {
+                annual_return: Decimal::new(151, 3),
+                excess_return: Decimal::new(3, 2),
+                sharpe: Decimal::new(85, 2),
+                sortino: Decimal::new(13, 1),
+                max_drawdown: Decimal::new(38, 2),
+                ..CandidateMetrics::default()
+            },
+            parameters: json!({}),
+        };
+        let mut candidates = vec![high_return_high_drawdown, lower_return_better_risk];
+
+        candidates.sort_by(discovery_candidate_order);
+
+        assert_eq!(candidates[0].trial_id, "better-risk");
+    }
+
+    #[test]
+    fn professional_discovery_only_approved_robustness_counts_as_found() {
+        assert!(robustness_result_is_approved(&json!({
+            "status": "approved_candidate"
+        })));
+        assert!(!robustness_result_is_approved(&json!({
+            "status": "rejected"
+        })));
+        assert!(!robustness_result_is_approved(&json!({
+            "status": "review_required"
+        })));
     }
 
     #[test]
@@ -2986,11 +3650,50 @@ mod tests {
     }
 
     #[test]
+    fn professional_robustness_policy_encodes_core_targets() {
+        let policy = default_professional_robustness_policy();
+
+        assert_eq!(policy["min_annual_return"], 0.15);
+        assert_eq!(policy["min_sharpe"], 1.0);
+        assert_eq!(policy["min_sortino"], 1.5);
+        assert_eq!(policy["max_drawdown"], 0.35);
+        assert_eq!(policy["walk_forward_window_days"], 756);
+        assert_eq!(policy["bootstrap_trials"], 512);
+    }
+
+    #[test]
+    fn professional_robustness_gate_rejects_low_sortino_candidate() {
+        let evaluation = evaluate_robustness_gates(
+            Decimal::new(10, 1),
+            Some(Decimal::new(6, 1)),
+            &json!({
+                "num_trades": 120,
+                "annual_return_pct": "0.18",
+                "excess_return_pct": "0.04",
+                "sharpe_ratio": "1.10",
+                "sortino_ratio": "1.00",
+                "max_drawdown_pct": "0.20"
+            }),
+            &json!([]),
+            Some(&default_professional_robustness_policy()),
+        );
+
+        assert_eq!(evaluation.status, "rejected");
+        assert!(evaluation
+            .gates
+            .as_array()
+            .expect("gates")
+            .iter()
+            .any(|gate| gate["gate"] == "min_sortino" && gate["passed"] == false));
+    }
+
+    #[test]
     fn market_scenario_classifies_regime_from_benchmark_path() {
         let bull = RobustnessMetricSummary {
             total_return: 0.18,
             annual_return: 0.20,
             sharpe_ratio: 1.2,
+            sortino_ratio: 1.8,
             max_drawdown: 0.04,
             benchmark_return: Some(0.18),
             excess_return: Some(0.02),
@@ -2999,6 +3702,7 @@ mod tests {
             total_return: -0.02,
             annual_return: -0.02,
             sharpe_ratio: -0.3,
+            sortino_ratio: -0.2,
             max_drawdown: 0.24,
             benchmark_return: Some(-0.18),
             excess_return: Some(0.16),
@@ -3007,6 +3711,7 @@ mod tests {
             total_return: 0.01,
             annual_return: 0.01,
             sharpe_ratio: 0.1,
+            sortino_ratio: 0.1,
             max_drawdown: 0.10,
             benchmark_return: Some(0.01),
             excess_return: Some(0.0),

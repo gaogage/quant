@@ -293,6 +293,10 @@ async fn main() {
             post(routes::optimization::create_phase7_layered_optimization),
         )
         .route(
+            "/api/v1/quant/optimizations/phase7-professional-discovery",
+            post(routes::optimization::run_phase7_professional_discovery),
+        )
+        .route(
             "/api/v1/quant/optimizations/{optimization_task_id}",
             get(routes::optimization::get_optimization),
         )
