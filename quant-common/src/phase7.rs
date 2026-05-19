@@ -1668,6 +1668,53 @@ fn professional_sharpe_stabilization_seed_trials() -> Vec<Value> {
         .collect()
 }
 
+fn professional_regime_stabilization_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    for seed in professional_sharpe_stabilization_seed_trials() {
+        let is_quality_mainline = seed["combo_name"] == "phase7_financial_quality_v1"
+            && seed["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+            && seed["stop_loss_pct"] == "0.075"
+            && seed["reentry_cooldown_days"] == 30;
+        let volatility_control = seed["portfolio_volatility_control"]
+            .as_str()
+            .unwrap_or("off");
+        let keeps_phase7_t_volatility_shape =
+            volatility_control == "vol120_24_70_100" || volatility_control == "vol120_22_65_100";
+
+        if !is_quality_mainline || !keeps_phase7_t_volatility_shape {
+            continue;
+        }
+
+        for market_regime in [
+            "quality_crash_guard_v1",
+            "quality_crash_guard_v2",
+            "quality_crash_guard_v3",
+        ] {
+            let mut regime_seed = seed.clone();
+            regime_seed["market_regime"] = json!(market_regime);
+            seeds.push(regime_seed);
+        }
+    }
+    seeds
+}
+
+fn professional_bear_window_stabilization_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    for seed in professional_regime_stabilization_seed_trials() {
+        for market_regime in [
+            "quality_bear_window_guard_v1",
+            "quality_bear_window_guard_v2",
+        ] {
+            let mut bear_seed = seed.clone();
+            bear_seed["market_regime"] = json!(market_regime);
+            if !seeds.contains(&bear_seed) {
+                seeds.push(bear_seed);
+            }
+        }
+    }
+    seeds
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreDirection {
@@ -2156,6 +2203,71 @@ impl LayeredSearchConfig {
     pub fn professional_sharpe_stabilization_default() -> Self {
         let mut config = Self::professional_risk_breakthrough_default();
         config.seed_trials = professional_sharpe_stabilization_seed_trials();
+        config
+    }
+
+    pub fn professional_regime_stabilization_default() -> Self {
+        let mut config = Self::professional_sharpe_stabilization_default();
+        config.market_regime_policies = vec![
+            "quality_crash_guard_v1".to_string(),
+            "quality_crash_guard_v2".to_string(),
+            "quality_crash_guard_v3".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2), Decimal::new(90, 2)];
+        config.kelly_fraction = vec![Decimal::ZERO];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.max_gross_exposure = vec![Decimal::ONE];
+        config.risk_budget_lookback_days = vec![120];
+        config.capacity_penalty_strength = vec![Decimal::new(75, 2)];
+        config.industry_max_weight_pct = vec![None];
+        config.score_candidate_pool_sizes = vec![500];
+        config.universe_profiles = vec!["all".to_string()];
+        config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::recover(
+            "recover252_10_24_50_30_70",
+            Decimal::new(10, 2),
+            Decimal::new(24, 2),
+            Decimal::new(50, 2),
+            Some(252),
+            Decimal::new(30, 2),
+            Decimal::new(70, 2),
+            Decimal::ONE,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_22_65_100",
+                Decimal::new(22, 2),
+                120,
+                Decimal::new(65, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_24_70_100",
+                Decimal::new(24, 2),
+                120,
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.position_risk_controls = vec![PositionRiskControlProfile::stop_loss_with_cooldown(
+            "stop_loss_075_cooldown_30",
+            Decimal::new(75, 3),
+            30,
+        )];
+        config.seed_trials = professional_regime_stabilization_seed_trials();
+        config
+    }
+
+    pub fn professional_bear_window_stabilization_default() -> Self {
+        let mut config = Self::professional_regime_stabilization_default();
+        config.market_regime_policies = vec![
+            "quality_bear_window_guard_v1".to_string(),
+            "quality_bear_window_guard_v2".to_string(),
+        ];
+        config.seed_trials = professional_bear_window_stabilization_seed_trials();
         config
     }
 
@@ -3489,6 +3601,79 @@ mod tests {
             trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
                 && trial["portfolio_volatility_control"] == "off"
                 && trial["stop_loss_pct"] == "0.07"
+        }));
+    }
+
+    #[test]
+    fn professional_regime_stabilization_profile_focuses_on_state_triggered_risk_controls() {
+        let sharpe_config = LayeredSearchConfig::professional_sharpe_stabilization_default();
+        let config = LayeredSearchConfig::professional_regime_stabilization_default();
+
+        assert!(config.seed_trials.len() <= sharpe_config.seed_trials.len());
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_crash_guard_v1".to_string(),
+                "quality_crash_guard_v2".to_string(),
+                "quality_crash_guard_v3".to_string(),
+            ]
+        );
+        assert_eq!(config.max_gross_exposure, vec![Decimal::ONE]);
+        assert!(config
+            .position_risk_controls
+            .iter()
+            .any(|profile| profile.profile_name == "stop_loss_075_cooldown_30"));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v2"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+                && trial["portfolio_volatility_control"] == "vol120_24_70_100"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"] == "quality_crash_guard_v3"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+                && trial["portfolio_volatility_control"] == "vol120_22_65_100"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert!(!config
+            .seed_trials
+            .iter()
+            .any(|trial| trial["max_pairwise_correlation"] == "0.65"));
+    }
+
+    #[test]
+    fn professional_bear_window_stabilization_profile_targets_attribution_failure_window() {
+        let config = LayeredSearchConfig::professional_bear_window_stabilization_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_bear_window_guard_v1".to_string(),
+                "quality_bear_window_guard_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.top_n, vec![20]);
+        assert_eq!(config.rebalance_days, vec![60]);
+        assert_eq!(config.max_gross_exposure, vec![Decimal::ONE]);
+        assert_eq!(
+            config.portfolio_volatility_controls.len(),
+            2,
+            "U2 keeps only Phase 7-T/U working volatility shapes"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_bear_window_guard_v1"
+                && trial["portfolio_volatility_control"] == "vol120_24_70_100"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_bear_window_guard_v2"
+                && trial["portfolio_volatility_control"] == "vol120_22_65_100"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
         }));
     }
 

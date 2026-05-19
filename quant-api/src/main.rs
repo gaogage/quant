@@ -316,6 +316,10 @@ async fn main() {
             "/api/v1/quant/optimizations/{optimization_task_id}/robustness-gates",
             post(routes::optimization::evaluate_optimization_robustness),
         )
+        .route(
+            "/api/v1/quant/optimizations/{optimization_task_id}/trials/{trial_id}/robustness-gates",
+            post(routes::optimization::evaluate_optimization_trial_robustness),
+        )
         .layer(trace_layer)
         .with_state(state);
 

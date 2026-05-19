@@ -13,7 +13,7 @@ use quant_common::phase7::{
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -251,6 +251,20 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
         | "phase7_t" => (
             "professional_sharpe_stabilization".to_string(),
             LayeredSearchConfig::professional_sharpe_stabilization_default(),
+        ),
+        "professional_regime_stabilization"
+        | "regime_stabilization"
+        | "phase7_regime_stabilization"
+        | "phase7_u" => (
+            "professional_regime_stabilization".to_string(),
+            LayeredSearchConfig::professional_regime_stabilization_default(),
+        ),
+        "professional_bear_window_stabilization"
+        | "bear_window_stabilization"
+        | "phase7_bear_window"
+        | "phase7_u2" => (
+            "professional_bear_window_stabilization".to_string(),
+            LayeredSearchConfig::professional_bear_window_stabilization_default(),
         ),
         "professional_breakthrough" | "breakthrough" | "phase7_breakthrough" => (
             "professional_breakthrough".to_string(),
@@ -804,6 +818,25 @@ pub async fn evaluate_optimization_robustness(
     Json(req): Json<EvaluateRobustnessRequest>,
 ) -> impl IntoResponse {
     match evaluate_and_persist_robustness(&state.db, &task_id, req.gate_policy.as_ref()).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn evaluate_optimization_trial_robustness(
+    State(state): State<Arc<AppState>>,
+    Path((task_id, trial_id)): Path<(String, String)>,
+    Json(req): Json<EvaluateRobustnessRequest>,
+) -> impl IntoResponse {
+    match evaluate_and_persist_robustness_for_trial(
+        &state.db,
+        &task_id,
+        &trial_id,
+        req.gate_policy.as_ref(),
+        "Trial robustness gate evaluated",
+    )
+    .await
+    {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -1441,6 +1474,7 @@ async fn evaluate_and_persist_robustness_for_trial(
         "trial_id": trial_id,
         "status": evaluation.status,
         "gate_results": evaluation.gates,
+        "failure_attribution": build_robustness_failure_attribution(&evaluation.gates),
     }))
 }
 
@@ -2109,7 +2143,9 @@ fn market_regime_request_from_value(
             | "quality_risk_off_v1"
             | "quality_crash_guard_v1"
             | "quality_crash_guard_v2"
-            | "quality_crash_guard_v3" => Ok(Some(MarketRegimeBacktestReq {
+            | "quality_crash_guard_v3"
+            | "quality_bear_window_guard_v1"
+            | "quality_bear_window_guard_v2" => Ok(Some(MarketRegimeBacktestReq {
                 enabled: Some(true),
                 policy: Some(policy.to_string()),
                 benchmark: Some(default_benchmark.to_string()),
@@ -2943,6 +2979,228 @@ fn evaluate_robustness_gates_with_analysis(
     }
 }
 
+fn build_robustness_failure_attribution(gates: &Value) -> Value {
+    let gate_items = gates.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let failed_gates = gate_items
+        .iter()
+        .filter(|gate| gate["passed"] == false)
+        .map(compact_gate_failure)
+        .collect::<Vec<_>>();
+    let walk_forward_windows = extract_walk_forward_windows(gate_items);
+    let worst_walk_forward_windows = rank_weak_walk_forward_windows(&walk_forward_windows, 5);
+    let weak_market_scenarios = rank_weak_market_scenarios(&walk_forward_windows, 5);
+    let bootstrap_tail = extract_bootstrap_tail(gate_items);
+    let primary_failure_modes = build_primary_failure_modes(&failed_gates);
+
+    json!({
+        "status": if failed_gates.is_empty() { "no_failed_gates" } else { "has_failed_gates" },
+        "failed_gates": failed_gates,
+        "primary_failure_modes": primary_failure_modes,
+        "worst_walk_forward_windows": worst_walk_forward_windows,
+        "weak_market_scenarios": weak_market_scenarios,
+        "bootstrap_tail": bootstrap_tail,
+    })
+}
+
+fn compact_gate_failure(gate: &Value) -> Value {
+    json!({
+        "gate": gate["gate"].clone(),
+        "limit": gate.get("limit").cloned().unwrap_or(Value::Null),
+        "actual": gate.get("actual").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn build_primary_failure_modes(failed_gates: &[Value]) -> Vec<Value> {
+    let mut modes = BTreeSet::new();
+    for gate in failed_gates {
+        match gate["gate"].as_str().unwrap_or_default() {
+            "min_annual_return" => {
+                modes.insert("annual_return_shortfall");
+            }
+            "min_excess_return" => {
+                modes.insert("excess_return_shortfall");
+            }
+            "min_sharpe" => {
+                modes.insert("sharpe_shortfall");
+            }
+            "min_sortino" => {
+                modes.insert("sortino_shortfall");
+            }
+            "max_drawdown" => {
+                modes.insert("drawdown_excess");
+            }
+            "walk_forward_positive_excess_ratio" | "walk_forward_min_window_count" => {
+                modes.insert("walk_forward_instability");
+            }
+            "bootstrap_positive_return_probability" => {
+                modes.insert("bootstrap_tail_risk");
+            }
+            "market_scenario_coverage" => {
+                modes.insert("market_scenario_coverage_gap");
+            }
+            "score_gap_vs_runner_up" => {
+                modes.insert("runner_up_gap_too_small");
+            }
+            "no_hard_constraint_violations" => {
+                modes.insert("hard_constraint_violation");
+            }
+            "min_trade_count" => {
+                modes.insert("insufficient_trade_sample");
+            }
+            _ => {
+                modes.insert("other_gate_failure");
+            }
+        }
+    }
+    modes
+        .into_iter()
+        .map(|mode| Value::String(mode.to_string()))
+        .collect()
+}
+
+fn extract_walk_forward_windows(gate_items: &[Value]) -> Vec<Value> {
+    gate_items
+        .iter()
+        .find(|gate| gate["gate"] == "walk_forward_min_window_count")
+        .and_then(|gate| gate["details"]["windows"].as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn rank_weak_walk_forward_windows(windows: &[Value], limit: usize) -> Vec<Value> {
+    let mut ranked = windows.to_vec();
+    ranked.sort_by(|left, right| {
+        weak_window_score(right)
+            .partial_cmp(&weak_window_score(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ranked.truncate(limit);
+    ranked
+        .into_iter()
+        .map(|window| {
+            json!({
+                "window_index": window["window_index"].clone(),
+                "start_date": window["start_date"].clone(),
+                "end_date": window["end_date"].clone(),
+                "scenario": window["scenario"].clone(),
+                "metrics": window["metrics"].clone(),
+                "weakness_score": weak_window_score(&window),
+            })
+        })
+        .collect()
+}
+
+fn weak_window_score(window: &Value) -> f64 {
+    let annual_return = metric_f64(window, "annual_return").unwrap_or(0.0);
+    let excess_return = metric_f64(window, "excess_return").unwrap_or(0.0);
+    let sharpe = metric_f64(window, "sharpe_ratio").unwrap_or(0.0);
+    let sortino = metric_f64(window, "sortino_ratio").unwrap_or(0.0);
+    let drawdown = metric_f64(window, "max_drawdown").unwrap_or(0.0);
+
+    positive_shortfall(0.15, annual_return) * 2.0
+        + positive_shortfall(0.0, excess_return) * 3.0
+        + positive_shortfall(1.0, sharpe)
+        + positive_shortfall(1.5, sortino) * 0.5
+        + drawdown
+}
+
+fn rank_weak_market_scenarios(windows: &[Value], limit: usize) -> Vec<Value> {
+    let mut by_scenario: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    for window in windows {
+        let scenario = window["scenario"].as_str().unwrap_or("unknown").to_string();
+        by_scenario.entry(scenario).or_default().push(window);
+    }
+    let mut scenarios = by_scenario
+        .into_iter()
+        .map(|(scenario, windows)| scenario_weakness_summary(&scenario, &windows))
+        .collect::<Vec<_>>();
+    scenarios.sort_by(|left, right| {
+        right["weakness_score"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&left["weakness_score"].as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scenarios.truncate(limit);
+    scenarios
+}
+
+fn scenario_weakness_summary(scenario: &str, windows: &[&Value]) -> Value {
+    let count = windows.len().max(1);
+    let avg_annual_return = average_metric(windows, "annual_return");
+    let avg_excess_return = average_metric(windows, "excess_return");
+    let avg_sharpe = average_metric(windows, "sharpe_ratio");
+    let avg_sortino = average_metric(windows, "sortino_ratio");
+    let worst_drawdown = windows
+        .iter()
+        .filter_map(|window| metric_f64(window, "max_drawdown"))
+        .fold(0.0_f64, f64::max);
+    let weakness_score = windows
+        .iter()
+        .map(|window| weak_window_score(window))
+        .sum::<f64>()
+        / count as f64;
+    let negative_excess_window_count = windows
+        .iter()
+        .filter(|window| metric_f64(window, "excess_return").unwrap_or(0.0) < 0.0)
+        .count();
+
+    json!({
+        "scenario": scenario,
+        "window_count": windows.len(),
+        "negative_excess_window_count": negative_excess_window_count,
+        "avg_annual_return": avg_annual_return,
+        "avg_excess_return": avg_excess_return,
+        "avg_sharpe_ratio": avg_sharpe,
+        "avg_sortino_ratio": avg_sortino,
+        "worst_drawdown": worst_drawdown,
+        "weakness_score": weakness_score,
+    })
+}
+
+fn average_metric(windows: &[&Value], metric: &str) -> f64 {
+    let values = windows
+        .iter()
+        .filter_map(|window| metric_f64(window, metric))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn extract_bootstrap_tail(gate_items: &[Value]) -> Value {
+    gate_items
+        .iter()
+        .find(|gate| gate["gate"] == "bootstrap_positive_return_probability")
+        .map(|gate| {
+            json!({
+                "positive_return_probability": gate["details"]["positive_return_probability"].clone(),
+                "total_return": gate["details"]["total_return"].clone(),
+                "sharpe_ratio": gate["details"]["sharpe_ratio"].clone(),
+                "sortino_ratio": gate["details"]["sortino_ratio"].clone(),
+            })
+        })
+        .unwrap_or_else(|| json!({}))
+}
+
+fn metric_f64(window: &Value, metric: &str) -> Option<f64> {
+    value_as_f64(window.get("metrics")?.get(metric)?)
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn positive_shortfall(limit: f64, actual: f64) -> f64 {
+    (limit - actual).max(0.0)
+}
+
 fn decimal_from_json(value: Option<&Value>) -> Option<Decimal> {
     match value {
         Some(Value::Number(number)) => number.as_f64().and_then(Decimal::from_f64_retain),
@@ -3343,6 +3601,40 @@ mod tests {
     }
 
     #[test]
+    fn trial_backtest_request_accepts_bear_window_market_regime_policy() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "60",
+                "max_position_pct": 0.15,
+                "portfolio_method": "risk_budget"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "market_regime": "quality_bear_window_guard_v1",
+            "score_direction": "ascending"
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("factor request");
+
+        assert_eq!(
+            req.market_regime
+                .as_ref()
+                .and_then(|policy| policy.policy.as_deref()),
+            Some("quality_bear_window_guard_v1")
+        );
+    }
+
+    #[test]
     fn optimization_trial_request_routes_model_prediction_source() {
         let task = OptimizationTaskExecutionContext {
             strategy_version_id: "prediction-strategy-v1".into(),
@@ -3521,6 +3813,74 @@ mod tests {
             trial.parameters["portfolio_volatility_control"] == "vol120_22_65_100"
                 && trial.parameters["stop_loss_pct"] == "0.075"
                 && trial.parameters["reentry_cooldown_days"] == 20
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_regime_stabilization_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(10),
+            search_profile: Some("phase7_u".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_regime_stabilization"
+        );
+        assert_eq!(bundle.plan.planned_trials, 10);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_crash_guard_v2"
+                && trial.parameters["portfolio_volatility_control"] == "vol120_24_70_100"
+                && trial.parameters["stop_loss_pct"] == "0.075"
+                && trial.parameters["reentry_cooldown_days"] == 30
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_bear_window_stabilization_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_u2".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_bear_window_stabilization"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_bear_window_guard_v1"
+                && trial.parameters["portfolio_volatility_control"] == "vol120_24_70_100"
+                && trial.parameters["stop_loss_pct"] == "0.075"
+                && trial.parameters["reentry_cooldown_days"] == 30
         }));
     }
 
@@ -3914,5 +4274,92 @@ mod tests {
         assert!(gates
             .iter()
             .any(|gate| gate["gate"] == "market_scenario_coverage"));
+    }
+
+    #[test]
+    fn robustness_failure_attribution_ranks_failed_gates_and_weak_windows() {
+        let gates = json!([
+            {
+                "gate": "min_sharpe",
+                "passed": false,
+                "limit": 1.0,
+                "actual": 0.714
+            },
+            {
+                "gate": "walk_forward_min_window_count",
+                "passed": true,
+                "limit": 2,
+                "actual": 3,
+                "details": {
+                    "windows": [
+                        {
+                            "window_index": 1,
+                            "start_date": "2016-03-04",
+                            "end_date": "2019-03-04",
+                            "scenario": "bear",
+                            "metrics": {
+                                "annual_return": 0.04,
+                                "excess_return": -0.02,
+                                "sharpe_ratio": 0.18,
+                                "sortino_ratio": 0.40,
+                                "max_drawdown": 0.34
+                            }
+                        },
+                        {
+                            "window_index": 2,
+                            "start_date": "2019-06-03",
+                            "end_date": "2022-06-03",
+                            "scenario": "mixed",
+                            "metrics": {
+                                "annual_return": 0.13,
+                                "excess_return": 0.03,
+                                "sharpe_ratio": 0.52,
+                                "sortino_ratio": 1.10,
+                                "max_drawdown": 0.24
+                            }
+                        },
+                        {
+                            "window_index": 3,
+                            "start_date": "2022-09-01",
+                            "end_date": "2025-09-01",
+                            "scenario": "bull",
+                            "metrics": {
+                                "annual_return": 0.22,
+                                "excess_return": 0.08,
+                                "sharpe_ratio": 0.92,
+                                "sortino_ratio": 1.80,
+                                "max_drawdown": 0.18
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "gate": "bootstrap_positive_return_probability",
+                "passed": true,
+                "limit": 0.70,
+                "actual": 0.99,
+                "details": {
+                    "positive_return_probability": 0.99,
+                    "total_return": {"p05": 0.18, "median": 3.0, "p95": 8.0},
+                    "sharpe_ratio": {"p05": 0.20, "median": 0.70, "p95": 1.30},
+                    "sortino_ratio": {"p05": 0.50, "median": 1.58, "p95": 2.40}
+                }
+            }
+        ]);
+
+        let attribution = build_robustness_failure_attribution(&gates);
+
+        assert_eq!(attribution["failed_gates"][0]["gate"], "min_sharpe");
+        assert_eq!(
+            attribution["worst_walk_forward_windows"][0]["start_date"],
+            "2016-03-04"
+        );
+        assert_eq!(attribution["weak_market_scenarios"][0]["scenario"], "bear");
+        assert_eq!(attribution["bootstrap_tail"]["sharpe_ratio"]["p05"], 0.20);
+        assert!(attribution["primary_failure_modes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("sharpe_shortfall")));
     }
 }

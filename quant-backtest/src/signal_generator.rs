@@ -1026,6 +1026,121 @@ impl MarketRegimePolicy {
         }
     }
 
+    /// Earlier bear-window guard for Phase 7-X attribution findings. It targets
+    /// long weak windows by triggering earlier than crash guards, while keeping
+    /// the quality alpha direction, holding count, and rebalance cadence intact.
+    pub fn quality_bear_window_guard_v1(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.78),
+                max_position_pct: Some(Decimal::new(11, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.66),
+                max_position_pct: Some(Decimal::new(9, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 126,
+            min_observations: 20,
+            high_volatility_threshold: 0.32,
+            bear_return_threshold: -0.04,
+            bear_drawdown_threshold: 0.16,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
+    /// Stronger early bear-window guard. This is still quality-shape preserving,
+    /// but cuts tail regimes harder when U2 needs more Sharpe stabilization.
+    pub fn quality_bear_window_guard_v2(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.72),
+                max_position_pct: Some(Decimal::new(10, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                max_gross_exposure: Some(0.58),
+                max_position_pct: Some(Decimal::new(8, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 126,
+            min_observations: 20,
+            high_volatility_threshold: 0.28,
+            bear_return_threshold: -0.03,
+            bear_drawdown_threshold: 0.14,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
     pub fn apply(&self, base: &SignalConfig, regime: MarketRegime) -> SignalConfig {
         self.rules
             .get(&regime)
@@ -3642,6 +3757,38 @@ mod tests {
         assert_eq!(bear.max_gross_exposure, 0.80);
         assert_eq!(bear.max_position_pct, Decimal::new(11, 2));
         assert_eq!(high_volatility.max_gross_exposure, 0.68);
+        assert_eq!(high_volatility.max_position_pct, Decimal::new(9, 2));
+    }
+
+    #[test]
+    fn quality_bear_window_guard_triggers_earlier_without_flipping_quality_alpha() {
+        let base = SignalConfig {
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_bear_window_guard_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(policy.lookback_days, 126);
+        assert_eq!(policy.bear_drawdown_threshold, 0.16);
+        assert_eq!(policy.high_volatility_threshold, 0.32);
+        assert_eq!(bull.max_gross_exposure, 1.0);
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.top_n, 20);
+        assert_eq!(bear.rebalance_freq_days, 60);
+        assert_eq!(bear.skip_top_pct, 0.10);
+        assert_eq!(bear.max_gross_exposure, 0.78);
+        assert_eq!(bear.max_position_pct, Decimal::new(11, 2));
+        assert_eq!(high_volatility.score_direction, ScoreDirection::Ascending);
+        assert_eq!(high_volatility.max_gross_exposure, 0.66);
         assert_eq!(high_volatility.max_position_pct, Decimal::new(9, 2));
     }
 

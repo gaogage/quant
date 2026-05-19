@@ -958,6 +958,12 @@ fn build_market_regime_policy(
         "quality_crash_guard_v1" => MarketRegimePolicy::quality_crash_guard_v1(benchmark),
         "quality_crash_guard_v2" => MarketRegimePolicy::quality_crash_guard_v2(benchmark),
         "quality_crash_guard_v3" => MarketRegimePolicy::quality_crash_guard_v3(benchmark),
+        "quality_bear_window_guard_v1" => {
+            MarketRegimePolicy::quality_bear_window_guard_v1(benchmark)
+        }
+        "quality_bear_window_guard_v2" => {
+            MarketRegimePolicy::quality_bear_window_guard_v2(benchmark)
+        }
         other => return Err(format!("unsupported market_regime policy: {}", other)),
     };
     if let Some(lookback_days) = req.lookback_days {
@@ -1719,6 +1725,40 @@ mod tests {
                 .get(&quant_backtest::signal_generator::MarketRegime::HighVolatility)
                 .and_then(|rule| rule.max_gross_exposure),
             Some(0.68)
+        );
+    }
+
+    #[test]
+    fn market_regime_request_builds_quality_bear_window_guard_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_bear_window_guard_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.lookback_days, 126);
+        assert_eq!(policy.bear_drawdown_threshold, 0.16);
+        assert_eq!(policy.high_volatility_threshold, 0.32);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.78)
+        );
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.score_direction),
+            None
         );
     }
 
