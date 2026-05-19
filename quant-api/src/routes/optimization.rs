@@ -245,6 +245,13 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_risk_breakthrough".to_string(),
             LayeredSearchConfig::professional_risk_breakthrough_default(),
         ),
+        "professional_sharpe_stabilization"
+        | "sharpe_stabilization"
+        | "phase7_sharpe_stabilization"
+        | "phase7_t" => (
+            "professional_sharpe_stabilization".to_string(),
+            LayeredSearchConfig::professional_sharpe_stabilization_default(),
+        ),
         "professional_breakthrough" | "breakthrough" | "phase7_breakthrough" => (
             "professional_breakthrough".to_string(),
             LayeredSearchConfig::professional_breakthrough_default(),
@@ -3481,6 +3488,39 @@ mod tests {
                 && trial.parameters["score_direction"] == "ascending"
                 && trial.parameters["portfolio_method"] == "risk_budget"
                 && trial.parameters["portfolio_volatility_control"] != "off"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_sharpe_stabilization_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: Some("phase7_t".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_sharpe_stabilization"
+        );
+        assert_eq!(bundle.plan.planned_trials, 8);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["portfolio_volatility_control"] == "vol120_22_65_100"
+                && trial.parameters["stop_loss_pct"] == "0.075"
+                && trial.parameters["reentry_cooldown_days"] == 20
         }));
     }
 
