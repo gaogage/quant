@@ -847,6 +847,10 @@ impl Phase7EventWindowAlphaBackfillRequest {
             return Err("combo_name must be <= 128 chars".to_string());
         }
 
+        let combo_name = combo_name;
+        let bundle_name = event_window_bundle_name(&combo_name);
+        let phase = event_window_phase(&combo_name);
+
         Ok(Phase7EventWindowAlphaBackfillPlan {
             start_date,
             end_date,
@@ -856,9 +860,9 @@ impl Phase7EventWindowAlphaBackfillRequest {
             task_type: "phase7_event_window_alpha_backfill",
             source: "factor",
             heartbeat_timeout_seconds: 3600,
-            bundle_name: "phase7_event_window_earnings_v1",
+            bundle_name,
             category: "event_alpha",
-            phase: "7-Y2",
+            phase,
             dependencies: &[
                 "market_stock_forecast",
                 "market_stock_express",
@@ -1673,56 +1677,113 @@ fn phase7_event_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
 }
 
 fn phase7_event_window_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    phase7_event_window_alpha_backfill_specs_for_days(20)
+}
+
+fn phase7_event_window_alpha_backfill_specs_for_plan(
+    plan: &Phase7EventWindowAlphaBackfillPlan,
+) -> Vec<Phase7BackfillFactorSpec> {
+    phase7_event_window_alpha_backfill_specs_for_days(event_window_days_for_combo(
+        &plan.combo_name,
+    ))
+}
+
+fn event_window_days_for_combo(combo_name: &str) -> i32 {
+    match combo_name {
+        "phase7_event_window_earnings_10d_v1" => 10,
+        "phase7_event_window_earnings_40d_v1" => 40,
+        _ => 20,
+    }
+}
+
+fn event_window_bundle_name(combo_name: &str) -> &'static str {
+    match combo_name {
+        "phase7_event_window_earnings_10d_v1" => "phase7_event_window_earnings_10d_v1",
+        "phase7_event_window_earnings_40d_v1" => "phase7_event_window_earnings_40d_v1",
+        _ => "phase7_event_window_earnings_v1",
+    }
+}
+
+fn event_window_phase(combo_name: &str) -> &'static str {
+    match combo_name {
+        "phase7_event_window_earnings_10d_v1" => "7-AZ10",
+        "phase7_event_window_earnings_40d_v1" => "7-AZ40",
+        _ => "7-Y2",
+    }
+}
+
+fn phase7_event_window_alpha_backfill_specs_for_days(
+    window_days: i32,
+) -> Vec<Phase7BackfillFactorSpec> {
+    let window_days = window_days.max(1);
+    let suffix = match window_days {
+        10 => "10d",
+        40 => "40d",
+        _ => "20d",
+    };
+    let forecast_change_code = Box::leak(
+        format!("event_window_forecast_change_{}_decay_std", suffix).into_boxed_str(),
+    );
+    let forecast_profit_code = Box::leak(
+        format!("event_window_forecast_profit_floor_{}_decay_std", suffix).into_boxed_str(),
+    );
+    let express_roe_code = Box::leak(
+        format!("event_window_express_roe_{}_decay_std", suffix).into_boxed_str(),
+    );
+    let disclosure_code = Box::leak(
+        format!("event_window_disclosure_early_days_{}_decay_std", suffix).into_boxed_str(),
+    );
+
     vec![
         Phase7BackfillFactorSpec {
-            factor_code: "event_window_forecast_change_20d_decay_std",
+            factor_code: forecast_change_code,
             name: "Phase 7 20d decayed forecast profit-change midpoint rank",
-            period: 20,
+            period: window_days,
             kind: Phase7BackfillFactorKind::EventWindow {
                 source_table: "market_stock_forecast",
                 value_expression: "(COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0",
                 higher_is_better: true,
-                window_days: 20,
-                decay_days: 20,
+                window_days,
+                decay_days: window_days,
             },
             weight: 0.35,
         },
         Phase7BackfillFactorSpec {
-            factor_code: "event_window_forecast_profit_floor_20d_decay_std",
+            factor_code: forecast_profit_code,
             name: "Phase 7 20d decayed forecast net-profit floor rank",
-            period: 20,
+            period: window_days,
             kind: Phase7BackfillFactorKind::EventWindow {
                 source_table: "market_stock_forecast",
                 value_expression: "event.net_profit_min::double precision",
                 higher_is_better: true,
-                window_days: 20,
-                decay_days: 20,
+                window_days,
+                decay_days: window_days,
             },
             weight: 0.20,
         },
         Phase7BackfillFactorSpec {
-            factor_code: "event_window_express_roe_20d_decay_std",
+            factor_code: express_roe_code,
             name: "Phase 7 20d decayed express diluted ROE rank",
-            period: 20,
+            period: window_days,
             kind: Phase7BackfillFactorKind::EventWindow {
                 source_table: "market_stock_express",
                 value_expression: "event.diluted_roe::double precision",
                 higher_is_better: true,
-                window_days: 20,
-                decay_days: 20,
+                window_days,
+                decay_days: window_days,
             },
             weight: 0.25,
         },
         Phase7BackfillFactorSpec {
-            factor_code: "event_window_disclosure_early_days_20d_decay_std",
+            factor_code: disclosure_code,
             name: "Phase 7 20d decayed early disclosure timing rank",
-            period: 20,
+            period: window_days,
             kind: Phase7BackfillFactorKind::EventWindow {
                 source_table: "market_stock_disclosure_date",
                 value_expression: "CASE WHEN event.pre_date IS NOT NULL AND event.actual_date IS NOT NULL THEN (event.pre_date - event.actual_date)::double precision ELSE NULL END",
                 higher_is_better: true,
-                window_days: 20,
-                decay_days: 20,
+                window_days,
+                decay_days: window_days,
             },
             weight: 0.20,
         },
@@ -4307,7 +4368,7 @@ pub async fn backfill_phase7_event_window_alpha_background(
                 .bind(total_rows)
                 .execute(&state.db)
                 .await;
-                let specs = phase7_event_window_alpha_backfill_specs();
+                let specs = phase7_event_window_alpha_backfill_specs_for_plan(&task_plan);
                 if let Err(error) = persist_factor_backfill_experiment_run(
                     &state.db,
                     &tid,
@@ -4741,7 +4802,7 @@ async fn run_phase7_event_window_alpha_backfill(
     task_id: &str,
     plan: &Phase7EventWindowAlphaBackfillPlan,
 ) -> Result<Phase7BackfillCompletion, String> {
-    let specs = phase7_event_window_alpha_backfill_specs();
+    let specs = phase7_event_window_alpha_backfill_specs_for_plan(plan);
     let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
     run_set_based_factor_backfill(db, task_id, job).await
 }
@@ -7739,6 +7800,67 @@ mod tests {
                 .any(|code| code.contains("yoy_dedu_np")),
             "ordinary Tushare express data currently leaves yoy_dedu_np empty, so the first event-window bundle should not spend weight there"
         );
+    }
+
+    #[test]
+    fn phase7_event_window_decay_variants_use_distinct_combo_metadata_and_window_lengths() {
+        let short_req = Phase7EventWindowAlphaBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-19".to_string()),
+            version: None,
+            combo_name: Some("phase7_event_window_earnings_10d_v1".to_string()),
+            statement_timeout_ms: None,
+        };
+        let long_req = Phase7EventWindowAlphaBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-19".to_string()),
+            version: None,
+            combo_name: Some("phase7_event_window_earnings_40d_v1".to_string()),
+            statement_timeout_ms: None,
+        };
+
+        let short_plan = short_req.into_plan().expect("valid short event-window plan");
+        let long_plan = long_req.into_plan().expect("valid long event-window plan");
+        let short_specs = phase7_event_window_alpha_backfill_specs_for_plan(&short_plan);
+        let long_specs = phase7_event_window_alpha_backfill_specs_for_plan(&long_plan);
+
+        assert_eq!(short_plan.combo_name, "phase7_event_window_earnings_10d_v1");
+        assert_eq!(short_plan.bundle_name, "phase7_event_window_earnings_10d_v1");
+        assert_eq!(long_plan.combo_name, "phase7_event_window_earnings_40d_v1");
+        assert_eq!(long_plan.bundle_name, "phase7_event_window_earnings_40d_v1");
+        assert!(short_specs
+            .iter()
+            .all(|spec| spec.factor_code.contains("_10d_decay_std")));
+        assert!(long_specs
+            .iter()
+            .all(|spec| spec.factor_code.contains("_40d_decay_std")));
+
+        for spec in short_specs {
+            match spec.kind {
+                Phase7BackfillFactorKind::EventWindow {
+                    window_days,
+                    decay_days,
+                    ..
+                } => {
+                    assert_eq!(window_days, 10);
+                    assert_eq!(decay_days, 10);
+                }
+                _ => panic!("expected event-window factor kind"),
+            }
+        }
+        for spec in long_specs {
+            match spec.kind {
+                Phase7BackfillFactorKind::EventWindow {
+                    window_days,
+                    decay_days,
+                    ..
+                } => {
+                    assert_eq!(window_days, 40);
+                    assert_eq!(decay_days, 40);
+                }
+                _ => panic!("expected event-window factor kind"),
+            }
+        }
     }
 
     #[test]

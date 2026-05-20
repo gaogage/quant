@@ -1579,6 +1579,28 @@ impl MarketRegimePolicy {
         )
     }
 
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_15pct_10d_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_window_earnings_10d_v1",
+            0.15,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_15pct_40d_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_window_earnings_40d_v1",
+            0.15,
+            ScoreDirection::Descending,
+        )
+    }
+
     pub fn quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1(
         benchmark: impl Into<String>,
     ) -> Self {
@@ -6452,6 +6474,42 @@ mod tests {
             .get(&MarketRegime::HighVolatility)
             .and_then(|rule| rule.portfolio_sleeve.as_ref())
             .is_some());
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_can_select_event_window_decay_variant() {
+        let short_decay =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_10d_v1(
+                "000300.SH",
+            );
+        let long_decay =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_40d_v1(
+                "000300.SH",
+            );
+
+        let short_sleeve = short_decay
+            .rules
+            .get(&MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .expect("short-decay event sleeve");
+        let long_sleeve = long_decay
+            .rules
+            .get(&MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .expect("long-decay event sleeve");
+
+        assert_eq!(
+            short_sleeve.combo_name,
+            "phase7_event_window_earnings_10d_v1"
+        );
+        assert_eq!(short_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((short_sleeve.weight - 0.15).abs() < 1e-9);
+        assert_eq!(
+            long_sleeve.combo_name,
+            "phase7_event_window_earnings_40d_v1"
+        );
+        assert_eq!(long_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((long_sleeve.weight - 0.15).abs() < 1e-9);
     }
 
     #[test]

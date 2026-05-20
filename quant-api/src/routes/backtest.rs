@@ -1380,6 +1380,16 @@ fn build_market_regime_policy(
                 benchmark,
             )
         }
+        "quality_regime_alpha_portfolio_sleeve_event_window_15pct_10d_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_10d_v1(
+                benchmark,
+            )
+        }
+        "quality_regime_alpha_portfolio_sleeve_event_window_15pct_40d_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_40d_v1(
+                benchmark,
+            )
+        }
         "quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1" => {
             MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1(
                 benchmark,
