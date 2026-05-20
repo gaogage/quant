@@ -362,6 +362,13 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_value_guard_sleeve_composition".to_string(),
             LayeredSearchConfig::professional_value_guard_sleeve_composition_default(),
         ),
+        "professional_nearest_candidate_risk_model"
+        | "nearest_candidate_risk_model"
+        | "phase7_nearest_risk_model"
+        | "phase7_at" => (
+            "professional_nearest_candidate_risk_model".to_string(),
+            LayeredSearchConfig::professional_nearest_candidate_risk_model_default(),
+        ),
         "professional_volatility_sharpe" | "volatility_sharpe" | "phase7_ai" => (
             "professional_volatility_sharpe".to_string(),
             LayeredSearchConfig::professional_volatility_sharpe_default(),
@@ -448,11 +455,12 @@ fn phase7_discovery_layered_request(
 ) -> Phase7LayeredOptimizationRequest {
     let default_backtest_template = || {
         json!({
-                "mode": "standard",
-                "benchmark": "000300.SH",
-                "start_date": "20160201",
-                "end_date": "20260515",
-                "initial_capital": 1000000.0,
+            "mode": "standard",
+            "persistence_mode": "summary_only",
+            "benchmark": "000300.SH",
+            "start_date": "20160201",
+            "end_date": "20260515",
+            "initial_capital": 1000000.0,
             "signal_timing": "close",
             "execution_timing": "next_open",
             "execution_price": "next_open",
@@ -2268,6 +2276,8 @@ fn build_factor_trial_request(
         end_date: string_value("end_date", None)?,
         initial_capital: f64_value("initial_capital", 1_000_000.0)?,
         mode: optional_string("mode")?.or_else(|| Some("standard".into())),
+        persistence_mode: optional_string("persistence_mode")?
+            .or_else(|| Some("summary_only".into())),
     })
 }
 
@@ -2379,6 +2389,8 @@ fn build_prediction_trial_request(
         end_date: string_value("end_date", None)?,
         initial_capital: f64_value("initial_capital", 1_000_000.0)?,
         mode: optional_string("mode")?.or_else(|| Some("standard".into())),
+        persistence_mode: optional_string("persistence_mode")?
+            .or_else(|| Some("summary_only".into())),
     })
 }
 
@@ -3977,6 +3989,7 @@ mod tests {
         assert_eq!(req.trailing_stop_pct, Some(0.18));
         assert_eq!(req.time_stop_days, Some(120));
         assert_eq!(req.reentry_cooldown_days, Some(10));
+        assert_eq!(req.persistence_mode.as_deref(), Some("summary_only"));
         let coverage = req
             .effective_coverage
             .as_ref()
@@ -5062,6 +5075,44 @@ mod tests {
             trial.parameters["event_gate_profile"] == "valuation_exclude_bottom40"
                 && trial.parameters["market_regime"]
                     == "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_nearest_candidate_risk_model_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_at".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_nearest_candidate_risk_model"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial.parameters["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
+                && trial.parameters["portfolio_method"] == "min_variance"
+                && trial.parameters["risk_budget_lookback_days"] == 180
         }));
     }
 

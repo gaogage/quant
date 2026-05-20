@@ -11,7 +11,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::engine::{
-    BacktestConfig, BacktestEngine, BacktestMode, BacktestOutput, MarketDay, StrategySignal,
+    BacktestConfig, BacktestEngine, BacktestMode, BacktestOutput, BacktestPersistenceMode,
+    MarketDay, StrategySignal,
 };
 
 pub fn schedule_signals_for_execution(
@@ -771,7 +772,8 @@ impl BacktestRunner {
         let execution_rules = json!({
             "execution_timing": config.execution_timing,
             "execution_price": config.execution_price,
-            "max_participation_rate": config.max_participation_rate.map(|v| v.to_string())
+            "max_participation_rate": config.max_participation_rate.map(|v| v.to_string()),
+            "persistence_mode": config.persistence_mode
         });
         let parameters = json!({
             "research_dataset_id": config.research_dataset_id.as_deref(),
@@ -857,6 +859,11 @@ impl BacktestRunner {
             .bind(Decimal::zero()) // cash detail not tracked in current version
             .execute(&self.pool)
             .await?;
+        }
+
+        if !Self::should_persist_detail_tables(&output.config) {
+            self.mark_task_completed(task_id, output).await?;
+            return Ok(());
         }
 
         // Trades
@@ -994,6 +1001,20 @@ impl BacktestRunner {
         }
 
         // Update task status
+        self.mark_task_completed(task_id, output).await?;
+
+        Ok(())
+    }
+
+    fn should_persist_detail_tables(config: &BacktestConfig) -> bool {
+        matches!(config.persistence_mode, BacktestPersistenceMode::Full)
+    }
+
+    async fn mark_task_completed(
+        &self,
+        task_id: &str,
+        output: &BacktestOutput,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE backtest_task SET status = 'completed', completed_at = now(), progress = 100, last_completed_date = $2, last_heartbeat_at = now() WHERE task_id = $1",
         )
@@ -1044,6 +1065,14 @@ mod tests {
             BacktestRunner::limit_rate_for("688001.SH", None),
             Decimal::new(20, 2)
         );
+    }
+
+    #[test]
+    fn summary_only_persistence_skips_detail_tables() {
+        let mut config = BacktestConfig::default();
+        config.persistence_mode = BacktestPersistenceMode::SummaryOnly;
+
+        assert!(!BacktestRunner::should_persist_detail_tables(&config));
     }
 
     #[test]

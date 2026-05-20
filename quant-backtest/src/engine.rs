@@ -100,6 +100,10 @@ pub struct BacktestConfig {
     pub execution_timing: ExecutionTiming,
     pub execution_price: ExecutionPrice,
     pub max_participation_rate: Option<Decimal>,
+    /// Database persistence depth. Summary-only keeps result/equity curve for discovery and
+    /// robustness, while skipping heavy detail tables.
+    #[serde(default)]
+    pub persistence_mode: BacktestPersistenceMode,
     /// Risk control configuration
     #[serde(default)]
     pub risk_control: RiskControlConfig,
@@ -203,6 +207,7 @@ impl Default for BacktestConfig {
             execution_timing: ExecutionTiming::NextOpen,
             execution_price: ExecutionPrice::Open,
             max_participation_rate: None,
+            persistence_mode: BacktestPersistenceMode::Full,
             risk_control: RiskControlConfig::default(),
         }
     }
@@ -214,6 +219,19 @@ pub enum BacktestMode {
     Fast,
     Standard,
     Audit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BacktestPersistenceMode {
+    Full,
+    SummaryOnly,
+}
+
+impl Default for BacktestPersistenceMode {
+    fn default() -> Self {
+        Self::Full
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

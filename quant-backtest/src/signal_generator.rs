@@ -658,6 +658,7 @@ pub enum ScoreDirection {
 pub enum PortfolioConstructionMethod {
     Heuristic,
     RiskBudget,
+    MinVariance,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1862,7 +1863,9 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
 
 fn capped_portfolio_top_n(top_n: usize, method: PortfolioConstructionMethod) -> usize {
     match method {
-        PortfolioConstructionMethod::RiskBudget => top_n.min(50),
+        PortfolioConstructionMethod::RiskBudget | PortfolioConstructionMethod::MinVariance => {
+            top_n.min(50)
+        }
         PortfolioConstructionMethod::Heuristic => top_n,
     }
 }
@@ -3778,6 +3781,13 @@ fn build_portfolio_weights(
             average_amounts,
             config,
         ),
+        PortfolioConstructionMethod::MinVariance => build_min_variance_raw_weights(
+            score_day,
+            &selected,
+            return_history,
+            average_amounts,
+            config,
+        ),
     };
 
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, config);
@@ -4004,6 +4014,45 @@ fn build_risk_budget_raw_weights(
         let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
         let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
         let raw = capacity_multiplier / risk_denominator;
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+fn build_min_variance_raw_weights(
+    score_day: NaiveDate,
+    symbols: &[String],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let returns = trailing_returns(
+            return_history,
+            symbol,
+            score_day,
+            config.risk_budget_lookback_days,
+        );
+        let volatility = sample_volatility(&returns).unwrap_or(0.20).max(0.01);
+        let concentration_penalty =
+            covariance_concentration_penalty(symbol, symbols, return_history, score_day, config);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        let variance = volatility * volatility;
+        let covariance_penalty = concentration_penalty.max(1.0).powi(2);
+        let raw = capacity_multiplier / (variance.max(0.0001) * covariance_penalty);
         raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
     }
 
@@ -4943,13 +4992,22 @@ mod tests {
     }
 
     #[test]
-    fn risk_budget_portfolio_config_caps_large_top_n_for_local_search() {
+    fn risk_model_portfolio_config_caps_large_top_n_for_local_search() {
         let config = SignalConfig {
             top_n: 80,
             portfolio_method: PortfolioConstructionMethod::RiskBudget,
             ..Default::default()
         };
         let portfolio_config = PortfolioConstructionConfig::from(&config);
+
+        assert_eq!(portfolio_config.top_n, 50);
+
+        let min_variance_config = SignalConfig {
+            top_n: 80,
+            portfolio_method: PortfolioConstructionMethod::MinVariance,
+            ..Default::default()
+        };
+        let portfolio_config = PortfolioConstructionConfig::from(&min_variance_config);
 
         assert_eq!(portfolio_config.top_n, 50);
 
@@ -5007,6 +5065,45 @@ mod tests {
         assert!(weights["LOW_RISK"] <= Decimal::new(80, 2));
         let gross: Decimal = weights.values().copied().sum();
         assert!(gross <= Decimal::ONE);
+    }
+
+    #[test]
+    fn min_variance_portfolio_penalizes_variance_more_aggressively() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("LOW_RISK".to_string(), 3.0),
+            ("HIGH_RISK".to_string(), 2.9),
+        ];
+        let return_history = HashMap::from([
+            (
+                "LOW_RISK".to_string(),
+                dated_returns(&[0.004, 0.003, 0.005, 0.004, 0.003]),
+            ),
+            (
+                "HIGH_RISK".to_string(),
+                dated_returns(&[0.08, -0.07, 0.09, -0.08, 0.07]),
+            ),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(95, 2),
+            max_gross_exposure: 1.0,
+            portfolio_method: PortfolioConstructionMethod::MinVariance,
+            risk_budget_lookback_days: 5,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights["LOW_RISK"] > Decimal::new(90, 2));
+        assert!(weights["HIGH_RISK"] < Decimal::new(10, 2));
     }
 
     #[test]

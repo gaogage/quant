@@ -15,8 +15,8 @@ use tracing::info;
 use uuid::Uuid;
 
 use quant_backtest::engine::{
-    BacktestConfig, BacktestMode, ExecutionPrice, ExecutionTiming, RiskControlConfig,
-    StrategySignal,
+    BacktestConfig, BacktestMode, BacktestPersistenceMode, ExecutionPrice, ExecutionTiming,
+    RiskControlConfig, StrategySignal,
 };
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::{BacktestDataCache, BacktestRunner};
@@ -72,7 +72,8 @@ pub struct RunBacktestReq {
     pub start_date: String,
     pub end_date: String,
     pub initial_capital: Option<f64>,
-    pub mode: Option<String>, // fast/standard/audit
+    pub mode: Option<String>,             // fast/standard/audit
+    pub persistence_mode: Option<String>, // full/summary_only
     pub rebalance_frequency: Option<String>,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
@@ -317,6 +318,18 @@ fn parse_mode(value: Option<&str>) -> BacktestMode {
     }
 }
 
+fn parse_persistence_mode(value: Option<&str>) -> Result<BacktestPersistenceMode, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("full") | Some("standard") | Some("detail") | Some("detailed") => {
+            Ok(BacktestPersistenceMode::Full)
+        }
+        Some("summary_only") | Some("summary-only") | Some("summary") | Some("discovery") => {
+            Ok(BacktestPersistenceMode::SummaryOnly)
+        }
+        Some(other) => Err(format!("unsupported persistence_mode: {}", other)),
+    }
+}
+
 fn parse_execution_timing(value: Option<&str>) -> Result<ExecutionTiming, String> {
     match value {
         None | Some("next_open") => Ok(ExecutionTiming::NextOpen),
@@ -427,6 +440,7 @@ fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String>
         execution_timing,
         execution_price,
         max_participation_rate,
+        persistence_mode: parse_persistence_mode(req.persistence_mode.as_deref())?,
         risk_control: Default::default(),
     })
 }
@@ -834,6 +848,7 @@ pub struct RunFactorBacktestReq {
     #[serde(default = "default_capital")]
     pub initial_capital: f64,
     pub mode: Option<String>,
+    pub persistence_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -900,6 +915,7 @@ pub struct RunPredictionBacktestReq {
     #[serde(default = "default_capital")]
     pub initial_capital: f64,
     pub mode: Option<String>,
+    pub persistence_mode: Option<String>,
 }
 
 pub(crate) struct FactorBacktestRunOutput {
@@ -968,6 +984,9 @@ fn parse_portfolio_method(value: &str) -> Result<PortfolioConstructionMethod, St
     match value {
         "heuristic" | "legacy" => Ok(PortfolioConstructionMethod::Heuristic),
         "risk_budget" | "risk-budget" => Ok(PortfolioConstructionMethod::RiskBudget),
+        "min_variance" | "min-variance" | "minimum_variance" | "minimum-variance" => {
+            Ok(PortfolioConstructionMethod::MinVariance)
+        }
         other => Err(format!("unsupported portfolio_method: {}", other)),
     }
 }
@@ -1628,6 +1647,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         Some("audit") => BacktestMode::Audit,
         _ => BacktestMode::Standard,
     };
+    let persistence_mode = parse_persistence_mode(req.persistence_mode.as_deref())?;
 
     let config = BacktestConfig {
         initial_capital: capital,
@@ -1653,6 +1673,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         execution_timing,
         execution_price,
         max_participation_rate,
+        persistence_mode,
         risk_control: build_portfolio_risk_control(&req)?,
     };
 
@@ -1768,6 +1789,7 @@ pub(crate) async fn execute_prediction_backtest(
         Some("audit") => BacktestMode::Audit,
         _ => BacktestMode::Standard,
     };
+    let persistence_mode = parse_persistence_mode(req.persistence_mode.as_deref())?;
 
     let config = BacktestConfig {
         initial_capital: capital,
@@ -1793,6 +1815,7 @@ pub(crate) async fn execute_prediction_backtest(
         execution_timing,
         execution_price,
         max_participation_rate,
+        persistence_mode,
         risk_control: Default::default(),
     };
 
@@ -1836,6 +1859,7 @@ mod tests {
             end_date: "20240131".into(),
             initial_capital: Some(1_000_000.0),
             mode: None,
+            persistence_mode: None,
             rebalance_frequency: None,
             cost_model: None,
             execution_rules: None,
@@ -1861,6 +1885,7 @@ mod tests {
             end_date: "20240131".into(),
             initial_capital: Some(1_000_000.0),
             mode: None,
+            persistence_mode: Some("summary_only".into()),
             rebalance_frequency: None,
             cost_model: Some(CostModelReq {
                 commission_rate: None,
@@ -1879,6 +1904,10 @@ mod tests {
 
         let config = build_backtest_config(&req).unwrap();
 
+        assert_eq!(
+            config.persistence_mode,
+            BacktestPersistenceMode::SummaryOnly
+        );
         assert_eq!(
             config.fee_config.cost_multiplier,
             Decimal::from_f64(1.5).unwrap()
@@ -2043,6 +2072,21 @@ mod tests {
             profile,
             RiskContributionControlProfile::SoftSingleName20PctV1
         );
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_min_variance_portfolio_method() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "portfolio_method": "min_variance"
+        }))
+        .expect("factor request");
+
+        let method = parse_portfolio_method(&req.portfolio_method).expect("portfolio method");
+
+        assert_eq!(method, PortfolioConstructionMethod::MinVariance);
     }
 
     #[test]
@@ -2505,6 +2549,7 @@ mod tests {
             end_date: "20250131".to_string(),
             initial_capital: 1_000_000.0,
             mode: Some("standard".to_string()),
+            persistence_mode: None,
             portfolio_drawdown_reduce_start_pct: Some(0.05),
             portfolio_drawdown_reduce_full_pct: Some(0.15),
             portfolio_drawdown_min_exposure: Some(0.4),
