@@ -1499,6 +1499,28 @@ impl MarketRegimePolicy {
         )
     }
 
+    pub fn quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_price_volume_expanded_v1",
+            0.10,
+            ScoreDirection::Ascending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_price_volume_expanded_v1",
+            0.15,
+            ScoreDirection::Ascending,
+        )
+    }
+
     fn quality_regime_alpha_switch(
         benchmark: impl Into<String>,
         stress_combo_name: &str,
@@ -6082,6 +6104,29 @@ mod tests {
         assert_eq!(sleeve.combo_name, "phase7_valuation_v1");
         assert_eq!(sleeve.version, "1.0.0");
         assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+        assert!((sleeve.weight - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_can_allocate_low_risk_sleeve() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+        let policy =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+
+        assert!(bull.portfolio_sleeve.is_none());
+        let sleeve = bear.portfolio_sleeve.expect("low-risk portfolio sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_price_volume_expanded_v1");
+        assert_eq!(sleeve.version, "1.0.0");
+        assert_eq!(sleeve.score_direction, ScoreDirection::Ascending);
         assert!((sleeve.weight - 0.15).abs() < 1e-9);
     }
 

@@ -348,6 +348,20 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_regime_alpha_sleeve_allocation".to_string(),
             LayeredSearchConfig::professional_regime_alpha_sleeve_allocation_default(),
         ),
+        "professional_low_risk_sleeve"
+        | "low_risk_sleeve"
+        | "phase7_low_risk_sleeve"
+        | "phase7_ar" => (
+            "professional_low_risk_sleeve".to_string(),
+            LayeredSearchConfig::professional_low_risk_sleeve_default(),
+        ),
+        "professional_value_guard_sleeve_composition"
+        | "value_guard_sleeve_composition"
+        | "phase7_value_guard_sleeve"
+        | "phase7_as" => (
+            "professional_value_guard_sleeve_composition".to_string(),
+            LayeredSearchConfig::professional_value_guard_sleeve_composition_default(),
+        ),
         "professional_volatility_sharpe" | "volatility_sharpe" | "phase7_ai" => (
             "professional_volatility_sharpe".to_string(),
             LayeredSearchConfig::professional_volatility_sharpe_default(),
@@ -2395,6 +2409,8 @@ fn market_regime_request_from_value(
             | "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
             | "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
             | "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1"
             | "quality_bear_position_guard_v1"
             | "quality_bear_position_guard_v2" => Ok(Some(MarketRegimeBacktestReq {
                 enabled: Some(true),
@@ -4211,6 +4227,8 @@ mod tests {
             "quality_regime_alpha_portfolio_sleeve_value_10pct_v1",
             "quality_regime_alpha_portfolio_sleeve_value_15pct_v1",
             "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1",
+            "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1",
+            "quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1",
         ] {
             let params = json!({
                 "market_regime": policy,
@@ -4970,6 +4988,80 @@ mod tests {
         assert!(bundle.plan.trials.iter().any(|trial| {
             trial.parameters["market_regime"]
                 == "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_low_risk_sleeve_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_ar".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_low_risk_sleeve"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_value_guard_sleeve_composition_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_as".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_value_guard_sleeve_composition"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom35"
+                && trial.parameters["market_regime"]
+                    == "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial.parameters["market_regime"]
+                    == "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
         }));
     }
 

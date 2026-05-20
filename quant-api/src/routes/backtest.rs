@@ -1326,6 +1326,12 @@ fn build_market_regime_policy(
         "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1" => {
             MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_blend_10pct_v1(benchmark)
         }
+        "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1(benchmark)
+        }
+        "quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1(benchmark)
+        }
         "quality_bear_position_guard_v1" => {
             MarketRegimePolicy::quality_bear_position_guard_v1(benchmark)
         }
@@ -2321,6 +2327,33 @@ mod tests {
                 .and_then(|rule| rule.score_direction),
             Some(quant_backtest::signal_generator::ScoreDirection::Descending)
         );
+    }
+
+    #[test]
+    fn market_regime_request_builds_low_risk_portfolio_sleeve_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        let sleeve = policy
+            .rules
+            .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .expect("bear low-risk sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_price_volume_expanded_v1");
+        assert_eq!(
+            sleeve.score_direction,
+            quant_backtest::signal_generator::ScoreDirection::Ascending
+        );
+        assert!((sleeve.weight - 0.15).abs() < 1e-9);
     }
 
     #[test]
