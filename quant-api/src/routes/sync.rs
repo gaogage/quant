@@ -166,6 +166,54 @@ async fn execute_sync_task(
                 json!({"task_id": task_id, "dataset": "moneyflow", "status": "completed", "count": count}),
             )
         }
+        "forecast" | "stock_forecast" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_forecast(
+                &state.db,
+                &state.tushare,
+                &req.symbols,
+                start,
+                end,
+                &task_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "forecast", "status": "completed", "count": count}),
+            )
+        }
+        "express" | "stock_express" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_express(
+                &state.db,
+                &state.tushare,
+                &req.symbols,
+                start,
+                end,
+                &task_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "express", "status": "completed", "count": count}),
+            )
+        }
+        "disclosure_date" | "stock_disclosure_date" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_disclosure_date(
+                &state.db,
+                &state.tushare,
+                &req.symbols,
+                start,
+                end,
+                &task_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "disclosure_date", "status": "completed", "count": count}),
+            )
+        }
         "adj_factor" => {
             if req.symbols.is_empty() {
                 return Err("symbols must not be empty for adj_factor sync".into());

@@ -193,6 +193,10 @@ async fn main() {
             post(routes::factors::backfill_phase7_financial_quality_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-industry-residual-quality-backfill/background",
+            post(routes::factors::backfill_phase7_industry_residual_quality_background),
+        )
+        .route(
             "/api/v1/quant/factors/phase7-relative-strength-backfill/background",
             post(routes::factors::backfill_phase7_relative_strength_background),
         )
@@ -211,6 +215,18 @@ async fn main() {
         .route(
             "/api/v1/quant/factors/phase7-moneyflow-backfill/background",
             post(routes::factors::backfill_phase7_moneyflow_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-event-alpha-backfill/background",
+            post(routes::factors::backfill_phase7_event_alpha_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-event-surprise-backfill/background",
+            post(routes::factors::backfill_phase7_event_surprise_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-event-window-alpha-backfill/background",
+            post(routes::factors::backfill_phase7_event_window_alpha_background),
         )
         .route(
             "/api/v1/quant/factors/phase7-alpha-blend-backfill/background",

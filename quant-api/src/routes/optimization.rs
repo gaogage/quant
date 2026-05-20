@@ -19,8 +19,9 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::routes::backtest::{
-    execute_factor_backtest_with_caches, execute_prediction_backtest, MarketRegimeBacktestReq,
-    RunFactorBacktestReq, RunPredictionBacktestReq,
+    execute_factor_backtest_with_caches, execute_prediction_backtest, EffectiveCoverageReq,
+    FactorBacktestRunOutput, MarketRegimeBacktestReq, RunFactorBacktestReq,
+    RunPredictionBacktestReq,
 };
 use crate::AppState;
 use quant_backtest::runner::BacktestDataCache;
@@ -225,7 +226,10 @@ fn default_professional_robustness_policy() -> Value {
         "walk_forward_step_days": 63,
         "min_walk_forward_windows": 4,
         "min_positive_excess_window_ratio": 0.50,
+        "min_positive_annual_return_window_ratio": 0.60,
+        "min_walk_forward_median_sharpe": 0.30,
         "min_bootstrap_positive_return_probability": 0.70,
+        "min_bootstrap_sharpe_p05": 0.0,
         "min_market_scenarios": 2,
         "bootstrap_trials": 512,
         "bootstrap_seed": 42
@@ -265,6 +269,123 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
         | "phase7_u2" => (
             "professional_bear_window_stabilization".to_string(),
             LayeredSearchConfig::professional_bear_window_stabilization_default(),
+        ),
+        "professional_style_risk_budget"
+        | "style_risk_budget"
+        | "phase7_style_risk_budget"
+        | "phase7_v" => (
+            "professional_style_risk_budget".to_string(),
+            LayeredSearchConfig::professional_style_risk_budget_default(),
+        ),
+        "professional_second_alpha_source"
+        | "second_alpha_source"
+        | "phase7_second_alpha_source"
+        | "phase7_w" => (
+            "professional_second_alpha_source".to_string(),
+            LayeredSearchConfig::professional_second_alpha_source_default(),
+        ),
+        "professional_residual_quality"
+        | "residual_quality"
+        | "industry_residual_quality"
+        | "phase7_residual_quality"
+        | "phase7_ag" => (
+            "professional_residual_quality".to_string(),
+            LayeredSearchConfig::professional_residual_quality_default(),
+        ),
+        "professional_residual_overlay_sharpe"
+        | "residual_overlay_sharpe"
+        | "quality_residual_overlay"
+        | "phase7_ah" => (
+            "professional_residual_overlay_sharpe".to_string(),
+            LayeredSearchConfig::professional_residual_overlay_sharpe_default(),
+        ),
+        "professional_conditioned_second_alpha"
+        | "conditioned_second_alpha"
+        | "quality_conditioned_second_alpha"
+        | "phase7_ak" => (
+            "professional_conditioned_second_alpha".to_string(),
+            LayeredSearchConfig::professional_conditioned_second_alpha_default(),
+        ),
+        "professional_valuation_guard_sharpe"
+        | "valuation_guard_sharpe"
+        | "phase7_valuation_guard"
+        | "phase7_al" => (
+            "professional_valuation_guard_sharpe".to_string(),
+            LayeredSearchConfig::professional_valuation_guard_sharpe_default(),
+        ),
+        "professional_regime_conditioned_valuation_guard"
+        | "regime_conditioned_valuation_guard"
+        | "phase7_regime_conditioned_valuation_guard"
+        | "phase7_am" => (
+            "professional_regime_conditioned_valuation_guard".to_string(),
+            LayeredSearchConfig::professional_regime_conditioned_valuation_guard_default(),
+        ),
+        "professional_regime_alpha_routing"
+        | "regime_alpha_routing"
+        | "phase7_regime_alpha_routing"
+        | "phase7_an" => (
+            "professional_regime_alpha_routing".to_string(),
+            LayeredSearchConfig::professional_regime_alpha_routing_default(),
+        ),
+        "professional_regime_alpha_sleeve_search"
+        | "regime_alpha_sleeve_search"
+        | "phase7_regime_alpha_sleeve_search"
+        | "phase7_ao" => (
+            "professional_regime_alpha_sleeve_search".to_string(),
+            LayeredSearchConfig::professional_regime_alpha_sleeve_search_default(),
+        ),
+        "professional_regime_alpha_overlay_search"
+        | "regime_alpha_overlay_search"
+        | "phase7_regime_alpha_overlay_search"
+        | "phase7_ap" => (
+            "professional_regime_alpha_overlay_search".to_string(),
+            LayeredSearchConfig::professional_regime_alpha_overlay_search_default(),
+        ),
+        "professional_regime_alpha_sleeve_allocation"
+        | "regime_alpha_sleeve_allocation"
+        | "phase7_regime_alpha_sleeve_allocation"
+        | "phase7_aq" => (
+            "professional_regime_alpha_sleeve_allocation".to_string(),
+            LayeredSearchConfig::professional_regime_alpha_sleeve_allocation_default(),
+        ),
+        "professional_volatility_sharpe" | "volatility_sharpe" | "phase7_ai" => (
+            "professional_volatility_sharpe".to_string(),
+            LayeredSearchConfig::professional_volatility_sharpe_default(),
+        ),
+        "professional_regime_position_sharpe"
+        | "regime_position_sharpe"
+        | "phase7_regime_position_sharpe"
+        | "phase7_aj" => (
+            "professional_regime_position_sharpe".to_string(),
+            LayeredSearchConfig::professional_regime_position_sharpe_default(),
+        ),
+        "professional_anti_overfit_sharpe"
+        | "anti_overfit_sharpe"
+        | "phase7_anti_overfit_sharpe"
+        | "phase7_ab" => (
+            "professional_anti_overfit_sharpe".to_string(),
+            LayeredSearchConfig::professional_anti_overfit_sharpe_default(),
+        ),
+        "professional_candidate_risk_filter"
+        | "candidate_risk_filter"
+        | "phase7_candidate_risk_filter"
+        | "phase7_ac" => (
+            "professional_candidate_risk_filter".to_string(),
+            LayeredSearchConfig::professional_candidate_risk_filter_default(),
+        ),
+        "professional_risk_contribution"
+        | "risk_contribution"
+        | "phase7_risk_contribution"
+        | "phase7_ad" => (
+            "professional_risk_contribution".to_string(),
+            LayeredSearchConfig::professional_risk_contribution_default(),
+        ),
+        "professional_event_conditioned_sharpe"
+        | "event_conditioned_sharpe"
+        | "phase7_event_conditioned"
+        | "phase7_ae" => (
+            "professional_event_conditioned_sharpe".to_string(),
+            LayeredSearchConfig::professional_event_conditioned_sharpe_default(),
         ),
         "professional_breakthrough" | "breakthrough" | "phase7_breakthrough" => (
             "professional_breakthrough".to_string(),
@@ -313,14 +434,18 @@ fn phase7_discovery_layered_request(
 ) -> Phase7LayeredOptimizationRequest {
     let default_backtest_template = || {
         json!({
-            "mode": "standard",
-            "benchmark": "000300.SH",
-            "start_date": "20160304",
-            "end_date": "20260515",
-            "initial_capital": 1000000.0,
+                "mode": "standard",
+                "benchmark": "000300.SH",
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0,
             "signal_timing": "close",
             "execution_timing": "next_open",
-            "execution_price": "next_open"
+            "execution_price": "next_open",
+            "effective_coverage": {
+                "enabled": true,
+                "mode": "adjust_start"
+            }
         })
     };
     Phase7LayeredOptimizationRequest {
@@ -356,7 +481,7 @@ fn phase7_discovery_layered_request(
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .unwrap_or("professional_risk_breakthrough")
+                .unwrap_or("professional_sharpe_stabilization")
                 .to_string(),
         ),
     }
@@ -369,6 +494,79 @@ fn normalize_prediction_set_ids(values: &[String]) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn default_effective_coverage_policy(top_n: usize) -> EffectiveCoverageReq {
+    EffectiveCoverageReq {
+        enabled: Some(true),
+        mode: Some("adjust_start".to_string()),
+        min_rows: Some(top_n.max(1)),
+        include_rebalance_warmup: Some(true),
+        warmup_trading_days: Some(19),
+    }
+}
+
+fn effective_coverage_policy_from_value(
+    value: Option<&Value>,
+    top_n: usize,
+) -> Result<Option<EffectiveCoverageReq>, String> {
+    let Some(value) = value else {
+        return Ok(Some(default_effective_coverage_policy(top_n)));
+    };
+    match value {
+        Value::Null => Ok(None),
+        Value::Bool(false) => Ok(Some(EffectiveCoverageReq {
+            enabled: Some(false),
+            mode: None,
+            min_rows: None,
+            include_rebalance_warmup: None,
+            warmup_trading_days: None,
+        })),
+        Value::Bool(true) => Ok(Some(default_effective_coverage_policy(top_n))),
+        Value::String(mode) => {
+            let mode = mode.trim();
+            if mode.is_empty() || mode == "adjust_start" {
+                Ok(Some(default_effective_coverage_policy(top_n)))
+            } else if mode == "guard_only" {
+                Ok(Some(EffectiveCoverageReq {
+                    enabled: Some(true),
+                    mode: Some("guard_only".to_string()),
+                    min_rows: Some(top_n.max(1)),
+                    include_rebalance_warmup: Some(true),
+                    warmup_trading_days: Some(19),
+                }))
+            } else if mode == "off" || mode == "disabled" {
+                Ok(None)
+            } else {
+                Err(format!("unsupported effective_coverage policy: {}", mode))
+            }
+        }
+        Value::Object(_) => {
+            let mut policy: EffectiveCoverageReq = serde_json::from_value(value.clone())
+                .map_err(|error| format!("effective_coverage must be an object: {}", error))?;
+            if policy.enabled != Some(false) {
+                if policy.enabled.is_none() {
+                    policy.enabled = Some(true);
+                }
+                if policy.mode.is_none() {
+                    policy.mode = Some("adjust_start".to_string());
+                }
+                if policy.min_rows.is_none() {
+                    policy.min_rows = Some(top_n.max(1));
+                }
+                if policy.include_rebalance_warmup.is_none() {
+                    policy.include_rebalance_warmup = Some(true);
+                }
+                if policy.include_rebalance_warmup == Some(true)
+                    && policy.warmup_trading_days.is_none()
+                {
+                    policy.warmup_trading_days = Some(19);
+                }
+            }
+            Ok(Some(policy))
+        }
+        _ => Err("effective_coverage must be null, boolean, string, or object".to_string()),
+    }
 }
 
 pub async fn create_optimization(
@@ -1043,7 +1241,7 @@ async fn execute_pending_trials(
         match execution_result {
             Ok(output) => {
                 let scored =
-                    score_trial(&output.metrics, &task.objective, task.constraints.as_ref());
+                    score_trial_with_output(&output, &task.objective, task.constraints.as_ref());
                 mark_trial_completed(db, trial_id, &backtest_task_id, &scored).await?;
                 completed += 1;
             }
@@ -1857,6 +2055,22 @@ fn build_factor_trial_request(
             _ => Err(format!("{} must be a string or number", name)),
         }
     };
+    let optional_string_array = |name: &str| -> Result<Option<Vec<String>>, String> {
+        match params.get(name).or_else(|| template.get(name)) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(vec![value.clone()])),
+            Some(Value::Array(values)) => values
+                .iter()
+                .map(|value| match value {
+                    Value::String(value) => Ok(value.clone()),
+                    Value::Number(value) => Ok(value.to_string()),
+                    _ => Err(format!("{} must contain only strings or numbers", name)),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            _ => Err(format!("{} must be a string or array", name)),
+        }
+    };
     let usize_value = |name: &str, default: usize| -> Result<usize, String> {
         match params.get(name).or_else(|| template.get(name)) {
             None | Some(Value::Null) => Ok(default),
@@ -1913,6 +2127,13 @@ fn build_factor_trial_request(
     };
 
     let benchmark = optional_string("benchmark")?.or_else(|| Some("000300.SH".into()));
+    let top_n = usize_value("top_n", 20)?;
+    let effective_coverage = effective_coverage_policy_from_value(
+        params
+            .get("effective_coverage")
+            .or_else(|| template.get("effective_coverage")),
+        top_n,
+    )?;
     let market_regime = market_regime_request_from_value(
         params
             .get("market_regime")
@@ -1930,8 +2151,15 @@ fn build_factor_trial_request(
         prediction_set_id: optional_string("prediction_set_id")?,
         prediction_blend_weight: optional_f64_value("prediction_blend_weight")?,
         prediction_min_percentile: optional_f64_value("prediction_min_percentile")?,
+        event_gate_combo_name: optional_string("event_gate_combo_name")?,
+        event_gate_version: string_value("event_gate_version", Some("1.0.0"))?,
+        event_gate_mode: optional_string("event_gate_mode")?,
+        event_gate_min_score: optional_f64_value("event_gate_min_score")?,
+        event_gate_boost_weight: optional_f64_value("event_gate_boost_weight")?,
+        event_gate_score_direction: optional_string("event_gate_score_direction")?,
+        event_gate_active_regimes: optional_string_array("event_gate_active_regimes")?,
         portfolio_policy_id: optional_string("portfolio_policy_id")?,
-        top_n: usize_value("top_n", 20)?,
+        top_n,
         rebalance: string_value("rebalance", Some("monthly"))?,
         entry_delay: usize_value("entry_delay", 0)?,
         min_amount: f64_value("min_amount", 0.0)?,
@@ -1947,6 +2175,11 @@ fn build_factor_trial_request(
         risk_budget_lookback_days: usize_value("risk_budget_lookback_days", 60)?,
         capacity_penalty_strength: f64_value("capacity_penalty_strength", 0.0)?,
         industry_max_weight_pct: optional_f64_value("industry_max_weight_pct")?,
+        style_risk_budget: optional_string("style_risk_budget")?,
+        candidate_risk_filter: optional_string("candidate_risk_filter")?,
+        risk_contribution_control: optional_string("risk_contribution_control")?,
+        rebalance_hysteresis_pct: optional_f64_value("rebalance_hysteresis_pct")?,
+        partial_rebalance_ratio: optional_f64_value("partial_rebalance_ratio")?,
         score_candidate_pool_size: match params
             .get("score_candidate_pool_size")
             .or_else(|| template.get("score_candidate_pool_size"))
@@ -1962,6 +2195,7 @@ fn build_factor_trial_request(
             }
         },
         universe_profile: optional_string("universe_profile")?,
+        effective_coverage,
         cost_model: None,
         execution_rules: None,
         benchmark,
@@ -2119,6 +2353,11 @@ fn build_prediction_trial_request(
         risk_budget_lookback_days: usize_value("risk_budget_lookback_days", 60)?,
         capacity_penalty_strength: f64_value("capacity_penalty_strength", 0.0)?,
         industry_max_weight_pct: optional_f64_value("industry_max_weight_pct")?,
+        style_risk_budget: optional_string("style_risk_budget")?,
+        candidate_risk_filter: optional_string("candidate_risk_filter")?,
+        risk_contribution_control: optional_string("risk_contribution_control")?,
+        rebalance_hysteresis_pct: optional_f64_value("rebalance_hysteresis_pct")?,
+        partial_rebalance_ratio: optional_f64_value("partial_rebalance_ratio")?,
         cost_model: None,
         execution_rules: None,
         benchmark: optional_string("benchmark")?.or_else(|| Some("000300.SH".into())),
@@ -2145,7 +2384,19 @@ fn market_regime_request_from_value(
             | "quality_crash_guard_v2"
             | "quality_crash_guard_v3"
             | "quality_bear_window_guard_v1"
-            | "quality_bear_window_guard_v2" => Ok(Some(MarketRegimeBacktestReq {
+            | "quality_bear_window_guard_v2"
+            | "quality_regime_alpha_switch_v1"
+            | "quality_regime_alpha_switch_value_v1"
+            | "quality_regime_alpha_switch_recovery_v1"
+            | "quality_regime_alpha_switch_blend_v1"
+            | "quality_regime_alpha_overlay_value_05pct_v1"
+            | "quality_regime_alpha_overlay_value_10pct_v1"
+            | "quality_regime_alpha_overlay_blend_10pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1"
+            | "quality_bear_position_guard_v1"
+            | "quality_bear_position_guard_v2" => Ok(Some(MarketRegimeBacktestReq {
                 enabled: Some(true),
                 policy: Some(policy.to_string()),
                 benchmark: Some(default_benchmark.to_string()),
@@ -2446,6 +2697,20 @@ fn score_trial(
     }
 }
 
+fn score_trial_with_output(
+    output: &FactorBacktestRunOutput,
+    objective: &Value,
+    constraints: Option<&Value>,
+) -> ScoredTrial {
+    let mut scored = score_trial(&output.metrics, objective, constraints);
+    if let Some(coverage) = output.effective_coverage.as_ref() {
+        if let Some(metrics) = scored.metrics.as_object_mut() {
+            metrics.insert("effective_coverage".to_string(), json!(coverage));
+        }
+    }
+    scored
+}
+
 impl RobustnessDailyPoint {
     #[cfg(test)]
     fn new(trade_date: &str, portfolio_value: f64, benchmark_value: Option<f64>) -> Self {
@@ -2511,12 +2776,22 @@ fn build_walk_forward_analysis(
     }
 
     let mut windows = Vec::new();
+    let mut annual_returns = Vec::new();
+    let mut excess_returns = Vec::new();
+    let mut sharpes = Vec::new();
+    let mut sortinos = Vec::new();
     let mut idx = 0;
     while idx + window_size <= points.len() {
         let slice = &points[idx..idx + window_size];
         let summary = summarize_points(slice);
         let volatility =
             annualized_volatility(&daily_returns(slice, |point| Some(point.portfolio_value)));
+        annual_returns.push(summary.annual_return);
+        if let Some(excess_return) = summary.excess_return {
+            excess_returns.push(excess_return);
+        }
+        sharpes.push(summary.sharpe_ratio);
+        sortinos.push(summary.sortino_ratio);
         windows.push(json!({
             "window_index": windows.len() + 1,
             "start_date": slice.first().map(|point| point.trade_date),
@@ -2537,6 +2812,10 @@ fn build_walk_forward_analysis(
                 .unwrap_or(false)
         })
         .count();
+    let positive_annual_return_count = annual_returns
+        .iter()
+        .filter(|value| value.is_finite() && **value > 0.0)
+        .count();
     let worst_window_drawdown = windows
         .iter()
         .filter_map(|window| window["metrics"]["max_drawdown"].as_f64())
@@ -2552,8 +2831,13 @@ fn build_walk_forward_analysis(
         "window_size": window_size,
         "step_size": step_size,
         "positive_excess_window_ratio": if windows.is_empty() { 0.0 } else { positive_excess_count as f64 / windows.len() as f64 },
+        "positive_annual_return_ratio": if windows.is_empty() { 0.0 } else { positive_annual_return_count as f64 / windows.len() as f64 },
         "worst_window_drawdown": worst_window_drawdown,
         "scenario_count": scenario_count,
+        "annual_return": distribution_summary(&mut annual_returns),
+        "excess_return": distribution_summary(&mut excess_returns),
+        "sharpe_ratio": distribution_summary(&mut sharpes),
+        "sortino_ratio": distribution_summary(&mut sortinos),
         "windows": windows
     })
 }
@@ -2838,8 +3122,14 @@ fn evaluate_robustness_gates_with_analysis(
         constraint_i64(gate_policy, "min_walk_forward_windows").unwrap_or(0);
     let min_positive_excess_window_ratio =
         constraint_f64(gate_policy, "min_positive_excess_window_ratio").unwrap_or(0.0);
+    let min_positive_annual_return_window_ratio =
+        constraint_f64(gate_policy, "min_positive_annual_return_window_ratio").unwrap_or(0.0);
+    let min_walk_forward_median_sharpe =
+        constraint_f64(gate_policy, "min_walk_forward_median_sharpe").unwrap_or(0.0);
     let min_bootstrap_positive_return_probability =
         constraint_f64(gate_policy, "min_bootstrap_positive_return_probability").unwrap_or(0.0);
+    let min_bootstrap_sharpe_p05 =
+        constraint_f64(gate_policy, "min_bootstrap_sharpe_p05").unwrap_or(f64::NEG_INFINITY);
     let min_market_scenarios = constraint_i64(gate_policy, "min_market_scenarios").unwrap_or(1);
 
     let num_trades = metrics
@@ -2884,6 +3174,14 @@ fn evaluate_robustness_gates_with_analysis(
             "actual": score_gap,
         }),
     ];
+    if let Some(coverage) = metrics.get("effective_coverage") {
+        gates.push(json!({
+            "gate": "effective_coverage_start",
+            "passed": true,
+            "actual": coverage.get("effective_start_date").cloned().unwrap_or(Value::Null),
+            "details": coverage,
+        }));
+    }
     if let Some(limit) = min_annual_return {
         gates.push(json!({
             "gate": "min_annual_return",
@@ -2921,10 +3219,19 @@ fn evaluate_robustness_gates_with_analysis(
         let positive_excess_window_ratio = analysis.walk_forward["positive_excess_window_ratio"]
             .as_f64()
             .unwrap_or(0.0);
+        let positive_annual_return_ratio = analysis.walk_forward["positive_annual_return_ratio"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let walk_forward_median_sharpe = analysis.walk_forward["sharpe_ratio"]["median"]
+            .as_f64()
+            .unwrap_or(0.0);
         let bootstrap_positive_return_probability = analysis.bootstrap
             ["positive_return_probability"]
             .as_f64()
             .unwrap_or(0.0);
+        let bootstrap_sharpe_p05 = analysis.bootstrap["sharpe_ratio"]["p05"]
+            .as_f64()
+            .unwrap_or(f64::NEG_INFINITY);
         let market_scenario_count = analysis.walk_forward["scenario_count"]
             .as_i64()
             .or_else(|| analysis.market_scenarios["scenario_count"].as_i64())
@@ -2943,11 +3250,35 @@ fn evaluate_robustness_gates_with_analysis(
             "actual": positive_excess_window_ratio,
         }));
         gates.push(json!({
+            "gate": "walk_forward_positive_annual_return_ratio",
+            "passed": positive_annual_return_ratio >= min_positive_annual_return_window_ratio,
+            "limit": min_positive_annual_return_window_ratio,
+            "actual": positive_annual_return_ratio,
+            "details": {
+                "annual_return": analysis.walk_forward["annual_return"].clone(),
+                "window_count": window_count
+            },
+        }));
+        gates.push(json!({
+            "gate": "walk_forward_median_sharpe",
+            "passed": walk_forward_median_sharpe >= min_walk_forward_median_sharpe,
+            "limit": min_walk_forward_median_sharpe,
+            "actual": walk_forward_median_sharpe,
+            "details": analysis.walk_forward["sharpe_ratio"].clone(),
+        }));
+        gates.push(json!({
             "gate": "bootstrap_positive_return_probability",
             "passed": bootstrap_positive_return_probability >= min_bootstrap_positive_return_probability,
             "limit": min_bootstrap_positive_return_probability,
             "actual": bootstrap_positive_return_probability,
             "details": analysis.bootstrap,
+        }));
+        gates.push(json!({
+            "gate": "bootstrap_sharpe_p05",
+            "passed": bootstrap_sharpe_p05 >= min_bootstrap_sharpe_p05,
+            "limit": min_bootstrap_sharpe_p05,
+            "actual": bootstrap_sharpe_p05,
+            "details": analysis.bootstrap["sharpe_ratio"].clone(),
         }));
         gates.push(json!({
             "gate": "market_scenario_coverage",
@@ -3032,8 +3363,14 @@ fn build_primary_failure_modes(failed_gates: &[Value]) -> Vec<Value> {
             "walk_forward_positive_excess_ratio" | "walk_forward_min_window_count" => {
                 modes.insert("walk_forward_instability");
             }
+            "walk_forward_positive_annual_return_ratio" | "walk_forward_median_sharpe" => {
+                modes.insert("overfit_window_concentration");
+            }
             "bootstrap_positive_return_probability" => {
                 modes.insert("bootstrap_tail_risk");
+            }
+            "bootstrap_sharpe_p05" => {
+                modes.insert("bootstrap_sharpe_tail_risk");
             }
             "market_scenario_coverage" => {
                 modes.insert("market_scenario_coverage_gap");
@@ -3524,10 +3861,17 @@ mod tests {
             "risk_budget_lookback_days": 80,
             "capacity_penalty_strength": 0.75,
             "industry_max_weight_pct": 0.35,
+            "style_risk_budget": "defensive_style_budget_v1",
+            "candidate_risk_filter": "low_volatility_low_correlation_v1",
             "score_candidate_pool_size": 300,
             "universe_profile": "listed_non_st",
             "prediction_set_id": "pred-quality-growth-v1",
             "prediction_blend_weight": 0.35,
+            "event_gate_combo_name": "phase7_event_window_earnings_v1",
+            "event_gate_mode": "boost_positive",
+            "event_gate_min_score": 0.0,
+            "event_gate_boost_weight": 0.05,
+            "event_gate_score_direction": "descending",
             "market_regime": "quality_crash_guard_v3",
             "portfolio_drawdown_reduce_start_pct": 0.10,
             "portfolio_drawdown_reduce_full_pct": 0.25,
@@ -3565,6 +3909,14 @@ mod tests {
         assert_eq!(req.risk_budget_lookback_days, 80);
         assert_eq!(req.capacity_penalty_strength, 0.75);
         assert_eq!(req.industry_max_weight_pct, Some(0.35));
+        assert_eq!(
+            req.style_risk_budget.as_deref(),
+            Some("defensive_style_budget_v1")
+        );
+        assert_eq!(
+            req.candidate_risk_filter.as_deref(),
+            Some("low_volatility_low_correlation_v1")
+        );
         assert_eq!(req.score_candidate_pool_size, Some(300));
         assert_eq!(req.universe_profile.as_deref(), Some("listed_non_st"));
         assert_eq!(
@@ -3572,6 +3924,17 @@ mod tests {
             Some("pred-quality-growth-v1")
         );
         assert_eq!(req.prediction_blend_weight, Some(0.35));
+        assert_eq!(
+            req.event_gate_combo_name.as_deref(),
+            Some("phase7_event_window_earnings_v1")
+        );
+        assert_eq!(req.event_gate_mode.as_deref(), Some("boost_positive"));
+        assert_eq!(req.event_gate_min_score, Some(0.0));
+        assert_eq!(req.event_gate_boost_weight, Some(0.05));
+        assert_eq!(
+            req.event_gate_score_direction.as_deref(),
+            Some("descending")
+        );
         assert_eq!(
             req.market_regime.as_ref().and_then(|policy| policy.enabled),
             Some(true)
@@ -3598,6 +3961,84 @@ mod tests {
         assert_eq!(req.trailing_stop_pct, Some(0.18));
         assert_eq!(req.time_stop_days, Some(120));
         assert_eq!(req.reentry_cooldown_days, Some(10));
+        let coverage = req
+            .effective_coverage
+            .as_ref()
+            .expect("optimization requests should auto-enable effective coverage");
+        assert_eq!(coverage.enabled, Some(true));
+        assert_eq!(coverage.mode.as_deref(), Some("adjust_start"));
+        assert_eq!(coverage.min_rows, Some(8));
+        assert_eq!(coverage.include_rebalance_warmup, Some(true));
+        assert_eq!(coverage.warmup_trading_days, Some(19));
+    }
+
+    #[test]
+    fn trial_backtest_request_allows_effective_coverage_override() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "effective_coverage": {
+                    "enabled": true,
+                    "mode": "guard_only",
+                    "min_rows": 120
+                }
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "top_n": 30,
+            "effective_coverage": {
+                "enabled": true,
+                "mode": "adjust_start",
+                "min_rows": 180
+            }
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("factor request");
+
+        let coverage = req.effective_coverage.expect("effective coverage");
+        assert_eq!(coverage.enabled, Some(true));
+        assert_eq!(coverage.mode.as_deref(), Some("adjust_start"));
+        assert_eq!(coverage.min_rows, Some(180));
+        assert_eq!(coverage.include_rebalance_warmup, Some(true));
+        assert_eq!(coverage.warmup_trading_days, Some(19));
+    }
+
+    #[test]
+    fn trial_backtest_request_applies_rebalance_smoothing_overrides() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "monthly",
+                "max_position_pct": 0.10
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "rebalance_hysteresis_pct": 0.02,
+            "partial_rebalance_ratio": 0.75
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("factor request");
+
+        assert_eq!(req.rebalance_hysteresis_pct, Some(0.02));
+        assert_eq!(req.partial_rebalance_ratio, Some(0.75));
     }
 
     #[test]
@@ -3631,6 +4072,191 @@ mod tests {
                 .as_ref()
                 .and_then(|policy| policy.policy.as_deref()),
             Some("quality_bear_window_guard_v1")
+        );
+    }
+
+    #[test]
+    fn trial_backtest_request_accepts_regime_alpha_switch_policy() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "60",
+                "max_position_pct": 0.15,
+                "portfolio_method": "risk_budget"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "market_regime": "quality_regime_alpha_switch_v1",
+            "score_direction": "ascending"
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("factor request");
+
+        assert_eq!(
+            req.market_regime
+                .as_ref()
+                .and_then(|policy| policy.policy.as_deref()),
+            Some("quality_regime_alpha_switch_v1")
+        );
+    }
+
+    #[test]
+    fn trial_backtest_request_accepts_regime_alpha_sleeve_search_policies() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "60",
+                "max_position_pct": 0.15,
+                "portfolio_method": "risk_budget"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+
+        for policy in [
+            "quality_regime_alpha_switch_value_v1",
+            "quality_regime_alpha_switch_recovery_v1",
+            "quality_regime_alpha_switch_blend_v1",
+        ] {
+            let params = json!({
+                "market_regime": policy,
+                "score_direction": "ascending"
+            });
+            let req = build_factor_trial_request(&task, &params).expect("factor request");
+            assert_eq!(
+                req.market_regime
+                    .as_ref()
+                    .and_then(|policy| policy.policy.as_deref()),
+                Some(policy)
+            );
+        }
+    }
+
+    #[test]
+    fn trial_backtest_request_accepts_regime_alpha_overlay_policies() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "60",
+                "max_position_pct": 0.15,
+                "portfolio_method": "risk_budget"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+
+        for policy in [
+            "quality_regime_alpha_overlay_value_05pct_v1",
+            "quality_regime_alpha_overlay_value_10pct_v1",
+            "quality_regime_alpha_overlay_blend_10pct_v1",
+        ] {
+            let params = json!({
+                "market_regime": policy,
+                "score_direction": "ascending"
+            });
+            let req = build_factor_trial_request(&task, &params).expect("factor request");
+            assert_eq!(
+                req.market_regime
+                    .as_ref()
+                    .and_then(|policy| policy.policy.as_deref()),
+                Some(policy)
+            );
+        }
+    }
+
+    #[test]
+    fn trial_backtest_request_accepts_regime_alpha_portfolio_sleeve_policies() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "60",
+                "max_position_pct": 0.15,
+                "portfolio_method": "risk_budget"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+
+        for policy in [
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1",
+            "quality_regime_alpha_portfolio_sleeve_value_15pct_v1",
+            "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1",
+        ] {
+            let params = json!({
+                "market_regime": policy,
+                "score_direction": "ascending"
+            });
+            let req = build_factor_trial_request(&task, &params).expect("factor request");
+            assert_eq!(
+                req.market_regime
+                    .as_ref()
+                    .and_then(|policy| policy.policy.as_deref()),
+                Some(policy)
+            );
+        }
+    }
+
+    #[test]
+    fn trial_backtest_request_accepts_bear_position_market_regime_policy() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "60",
+                "max_position_pct": 0.15,
+                "portfolio_method": "risk_budget"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "market_regime": "quality_bear_position_guard_v1",
+            "score_direction": "ascending"
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("factor request");
+
+        assert_eq!(
+            req.market_regime
+                .as_ref()
+                .and_then(|policy| policy.policy.as_deref()),
+            Some("quality_bear_position_guard_v1")
         );
     }
 
@@ -3699,7 +4325,7 @@ mod tests {
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
-        assert_eq!(bundle.plan.requested_trials, 3_197_988_864);
+        assert_eq!(bundle.plan.requested_trials, 4_702_924_800);
         assert_eq!(bundle.plan.planned_trials, 7);
         assert!(bundle.plan.truncated);
         assert_eq!(bundle.search_space["phase"], "7-D");
@@ -3738,7 +4364,7 @@ mod tests {
     }
 
     #[test]
-    fn professional_discovery_defaults_to_risk_breakthrough_search_profile() {
+    fn professional_discovery_defaults_to_sharpe_stabilization_search_profile() {
         let req = Phase7ProfessionalDiscoveryRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
             data_version_id: "full-market-2016-v1".to_string(),
@@ -3768,18 +4394,40 @@ mod tests {
 
         assert_eq!(
             bundle.search_space["search_profile"],
-            "professional_risk_breakthrough"
+            "professional_sharpe_stabilization"
         );
         assert_eq!(bundle.plan.planned_trials, 12);
         assert_eq!(
             layered_req.constraints.as_ref().unwrap()["min_sortino"],
             1.5
         );
+        let first_trial = bundle.plan.trials.first().unwrap();
+        assert_eq!(
+            first_trial.parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert_eq!(
+            first_trial.parameters["portfolio_drawdown_control"],
+            "recover252_10_24_50_30_70"
+        );
+        assert_eq!(
+            first_trial.parameters["portfolio_volatility_control"],
+            "vol120_22_65_100"
+        );
+        assert_eq!(first_trial.parameters["stop_loss_pct"], "0.075");
+        assert_eq!(first_trial.parameters["reentry_cooldown_days"], 30);
+        assert_eq!(first_trial.parameters["rebalance_hysteresis_pct"], "0");
+        assert_eq!(first_trial.parameters["partial_rebalance_ratio"], "1");
         assert!(bundle.plan.trials.iter().any(|trial| {
             trial.parameters["combo_name"] == "phase7_financial_quality_v1"
-                && trial.parameters["score_direction"] == "ascending"
-                && trial.parameters["portfolio_method"] == "risk_budget"
-                && trial.parameters["portfolio_volatility_control"] != "off"
+                && trial.parameters["market_regime"] == "quality_bear_window_guard_v2"
+                && trial.parameters["portfolio_volatility_control"] == "vol120_24_70_100"
+                && trial.parameters["stop_loss_pct"] == "0.075"
+                && trial.parameters["reentry_cooldown_days"] == 30
         }));
     }
 
@@ -3797,7 +4445,7 @@ mod tests {
                 "initial_capital": 1000000.0
             })),
             prediction_set_ids: None,
-            max_trials: Some(8),
+            max_trials: Some(10),
             search_profile: Some("phase7_t".to_string()),
         };
         let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
@@ -3808,7 +4456,7 @@ mod tests {
             bundle.search_space["search_profile"],
             "professional_sharpe_stabilization"
         );
-        assert_eq!(bundle.plan.planned_trials, 8);
+        assert_eq!(bundle.plan.planned_trials, 10);
         assert!(bundle.plan.trials.iter().any(|trial| {
             trial.parameters["portfolio_volatility_control"] == "vol120_22_65_100"
                 && trial.parameters["stop_loss_pct"] == "0.075"
@@ -3885,6 +4533,684 @@ mod tests {
     }
 
     #[test]
+    fn phase7_layered_request_accepts_style_risk_budget_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_v".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_style_risk_budget"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["style_risk_budget"] == "defensive_style_budget_v1"
+                && trial.parameters["market_regime"] == "quality_bear_window_guard_v2"
+                && trial.parameters["stop_loss_pct"] == "0.075"
+                && trial.parameters["reentry_cooldown_days"] == 30
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_second_alpha_source_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_w".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_second_alpha_source"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_quality_value_recovery_confirm_v1"
+                && trial.parameters["style_risk_budget"] == "liquidity_volatility_balanced_v1"
+                && trial.parameters["market_regime"] == "quality_bear_window_guard_v2"
+                && trial.parameters["stop_loss_pct"] == "0.075"
+                && trial.parameters["reentry_cooldown_days"] == 30
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_residual_quality_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_ag".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_residual_quality"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["combo_name"],
+            "phase7_industry_residual_quality_v1"
+        );
+        assert_eq!(
+            bundle.plan.trials[0].parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_industry_residual_quality_v1"
+                && trial.parameters["score_direction"] == "descending"
+        }));
+        assert!(bundle
+            .plan
+            .trials
+            .iter()
+            .any(|trial| { trial.parameters["combo_name"] == "phase7_financial_quality_v1" }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_residual_overlay_sharpe_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_ah".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_residual_overlay_sharpe"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            bundle.plan.trials[1].parameters["combo_name"],
+            "phase7_quality_residual_confirm_5pct_v1"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_quality_residual_confirm_10pct_v1"
+        }));
+        assert!(bundle
+            .plan
+            .trials
+            .iter()
+            .any(|trial| { trial.parameters["market_regime"] == "quality_bear_window_guard_v2" }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_conditioned_second_alpha_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(5),
+            search_profile: Some("phase7_ak".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_conditioned_second_alpha"
+        );
+        assert_eq!(bundle.plan.planned_trials, 5);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            bundle.plan.trials[0].parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_require_top40"
+                && trial.parameters["event_gate_combo_name"] == "phase7_valuation_v1"
+                && trial.parameters["event_gate_min_score"] == "0.60"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "moneyflow_require_top40"
+                && trial.parameters["event_gate_combo_name"] == "phase7_moneyflow_v1"
+        }));
+        assert!(bundle
+            .plan
+            .trials
+            .iter()
+            .all(|trial| trial.parameters["combo_name"] == "phase7_financial_quality_v1"));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_valuation_guard_sharpe_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(9),
+            search_profile: Some("phase7_al".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_valuation_guard_sharpe"
+        );
+        assert_eq!(bundle.plan.planned_trials, 9);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            bundle.plan.trials[0].parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial.parameters["event_gate_combo_name"] == "phase7_valuation_v1"
+                && trial.parameters["event_gate_mode"] == "exclude_negative"
+                && trial.parameters["event_gate_min_score"] == "0.40"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom35"
+                && trial.parameters["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_mode"] == "require_positive"
+                || trial.parameters["event_gate_combo_name"] == "phase7_moneyflow_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_regime_conditioned_valuation_guard_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_am".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_regime_conditioned_valuation_guard"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom35_stress_only"
+                && trial.parameters["event_gate_active_regimes"]
+                    == json!(["bear", "high_volatility"])
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom40_stress_only"
+                && trial.parameters["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_regime_alpha_routing_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_an".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_regime_alpha_routing"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_regime_alpha_switch_v1"
+                && trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_regime_alpha_sleeve_search_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_ao".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_regime_alpha_sleeve_search"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_regime_alpha_switch_value_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_regime_alpha_switch_recovery_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_regime_alpha_switch_blend_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_regime_alpha_overlay_search_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_ap".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_regime_alpha_overlay_search"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_regime_alpha_overlay_value_05pct_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_regime_alpha_overlay_value_10pct_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_regime_alpha_overlay_blend_10pct_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_regime_alpha_sleeve_allocation_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_aq".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_regime_alpha_sleeve_allocation"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_volatility_sharpe_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(4),
+            search_profile: Some("phase7_ai".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_volatility_sharpe"
+        );
+        assert_eq!(bundle.plan.planned_trials, 4);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["portfolio_volatility_control"],
+            "vol120_22_65_100"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["portfolio_volatility_control"] == "vol120_20_60_100"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_regime_position_sharpe_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_aj".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_regime_position_sharpe"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert_eq!(
+            bundle.plan.trials[0].parameters["portfolio_volatility_control"],
+            "vol120_18_55_100"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_bear_position_guard_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_bear_position_guard_v2"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_anti_overfit_sharpe_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(10),
+            search_profile: Some("phase7_ab".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_anti_overfit_sharpe"
+        );
+        assert_eq!(bundle.plan.planned_trials, 10);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            bundle.plan.trials[0].parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "event_window_boost_pos_5pct"
+                && trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_event_earnings_v1"
+                || trial.parameters["combo_name"] == "phase7_event_surprise_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_candidate_risk_filter_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_ac".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_candidate_risk_filter"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["candidate_risk_filter"],
+            "off"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["candidate_risk_filter"] == "low_volatility_low_correlation_v1"
+                && trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_risk_contribution_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_ad".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_risk_contribution"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["risk_contribution_control"],
+            "off"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["risk_contribution_control"] == "soft_single_name_20pct_v1"
+                && trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_event_conditioned_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(10),
+            search_profile: Some("phase7_ae".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_event_conditioned_sharpe"
+        );
+        assert_eq!(bundle.plan.planned_trials, 10);
+        assert_eq!(
+            bundle.plan.trials[0].parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["event_gate_profile"] == "event_surprise_boost_pos_5pct"
+                && trial.parameters["event_gate_combo_name"] == "phase7_event_surprise_v1"
+                && trial.parameters["event_gate_mode"] == "boost_positive"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_quality_event_surprise_confirm_v1"
+                && trial.parameters["market_regime"] == "quality_bear_window_guard_v2"
+        }));
+    }
+
+    #[test]
     fn professional_discovery_defaults_backtest_template_to_full_history_window() {
         let req = Phase7ProfessionalDiscoveryRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
@@ -3907,10 +5233,11 @@ mod tests {
         let layered_req = phase7_discovery_layered_request(&req);
 
         let template = layered_req.backtest_template.expect("default template");
-        assert_eq!(template["start_date"], "20160304");
+        assert_eq!(template["start_date"], "20160201");
         assert_eq!(template["end_date"], "20260515");
         assert_eq!(template["benchmark"], "000300.SH");
         assert_eq!(template["mode"], "standard");
+        assert_eq!(template["effective_coverage"]["mode"], "adjust_start");
     }
 
     #[test]
@@ -3996,6 +5323,62 @@ mod tests {
         assert!(violations
             .iter()
             .any(|item| item["constraint"] == "min_trade_count"));
+    }
+
+    #[test]
+    fn scoring_and_robustness_preserve_effective_coverage_metadata() {
+        let mut metrics = quant_backtest::metrics::BacktestMetrics::default();
+        metrics.annual_return_pct = Decimal::new(18, 2);
+        metrics.excess_return_pct = Decimal::new(10, 2);
+        metrics.sharpe_ratio = Decimal::new(8, 1);
+        metrics.sortino_ratio = Decimal::new(18, 1);
+        metrics.max_drawdown_pct = Decimal::new(30, 2);
+        metrics.num_trades = 128;
+        let output = FactorBacktestRunOutput {
+            signals_count: 10,
+            metrics,
+            trades: 128,
+            equity_points: 512,
+            effective_coverage: Some(crate::routes::backtest::EffectiveCoverageRunSummary {
+                requested_start_date: NaiveDate::from_ymd_opt(2016, 2, 1).unwrap(),
+                effective_start_date: NaiveDate::from_ymd_opt(2016, 3, 4).unwrap(),
+                adjusted: true,
+                mode: "adjust_start".to_string(),
+                min_rows: 20,
+                observed_rows: 3470,
+                coverage_start_date: NaiveDate::from_ymd_opt(2016, 2, 1).unwrap(),
+                warmup_start_date: Some(NaiveDate::from_ymd_opt(2016, 3, 4).unwrap()),
+                warmup_trading_days: Some(19),
+                combo_name: "phase7_financial_quality_v1".to_string(),
+                version: "1.0.0".to_string(),
+                universe_profile: Some("listed_non_st".to_string()),
+            }),
+        };
+
+        let scored = score_trial_with_output(
+            &output,
+            &json!({"type": "professional_candidate"}),
+            Some(&json!({"min_trade_count": 1})),
+        );
+
+        assert_eq!(
+            scored.metrics["effective_coverage"]["effective_start_date"],
+            "2016-03-04"
+        );
+        let evaluation = evaluate_robustness_gates_with_analysis(
+            scored.score,
+            None,
+            &scored.metrics,
+            &scored.constraint_violations,
+            Some(&json!({"min_trade_count": 1, "max_drawdown": 0.35})),
+            None,
+        );
+        assert!(evaluation
+            .gates
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gate| { gate["gate"] == "effective_coverage_start" && gate["passed"] == true }));
     }
 
     #[test]
@@ -4136,6 +5519,9 @@ mod tests {
         assert_eq!(policy["max_drawdown"], 0.35);
         assert_eq!(policy["walk_forward_window_days"], 756);
         assert_eq!(policy["bootstrap_trials"], 512);
+        assert_eq!(policy["min_positive_annual_return_window_ratio"], 0.60);
+        assert_eq!(policy["min_walk_forward_median_sharpe"], 0.30);
+        assert_eq!(policy["min_bootstrap_sharpe_p05"], 0.0);
     }
 
     #[test]
@@ -4274,6 +5660,65 @@ mod tests {
         assert!(gates
             .iter()
             .any(|gate| gate["gate"] == "market_scenario_coverage"));
+    }
+
+    #[test]
+    fn robustness_gate_rejects_overfit_candidate_with_weak_window_distribution() {
+        let analysis = RobustnessTimeSeriesAnalysis {
+            market_scenarios: json!({
+                "scenario_count": 3,
+                "scenarios": []
+            }),
+            walk_forward: json!({
+                "window_count": 8,
+                "positive_excess_window_ratio": 0.75,
+                "positive_annual_return_ratio": 0.50,
+                "sharpe_ratio": {
+                    "p05": -0.20,
+                    "median": 0.10,
+                    "p95": 1.40,
+                    "mean": 0.35
+                },
+                "windows": []
+            }),
+            bootstrap: json!({
+                "positive_return_probability": 0.95,
+                "sharpe_ratio": {
+                    "p05": -0.05,
+                    "median": 0.80,
+                    "p95": 1.40,
+                    "mean": 0.78
+                }
+            }),
+        };
+
+        let evaluation = evaluate_robustness_gates_with_analysis(
+            Decimal::new(10, 1),
+            Some(Decimal::new(7, 1)),
+            &json!({
+                "num_trades": 120,
+                "annual_return_pct": "0.18",
+                "excess_return_pct": "0.40",
+                "sharpe_ratio": "1.10",
+                "sortino_ratio": "1.80",
+                "max_drawdown_pct": "0.25"
+            }),
+            &json!([]),
+            Some(&default_professional_robustness_policy()),
+            Some(&analysis),
+        );
+
+        assert_eq!(evaluation.status, "rejected");
+        let gates = evaluation.gates.as_array().expect("gates");
+        assert!(gates.iter().any(|gate| {
+            gate["gate"] == "walk_forward_positive_annual_return_ratio" && gate["passed"] == false
+        }));
+        assert!(gates.iter().any(|gate| {
+            gate["gate"] == "walk_forward_median_sharpe" && gate["passed"] == false
+        }));
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "bootstrap_sharpe_p05" && gate["passed"] == false));
     }
 
     #[test]

@@ -310,6 +310,194 @@ impl TushareClient {
         .await
     }
 
+    /// 获取业绩预告。
+    pub async fn forecast(
+        &self,
+        ts_code: Option<&str>,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        period: Option<&str>,
+        forecast_type: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(sd) = start_date {
+            params.push(("start_date", sd));
+        }
+        if let Some(ed) = end_date {
+            params.push(("end_date", ed));
+        }
+        if let Some(p) = period {
+            params.push(("period", p));
+        }
+        if let Some(t) = forecast_type {
+            params.push(("type", t));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "forecast",
+            params,
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "type",
+                "p_change_min",
+                "p_change_max",
+                "net_profit_min",
+                "net_profit_max",
+                "first_ann_date",
+                "summary",
+                "change_reason",
+            ],
+        )
+        .await
+    }
+
+    /// 获取业绩快报。
+    pub async fn express(
+        &self,
+        ts_code: &str,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        period: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = vec![("ts_code", ts_code)];
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(sd) = start_date {
+            params.push(("start_date", sd));
+        }
+        if let Some(ed) = end_date {
+            params.push(("end_date", ed));
+        }
+        if let Some(p) = period {
+            params.push(("period", p));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "express",
+            params,
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "revenue",
+                "operate_profit",
+                "total_profit",
+                "n_income",
+                "diluted_eps",
+                "diluted_roe",
+                "yoy_sales",
+                "yoy_dedu_np",
+                "is_audit",
+                "perf_summary",
+                "remark",
+            ],
+        )
+        .await
+    }
+
+    /// 获取财报披露计划日期。
+    pub async fn disclosure_date(
+        &self,
+        ts_code: Option<&str>,
+        end_date: Option<&str>,
+        pre_date: Option<&str>,
+        ann_date: Option<&str>,
+        actual_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(ed) = end_date {
+            params.push(("end_date", ed));
+        }
+        if let Some(date) = pre_date {
+            params.push(("pre_date", date));
+        }
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(date) = actual_date {
+            params.push(("actual_date", date));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "disclosure_date",
+            params,
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "pre_date",
+                "actual_date",
+                "modify_date",
+            ],
+        )
+        .await
+    }
+
     /// 获取交易日历
     pub async fn trade_cal(
         &self,

@@ -61,6 +61,18 @@ pub struct SignalConfig {
     pub capacity_penalty_strength: f64,
     /// Optional max aggregate target weight for any single industry.
     pub industry_max_weight_pct: Option<f64>,
+    /// In-memory style exposure budget applied after raw portfolio weights.
+    pub style_risk_budget_profile: StyleRiskBudgetProfile,
+    /// Candidate-pool risk filter applied before portfolio construction.
+    pub candidate_risk_filter_profile: CandidateRiskFilterProfile,
+    /// Portfolio-level risk-contribution control applied after weights are built.
+    pub risk_contribution_control_profile: RiskContributionControlProfile,
+    /// Minimum absolute target-weight delta required to move a position on rebalance.
+    /// 0.01 = 1 percentage point. 0 disables hysteresis.
+    pub rebalance_hysteresis_pct: f64,
+    /// Fraction of the target-weight gap to apply on each rebalance.
+    /// 1.0 = full rebalance; 0.5 = move halfway toward the new target.
+    pub partial_rebalance_ratio: f64,
     /// Optional per-trade-date score preselection size before in-memory portfolio filtering.
     /// None or 0 keeps the legacy full-universe score load.
     pub score_candidate_pool_size: Option<usize>,
@@ -68,6 +80,12 @@ pub struct SignalConfig {
     pub universe_profile: TradableUniverseProfile,
     /// Optional persisted prediction set to blend with factor combo scores.
     pub prediction_blend: Option<PredictionBlendConfig>,
+    /// Optional event-window gate applied after base score loading.
+    pub event_gate: Option<EventGateConfig>,
+    /// Optional regime-conditioned overlay score blended into the base combo.
+    pub score_overlay: Option<FactorScoreOverlayConfig>,
+    /// Optional regime-conditioned portfolio sleeve blended after portfolio construction.
+    pub portfolio_sleeve: Option<FactorPortfolioSleeveConfig>,
 }
 
 /// Signal generation parameters for persisted model predictions.
@@ -107,6 +125,16 @@ pub struct PredictionSignalConfig {
     pub capacity_penalty_strength: f64,
     /// Optional max aggregate target weight for any single industry.
     pub industry_max_weight_pct: Option<f64>,
+    /// In-memory style exposure budget applied after raw portfolio weights.
+    pub style_risk_budget_profile: StyleRiskBudgetProfile,
+    /// Candidate-pool risk filter applied before portfolio construction.
+    pub candidate_risk_filter_profile: CandidateRiskFilterProfile,
+    /// Portfolio-level risk-contribution control applied after weights are built.
+    pub risk_contribution_control_profile: RiskContributionControlProfile,
+    /// Minimum absolute target-weight delta required to move a position on rebalance.
+    pub rebalance_hysteresis_pct: f64,
+    /// Fraction of the target-weight gap to apply on each rebalance.
+    pub partial_rebalance_ratio: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +145,41 @@ pub struct PredictionBlendConfig {
     /// Keep only stocks whose same-day prediction percentile is at least this threshold.
     /// Percentile is computed cross-sectionally per date, with higher prediction scores better.
     pub prediction_min_percentile: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventGateConfig {
+    pub combo_name: String,
+    pub version: String,
+    pub mode: EventGateMode,
+    pub score_direction: ScoreDirection,
+    pub min_score: f64,
+    pub boost_weight: f64,
+    pub active_regimes: Vec<MarketRegime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactorScoreOverlayConfig {
+    pub combo_name: String,
+    pub version: String,
+    pub weight: f64,
+    pub score_direction: ScoreDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactorPortfolioSleeveConfig {
+    pub combo_name: String,
+    pub version: String,
+    pub weight: f64,
+    pub score_direction: ScoreDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventGateMode {
+    BoostPositive,
+    ExcludeNegative,
+    RequirePositive,
 }
 
 impl Default for PredictionSignalConfig {
@@ -139,6 +202,11 @@ impl Default for PredictionSignalConfig {
             risk_budget_lookback_days: 60,
             capacity_penalty_strength: 0.0,
             industry_max_weight_pct: None,
+            style_risk_budget_profile: StyleRiskBudgetProfile::Off,
+            candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
+            risk_contribution_control_profile: RiskContributionControlProfile::Off,
+            rebalance_hysteresis_pct: 0.0,
+            partial_rebalance_ratio: 1.0,
         }
     }
 }
@@ -158,6 +226,29 @@ type IndustryMap = HashMap<String, String>;
 type BenchmarkReturns = Vec<(NaiveDate, f64)>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FactorScoreSourceKey {
+    combo_name: String,
+    version: String,
+    score_direction: ScoreDirection,
+    score_candidate_pool_size: Option<usize>,
+    universe_profile: TradableUniverseProfile,
+}
+
+impl FactorScoreSourceKey {
+    fn from_config(config: &SignalConfig) -> Self {
+        Self {
+            combo_name: config.combo_name.clone(),
+            version: config.version.clone(),
+            score_direction: config.score_direction,
+            score_candidate_pool_size: normalize_score_candidate_pool_size(
+                config.score_candidate_pool_size,
+            ),
+            universe_profile: config.universe_profile,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SignalDataCacheKey {
     ComboScores {
         combo_name: String,
@@ -172,14 +263,14 @@ pub(crate) enum SignalDataCacheKey {
         start_date: NaiveDate,
         end_date: NaiveDate,
     },
-    ReturnHistory {
-        symbols: Vec<String>,
+    ReturnHistorySymbol {
+        symbol: String,
         start_date: NaiveDate,
         end_date: NaiveDate,
         lookback_days: usize,
     },
-    AverageAmounts {
-        symbols: Vec<String>,
+    AverageAmountSymbol {
+        symbol: String,
         start_date: NaiveDate,
         end_date: NaiveDate,
     },
@@ -224,23 +315,23 @@ impl SignalDataCacheKey {
         }
     }
 
-    fn return_history(
-        symbols: &[String],
+    fn return_history_symbol(
+        symbol: &str,
         start_date: NaiveDate,
         end_date: NaiveDate,
         lookback_days: usize,
     ) -> Self {
-        Self::ReturnHistory {
-            symbols: normalized_symbol_key(symbols),
+        Self::ReturnHistorySymbol {
+            symbol: symbol.to_string(),
             start_date,
             end_date,
             lookback_days,
         }
     }
 
-    fn average_amounts(symbols: &[String], start_date: NaiveDate, end_date: NaiveDate) -> Self {
-        Self::AverageAmounts {
-            symbols: normalized_symbol_key(symbols),
+    fn average_amount_symbol(symbol: &str, start_date: NaiveDate, end_date: NaiveDate) -> Self {
+        Self::AverageAmountSymbol {
+            symbol: symbol.to_string(),
             start_date,
             end_date,
         }
@@ -355,53 +446,109 @@ impl SignalDataCache {
         value
     }
 
-    fn cached_return_history(
+    fn cached_return_history_symbols(
         &mut self,
-        key: &SignalDataCacheKey,
-    ) -> Option<Arc<SymbolReturnHistory>> {
-        match self.return_history.get(key) {
-            Some(value) => {
-                self.stats.return_history_hits += 1;
-                Some(Arc::clone(value))
-            }
-            None => {
-                self.stats.return_history_misses += 1;
-                None
+        symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> (Vec<String>, SymbolReturnHistory) {
+        let mut missing_symbols = Vec::new();
+        let mut result = HashMap::new();
+        for symbol in normalized_symbol_key(symbols) {
+            let key = SignalDataCacheKey::return_history_symbol(
+                &symbol,
+                start_date,
+                end_date,
+                lookback_days,
+            );
+            match self.return_history.get(&key) {
+                Some(value) => {
+                    self.stats.return_history_hits += 1;
+                    let rows = value.as_ref().get(&symbol).cloned().unwrap_or_default();
+                    result.insert(symbol, rows);
+                }
+                None => {
+                    self.stats.return_history_misses += 1;
+                    missing_symbols.push(symbol);
+                }
             }
         }
+        (missing_symbols, result)
     }
 
-    fn insert_return_history(
+    fn insert_return_history_symbols(
         &mut self,
-        key: SignalDataCacheKey,
-        value: SymbolReturnHistory,
-    ) -> Arc<SymbolReturnHistory> {
-        let value = Arc::new(value);
-        self.return_history.insert(key, Arc::clone(&value));
-        value
+        requested_symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+        mut value: SymbolReturnHistory,
+    ) -> SymbolReturnHistory {
+        let mut result = HashMap::new();
+        for symbol in normalized_symbol_key(requested_symbols) {
+            let rows = value.remove(&symbol).unwrap_or_default();
+            result.insert(symbol.clone(), rows.clone());
+            let mut symbol_history = HashMap::new();
+            symbol_history.insert(symbol.clone(), rows);
+            let key = SignalDataCacheKey::return_history_symbol(
+                &symbol,
+                start_date,
+                end_date,
+                lookback_days,
+            );
+            self.return_history.insert(key, Arc::new(symbol_history));
+        }
+        result
     }
 
-    fn cached_average_amounts(&mut self, key: &SignalDataCacheKey) -> Option<Arc<AverageAmounts>> {
-        match self.average_amounts.get(key) {
-            Some(value) => {
-                self.stats.average_amount_hits += 1;
-                Some(Arc::clone(value))
-            }
-            None => {
-                self.stats.average_amount_misses += 1;
-                None
+    fn cached_average_amount_symbols(
+        &mut self,
+        symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> (Vec<String>, AverageAmounts) {
+        let mut missing_symbols = Vec::new();
+        let mut result = HashMap::new();
+        for symbol in normalized_symbol_key(symbols) {
+            let key = SignalDataCacheKey::average_amount_symbol(&symbol, start_date, end_date);
+            match self.average_amounts.get(&key) {
+                Some(value) => {
+                    self.stats.average_amount_hits += 1;
+                    if let Some(amount) = value.as_ref().get(&symbol).copied() {
+                        result.insert(symbol, amount);
+                    }
+                }
+                None => {
+                    self.stats.average_amount_misses += 1;
+                    missing_symbols.push(symbol);
+                }
             }
         }
+        (missing_symbols, result)
     }
 
-    fn insert_average_amounts(
+    fn insert_average_amount_symbols(
         &mut self,
-        key: SignalDataCacheKey,
-        value: AverageAmounts,
-    ) -> Arc<AverageAmounts> {
-        let value = Arc::new(value);
-        self.average_amounts.insert(key, Arc::clone(&value));
-        value
+        requested_symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        mut value: AverageAmounts,
+    ) -> AverageAmounts {
+        let mut result = HashMap::new();
+        for symbol in normalized_symbol_key(requested_symbols) {
+            let amount = value.remove(&symbol);
+            if let Some(amount) = amount {
+                result.insert(symbol.clone(), amount);
+            }
+            let mut symbol_amount = HashMap::new();
+            if let Some(amount) = amount {
+                symbol_amount.insert(symbol.clone(), amount);
+            }
+            let key = SignalDataCacheKey::average_amount_symbol(&symbol, start_date, end_date);
+            self.average_amounts.insert(key, Arc::new(symbol_amount));
+        }
+        result
     }
 
     fn cached_industry_classifications(
@@ -484,9 +631,17 @@ impl Default for SignalConfig {
             risk_budget_lookback_days: 60,
             capacity_penalty_strength: 0.0,
             industry_max_weight_pct: None,
+            style_risk_budget_profile: StyleRiskBudgetProfile::Off,
+            candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
+            risk_contribution_control_profile: RiskContributionControlProfile::Off,
+            rebalance_hysteresis_pct: 0.0,
+            partial_rebalance_ratio: 1.0,
             score_candidate_pool_size: None,
             universe_profile: TradableUniverseProfile::All,
             prediction_blend: None,
+            event_gate: None,
+            score_overlay: None,
+            portfolio_sleeve: None,
         }
     }
 }
@@ -503,6 +658,151 @@ pub enum ScoreDirection {
 pub enum PortfolioConstructionMethod {
     Heuristic,
     RiskBudget,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StyleRiskBudgetProfile {
+    #[default]
+    Off,
+    LiquidityVolatilityBalancedV1,
+    DefensiveStyleBudgetV1,
+}
+
+impl StyleRiskBudgetProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "liquidity_volatility_balanced_v1" | "liquidity-volatility-balanced-v1" => {
+                Ok(Self::LiquidityVolatilityBalancedV1)
+            }
+            "defensive_style_budget_v1" | "defensive-style-budget-v1" => {
+                Ok(Self::DefensiveStyleBudgetV1)
+            }
+            other => Err(format!("unsupported style_risk_budget: {}", other)),
+        }
+    }
+
+    fn params(self) -> Option<StyleRiskBudgetParams> {
+        match self {
+            Self::Off => None,
+            Self::LiquidityVolatilityBalancedV1 => Some(StyleRiskBudgetParams {
+                high_volatility_quantile: 0.70,
+                high_volatility_max_weight_pct: 0.40,
+                low_liquidity_quantile: 0.30,
+                low_liquidity_max_weight_pct: 0.35,
+            }),
+            Self::DefensiveStyleBudgetV1 => Some(StyleRiskBudgetParams {
+                high_volatility_quantile: 0.60,
+                high_volatility_max_weight_pct: 0.30,
+                low_liquidity_quantile: 0.35,
+                low_liquidity_max_weight_pct: 0.30,
+            }),
+        }
+    }
+
+    fn uses_liquidity(self) -> bool {
+        self.params()
+            .map(|params| params.low_liquidity_max_weight_pct < 1.0)
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StyleRiskBudgetParams {
+    high_volatility_quantile: f64,
+    high_volatility_max_weight_pct: f64,
+    low_liquidity_quantile: f64,
+    low_liquidity_max_weight_pct: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateRiskFilterProfile {
+    #[default]
+    Off,
+    LowVolatilityV1,
+    LowVolatilityLowCorrelationV1,
+}
+
+impl CandidateRiskFilterProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "low_volatility_v1" | "low-volatility-v1" => Ok(Self::LowVolatilityV1),
+            "low_volatility_low_correlation_v1" | "low-volatility-low-correlation-v1" => {
+                Ok(Self::LowVolatilityLowCorrelationV1)
+            }
+            other => Err(format!("unsupported candidate_risk_filter: {}", other)),
+        }
+    }
+
+    fn params(self) -> Option<CandidateRiskFilterParams> {
+        match self {
+            Self::Off => None,
+            Self::LowVolatilityV1 => Some(CandidateRiskFilterParams {
+                max_volatility_quantile: 0.70,
+                max_average_abs_correlation: None,
+                correlation_reference_limit: 0,
+            }),
+            Self::LowVolatilityLowCorrelationV1 => Some(CandidateRiskFilterParams {
+                max_volatility_quantile: 0.70,
+                max_average_abs_correlation: Some(0.55),
+                correlation_reference_limit: 120,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CandidateRiskFilterParams {
+    max_volatility_quantile: f64,
+    max_average_abs_correlation: Option<f64>,
+    correlation_reference_limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskContributionControlProfile {
+    #[default]
+    Off,
+    SoftSingleName20PctV1,
+    SoftSingleName15PctV1,
+}
+
+impl RiskContributionControlProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "soft_single_name_20pct_v1" | "soft-single-name-20pct-v1" => {
+                Ok(Self::SoftSingleName20PctV1)
+            }
+            "soft_single_name_15pct_v1" | "soft-single-name-15pct-v1" => {
+                Ok(Self::SoftSingleName15PctV1)
+            }
+            other => Err(format!("unsupported risk_contribution_control: {}", other)),
+        }
+    }
+
+    fn params(self) -> Option<RiskContributionControlParams> {
+        match self {
+            Self::Off => None,
+            Self::SoftSingleName20PctV1 => Some(RiskContributionControlParams {
+                max_single_name_contribution_pct: 0.20,
+                iterations: 6,
+            }),
+            Self::SoftSingleName15PctV1 => Some(RiskContributionControlParams {
+                max_single_name_contribution_pct: 0.15,
+                iterations: 6,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RiskContributionControlParams {
+    max_single_name_contribution_pct: f64,
+    iterations: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -536,17 +836,27 @@ pub enum MarketRegime {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegimeSignalRule {
+    pub combo_name: Option<String>,
+    pub version: Option<String>,
     pub top_n: Option<usize>,
     pub rebalance_freq_days: Option<usize>,
     pub max_gross_exposure: Option<f64>,
     pub score_direction: Option<ScoreDirection>,
     pub skip_top_pct: Option<f64>,
     pub max_position_pct: Option<Decimal>,
+    pub score_overlay: Option<FactorScoreOverlayConfig>,
+    pub portfolio_sleeve: Option<FactorPortfolioSleeveConfig>,
 }
 
 impl RegimeSignalRule {
     fn apply_to(&self, base: &SignalConfig) -> SignalConfig {
         let mut config = base.clone();
+        if let Some(combo_name) = self.combo_name.as_ref() {
+            config.combo_name = combo_name.clone();
+        }
+        if let Some(version) = self.version.as_ref() {
+            config.version = version.clone();
+        }
         if let Some(top_n) = self.top_n {
             config.top_n = top_n.max(1);
         }
@@ -564,6 +874,12 @@ impl RegimeSignalRule {
         }
         if let Some(max_position_pct) = self.max_position_pct {
             config.max_position_pct = max_position_pct.clamp(Decimal::ZERO, Decimal::ONE);
+        }
+        if let Some(score_overlay) = self.score_overlay.as_ref() {
+            config.score_overlay = Some(score_overlay.clone());
+        }
+        if let Some(portfolio_sleeve) = self.portfolio_sleeve.as_ref() {
+            config.portfolio_sleeve = Some(portfolio_sleeve.clone());
         }
         config
     }
@@ -673,6 +989,7 @@ impl MarketRegimePolicy {
                 score_direction: Some(ScoreDirection::Ascending),
                 skip_top_pct: Some(0.10),
                 max_position_pct: Some(Decimal::new(5, 2)),
+                ..Default::default()
             },
         );
         rules.insert(
@@ -684,6 +1001,7 @@ impl MarketRegimePolicy {
                 score_direction: Some(ScoreDirection::Ascending),
                 skip_top_pct: Some(0.05),
                 max_position_pct: Some(Decimal::new(5, 2)),
+                ..Default::default()
             },
         );
         rules.insert(
@@ -744,6 +1062,7 @@ impl MarketRegimePolicy {
                 score_direction: Some(ScoreDirection::Ascending),
                 skip_top_pct: Some(0.15),
                 max_position_pct: Some(Decimal::new(4, 2)),
+                ..Default::default()
             },
         );
         rules.insert(
@@ -755,6 +1074,7 @@ impl MarketRegimePolicy {
                 score_direction: Some(ScoreDirection::Ascending),
                 skip_top_pct: Some(0.10),
                 max_position_pct: Some(Decimal::new(4, 2)),
+                ..Default::default()
             },
         );
         rules.insert(
@@ -1084,6 +1404,166 @@ impl MarketRegimePolicy {
         }
     }
 
+    /// Regime-conditioned alpha router for Phase 7-AN. Normal regimes keep the
+    /// high-return financial-quality anchor, while weak/high-volatility regimes
+    /// switch to industry-residual quality as a defensive second alpha source.
+    pub fn quality_regime_alpha_switch_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_regime_alpha_switch(
+            benchmark,
+            "phase7_industry_residual_quality_v1",
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_switch_value_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_regime_alpha_switch(
+            benchmark,
+            "phase7_valuation_v1",
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_switch_recovery_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_regime_alpha_switch(
+            benchmark,
+            "phase7_growth_recovery_v1",
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_switch_blend_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_regime_alpha_switch(
+            benchmark,
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_overlay_value_05pct_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_regime_alpha_overlay(
+            benchmark,
+            "phase7_valuation_v1",
+            0.05,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_overlay_value_10pct_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_regime_alpha_overlay(
+            benchmark,
+            "phase7_valuation_v1",
+            0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_overlay_blend_10pct_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_regime_alpha_overlay(
+            benchmark,
+            "phase7_quality_value_recovery_confirm_v1",
+            0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_value_10pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_valuation_v1",
+            0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_value_15pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_valuation_v1",
+            0.15,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_blend_10pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_quality_value_recovery_confirm_v1",
+            0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
+    fn quality_regime_alpha_switch(
+        benchmark: impl Into<String>,
+        stress_combo_name: &str,
+        stress_score_direction: ScoreDirection,
+    ) -> Self {
+        let mut policy = Self::quality_bear_window_guard_v1(benchmark);
+        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+            if let Some(rule) = policy.rules.get_mut(&regime) {
+                rule.combo_name = Some(stress_combo_name.to_string());
+                rule.version = Some("1.0.0".to_string());
+                rule.score_direction = Some(stress_score_direction);
+            }
+        }
+        policy
+    }
+
+    /// Regime-conditioned alpha overlay for Phase 7-AP. This preserves the
+    /// quality anchor and only adds a small secondary score in bear or
+    /// high-volatility regimes, avoiding the return dilution seen in hard
+    /// alpha-source replacement.
+    fn quality_regime_alpha_overlay(
+        benchmark: impl Into<String>,
+        overlay_combo_name: &str,
+        overlay_weight: f64,
+        overlay_score_direction: ScoreDirection,
+    ) -> Self {
+        let mut policy = Self::quality_bear_window_guard_v2(benchmark);
+        let overlay = FactorScoreOverlayConfig {
+            combo_name: overlay_combo_name.to_string(),
+            version: "1.0.0".to_string(),
+            weight: overlay_weight.clamp(0.0, 1.0),
+            score_direction: overlay_score_direction,
+        };
+        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+            if let Some(rule) = policy.rules.get_mut(&regime) {
+                rule.score_overlay = Some(overlay.clone());
+            }
+        }
+        policy
+    }
+
+    /// Regime-conditioned portfolio sleeve for Phase 7-AQ. It builds a small
+    /// independent stress sleeve after portfolio construction and blends target
+    /// weights, instead of perturbing the main quality ranking.
+    fn quality_regime_alpha_portfolio_sleeve(
+        benchmark: impl Into<String>,
+        sleeve_combo_name: &str,
+        sleeve_weight: f64,
+        sleeve_score_direction: ScoreDirection,
+    ) -> Self {
+        let mut policy = Self::quality_bear_window_guard_v2(benchmark);
+        let sleeve = FactorPortfolioSleeveConfig {
+            combo_name: sleeve_combo_name.to_string(),
+            version: "1.0.0".to_string(),
+            weight: sleeve_weight.clamp(0.0, 1.0),
+            score_direction: sleeve_score_direction,
+        };
+        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+            if let Some(rule) = policy.rules.get_mut(&regime) {
+                rule.portfolio_sleeve = Some(sleeve.clone());
+            }
+        }
+        policy
+    }
+
     /// Stronger early bear-window guard. This is still quality-shape preserving,
     /// but cuts tail regimes harder when U2 needs more Sharpe stabilization.
     pub fn quality_bear_window_guard_v2(benchmark: impl Into<String>) -> Self {
@@ -1141,6 +1621,133 @@ impl MarketRegimePolicy {
         }
     }
 
+    /// Position-aware bear-window guard for the U2 quality anchor. It keeps the
+    /// quality score direction intact, but diversifies and slows the book when
+    /// the benchmark enters a weak or high-volatility regime.
+    pub fn quality_bear_position_guard_v1(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                top_n: Some(25),
+                rebalance_freq_days: Some(80),
+                max_gross_exposure: Some(0.74),
+                skip_top_pct: Some(0.05),
+                max_position_pct: Some(Decimal::new(9, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                top_n: Some(25),
+                rebalance_freq_days: Some(40),
+                max_gross_exposure: Some(0.58),
+                skip_top_pct: Some(0.05),
+                max_position_pct: Some(Decimal::new(75, 3)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 126,
+            min_observations: 20,
+            high_volatility_threshold: 0.28,
+            bear_return_threshold: -0.03,
+            bear_drawdown_threshold: 0.14,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
+    /// Stronger position-aware guard for local Sharpe searches. Use as a
+    /// stress-neighborhood candidate, not as a broad default.
+    pub fn quality_bear_position_guard_v2(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                top_n: Some(30),
+                rebalance_freq_days: Some(80),
+                max_gross_exposure: Some(0.68),
+                skip_top_pct: Some(0.05),
+                max_position_pct: Some(Decimal::new(8, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                top_n: Some(30),
+                rebalance_freq_days: Some(40),
+                max_gross_exposure: Some(0.52),
+                skip_top_pct: Some(0.05),
+                max_position_pct: Some(Decimal::new(65, 3)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 126,
+            min_observations: 20,
+            high_volatility_threshold: 0.28,
+            bear_return_threshold: -0.03,
+            bear_drawdown_threshold: 0.14,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
     pub fn apply(&self, base: &SignalConfig, regime: MarketRegime) -> SignalConfig {
         self.rules
             .get(&regime)
@@ -1163,6 +1770,9 @@ struct PortfolioConstructionConfig {
     risk_budget_lookback_days: usize,
     capacity_penalty_strength: f64,
     max_industry_weight_pct: Option<f64>,
+    style_risk_budget_profile: StyleRiskBudgetProfile,
+    candidate_risk_filter_profile: CandidateRiskFilterProfile,
+    risk_contribution_control_profile: RiskContributionControlProfile,
 }
 
 impl Default for PortfolioConstructionConfig {
@@ -1179,6 +1789,9 @@ impl Default for PortfolioConstructionConfig {
             risk_budget_lookback_days: 60,
             capacity_penalty_strength: 0.0,
             max_industry_weight_pct: None,
+            style_risk_budget_profile: StyleRiskBudgetProfile::Off,
+            candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
+            risk_contribution_control_profile: RiskContributionControlProfile::Off,
         }
     }
 }
@@ -1197,6 +1810,9 @@ impl From<&SignalConfig> for PortfolioConstructionConfig {
             risk_budget_lookback_days: config.risk_budget_lookback_days,
             capacity_penalty_strength: config.capacity_penalty_strength,
             max_industry_weight_pct: config.industry_max_weight_pct,
+            style_risk_budget_profile: config.style_risk_budget_profile,
+            candidate_risk_filter_profile: config.candidate_risk_filter_profile,
+            risk_contribution_control_profile: config.risk_contribution_control_profile,
         }
     }
 }
@@ -1215,6 +1831,9 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
             risk_budget_lookback_days: config.risk_budget_lookback_days,
             capacity_penalty_strength: config.capacity_penalty_strength,
             max_industry_weight_pct: config.industry_max_weight_pct,
+            style_risk_budget_profile: config.style_risk_budget_profile,
+            candidate_risk_filter_profile: config.candidate_risk_filter_profile,
+            risk_contribution_control_profile: config.risk_contribution_control_profile,
         }
     }
 }
@@ -1254,39 +1873,47 @@ pub async fn generate_signals_with_cache(
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
     let score_cache = load_combo_scores_cached(pool, cache, config, start_date, end_date).await?;
     let mut adjusted_scores;
-    let scores_by_date: &FactorScoresByDate =
-        if config.min_daily_amount_cny.is_some() || config.prediction_blend.is_some() {
-            adjusted_scores = Arc::as_ref(&score_cache).clone();
-            if config.min_daily_amount_cny.is_some() {
-                apply_factor_liquidity_filter(
-                    pool,
-                    cache,
-                    &mut adjusted_scores,
-                    config,
-                    start_date,
-                    end_date,
-                )
-                .await?;
-            }
-            if let Some(blend) = config.prediction_blend.as_ref() {
-                let prediction_scores = load_prediction_scores_by_date(
-                    pool,
-                    &blend.prediction_set_id,
-                    start_date,
-                    end_date,
-                )
-                .await?;
-                blend_factor_prediction_scores(
-                    &mut adjusted_scores,
-                    &prediction_scores,
-                    blend,
-                    config.score_direction,
-                );
-            }
-            &adjusted_scores
-        } else {
-            score_cache.as_ref()
-        };
+    let scores_by_date: &FactorScoresByDate = if config.min_daily_amount_cny.is_some()
+        || config.prediction_blend.is_some()
+        || config.event_gate.is_some()
+    {
+        adjusted_scores = Arc::as_ref(&score_cache).clone();
+        if config.min_daily_amount_cny.is_some() {
+            apply_factor_liquidity_filter(
+                pool,
+                cache,
+                &mut adjusted_scores,
+                config,
+                start_date,
+                end_date,
+            )
+            .await?;
+        }
+        if let Some(blend) = config.prediction_blend.as_ref() {
+            let prediction_scores = load_prediction_scores_by_date(
+                pool,
+                &blend.prediction_set_id,
+                start_date,
+                end_date,
+            )
+            .await?;
+            blend_factor_prediction_scores(
+                &mut adjusted_scores,
+                &prediction_scores,
+                blend,
+                config.score_direction,
+            );
+        }
+        if let Some(event_gate) = config.event_gate.as_ref() {
+            let event_scores =
+                load_event_gate_scores_cached(pool, cache, event_gate, start_date, end_date)
+                    .await?;
+            apply_event_gate_scores(&mut adjusted_scores, event_scores.as_ref(), event_gate);
+        }
+        &adjusted_scores
+    } else {
+        score_cache.as_ref()
+    };
 
     let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
 
@@ -1350,51 +1977,55 @@ pub async fn generate_regime_signals_with_cache(
     end_date: NaiveDate,
     cache: &mut SignalDataCache,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
-    let score_cache = load_combo_scores_cached(pool, cache, config, start_date, end_date).await?;
-    let mut adjusted_scores;
-    let scores_by_date: &FactorScoresByDate =
-        if config.min_daily_amount_cny.is_some() || config.prediction_blend.is_some() {
-            adjusted_scores = Arc::as_ref(&score_cache).clone();
-            if config.min_daily_amount_cny.is_some() {
-                apply_factor_liquidity_filter(
-                    pool,
-                    cache,
-                    &mut adjusted_scores,
-                    config,
-                    start_date,
-                    end_date,
-                )
-                .await?;
-            }
-            if let Some(blend) = config.prediction_blend.as_ref() {
-                let prediction_scores = load_prediction_scores_by_date(
-                    pool,
-                    &blend.prediction_set_id,
-                    start_date,
-                    end_date,
-                )
-                .await?;
-                blend_factor_prediction_scores(
-                    &mut adjusted_scores,
-                    &prediction_scores,
-                    blend,
-                    config.score_direction,
-                );
-            }
-            &adjusted_scores
-        } else {
-            score_cache.as_ref()
-        };
-
     let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
-    let all_symbols: Vec<String> = scores_by_date
+    let portfolio_config = PortfolioConstructionConfig::from(config);
+    let max_lookback = portfolio_history_lookback_days(&portfolio_config).max(policy.lookback_days);
+    let benchmark_returns = load_benchmark_return_history_cached(
+        pool,
+        cache,
+        &policy.benchmark,
+        start_date,
+        end_date,
+        max_lookback,
+    )
+    .await?;
+
+    let score_source_configs = regime_score_source_configs(config, policy);
+    let mut score_sources: HashMap<FactorScoreSourceKey, FactorScoresByDate> = HashMap::new();
+    for source_config in score_source_configs {
+        let key = FactorScoreSourceKey::from_config(&source_config);
+        if score_sources.contains_key(&key) {
+            continue;
+        }
+        let scores =
+            load_regime_base_scores_cached(pool, cache, &source_config, start_date, end_date)
+                .await?;
+        score_sources.insert(key, scores);
+    }
+
+    if let Some(event_gate) = config
+        .event_gate
+        .as_ref()
+        .filter(|gate| !gate.active_regimes.is_empty())
+    {
+        let event_scores =
+            load_event_gate_scores_cached(pool, cache, event_gate, start_date, end_date).await?;
+        for scores in score_sources.values_mut() {
+            apply_event_gate_scores_for_regime(scores, event_scores.as_ref(), event_gate, |day| {
+                let returns =
+                    trailing_market_returns(benchmark_returns.as_ref(), day, policy.lookback_days);
+                classify_market_regime(&returns, policy)
+            });
+        }
+    }
+
+    let all_symbols: Vec<String> = score_sources
         .values()
+        .flat_map(|scores_by_date| scores_by_date.values())
         .flat_map(|v| v.iter().map(|(s, _)| s.clone()))
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let portfolio_config = PortfolioConstructionConfig::from(config);
-    let max_lookback = portfolio_history_lookback_days(&portfolio_config).max(policy.lookback_days);
     let return_history = load_symbol_return_history_cached(
         pool,
         cache,
@@ -1415,23 +2046,16 @@ pub async fn generate_regime_signals_with_cache(
     .await?;
     let industry_by_symbol =
         load_portfolio_industry_inputs_cached(pool, cache, &all_symbols, &portfolio_config).await?;
-    let benchmark_returns = load_benchmark_return_history_cached(
-        pool,
-        cache,
-        &policy.benchmark,
-        start_date,
-        end_date,
-        max_lookback,
-    )
-    .await?;
 
-    build_rebalance_factor_signals(
+    build_rebalance_factor_signals_with_score_selector(
         trading_days.as_ref(),
-        scores_by_date,
         config,
         return_history.as_ref(),
         average_amounts.as_ref(),
         industry_by_symbol.as_ref(),
+        |score_day, active_config| {
+            score_rows_for_active_config(&score_sources, score_day, active_config)
+        },
         |day, base| {
             let returns =
                 trailing_market_returns(benchmark_returns.as_ref(), day, policy.lookback_days);
@@ -1439,6 +2063,197 @@ pub async fn generate_regime_signals_with_cache(
             policy.apply(base, regime)
         },
     )
+}
+
+fn regime_score_source_configs(
+    base_config: &SignalConfig,
+    policy: &MarketRegimePolicy,
+) -> Vec<SignalConfig> {
+    let mut configs = Vec::new();
+    let mut seen = HashSet::new();
+    for config in std::iter::once(base_config.clone()).chain(
+        [
+            MarketRegime::Bull,
+            MarketRegime::Bear,
+            MarketRegime::HighVolatility,
+            MarketRegime::Sideways,
+            MarketRegime::Mixed,
+        ]
+        .into_iter()
+        .map(|regime| policy.apply(base_config, regime)),
+    ) {
+        let key = FactorScoreSourceKey::from_config(&config);
+        if seen.insert(key) {
+            configs.push(config.clone());
+        }
+        if let Some(overlay) = config.score_overlay.as_ref() {
+            let overlay_config = score_source_config_for_overlay(&config, overlay);
+            let key = FactorScoreSourceKey::from_config(&overlay_config);
+            if seen.insert(key) {
+                configs.push(overlay_config);
+            }
+        }
+        if let Some(sleeve) = config.portfolio_sleeve.as_ref() {
+            let sleeve_config = score_source_config_for_portfolio_sleeve(&config, sleeve);
+            let key = FactorScoreSourceKey::from_config(&sleeve_config);
+            if seen.insert(key) {
+                configs.push(sleeve_config);
+            }
+        }
+    }
+    configs
+}
+
+fn score_rows_for_active_config(
+    score_sources: &HashMap<FactorScoreSourceKey, FactorScoresByDate>,
+    score_day: NaiveDate,
+    active_config: &SignalConfig,
+) -> Option<Vec<(String, f64)>> {
+    let base_key = FactorScoreSourceKey::from_config(active_config);
+    let base_rows = score_sources.get(&base_key)?.get(&score_day)?.clone();
+    let Some(overlay) = active_config.score_overlay.as_ref() else {
+        return Some(base_rows);
+    };
+    let overlay_config = score_source_config_for_overlay(active_config, overlay);
+    let overlay_key = FactorScoreSourceKey::from_config(&overlay_config);
+    let Some(overlay_rows) = score_sources
+        .get(&overlay_key)
+        .and_then(|scores_by_date| scores_by_date.get(&score_day))
+        .cloned()
+    else {
+        return Some(base_rows);
+    };
+    if overlay_rows.is_empty() {
+        return Some(base_rows);
+    }
+
+    Some(blend_factor_overlay_scores(
+        base_rows,
+        overlay_rows,
+        active_config.score_direction,
+        overlay.score_direction,
+        overlay.weight,
+    ))
+}
+
+fn score_source_config_for_overlay(
+    base_config: &SignalConfig,
+    overlay: &FactorScoreOverlayConfig,
+) -> SignalConfig {
+    let mut config = base_config.clone();
+    config.combo_name = overlay.combo_name.clone();
+    config.version = overlay.version.clone();
+    config.score_direction = overlay.score_direction;
+    config.score_overlay = None;
+    config.portfolio_sleeve = None;
+    config
+}
+
+fn score_source_config_for_portfolio_sleeve(
+    base_config: &SignalConfig,
+    sleeve: &FactorPortfolioSleeveConfig,
+) -> SignalConfig {
+    let mut config = base_config.clone();
+    config.combo_name = sleeve.combo_name.clone();
+    config.version = sleeve.version.clone();
+    config.score_direction = sleeve.score_direction;
+    config.score_overlay = None;
+    config.portfolio_sleeve = None;
+    config
+}
+
+fn blend_factor_overlay_scores(
+    base_rows: Vec<(String, f64)>,
+    overlay_rows: Vec<(String, f64)>,
+    base_direction: ScoreDirection,
+    overlay_direction: ScoreDirection,
+    overlay_weight: f64,
+) -> Vec<(String, f64)> {
+    let overlay_weight = overlay_weight.clamp(0.0, 1.0);
+    if overlay_weight <= f64::EPSILON {
+        return base_rows;
+    }
+    let base_weight = 1.0 - overlay_weight;
+    let base_stats = score_stats(base_rows.iter().map(|(_, score)| *score));
+    let overlay_stats = score_stats(overlay_rows.iter().map(|(_, score)| *score));
+    let overlay_scores: HashMap<String, f64> = overlay_rows
+        .into_iter()
+        .filter(|(_, score)| score.is_finite())
+        .map(|(symbol, score)| {
+            (
+                symbol,
+                oriented_standard_score(score, overlay_stats, overlay_direction),
+            )
+        })
+        .collect();
+
+    base_rows
+        .into_iter()
+        .filter(|(_, score)| score.is_finite())
+        .map(|(symbol, score)| {
+            let base_good = oriented_standard_score(score, base_stats, base_direction);
+            let overlay_good = overlay_scores.get(&symbol).copied().unwrap_or(0.0);
+            let blended_good = base_weight * base_good + overlay_weight * overlay_good;
+            let blended_score = match base_direction {
+                ScoreDirection::Descending => blended_good,
+                ScoreDirection::Ascending => -blended_good,
+            };
+            (symbol, blended_score)
+        })
+        .collect()
+}
+
+fn oriented_standard_score(value: f64, stats: (f64, f64), direction: ScoreDirection) -> f64 {
+    let score = standard_score(value, stats);
+    match direction {
+        ScoreDirection::Descending => score,
+        ScoreDirection::Ascending => -score,
+    }
+}
+
+async fn load_regime_base_scores_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    config: &SignalConfig,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<FactorScoresByDate, String> {
+    let score_cache = load_combo_scores_cached(pool, cache, config, start_date, end_date).await?;
+    let mut adjusted_scores = score_cache.as_ref().clone();
+
+    if config.min_daily_amount_cny.is_some() {
+        apply_factor_liquidity_filter(
+            pool,
+            cache,
+            &mut adjusted_scores,
+            config,
+            start_date,
+            end_date,
+        )
+        .await?;
+    }
+    if let Some(blend) = config.prediction_blend.as_ref() {
+        let prediction_scores =
+            load_prediction_scores_by_date(pool, &blend.prediction_set_id, start_date, end_date)
+                .await?;
+        blend_factor_prediction_scores(
+            &mut adjusted_scores,
+            &prediction_scores,
+            blend,
+            config.score_direction,
+        );
+    }
+    if let Some(event_gate) = config
+        .event_gate
+        .as_ref()
+        .filter(|gate| gate.active_regimes.is_empty())
+    {
+        let event_scores =
+            load_event_gate_scores_cached(pool, cache, event_gate, start_date, end_date).await?;
+        apply_event_gate_scores(&mut adjusted_scores, event_scores.as_ref(), event_gate);
+    }
+
+    Ok(adjusted_scores)
 }
 
 /// Generate daily strategy signals from persisted model predictions.
@@ -1685,6 +2500,110 @@ fn blend_factor_prediction_scores(
             })
             .collect();
         true
+    });
+}
+
+async fn load_event_gate_scores_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    event_gate: &EventGateConfig,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Arc<FactorScoresByDate>, String> {
+    let mut gate_config = SignalConfig {
+        combo_name: event_gate.combo_name.clone(),
+        version: event_gate.version.clone(),
+        score_direction: event_gate.score_direction,
+        score_candidate_pool_size: None,
+        universe_profile: TradableUniverseProfile::All,
+        event_gate: None,
+        prediction_blend: None,
+        ..Default::default()
+    };
+    gate_config.min_daily_amount_cny = None;
+    load_combo_scores_cached(pool, cache, &gate_config, start_date, end_date).await
+}
+
+fn apply_event_gate_scores(
+    factor_scores: &mut FactorScoresByDate,
+    event_scores: &FactorScoresByDate,
+    gate: &EventGateConfig,
+) {
+    apply_event_gate_scores_when(factor_scores, event_scores, gate, |_| true);
+}
+
+fn apply_event_gate_scores_for_regime<F>(
+    factor_scores: &mut FactorScoresByDate,
+    event_scores: &FactorScoresByDate,
+    gate: &EventGateConfig,
+    regime_for_date: F,
+) where
+    F: Fn(NaiveDate) -> MarketRegime,
+{
+    apply_event_gate_scores_when(factor_scores, event_scores, gate, |date| {
+        gate.active_regimes.is_empty() || gate.active_regimes.contains(&regime_for_date(date))
+    });
+}
+
+fn apply_event_gate_scores_when<F>(
+    factor_scores: &mut FactorScoresByDate,
+    event_scores: &FactorScoresByDate,
+    gate: &EventGateConfig,
+    active_for_date: F,
+) where
+    F: Fn(NaiveDate) -> bool,
+{
+    let min_score = if gate.min_score.is_finite() {
+        gate.min_score
+    } else {
+        0.0
+    };
+    let boost_weight = gate.boost_weight.max(0.0);
+    factor_scores.retain(|date, rows| {
+        if !active_for_date(*date) {
+            return true;
+        }
+        let event_by_symbol = event_scores
+            .get(date)
+            .map(|scores| {
+                scores
+                    .iter()
+                    .filter(|(_, score)| score.is_finite())
+                    .map(|(symbol, score)| (symbol.as_str(), *score))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+
+        match gate.mode {
+            EventGateMode::BoostPositive => {
+                let event_stats = score_stats(event_by_symbol.values().copied());
+                for (symbol, factor_score) in rows.iter_mut() {
+                    let Some(event_score) = event_by_symbol.get(symbol.as_str()).copied() else {
+                        continue;
+                    };
+                    if event_score > min_score && boost_weight > 0.0 {
+                        *factor_score += boost_weight * standard_score(event_score, event_stats);
+                    }
+                }
+            }
+            EventGateMode::ExcludeNegative => {
+                rows.retain(|(symbol, _)| {
+                    event_by_symbol
+                        .get(symbol.as_str())
+                        .map(|score| *score >= min_score)
+                        .unwrap_or(true)
+                });
+            }
+            EventGateMode::RequirePositive => {
+                rows.retain(|(symbol, _)| {
+                    event_by_symbol
+                        .get(symbol.as_str())
+                        .map(|score| *score > min_score)
+                        .unwrap_or(false)
+                });
+            }
+        }
+        !rows.is_empty()
     });
 }
 
@@ -1938,7 +2857,32 @@ fn build_rebalance_factor_signals<F>(
 where
     F: Fn(NaiveDate, &SignalConfig) -> SignalConfig,
 {
+    build_rebalance_factor_signals_with_score_selector(
+        trading_days,
+        base_config,
+        return_history,
+        average_amounts,
+        industry_by_symbol,
+        |score_day, _active_config| scores_by_date.get(&score_day).cloned(),
+        active_config_for_day,
+    )
+}
+
+fn build_rebalance_factor_signals_with_score_selector<F, S>(
+    trading_days: &[NaiveDate],
+    base_config: &SignalConfig,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts: &HashMap<String, f64>,
+    industry_by_symbol: &HashMap<String, String>,
+    scores_for_day: S,
+    active_config_for_day: F,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String>
+where
+    F: Fn(NaiveDate, &SignalConfig) -> SignalConfig,
+    S: Fn(NaiveDate, &SignalConfig) -> Option<Vec<(String, f64)>>,
+{
     let mut signals: HashMap<NaiveDate, StrategySignal> = HashMap::new();
+    let mut previous_target_weights: Option<HashMap<String, Decimal>> = None;
 
     for (i, &day) in trading_days.iter().enumerate() {
         let active_config = active_config_for_day(day, base_config);
@@ -1954,46 +2898,32 @@ where
             Some(day) => day,
             None => continue,
         };
-        let mut prev_scores = match scores_by_date.get(&score_day) {
-            Some(scores) => scores.clone(),
-            None => continue,
-        };
-        sort_factor_scores(&mut prev_scores, active_config.score_direction);
-
-        let skip_count = if active_config.skip_top_pct > 0.0 {
-            (prev_scores.len() as f64 * active_config.skip_top_pct).ceil() as usize
-        } else {
-            0
-        };
-        let candidates: Vec<(String, f64)> = prev_scores
-            .iter()
-            .skip(skip_count)
-            .map(|(symbol, score)| (symbol.clone(), *score))
-            .collect();
-        if candidates.len() < active_config.top_n.min(5) {
-            continue;
-        }
-
-        let portfolio_config = PortfolioConstructionConfig::from(&active_config);
-        let target_weights = build_portfolio_weights(
+        let mut target_weights = match build_portfolio_sleeve_target_weights(
             score_day,
-            &candidates,
+            &active_config,
             return_history,
             average_amounts,
             industry_by_symbol,
-            &portfolio_config,
+            &scores_for_day,
+        ) {
+            Some(weights) => weights,
+            None => continue,
+        };
+        apply_rebalance_path_smoothing(
+            &mut target_weights,
+            previous_target_weights.as_ref(),
+            active_config.rebalance_hysteresis_pct,
+            active_config.partial_rebalance_ratio,
         );
-        if target_weights.len() < active_config.top_n.min(5) {
-            continue;
-        }
 
         signals.insert(
             day,
             StrategySignal {
                 date: day,
-                target_weights,
+                target_weights: target_weights.clone(),
             },
         );
+        previous_target_weights = Some(target_weights);
     }
 
     info!(
@@ -2005,6 +2935,128 @@ where
     );
 
     Ok(signals)
+}
+
+fn build_portfolio_sleeve_target_weights<S>(
+    score_day: NaiveDate,
+    active_config: &SignalConfig,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts: &HashMap<String, f64>,
+    industry_by_symbol: &HashMap<String, String>,
+    scores_for_day: &S,
+) -> Option<HashMap<String, Decimal>>
+where
+    S: Fn(NaiveDate, &SignalConfig) -> Option<Vec<(String, f64)>>,
+{
+    let mut base_config = active_config.clone();
+    base_config.portfolio_sleeve = None;
+    let base_weights = build_single_sleeve_target_weights(
+        score_day,
+        &base_config,
+        return_history,
+        average_amounts,
+        industry_by_symbol,
+        scores_for_day,
+    )?;
+
+    let Some(sleeve) = active_config.portfolio_sleeve.as_ref() else {
+        return Some(base_weights);
+    };
+    let sleeve_weight = sleeve.weight.clamp(0.0, 1.0);
+    if sleeve_weight <= f64::EPSILON {
+        return Some(base_weights);
+    }
+    let sleeve_config = score_source_config_for_portfolio_sleeve(active_config, sleeve);
+    let Some(sleeve_weights) = build_single_sleeve_target_weights(
+        score_day,
+        &sleeve_config,
+        return_history,
+        average_amounts,
+        industry_by_symbol,
+        scores_for_day,
+    ) else {
+        return Some(base_weights);
+    };
+
+    Some(blend_portfolio_sleeve_weights(
+        base_weights,
+        1.0 - sleeve_weight,
+        sleeve_weights,
+        sleeve_weight,
+    ))
+}
+
+fn build_single_sleeve_target_weights<S>(
+    score_day: NaiveDate,
+    config: &SignalConfig,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts: &HashMap<String, f64>,
+    industry_by_symbol: &HashMap<String, String>,
+    scores_for_day: &S,
+) -> Option<HashMap<String, Decimal>>
+where
+    S: Fn(NaiveDate, &SignalConfig) -> Option<Vec<(String, f64)>>,
+{
+    let mut prev_scores = scores_for_day(score_day, config)?;
+    sort_factor_scores(&mut prev_scores, config.score_direction);
+
+    let skip_count = if config.skip_top_pct > 0.0 {
+        (prev_scores.len() as f64 * config.skip_top_pct).ceil() as usize
+    } else {
+        0
+    };
+    let candidates: Vec<(String, f64)> = prev_scores
+        .iter()
+        .skip(skip_count)
+        .map(|(symbol, score)| (symbol.clone(), *score))
+        .collect();
+    if candidates.len() < config.top_n.min(5) {
+        return None;
+    }
+
+    let portfolio_config = PortfolioConstructionConfig::from(config);
+    let target_weights = build_portfolio_weights(
+        score_day,
+        &candidates,
+        return_history,
+        average_amounts,
+        industry_by_symbol,
+        &portfolio_config,
+    );
+    if target_weights.len() < config.top_n.min(5) {
+        return None;
+    }
+    Some(target_weights)
+}
+
+fn blend_portfolio_sleeve_weights(
+    base_weights: HashMap<String, Decimal>,
+    base_weight: f64,
+    sleeve_weights: HashMap<String, Decimal>,
+    sleeve_weight: f64,
+) -> HashMap<String, Decimal> {
+    let base_weight = decimal_from_unit_f64(base_weight);
+    let sleeve_weight = decimal_from_unit_f64(sleeve_weight);
+    let mut blended = HashMap::new();
+
+    for (symbol, weight) in base_weights {
+        let scaled = weight * base_weight;
+        if scaled > Decimal::ZERO {
+            blended.insert(symbol, scaled);
+        }
+    }
+    for (symbol, weight) in sleeve_weights {
+        let scaled = weight * sleeve_weight;
+        if scaled > Decimal::ZERO {
+            *blended.entry(symbol).or_insert(Decimal::ZERO) += scaled;
+        }
+    }
+    blended.retain(|_, weight| *weight > Decimal::ZERO);
+    blended
+}
+
+fn decimal_from_unit_f64(value: f64) -> Decimal {
+    Decimal::from_f64(value.clamp(0.0, 1.0)).unwrap_or(Decimal::ZERO)
 }
 
 async fn apply_prediction_liquidity_filter(
@@ -2190,6 +3242,7 @@ fn build_rebalance_prediction_signals(
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
     let min_idx = 1 + config.entry_delay_days;
     let mut signals = HashMap::new();
+    let mut previous_target_weights: Option<HashMap<String, Decimal>> = None;
 
     for (i, &day) in trading_days.iter().enumerate() {
         if i < min_idx || i % config.rebalance_freq_days != 0 {
@@ -2218,7 +3271,7 @@ fn build_rebalance_prediction_signals(
             continue;
         }
 
-        let target_weights = build_portfolio_weights(
+        let mut target_weights = build_portfolio_weights(
             score_day,
             &candidates,
             return_history,
@@ -2229,14 +3282,21 @@ fn build_rebalance_prediction_signals(
         if target_weights.len() < config.top_n.min(5) {
             continue;
         }
+        apply_rebalance_path_smoothing(
+            &mut target_weights,
+            previous_target_weights.as_ref(),
+            config.rebalance_hysteresis_pct,
+            config.partial_rebalance_ratio,
+        );
 
         signals.insert(
             day,
             StrategySignal {
                 date: day,
-                target_weights,
+                target_weights: target_weights.clone(),
             },
         );
+        previous_target_weights = Some(target_weights);
     }
 
     if signals.is_empty() {
@@ -2253,6 +3313,76 @@ fn build_rebalance_prediction_signals(
     );
 
     Ok(signals)
+}
+
+fn apply_rebalance_path_smoothing(
+    target_weights: &mut HashMap<String, Decimal>,
+    previous_target_weights: Option<&HashMap<String, Decimal>>,
+    rebalance_hysteresis_pct: f64,
+    partial_rebalance_ratio: f64,
+) {
+    let Some(previous_target_weights) = previous_target_weights else {
+        return;
+    };
+    let hysteresis = finite_decimal(rebalance_hysteresis_pct, 0.0, 0.0, 1.0);
+    let partial = finite_decimal(partial_rebalance_ratio, 1.0, 0.0, 1.0);
+    if hysteresis.is_zero() && partial == Decimal::ONE {
+        return;
+    }
+    if target_weights.is_empty() {
+        return;
+    }
+
+    let target_gross = target_weights.values().copied().sum::<Decimal>();
+    if target_gross.is_zero() {
+        target_weights.clear();
+        return;
+    }
+
+    let raw_target_weights = target_weights.clone();
+    let mut symbols = previous_target_weights
+        .keys()
+        .chain(raw_target_weights.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    symbols.sort();
+    symbols.dedup();
+
+    target_weights.clear();
+    for symbol in symbols {
+        let previous = previous_target_weights
+            .get(&symbol)
+            .copied()
+            .unwrap_or_default();
+        let target = raw_target_weights.get(&symbol).copied().unwrap_or_default();
+        let delta = target - previous;
+        let adjusted = if delta.abs() <= hysteresis {
+            previous
+        } else {
+            previous + delta * partial
+        };
+        if adjusted > Decimal::ZERO {
+            target_weights.insert(symbol, adjusted);
+        }
+    }
+
+    let adjusted_gross = target_weights.values().copied().sum::<Decimal>();
+    if adjusted_gross > target_gross && !adjusted_gross.is_zero() {
+        let scale = target_gross / adjusted_gross;
+        for weight in target_weights.values_mut() {
+            *weight *= scale;
+        }
+    }
+    target_weights.retain(|_, weight| *weight > Decimal::ZERO);
+}
+
+fn finite_decimal(value: f64, default: f64, min: f64, max: f64) -> Decimal {
+    let bounded = if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        default
+    };
+    Decimal::from_f64(bounded).unwrap_or_else(|| Decimal::from_f64(default).unwrap_or_default())
 }
 
 fn score_day_for_signal(
@@ -2355,13 +3485,24 @@ async fn load_symbol_return_history_cached(
     end_date: NaiveDate,
     lookback_days: usize,
 ) -> Result<Arc<SymbolReturnHistory>, String> {
-    let key = SignalDataCacheKey::return_history(symbols, start_date, end_date, lookback_days);
-    if let Some(history) = cache.cached_return_history(&key) {
-        return Ok(history);
+    let (missing_symbols, mut history) =
+        cache.cached_return_history_symbols(symbols, start_date, end_date, lookback_days);
+    if missing_symbols.is_empty() {
+        return Ok(Arc::new(history));
     }
-    let history =
-        load_symbol_return_history(pool, symbols, start_date, end_date, lookback_days).await?;
-    Ok(cache.insert_return_history(key, history))
+
+    let loaded_history =
+        load_symbol_return_history(pool, &missing_symbols, start_date, end_date, lookback_days)
+            .await?;
+    let loaded_history = cache.insert_return_history_symbols(
+        &missing_symbols,
+        start_date,
+        end_date,
+        lookback_days,
+        loaded_history,
+    );
+    history.extend(loaded_history);
+    Ok(Arc::new(history))
 }
 
 async fn load_average_amounts(
@@ -2407,12 +3548,16 @@ async fn load_average_amounts_cached(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<Arc<AverageAmounts>, String> {
-    let key = SignalDataCacheKey::average_amounts(symbols, start_date, end_date);
-    if let Some(amounts) = cache.cached_average_amounts(&key) {
-        return Ok(amounts);
+    let (missing_symbols, mut amounts) =
+        cache.cached_average_amount_symbols(symbols, start_date, end_date);
+    if missing_symbols.is_empty() {
+        return Ok(Arc::new(amounts));
     }
-    let amounts = load_average_amounts(pool, symbols, start_date, end_date).await?;
-    Ok(cache.insert_average_amounts(key, amounts))
+    let loaded_amounts = load_average_amounts(pool, &missing_symbols, start_date, end_date).await?;
+    let loaded_amounts =
+        cache.insert_average_amount_symbols(&missing_symbols, start_date, end_date, loaded_amounts);
+    amounts.extend(loaded_amounts);
+    Ok(Arc::new(amounts))
 }
 
 async fn load_industry_classifications(
@@ -2461,10 +3606,12 @@ async fn load_portfolio_capacity_inputs(
     end_date: NaiveDate,
     config: &PortfolioConstructionConfig,
 ) -> Result<HashMap<String, f64>, String> {
-    if config.portfolio_method != PortfolioConstructionMethod::RiskBudget {
-        Ok(HashMap::new())
-    } else {
+    if config.portfolio_method == PortfolioConstructionMethod::RiskBudget
+        || config.style_risk_budget_profile.uses_liquidity()
+    {
         load_average_amounts(pool, symbols, start_date, end_date).await
+    } else {
+        Ok(HashMap::new())
     }
 }
 
@@ -2476,10 +3623,12 @@ async fn load_portfolio_capacity_inputs_cached(
     end_date: NaiveDate,
     config: &PortfolioConstructionConfig,
 ) -> Result<Arc<AverageAmounts>, String> {
-    if config.portfolio_method != PortfolioConstructionMethod::RiskBudget {
-        Ok(Arc::new(HashMap::new()))
-    } else {
+    if config.portfolio_method == PortfolioConstructionMethod::RiskBudget
+        || config.style_risk_budget_profile.uses_liquidity()
+    {
         load_average_amounts_cached(pool, cache, symbols, start_date, end_date).await
+    } else {
+        Ok(Arc::new(HashMap::new()))
     }
 }
 
@@ -2580,7 +3729,14 @@ fn build_portfolio_weights(
     industry_by_symbol: &HashMap<String, String>,
     config: &PortfolioConstructionConfig,
 ) -> HashMap<String, Decimal> {
-    let selected = select_uncorrelated_candidates(score_day, candidates, return_history, config);
+    let risk_filtered_candidates =
+        filter_candidate_risk_pool(score_day, candidates, return_history, config);
+    let selected = select_uncorrelated_candidates(
+        score_day,
+        &risk_filtered_candidates,
+        return_history,
+        config,
+    );
     if selected.is_empty() {
         return HashMap::new();
     }
@@ -2603,7 +3759,15 @@ fn build_portfolio_weights(
     };
 
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, config);
+    apply_style_risk_budget(
+        &mut weights,
+        return_history,
+        average_amounts,
+        score_day,
+        config,
+    );
     apply_industry_cap(&mut weights, industry_by_symbol, config);
+    apply_risk_contribution_control(&mut weights, return_history, score_day, config);
     weights
 }
 
@@ -2643,6 +3807,127 @@ fn select_uncorrelated_candidates(
         selected.push(symbol.clone());
     }
     selected
+}
+
+fn filter_candidate_risk_pool(
+    score_day: NaiveDate,
+    candidates: &[(String, f64)],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<(String, f64)> {
+    let Some(params) = config.candidate_risk_filter_profile.params() else {
+        return candidates.to_vec();
+    };
+    if candidates.len() <= config.top_n || candidates.is_empty() {
+        return candidates.to_vec();
+    }
+
+    let volatility_scores = candidates
+        .iter()
+        .filter_map(|(symbol, _)| {
+            let returns = trailing_returns(
+                return_history,
+                symbol,
+                score_day,
+                config.risk_budget_lookback_days,
+            );
+            sample_volatility(&returns).map(|volatility| (symbol.as_str(), volatility))
+        })
+        .collect::<Vec<_>>();
+
+    let Some(volatility_threshold) = quantile_value(
+        volatility_scores.iter().map(|(_, volatility)| *volatility),
+        params.max_volatility_quantile,
+    ) else {
+        return candidates.to_vec();
+    };
+
+    let low_volatility_symbols = volatility_scores
+        .iter()
+        .filter(|(_, volatility)| *volatility <= volatility_threshold)
+        .map(|(symbol, _)| *symbol)
+        .collect::<HashSet<_>>();
+
+    let mut filtered = candidates
+        .iter()
+        .filter(|(symbol, _)| {
+            if volatility_scores
+                .iter()
+                .any(|(known, _)| *known == symbol.as_str())
+            {
+                low_volatility_symbols.contains(symbol.as_str())
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(max_average_corr) = params.max_average_abs_correlation {
+        let reference_limit = params
+            .correlation_reference_limit
+            .max(config.top_n.saturating_mul(4))
+            .max(20);
+        let reference_symbols = filtered
+            .iter()
+            .take(reference_limit)
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        filtered.retain(|(symbol, _)| {
+            average_abs_correlation_to_reference(
+                symbol,
+                &reference_symbols,
+                return_history,
+                score_day,
+                config.risk_budget_lookback_days,
+            )
+            .map(|corr| corr <= max_average_corr)
+            .unwrap_or(true)
+        });
+    }
+
+    if filtered.len() >= config.top_n {
+        filtered
+    } else {
+        candidates.to_vec()
+    }
+}
+
+fn quantile_value(values: impl Iterator<Item = f64>, quantile: f64) -> Option<f64> {
+    let mut values = values.filter(|value| value.is_finite()).collect::<Vec<_>>();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((values.len().saturating_sub(1) as f64) * quantile.clamp(0.0, 1.0)).floor() as usize;
+    values.get(idx.min(values.len() - 1)).copied()
+}
+
+fn average_abs_correlation_to_reference(
+    symbol: &str,
+    reference_symbols: &[String],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    score_day: NaiveDate,
+    lookback_days: usize,
+) -> Option<f64> {
+    let own_returns = trailing_returns(return_history, symbol, score_day, lookback_days);
+    if own_returns.len() < 3 {
+        return None;
+    }
+    let correlations = reference_symbols
+        .iter()
+        .filter(|other| other.as_str() != symbol)
+        .filter_map(|other| {
+            let other_returns =
+                trailing_returns(return_history, other.as_str(), score_day, lookback_days);
+            pearson_correlation(&own_returns, &other_returns).map(f64::abs)
+        })
+        .collect::<Vec<_>>();
+    if correlations.is_empty() {
+        None
+    } else {
+        Some(correlations.iter().sum::<f64>() / correlations.len() as f64)
+    }
 }
 
 fn build_kelly_raw_weights(
@@ -2790,6 +4075,216 @@ fn apply_industry_cap(
         }
     }
     weights.retain(|_, weight| !weight.is_zero());
+}
+
+fn apply_style_risk_budget(
+    weights: &mut HashMap<String, Decimal>,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts: &HashMap<String, f64>,
+    score_day: NaiveDate,
+    config: &PortfolioConstructionConfig,
+) {
+    let Some(params) = config.style_risk_budget_profile.params() else {
+        return;
+    };
+    if weights.is_empty() {
+        return;
+    }
+
+    let volatility_scores = weights
+        .keys()
+        .filter_map(|symbol| {
+            let returns = trailing_returns(
+                return_history,
+                symbol,
+                score_day,
+                config.risk_budget_lookback_days,
+            );
+            sample_volatility(&returns).map(|volatility| (symbol.clone(), volatility))
+        })
+        .collect::<Vec<_>>();
+    let high_volatility_symbols =
+        high_style_bucket_symbols(&volatility_scores, params.high_volatility_quantile);
+    cap_style_bucket(
+        weights,
+        &high_volatility_symbols,
+        params.high_volatility_max_weight_pct,
+    );
+
+    let liquidity_scores = weights
+        .keys()
+        .filter_map(|symbol| {
+            average_amounts
+                .get(symbol)
+                .copied()
+                .filter(|amount| amount.is_finite() && *amount > 0.0)
+                .map(|amount| (symbol.clone(), amount))
+        })
+        .collect::<Vec<_>>();
+    let low_liquidity_symbols =
+        low_style_bucket_symbols(&liquidity_scores, params.low_liquidity_quantile);
+    cap_style_bucket(
+        weights,
+        &low_liquidity_symbols,
+        params.low_liquidity_max_weight_pct,
+    );
+}
+
+fn high_style_bucket_symbols(scores: &[(String, f64)], quantile: f64) -> HashSet<String> {
+    if scores.is_empty() {
+        return HashSet::new();
+    }
+    let mut sorted = scores
+        .iter()
+        .filter(|(_, value)| value.is_finite())
+        .collect::<Vec<_>>();
+    if sorted.is_empty() {
+        return HashSet::new();
+    }
+    sorted.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let threshold_index =
+        ((sorted.len().saturating_sub(1) as f64) * quantile.clamp(0.0, 1.0)).ceil() as usize;
+    let threshold = sorted[threshold_index.min(sorted.len() - 1)].1;
+    sorted
+        .into_iter()
+        .filter(|(_, value)| *value >= threshold)
+        .map(|(symbol, _)| symbol.clone())
+        .collect()
+}
+
+fn low_style_bucket_symbols(scores: &[(String, f64)], quantile: f64) -> HashSet<String> {
+    if scores.is_empty() {
+        return HashSet::new();
+    }
+    let mut sorted = scores
+        .iter()
+        .filter(|(_, value)| value.is_finite())
+        .collect::<Vec<_>>();
+    if sorted.is_empty() {
+        return HashSet::new();
+    }
+    sorted.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let threshold_index =
+        ((sorted.len().saturating_sub(1) as f64) * quantile.clamp(0.0, 1.0)).floor() as usize;
+    let threshold = sorted[threshold_index.min(sorted.len() - 1)].1;
+    sorted
+        .into_iter()
+        .filter(|(_, value)| *value <= threshold)
+        .map(|(symbol, _)| symbol.clone())
+        .collect()
+}
+
+fn cap_style_bucket(
+    weights: &mut HashMap<String, Decimal>,
+    bucket_symbols: &HashSet<String>,
+    max_weight_pct: f64,
+) {
+    if weights.is_empty() || bucket_symbols.is_empty() || !max_weight_pct.is_finite() {
+        return;
+    }
+    let cap = max_weight_pct.clamp(0.0, 1.0);
+    if cap >= 1.0 {
+        return;
+    }
+    let cap = Decimal::from_f64(cap).unwrap_or(Decimal::ONE);
+    let total = weights
+        .iter()
+        .filter(|(symbol, _)| bucket_symbols.contains(*symbol))
+        .map(|(_, weight)| *weight)
+        .sum::<Decimal>();
+    if total <= cap || total.is_zero() {
+        return;
+    }
+    let scale = cap / total;
+    for (symbol, weight) in weights.iter_mut() {
+        if bucket_symbols.contains(symbol) {
+            *weight *= scale;
+        }
+    }
+    weights.retain(|_, weight| !weight.is_zero());
+}
+
+fn apply_risk_contribution_control(
+    weights: &mut HashMap<String, Decimal>,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    score_day: NaiveDate,
+    config: &PortfolioConstructionConfig,
+) {
+    let Some(params) = config.risk_contribution_control_profile.params() else {
+        return;
+    };
+    if weights.len() < 2 {
+        return;
+    }
+
+    let cap = params.max_single_name_contribution_pct.clamp(0.01, 1.0);
+    if cap >= 1.0 {
+        return;
+    }
+
+    for _ in 0..params.iterations.max(1) {
+        let symbols = weights.keys().cloned().collect::<Vec<_>>();
+        let contributions = symbols
+            .iter()
+            .filter_map(|symbol| {
+                let weight = weights.get(symbol)?.to_f64()?;
+                if !weight.is_finite() || weight <= 0.0 {
+                    return None;
+                }
+                let volatility = sample_volatility(&trailing_returns(
+                    return_history,
+                    symbol,
+                    score_day,
+                    config.risk_budget_lookback_days,
+                ))
+                .unwrap_or(0.20)
+                .max(0.01);
+                let concentration_penalty = covariance_concentration_penalty(
+                    symbol,
+                    &symbols,
+                    return_history,
+                    score_day,
+                    config,
+                );
+                let risk_score = weight * volatility * concentration_penalty.max(1.0);
+                if risk_score.is_finite() && risk_score > 0.0 {
+                    Some((symbol.clone(), risk_score))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let total_risk = contributions.iter().map(|(_, risk)| *risk).sum::<f64>();
+        if total_risk <= 0.0 {
+            return;
+        }
+
+        let mut changed = false;
+        for (symbol, risk_score) in contributions {
+            let contribution_pct = risk_score / total_risk;
+            if contribution_pct <= cap {
+                continue;
+            }
+            if let Some(weight) = weights.get_mut(&symbol) {
+                let scale = Decimal::from_f64((cap / contribution_pct).clamp(0.0, 1.0))
+                    .unwrap_or(Decimal::ONE);
+                *weight *= scale;
+                changed = true;
+            }
+        }
+        weights.retain(|_, weight| !weight.is_zero());
+        if !changed {
+            break;
+        }
+    }
 }
 
 fn sample_volatility(returns: &[f64]) -> Option<f64> {
@@ -3176,6 +4671,165 @@ mod tests {
     }
 
     #[test]
+    fn event_gate_boosts_or_filters_without_replacing_base_ranking() {
+        let day = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let base_scores = HashMap::from([(
+            day,
+            vec![
+                ("BASE_LEADER_NO_EVENT".to_string(), 10.0),
+                ("BASE_MID_POSITIVE_EVENT".to_string(), 9.0),
+                ("BASE_LOW_NEGATIVE_EVENT".to_string(), 8.0),
+            ],
+        )]);
+        let event_scores = HashMap::from([(
+            day,
+            vec![
+                ("BASE_MID_POSITIVE_EVENT".to_string(), 1.2),
+                ("BASE_LOW_NEGATIVE_EVENT".to_string(), -0.7),
+            ],
+        )]);
+
+        let mut boosted = base_scores.clone();
+        apply_event_gate_scores(
+            &mut boosted,
+            &event_scores,
+            &EventGateConfig {
+                combo_name: "phase7_event_window_earnings_v1".to_string(),
+                version: "1.0.0".to_string(),
+                mode: EventGateMode::BoostPositive,
+                score_direction: ScoreDirection::Descending,
+                min_score: 0.0,
+                boost_weight: 0.05,
+                active_regimes: vec![],
+            },
+        );
+        let boosted = boosted.get(&day).unwrap();
+        assert_eq!(
+            boosted.len(),
+            3,
+            "boost mode must not create sparse deletion"
+        );
+        assert_eq!(boosted[0].0, "BASE_LEADER_NO_EVENT");
+        assert!(boosted[1].1 > base_scores.get(&day).unwrap()[1].1);
+        assert_eq!(boosted[2].1, base_scores.get(&day).unwrap()[2].1);
+
+        let mut exclude_negative = base_scores.clone();
+        apply_event_gate_scores(
+            &mut exclude_negative,
+            &event_scores,
+            &EventGateConfig {
+                combo_name: "phase7_event_window_earnings_v1".to_string(),
+                version: "1.0.0".to_string(),
+                mode: EventGateMode::ExcludeNegative,
+                score_direction: ScoreDirection::Descending,
+                min_score: 0.0,
+                boost_weight: 0.0,
+                active_regimes: vec![],
+            },
+        );
+        let exclude_negative = exclude_negative.get(&day).unwrap();
+        assert_eq!(
+            exclude_negative
+                .iter()
+                .map(|(symbol, _)| symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["BASE_LEADER_NO_EVENT", "BASE_MID_POSITIVE_EVENT"]
+        );
+
+        let mut require_positive = base_scores.clone();
+        apply_event_gate_scores(
+            &mut require_positive,
+            &event_scores,
+            &EventGateConfig {
+                combo_name: "phase7_event_window_earnings_v1".to_string(),
+                version: "1.0.0".to_string(),
+                mode: EventGateMode::RequirePositive,
+                score_direction: ScoreDirection::Descending,
+                min_score: 0.0,
+                boost_weight: 0.0,
+                active_regimes: vec![],
+            },
+        );
+        let require_positive = require_positive.get(&day).unwrap();
+        assert_eq!(require_positive.len(), 1);
+        assert_eq!(require_positive[0].0, "BASE_MID_POSITIVE_EVENT");
+    }
+
+    #[test]
+    fn event_gate_can_be_limited_to_stress_regimes() {
+        let bear_day = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let bull_day = NaiveDate::from_ymd_opt(2025, 1, 13).unwrap();
+        let base_scores = HashMap::from([
+            (
+                bear_day,
+                vec![
+                    ("BASE_LEADER_NO_EVENT".to_string(), 10.0),
+                    ("BASE_LOW_NEGATIVE_EVENT".to_string(), 8.0),
+                ],
+            ),
+            (
+                bull_day,
+                vec![
+                    ("BASE_LEADER_NO_EVENT".to_string(), 10.0),
+                    ("BASE_LOW_NEGATIVE_EVENT".to_string(), 8.0),
+                ],
+            ),
+        ]);
+        let event_scores = HashMap::from([
+            (
+                bear_day,
+                vec![("BASE_LOW_NEGATIVE_EVENT".to_string(), -0.7)],
+            ),
+            (
+                bull_day,
+                vec![("BASE_LOW_NEGATIVE_EVENT".to_string(), -0.7)],
+            ),
+        ]);
+
+        let mut regime_limited = base_scores.clone();
+        apply_event_gate_scores_for_regime(
+            &mut regime_limited,
+            &event_scores,
+            &EventGateConfig {
+                combo_name: "phase7_valuation_v1".to_string(),
+                version: "1.0.0".to_string(),
+                mode: EventGateMode::ExcludeNegative,
+                score_direction: ScoreDirection::Descending,
+                min_score: 0.0,
+                boost_weight: 0.0,
+                active_regimes: vec![MarketRegime::Bear, MarketRegime::HighVolatility],
+            },
+            |date| {
+                if date == bear_day {
+                    MarketRegime::Bear
+                } else {
+                    MarketRegime::Bull
+                }
+            },
+        );
+
+        let bear_symbols = regime_limited
+            .get(&bear_day)
+            .unwrap()
+            .iter()
+            .map(|(symbol, _)| symbol.as_str())
+            .collect::<Vec<_>>();
+        let bull_symbols = regime_limited
+            .get(&bull_day)
+            .unwrap()
+            .iter()
+            .map(|(symbol, _)| symbol.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(bear_symbols, vec!["BASE_LEADER_NO_EVENT"]);
+        assert_eq!(
+            bull_symbols,
+            vec!["BASE_LEADER_NO_EVENT", "BASE_LOW_NEGATIVE_EVENT"],
+            "the valuation guard should stay inactive outside stress regimes"
+        );
+    }
+
+    #[test]
     fn sort_factor_scores_honors_ascending_direction() {
         let mut scores = vec![
             ("AAA".to_string(), 3.0),
@@ -3371,16 +5025,285 @@ mod tests {
     }
 
     #[test]
+    fn style_risk_budget_caps_high_volatility_and_low_liquidity_exposures() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("STABLE_LIQUID".to_string(), 3.0),
+            ("HIGH_VOL".to_string(), 2.0),
+            ("LOW_LIQUIDITY".to_string(), 1.0),
+        ];
+        let return_history = HashMap::from([
+            (
+                "STABLE_LIQUID".to_string(),
+                dated_returns(&[0.004, 0.003, 0.005, 0.004, 0.003]),
+            ),
+            (
+                "HIGH_VOL".to_string(),
+                dated_returns(&[0.08, -0.07, 0.09, -0.08, 0.07]),
+            ),
+            (
+                "LOW_LIQUIDITY".to_string(),
+                dated_returns(&[0.005, 0.004, 0.004, 0.006, 0.005]),
+            ),
+        ]);
+        let average_amounts = HashMap::from([
+            ("STABLE_LIQUID".to_string(), 800_000_000.0),
+            ("HIGH_VOL".to_string(), 600_000_000.0),
+            ("LOW_LIQUIDITY".to_string(), 20_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::ONE,
+            max_gross_exposure: 1.0,
+            style_risk_budget_profile: StyleRiskBudgetProfile::DefensiveStyleBudgetV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights["HIGH_VOL"] <= Decimal::new(30, 2));
+        assert!(weights["LOW_LIQUIDITY"] <= Decimal::new(30, 2));
+        assert!(weights["STABLE_LIQUID"] > weights["HIGH_VOL"]);
+        assert!(weights["STABLE_LIQUID"] > weights["LOW_LIQUIDITY"]);
+    }
+
+    #[test]
+    fn candidate_risk_filter_removes_high_volatility_candidates_before_selection() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("HIGH_VOL_LEADER".to_string(), 4.0),
+            ("LOW_VOL_A".to_string(), 3.0),
+            ("LOW_VOL_B".to_string(), 2.0),
+        ];
+        let return_history = HashMap::from([
+            (
+                "HIGH_VOL_LEADER".to_string(),
+                dated_returns(&[0.12, -0.11, 0.10, -0.09, 0.08]),
+            ),
+            (
+                "LOW_VOL_A".to_string(),
+                dated_returns(&[0.004, 0.003, 0.005, 0.004, 0.003]),
+            ),
+            (
+                "LOW_VOL_B".to_string(),
+                dated_returns(&[0.005, 0.004, 0.003, 0.004, 0.005]),
+            ),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(60, 2),
+            risk_budget_lookback_days: 5,
+            candidate_risk_filter_profile: CandidateRiskFilterProfile::LowVolatilityV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(!weights.contains_key("HIGH_VOL_LEADER"));
+        assert!(weights.contains_key("LOW_VOL_A"));
+        assert!(weights.contains_key("LOW_VOL_B"));
+    }
+
+    #[test]
+    fn candidate_risk_filter_can_prefer_low_correlation_candidate_over_cluster() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("CLUSTER_A".to_string(), 4.0),
+            ("CLUSTER_B".to_string(), 3.0),
+            ("CLUSTER_C".to_string(), 2.0),
+            ("DIVERSIFIER".to_string(), 1.0),
+        ];
+        let return_history = HashMap::from([
+            (
+                "CLUSTER_A".to_string(),
+                dated_returns(&[0.010, -0.010, 0.010, -0.010, 0.010]),
+            ),
+            (
+                "CLUSTER_B".to_string(),
+                dated_returns(&[0.010, -0.010, 0.010, -0.010, 0.010]),
+            ),
+            (
+                "CLUSTER_C".to_string(),
+                dated_returns(&[0.010, -0.010, 0.010, -0.010, 0.010]),
+            ),
+            (
+                "DIVERSIFIER".to_string(),
+                dated_returns(&[0.010, 0.010, -0.010, -0.010, 0.010]),
+            ),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 1,
+            max_position_pct: Decimal::ONE,
+            risk_budget_lookback_days: 5,
+            candidate_risk_filter_profile:
+                CandidateRiskFilterProfile::LowVolatilityLowCorrelationV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights.contains_key("DIVERSIFIER"));
+        assert_eq!(weights.len(), 1);
+    }
+
+    #[test]
+    fn risk_contribution_control_scales_dominant_risk_name() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("HIGH_RISK".to_string(), 3.0),
+            ("LOW_RISK_A".to_string(), 2.0),
+            ("LOW_RISK_B".to_string(), 1.0),
+        ];
+        let return_history = HashMap::from([
+            (
+                "HIGH_RISK".to_string(),
+                dated_returns(&[0.12, -0.11, 0.10, -0.09, 0.08]),
+            ),
+            (
+                "LOW_RISK_A".to_string(),
+                dated_returns(&[0.004, 0.003, 0.005, 0.004, 0.003]),
+            ),
+            (
+                "LOW_RISK_B".to_string(),
+                dated_returns(&[0.005, 0.004, 0.003, 0.004, 0.005]),
+            ),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::ONE,
+            max_gross_exposure: 1.0,
+            risk_budget_lookback_days: 5,
+            risk_contribution_control_profile:
+                RiskContributionControlProfile::SoftSingleName20PctV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights["HIGH_RISK"] < weights["LOW_RISK_A"]);
+        assert!(weights["HIGH_RISK"] < weights["LOW_RISK_B"]);
+    }
+
+    #[test]
     fn signal_data_cache_normalizes_symbol_order_for_portfolio_inputs() {
+        let symbols = vec!["BBB".to_string(), "AAA".to_string(), "AAA".to_string()];
+
+        assert_eq!(
+            normalized_symbol_key(&symbols),
+            vec!["AAA".to_string(), "BBB".to_string()]
+        );
+    }
+
+    #[test]
+    fn return_history_cache_reuses_overlapping_symbols_incrementally() {
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
-        let left_symbols = vec!["BBB".to_string(), "AAA".to_string()];
-        let right_symbols = vec!["AAA".to_string(), "BBB".to_string()];
+        let lookback_days = 60;
+        let mut cache = SignalDataCache::default();
+        let cached_symbols = vec!["AAA".to_string(), "BBB".to_string()];
+        let trade_date = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
 
-        let left_key = SignalDataCacheKey::return_history(&left_symbols, start, end, 60);
-        let right_key = SignalDataCacheKey::return_history(&right_symbols, start, end, 60);
+        cache.insert_return_history_symbols(
+            &cached_symbols,
+            start,
+            end,
+            lookback_days,
+            HashMap::from([
+                ("AAA".to_string(), vec![(trade_date, 0.01)]),
+                ("BBB".to_string(), vec![(trade_date, -0.02)]),
+            ]),
+        );
 
-        assert_eq!(left_key, right_key);
+        let requested_symbols = vec![
+            "BBB".to_string(),
+            "CCC".to_string(),
+            "AAA".to_string(),
+            "AAA".to_string(),
+        ];
+        let (missing, cached_history) =
+            cache.cached_return_history_symbols(&requested_symbols, start, end, lookback_days);
+
+        assert_eq!(missing, vec!["CCC".to_string()]);
+        assert_eq!(cached_history["AAA"], vec![(trade_date, 0.01)]);
+        assert_eq!(cached_history["BBB"], vec![(trade_date, -0.02)]);
+        assert_eq!(cache.stats().return_history_hits, 2);
+        assert_eq!(cache.stats().return_history_misses, 1);
+
+        cache.insert_return_history_symbols(&missing, start, end, lookback_days, HashMap::new());
+        let (missing_again, cached_again) =
+            cache.cached_return_history_symbols(&requested_symbols, start, end, lookback_days);
+
+        assert!(missing_again.is_empty());
+        assert_eq!(cached_again["CCC"], Vec::<(NaiveDate, f64)>::new());
+        assert_eq!(cache.stats().return_history_hits, 5);
+        assert_eq!(cache.stats().return_history_misses, 1);
+    }
+
+    #[test]
+    fn average_amount_cache_reuses_overlapping_symbols_incrementally() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let mut cache = SignalDataCache::default();
+        let cached_symbols = vec!["AAA".to_string(), "BBB".to_string()];
+
+        cache.insert_average_amount_symbols(
+            &cached_symbols,
+            start,
+            end,
+            HashMap::from([("AAA".to_string(), 5_000.0), ("BBB".to_string(), 3_000.0)]),
+        );
+
+        let requested_symbols = vec![
+            "BBB".to_string(),
+            "CCC".to_string(),
+            "AAA".to_string(),
+            "AAA".to_string(),
+        ];
+        let (missing, cached_amounts) =
+            cache.cached_average_amount_symbols(&requested_symbols, start, end);
+
+        assert_eq!(missing, vec!["CCC".to_string()]);
+        assert_eq!(cached_amounts["AAA"], 5_000.0);
+        assert_eq!(cached_amounts["BBB"], 3_000.0);
+        assert_eq!(cache.stats().average_amount_hits, 2);
+        assert_eq!(cache.stats().average_amount_misses, 1);
+
+        cache.insert_average_amount_symbols(&missing, start, end, HashMap::new());
+        let (missing_again, cached_again) =
+            cache.cached_average_amount_symbols(&requested_symbols, start, end);
+
+        assert!(missing_again.is_empty());
+        assert!(!cached_again.contains_key("CCC"));
+        assert_eq!(cache.stats().average_amount_hits, 5);
+        assert_eq!(cache.stats().average_amount_misses, 1);
     }
 
     #[test]
@@ -3554,6 +5477,8 @@ mod tests {
     #[test]
     fn market_regime_policy_classifies_and_applies_bear_defensive_rule() {
         let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
             top_n: 80,
             rebalance_freq_days: 20,
             max_gross_exposure: 1.0,
@@ -3571,6 +5496,68 @@ mod tests {
         assert_eq!(active.rebalance_freq_days, 60);
         assert_eq!(active.max_gross_exposure, 0.50);
         assert_eq!(active.score_direction, ScoreDirection::Ascending);
+    }
+
+    #[test]
+    fn market_regime_rule_can_route_to_regime_specific_alpha_combo() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_regime_alpha_switch_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(bull.combo_name, "phase7_financial_quality_v1");
+        assert_eq!(bull.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.combo_name, "phase7_industry_residual_quality_v1");
+        assert_eq!(bear.version, "1.0.0");
+        assert_eq!(bear.score_direction, ScoreDirection::Descending);
+        assert_eq!(bear.max_gross_exposure, 0.78);
+        assert_eq!(
+            high_volatility.combo_name,
+            "phase7_industry_residual_quality_v1"
+        );
+        assert_eq!(high_volatility.score_direction, ScoreDirection::Descending);
+        assert_eq!(high_volatility.max_gross_exposure, 0.66);
+    }
+
+    #[test]
+    fn market_regime_alpha_switch_variants_route_to_distinct_stress_sleeves() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+
+        let value = MarketRegimePolicy::quality_regime_alpha_switch_value_v1("000300.SH")
+            .apply(&base, MarketRegime::Bear);
+        let recovery = MarketRegimePolicy::quality_regime_alpha_switch_recovery_v1("000300.SH")
+            .apply(&base, MarketRegime::Bear);
+        let blend = MarketRegimePolicy::quality_regime_alpha_switch_blend_v1("000300.SH")
+            .apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(value.combo_name, "phase7_valuation_v1");
+        assert_eq!(value.score_direction, ScoreDirection::Descending);
+        assert_eq!(recovery.combo_name, "phase7_growth_recovery_v1");
+        assert_eq!(recovery.score_direction, ScoreDirection::Descending);
+        assert_eq!(blend.combo_name, "phase7_quality_value_recovery_confirm_v1");
+        assert_eq!(blend.score_direction, ScoreDirection::Descending);
     }
 
     #[test]
@@ -3793,6 +5780,74 @@ mod tests {
     }
 
     #[test]
+    fn quality_bear_position_guard_changes_only_position_risk_shape_in_stress_regimes() {
+        let base = SignalConfig {
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_bear_position_guard_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(policy.lookback_days, 126);
+        assert_eq!(policy.bear_drawdown_threshold, 0.14);
+        assert_eq!(bull.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bull.top_n, 20);
+        assert_eq!(bull.max_gross_exposure, 1.0);
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.top_n, 25);
+        assert_eq!(bear.rebalance_freq_days, 80);
+        assert_eq!(bear.skip_top_pct, 0.05);
+        assert_eq!(bear.max_gross_exposure, 0.74);
+        assert_eq!(bear.max_position_pct, Decimal::new(9, 2));
+        assert_eq!(high_volatility.top_n, 25);
+        assert_eq!(high_volatility.rebalance_freq_days, 40);
+        assert_eq!(high_volatility.max_gross_exposure, 0.58);
+        assert_eq!(high_volatility.max_position_pct, Decimal::new(75, 3));
+    }
+
+    #[test]
+    fn rebalance_smoothing_keeps_small_changes_and_partially_moves_large_ones() {
+        let previous = HashMap::from([
+            ("AAA".to_string(), Decimal::new(10, 2)),
+            ("BBB".to_string(), Decimal::new(10, 2)),
+        ]);
+        let mut next = HashMap::from([
+            ("AAA".to_string(), Decimal::new(14, 2)),
+            ("BBB".to_string(), Decimal::new(6, 2)),
+        ]);
+
+        apply_rebalance_path_smoothing(&mut next, Some(&previous), 0.01, 0.50);
+
+        assert_eq!(next.get("AAA"), Some(&Decimal::new(12, 2)));
+        assert_eq!(next.get("BBB"), Some(&Decimal::new(8, 2)));
+    }
+
+    #[test]
+    fn rebalance_smoothing_leaves_small_deltas_unchanged() {
+        let previous = HashMap::from([
+            ("AAA".to_string(), Decimal::new(10, 2)),
+            ("BBB".to_string(), Decimal::new(10, 2)),
+        ]);
+        let mut next = HashMap::from([
+            ("AAA".to_string(), Decimal::new(105, 3)),
+            ("BBB".to_string(), Decimal::new(95, 3)),
+        ]);
+
+        apply_rebalance_path_smoothing(&mut next, Some(&previous), 0.01, 0.50);
+
+        assert_eq!(next.get("AAA"), Some(&Decimal::new(10, 2)));
+        assert_eq!(next.get("BBB"), Some(&Decimal::new(10, 2)));
+    }
+
+    #[test]
     fn regime_aware_factor_signals_use_dynamic_direction_and_exposure() {
         let d1 = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
         let d2 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
@@ -3838,6 +5893,289 @@ mod tests {
             Some(&Decimal::from_f64(0.50).unwrap())
         );
         assert!(!bear_signal.target_weights.contains_key("AAA"));
+    }
+
+    #[test]
+    fn regime_aware_factor_signals_can_switch_score_source_by_active_combo() {
+        let d1 = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let trading_days = vec![d1, d2, d3];
+        let quality_scores = HashMap::from([
+            (
+                d1,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 3.0),
+                    ("RESIDUAL_WINNER".to_string(), 1.0),
+                ],
+            ),
+            (
+                d2,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 3.0),
+                    ("RESIDUAL_WINNER".to_string(), 1.0),
+                ],
+            ),
+        ]);
+        let residual_scores = HashMap::from([
+            (
+                d1,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 1.0),
+                    ("RESIDUAL_WINNER".to_string(), 3.0),
+                ],
+            ),
+            (
+                d2,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 1.0),
+                    ("RESIDUAL_WINNER".to_string(), 3.0),
+                ],
+            ),
+        ]);
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            top_n: 1,
+            rebalance_freq_days: 1,
+            max_position_pct: Decimal::ONE,
+            max_gross_exposure: 1.0,
+            score_direction: ScoreDirection::Descending,
+            ..Default::default()
+        };
+
+        let signals = build_rebalance_factor_signals_with_score_selector(
+            &trading_days,
+            &base,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            |score_day, active_config| match active_config.combo_name.as_str() {
+                "phase7_financial_quality_v1" => quality_scores.get(&score_day).cloned(),
+                "phase7_industry_residual_quality_v1" => residual_scores.get(&score_day).cloned(),
+                _ => None,
+            },
+            |day, base| {
+                if day == d3 {
+                    let mut residual = base.clone();
+                    residual.combo_name = "phase7_industry_residual_quality_v1".to_string();
+                    residual
+                } else {
+                    base.clone()
+                }
+            },
+        )
+        .expect("regime-aware alpha-routed signals");
+
+        let quality_signal = signals.get(&d2).expect("quality signal");
+        assert_eq!(
+            quality_signal.target_weights.get("QUALITY_WINNER"),
+            Some(&Decimal::ONE)
+        );
+        let residual_signal = signals.get(&d3).expect("residual signal");
+        assert_eq!(
+            residual_signal.target_weights.get("RESIDUAL_WINNER"),
+            Some(&Decimal::ONE)
+        );
+        assert!(!residual_signal
+            .target_weights
+            .contains_key("QUALITY_WINNER"));
+    }
+
+    #[test]
+    fn quality_regime_alpha_overlay_keeps_quality_anchor_and_adds_small_stress_sleeve() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_regime_alpha_overlay_value_10pct_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+
+        assert_eq!(bull.combo_name, "phase7_financial_quality_v1");
+        assert!(bull.score_overlay.is_none());
+        assert_eq!(bear.combo_name, "phase7_financial_quality_v1");
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.max_gross_exposure, 0.72);
+        let overlay = bear.score_overlay.expect("stress overlay");
+        assert_eq!(overlay.combo_name, "phase7_valuation_v1");
+        assert_eq!(overlay.version, "1.0.0");
+        assert_eq!(overlay.score_direction, ScoreDirection::Descending);
+        assert!((overlay.weight - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn regime_score_selector_blends_overlay_scores_without_replacing_base_source() {
+        let d1 = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        let mut base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        base.score_overlay = Some(FactorScoreOverlayConfig {
+            combo_name: "phase7_valuation_v1".to_string(),
+            version: "1.0.0".to_string(),
+            weight: 0.25,
+            score_direction: ScoreDirection::Descending,
+        });
+
+        let mut score_sources = HashMap::new();
+        let mut quality_scores = HashMap::new();
+        quality_scores.insert(
+            d1,
+            vec![
+                ("QUALITY_BEST".to_string(), 1.0),
+                ("VALUATION_BEST".to_string(), 2.0),
+            ],
+        );
+        let mut valuation_scores = HashMap::new();
+        valuation_scores.insert(
+            d1,
+            vec![
+                ("QUALITY_BEST".to_string(), 1.0),
+                ("VALUATION_BEST".to_string(), 5.0),
+            ],
+        );
+        score_sources.insert(FactorScoreSourceKey::from_config(&base), quality_scores);
+        let overlay_config = score_source_config_for_overlay(
+            &base,
+            base.score_overlay.as_ref().expect("overlay config"),
+        );
+        score_sources.insert(
+            FactorScoreSourceKey::from_config(&overlay_config),
+            valuation_scores,
+        );
+
+        let rows = score_rows_for_active_config(&score_sources, d1, &base).expect("blended rows");
+        let mut sorted = rows.clone();
+        sort_factor_scores(&mut sorted, base.score_direction);
+
+        assert_eq!(sorted[0].0, "QUALITY_BEST");
+        assert_eq!(sorted.len(), 2);
+        assert_ne!(rows[0].1, 1.0);
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_keeps_anchor_and_allocates_stress_sleeve() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+        let policy =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_value_15pct_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+
+        assert_eq!(bull.combo_name, "phase7_financial_quality_v1");
+        assert!(bull.portfolio_sleeve.is_none());
+        assert_eq!(bear.combo_name, "phase7_financial_quality_v1");
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        let sleeve = bear.portfolio_sleeve.expect("stress portfolio sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_valuation_v1");
+        assert_eq!(sleeve.version, "1.0.0");
+        assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+        assert!((sleeve.weight - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn regime_aware_factor_signals_can_allocate_portfolio_sleeve_weights() {
+        let d1 = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let trading_days = vec![d1, d2, d3];
+        let quality_scores = HashMap::from([
+            (
+                d1,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 1.0),
+                    ("SLEEVE_WINNER".to_string(), 3.0),
+                ],
+            ),
+            (
+                d2,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 1.0),
+                    ("SLEEVE_WINNER".to_string(), 3.0),
+                ],
+            ),
+        ]);
+        let sleeve_scores = HashMap::from([
+            (
+                d1,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 1.0),
+                    ("SLEEVE_WINNER".to_string(), 3.0),
+                ],
+            ),
+            (
+                d2,
+                vec![
+                    ("QUALITY_WINNER".to_string(), 1.0),
+                    ("SLEEVE_WINNER".to_string(), 3.0),
+                ],
+            ),
+        ]);
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 1,
+            rebalance_freq_days: 1,
+            max_position_pct: Decimal::ONE,
+            max_gross_exposure: 1.0,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+
+        let signals = build_rebalance_factor_signals_with_score_selector(
+            &trading_days,
+            &base,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            |score_day, active_config| match active_config.combo_name.as_str() {
+                "phase7_financial_quality_v1" => quality_scores.get(&score_day).cloned(),
+                "phase7_valuation_v1" => sleeve_scores.get(&score_day).cloned(),
+                _ => None,
+            },
+            |day, base| {
+                if day == d3 {
+                    let mut stressed = base.clone();
+                    stressed.portfolio_sleeve = Some(FactorPortfolioSleeveConfig {
+                        combo_name: "phase7_valuation_v1".to_string(),
+                        version: "1.0.0".to_string(),
+                        weight: 0.25,
+                        score_direction: ScoreDirection::Descending,
+                    });
+                    stressed
+                } else {
+                    base.clone()
+                }
+            },
+        )
+        .expect("portfolio-sleeve signals");
+
+        let normal_signal = signals.get(&d2).expect("normal signal");
+        assert_eq!(
+            normal_signal.target_weights.get("QUALITY_WINNER"),
+            Some(&Decimal::ONE)
+        );
+        let sleeve_signal = signals.get(&d3).expect("sleeve signal");
+        assert_eq!(
+            sleeve_signal.target_weights.get("QUALITY_WINNER"),
+            Some(&Decimal::new(75, 2))
+        );
+        assert_eq!(
+            sleeve_signal.target_weights.get("SLEEVE_WINNER"),
+            Some(&Decimal::new(25, 2))
+        );
     }
 
     fn dated_returns(values: &[f64]) -> Vec<(NaiveDate, f64)> {

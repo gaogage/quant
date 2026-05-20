@@ -7,7 +7,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,8 +21,9 @@ use quant_backtest::engine::{
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::{BacktestDataCache, BacktestRunner};
 use quant_backtest::signal_generator::{
-    MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig, ScoreDirection,
-    SignalDataCache, TradableUniverseProfile,
+    CandidateRiskFilterProfile, EventGateConfig, EventGateMode, MarketRegime, MarketRegimePolicy,
+    PortfolioConstructionMethod, PredictionBlendConfig, RiskContributionControlProfile,
+    ScoreDirection, SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -94,9 +95,218 @@ pub struct ExecutionRulesReq {
     pub max_participation_rate: Option<f64>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct EffectiveCoverageReq {
+    pub enabled: Option<bool>,
+    pub mode: Option<String>,
+    pub min_rows: Option<usize>,
+    pub include_rebalance_warmup: Option<bool>,
+    pub warmup_trading_days: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct EffectiveCoverageRunSummary {
+    pub requested_start_date: NaiveDate,
+    pub effective_start_date: NaiveDate,
+    pub adjusted: bool,
+    pub mode: String,
+    pub min_rows: usize,
+    pub observed_rows: i64,
+    pub coverage_start_date: NaiveDate,
+    pub warmup_start_date: Option<NaiveDate>,
+    pub warmup_trading_days: Option<usize>,
+    pub combo_name: String,
+    pub version: String,
+    pub universe_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectiveCoverageMode {
+    AdjustStart,
+    GuardOnly,
+}
+
+const DEFAULT_EFFECTIVE_COVERAGE_WARMUP_TRADING_DAYS: usize = 19;
+
+impl EffectiveCoverageMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AdjustStart => "adjust_start",
+            Self::GuardOnly => "guard_only",
+        }
+    }
+}
+
 fn parse_yyyymmdd(value: &str, field: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(value, "%Y%m%d")
         .map_err(|_| format!("{} must use YYYYMMDD format", field))
+}
+
+fn parse_effective_coverage_mode(value: Option<&str>) -> Result<EffectiveCoverageMode, String> {
+    match value.unwrap_or("adjust_start").trim() {
+        "" | "adjust_start" | "auto_adjust_start" => Ok(EffectiveCoverageMode::AdjustStart),
+        "guard_only" | "strict" => Ok(EffectiveCoverageMode::GuardOnly),
+        other => Err(format!("unsupported effective_coverage.mode: {}", other)),
+    }
+}
+
+fn effective_coverage_enabled(value: &EffectiveCoverageReq) -> bool {
+    value.enabled.unwrap_or(true)
+}
+
+async fn resolve_effective_factor_coverage(
+    db: &sqlx::PgPool,
+    req: &RunFactorBacktestReq,
+    requested_start: NaiveDate,
+    end: NaiveDate,
+) -> Result<(NaiveDate, Option<EffectiveCoverageRunSummary>), String> {
+    let Some(policy) = req.effective_coverage.as_ref() else {
+        return Ok((requested_start, None));
+    };
+    if !effective_coverage_enabled(policy) {
+        return Ok((requested_start, None));
+    }
+
+    let mode = parse_effective_coverage_mode(policy.mode.as_deref())?;
+    let min_rows = policy.min_rows.unwrap_or(req.top_n.max(1)).max(1);
+    let include_warmup = policy.include_rebalance_warmup.unwrap_or(true);
+    let warmup_trading_days = include_warmup
+        .then(|| {
+            policy
+                .warmup_trading_days
+                .unwrap_or(DEFAULT_EFFECTIVE_COVERAGE_WARMUP_TRADING_DAYS)
+        })
+        .filter(|days| *days > 0);
+    let universe_profile = parse_tradable_universe_profile(req.universe_profile.as_deref())?;
+    let sql = effective_factor_coverage_sql(universe_profile);
+    let row = sqlx::query_as::<_, (NaiveDate, i64)>(&sql)
+        .bind(&req.combo_name)
+        .bind(&req.version)
+        .bind(requested_start)
+        .bind(end)
+        .bind(min_rows as i64)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| format!("Failed to resolve effective factor coverage: {}", error))?;
+
+    let Some((coverage_start, observed_rows)) = row else {
+        return Err(format!(
+            "No effective factor coverage found for {}:{} between {} and {} with min_rows={}",
+            req.combo_name, req.version, requested_start, end, min_rows
+        ));
+    };
+
+    let warmup_start = if let Some(warmup_days) = warmup_trading_days {
+        Some(resolve_warmup_start_date(db, requested_start, end, warmup_days).await?)
+    } else {
+        None
+    };
+    let first_eligible_start = warmup_start
+        .map(|start| start.max(coverage_start))
+        .unwrap_or(coverage_start);
+
+    if mode == EffectiveCoverageMode::GuardOnly && first_eligible_start > requested_start {
+        return Err(format!(
+            "requested start_date {} is before effective factor coverage start {} for {}:{}",
+            requested_start, first_eligible_start, req.combo_name, req.version
+        ));
+    }
+
+    let effective_start = match mode {
+        EffectiveCoverageMode::AdjustStart => first_eligible_start.max(requested_start),
+        EffectiveCoverageMode::GuardOnly => requested_start,
+    };
+
+    Ok((
+        effective_start,
+        Some(EffectiveCoverageRunSummary {
+            requested_start_date: requested_start,
+            effective_start_date: effective_start,
+            adjusted: effective_start != requested_start,
+            mode: mode.as_str().to_string(),
+            min_rows,
+            observed_rows,
+            coverage_start_date: coverage_start,
+            warmup_start_date: warmup_start,
+            warmup_trading_days,
+            combo_name: req.combo_name.clone(),
+            version: req.version.clone(),
+            universe_profile: req.universe_profile.clone(),
+        }),
+    ))
+}
+
+fn effective_factor_coverage_sql(universe_profile: TradableUniverseProfile) -> String {
+    let (join_sql, filter_sql) = match universe_profile {
+        TradableUniverseProfile::All => ("", ""),
+        TradableUniverseProfile::ListedNonSt => (
+            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
+            "\n           AND ms.list_status = 'L' AND COALESCE(ms.is_st, false) = false",
+        ),
+        TradableUniverseProfile::MainBoardNonSt => (
+            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
+            "\n           AND ms.list_status = 'L'
+           AND COALESCE(ms.is_st, false) = false
+           AND ms.exchange IN ('SSE', 'SZSE')
+           AND COALESCE(ms.market, '') NOT ILIKE '%创业%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%北交%'",
+        ),
+    };
+
+    format!(
+        "SELECT mfv.trade_date, COUNT(*)::bigint AS score_rows
+         FROM multi_factor_value mfv{join_sql}
+         WHERE mfv.combo_name = $1
+           AND mfv.version = $2
+           AND mfv.trade_date >= $3
+           AND mfv.trade_date <= $4
+           AND (mfv.available_at IS NULL OR mfv.available_at <= mfv.trade_date){filter_sql}
+         GROUP BY mfv.trade_date
+         HAVING COUNT(*) >= $5
+         ORDER BY mfv.trade_date ASC
+         LIMIT 1"
+    )
+}
+
+async fn resolve_warmup_start_date(
+    db: &sqlx::PgPool,
+    requested_start: NaiveDate,
+    end: NaiveDate,
+    warmup_trading_days: usize,
+) -> Result<NaiveDate, String> {
+    if warmup_trading_days == 0 {
+        return Ok(requested_start);
+    }
+    sqlx::query_as::<_, (NaiveDate,)>(
+        "SELECT trade_date
+         FROM market_trade_calendar
+         WHERE exchange = 'SSE'
+           AND is_open = true
+           AND trade_date >= $1
+           AND trade_date <= $2
+         ORDER BY trade_date ASC
+         OFFSET $3
+         LIMIT 1",
+    )
+    .bind(requested_start)
+    .bind(end)
+    .bind(warmup_trading_days as i64)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to resolve effective coverage warmup start: {}",
+            error
+        )
+    })?
+    .map(|row| row.0)
+    .ok_or_else(|| {
+        format!(
+            "No open trading day found after {} warmup trading days between {} and {}",
+            warmup_trading_days, requested_start, end
+        )
+    })
 }
 
 fn parse_mode(value: Option<&str>) -> BacktestMode {
@@ -545,6 +755,14 @@ pub struct RunFactorBacktestReq {
     pub prediction_set_id: Option<String>,
     pub prediction_blend_weight: Option<f64>,
     pub prediction_min_percentile: Option<f64>,
+    pub event_gate_combo_name: Option<String>,
+    #[serde(default = "default_combo_version")]
+    pub event_gate_version: String,
+    pub event_gate_mode: Option<String>,
+    pub event_gate_min_score: Option<f64>,
+    pub event_gate_boost_weight: Option<f64>,
+    pub event_gate_score_direction: Option<String>,
+    pub event_gate_active_regimes: Option<Vec<String>>,
     pub portfolio_policy_id: Option<String>,
     #[serde(default = "default_top_n")]
     pub top_n: usize,
@@ -580,9 +798,17 @@ pub struct RunFactorBacktestReq {
     #[serde(default)]
     pub capacity_penalty_strength: f64,
     pub industry_max_weight_pct: Option<f64>,
+    pub style_risk_budget: Option<String>,
+    pub candidate_risk_filter: Option<String>,
+    pub risk_contribution_control: Option<String>,
+    #[serde(default)]
+    pub rebalance_hysteresis_pct: Option<f64>,
+    #[serde(default)]
+    pub partial_rebalance_ratio: Option<f64>,
     #[serde(default)]
     pub score_candidate_pool_size: Option<usize>,
     pub universe_profile: Option<String>,
+    pub effective_coverage: Option<EffectiveCoverageReq>,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
@@ -659,6 +885,13 @@ pub struct RunPredictionBacktestReq {
     #[serde(default)]
     pub capacity_penalty_strength: f64,
     pub industry_max_weight_pct: Option<f64>,
+    pub style_risk_budget: Option<String>,
+    pub candidate_risk_filter: Option<String>,
+    pub risk_contribution_control: Option<String>,
+    #[serde(default)]
+    pub rebalance_hysteresis_pct: Option<f64>,
+    #[serde(default)]
+    pub partial_rebalance_ratio: Option<f64>,
     pub cost_model: Option<CostModelReq>,
     pub execution_rules: Option<ExecutionRulesReq>,
     pub benchmark: Option<String>,
@@ -674,6 +907,7 @@ pub(crate) struct FactorBacktestRunOutput {
     pub metrics: quant_backtest::metrics::BacktestMetrics,
     pub trades: usize,
     pub equity_points: usize,
+    pub effective_coverage: Option<EffectiveCoverageRunSummary>,
 }
 
 fn default_combo_version() -> String {
@@ -744,6 +978,34 @@ fn parse_tradable_universe_profile(value: Option<&str>) -> Result<TradableUniver
         .unwrap_or(Ok(TradableUniverseProfile::All))
 }
 
+fn parse_style_risk_budget_profile(value: Option<&str>) -> Result<StyleRiskBudgetProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(StyleRiskBudgetProfile::parse)
+        .unwrap_or(Ok(StyleRiskBudgetProfile::Off))
+}
+
+fn parse_candidate_risk_filter_profile(
+    value: Option<&str>,
+) -> Result<CandidateRiskFilterProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(CandidateRiskFilterProfile::parse)
+        .unwrap_or(Ok(CandidateRiskFilterProfile::Off))
+}
+
+fn parse_risk_contribution_control_profile(
+    value: Option<&str>,
+) -> Result<RiskContributionControlProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(RiskContributionControlProfile::parse)
+        .unwrap_or(Ok(RiskContributionControlProfile::Off))
+}
+
 fn build_prediction_blend_config(
     prediction_set_id: Option<&String>,
     prediction_blend_weight: Option<f64>,
@@ -773,6 +1035,76 @@ fn build_prediction_blend_config(
         prediction_weight,
         prediction_min_percentile,
     }))
+}
+
+fn build_event_gate_config(req: &RunFactorBacktestReq) -> Result<Option<EventGateConfig>, String> {
+    let mode = req
+        .event_gate_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let combo_name = req
+        .event_gate_combo_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let boost_weight = req.event_gate_boost_weight.unwrap_or(0.0);
+    let min_score = req.event_gate_min_score.unwrap_or(0.0);
+    if mode.is_none() && combo_name.is_none() && boost_weight <= f64::EPSILON {
+        return Ok(None);
+    }
+    let combo_name = combo_name.ok_or_else(|| {
+        "event_gate_combo_name is required when event gate is enabled".to_string()
+    })?;
+    let mode = match mode.unwrap_or("boost_positive") {
+        "boost_positive" | "boost-positive" => EventGateMode::BoostPositive,
+        "exclude_negative" | "exclude-negative" => EventGateMode::ExcludeNegative,
+        "require_positive" | "require-positive" => EventGateMode::RequirePositive,
+        other => return Err(format!("unsupported event_gate_mode: {}", other)),
+    };
+    if !min_score.is_finite() {
+        return Err("event_gate_min_score must be a finite number".into());
+    }
+    if !boost_weight.is_finite() || boost_weight < 0.0 || boost_weight > 1.0 {
+        return Err("event_gate_boost_weight must be between 0 and 1".into());
+    }
+    let score_direction = req
+        .event_gate_score_direction
+        .as_deref()
+        .map(parse_score_direction)
+        .transpose()?
+        .unwrap_or(ScoreDirection::Descending);
+    let active_regimes = parse_event_gate_active_regimes(req.event_gate_active_regimes.as_deref())?;
+    Ok(Some(EventGateConfig {
+        combo_name: combo_name.to_string(),
+        version: req.event_gate_version.clone(),
+        mode,
+        score_direction,
+        min_score,
+        boost_weight,
+        active_regimes,
+    }))
+}
+
+fn parse_event_gate_active_regimes(values: Option<&[String]>) -> Result<Vec<MarketRegime>, String> {
+    let Some(values) = values else {
+        return Ok(Vec::new());
+    };
+    values
+        .iter()
+        .map(|value| parse_market_regime_name(value))
+        .collect()
+}
+
+fn parse_market_regime_name(value: &str) -> Result<MarketRegime, String> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "bull" => Ok(MarketRegime::Bull),
+        "bear" => Ok(MarketRegime::Bear),
+        "high_volatility" | "high_vol" => Ok(MarketRegime::HighVolatility),
+        "sideways" => Ok(MarketRegime::Sideways),
+        "mixed" => Ok(MarketRegime::Mixed),
+        other => Err(format!("unsupported event_gate_active_regime: {}", other)),
+    }
 }
 
 fn optional_unit_f64(value: Option<f64>, name: &str) -> Result<Option<f64>, String> {
@@ -964,6 +1296,42 @@ fn build_market_regime_policy(
         "quality_bear_window_guard_v2" => {
             MarketRegimePolicy::quality_bear_window_guard_v2(benchmark)
         }
+        "quality_regime_alpha_switch_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_switch_v1(benchmark)
+        }
+        "quality_regime_alpha_switch_value_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_switch_value_v1(benchmark)
+        }
+        "quality_regime_alpha_switch_recovery_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_switch_recovery_v1(benchmark)
+        }
+        "quality_regime_alpha_switch_blend_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_switch_blend_v1(benchmark)
+        }
+        "quality_regime_alpha_overlay_value_05pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_overlay_value_05pct_v1(benchmark)
+        }
+        "quality_regime_alpha_overlay_value_10pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_overlay_value_10pct_v1(benchmark)
+        }
+        "quality_regime_alpha_overlay_blend_10pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_overlay_blend_10pct_v1(benchmark)
+        }
+        "quality_regime_alpha_portfolio_sleeve_value_10pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_value_10pct_v1(benchmark)
+        }
+        "quality_regime_alpha_portfolio_sleeve_value_15pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_value_15pct_v1(benchmark)
+        }
+        "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_blend_10pct_v1(benchmark)
+        }
+        "quality_bear_position_guard_v1" => {
+            MarketRegimePolicy::quality_bear_position_guard_v1(benchmark)
+        }
+        "quality_bear_position_guard_v2" => {
+            MarketRegimePolicy::quality_bear_position_guard_v2(benchmark)
+        }
         other => return Err(format!("unsupported market_regime policy: {}", other)),
     };
     if let Some(lookback_days) = req.lookback_days {
@@ -1015,6 +1383,7 @@ pub async fn run_factor_backtest(
                 },
                 "trades": output.trades,
                 "equity_points": output.equity_points,
+                "effective_coverage": output.effective_coverage,
             }
         })),
         Err(e) => Json(json!({"code": 1, "message": e})),
@@ -1060,6 +1429,7 @@ pub async fn run_prediction_backtest(
                 },
                 "trades": output.trades,
                 "equity_points": output.equity_points,
+                "effective_coverage": output.effective_coverage,
             }
         })),
         Err(e) => Json(json!({"code": 1, "message": e})),
@@ -1095,6 +1465,14 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     if end < start {
         return Err("end_date must be greater than or equal to start_date".into());
     }
+    let reb_freq = match req.rebalance.as_str() {
+        "daily" => 1,
+        "weekly" => 5,
+        "monthly" => 20,
+        s => s.parse::<usize>().unwrap_or(20),
+    };
+    let (effective_start, effective_coverage) =
+        resolve_effective_factor_coverage(db, &req, start, end).await?;
     let capital = decimal_from_f64(req.initial_capital, "initial_capital")?;
     let fee_config = match apply_cost_model(FeeConfig::default(), req.cost_model.as_ref()) {
         Ok(config) => config,
@@ -1128,17 +1506,17 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         Err(message) => return Err(message),
     };
 
-    let reb_freq = match req.rebalance.as_str() {
-        "daily" => 1,
-        "weekly" => 5,
-        "monthly" => 20,
-        s => s.parse::<usize>().unwrap_or(20),
-    };
     let score_direction = parse_score_direction(&req.score_direction)?;
     let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
     let universe_profile = parse_tradable_universe_profile(req.universe_profile.as_deref())?;
     let industry_max_weight_pct =
         optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
+    let style_risk_budget_profile =
+        parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
+    let candidate_risk_filter_profile =
+        parse_candidate_risk_filter_profile(req.candidate_risk_filter.as_deref())?;
+    let risk_contribution_control_profile =
+        parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
 
     let sig_config = quant_backtest::signal_generator::SignalConfig {
         combo_name: req.combo_name.clone(),
@@ -1163,6 +1541,11 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         risk_budget_lookback_days: req.risk_budget_lookback_days,
         capacity_penalty_strength: req.capacity_penalty_strength,
         industry_max_weight_pct,
+        style_risk_budget_profile,
+        candidate_risk_filter_profile,
+        risk_contribution_control_profile,
+        rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
+        partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
         score_candidate_pool_size: req.score_candidate_pool_size.filter(|size| *size > 0),
         universe_profile,
         prediction_blend: build_prediction_blend_config(
@@ -1170,9 +1553,19 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             req.prediction_blend_weight,
             req.prediction_min_percentile,
         )?,
+        event_gate: build_event_gate_config(&req)?,
+        score_overlay: None,
+        portfolio_sleeve: None,
     };
 
-    info!(task_id, combo=%req.combo_name, top_n=req.top_n, reb=reb_freq, "Generating factor signals");
+    info!(
+        task_id,
+        combo=%req.combo_name,
+        top_n=req.top_n,
+        reb=reb_freq,
+        start=%effective_start,
+        "Generating factor signals"
+    );
 
     let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
     let signals = match (regime_policy.as_ref(), signal_cache) {
@@ -1181,7 +1574,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
                 db,
                 &sig_config,
                 policy,
-                start,
+                effective_start,
                 end,
                 cache,
             )
@@ -1192,7 +1585,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
                 db,
                 &sig_config,
                 policy,
-                start,
+                effective_start,
                 end,
             )
             .await
@@ -1201,14 +1594,20 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             quant_backtest::signal_generator::generate_signals_with_cache(
                 db,
                 &sig_config,
-                start,
+                effective_start,
                 end,
                 cache,
             )
             .await
         }
         (None, None) => {
-            quant_backtest::signal_generator::generate_signals(db, &sig_config, start, end).await
+            quant_backtest::signal_generator::generate_signals(
+                db,
+                &sig_config,
+                effective_start,
+                end,
+            )
+            .await
         }
     }?;
 
@@ -1227,7 +1626,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     let config = BacktestConfig {
         initial_capital: capital,
         benchmark,
-        start_date: start,
+        start_date: effective_start,
         end_date: end,
         fee_config,
         mode,
@@ -1261,6 +1660,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             trades: output.trades.len(),
             equity_points: output.equity_curve.len(),
             metrics: output.metrics,
+            effective_coverage,
         }),
         Err(e) => Err(e.to_string()),
     }
@@ -1309,6 +1709,12 @@ pub(crate) async fn execute_prediction_backtest(
     let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
     let industry_max_weight_pct =
         optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
+    let style_risk_budget_profile =
+        parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
+    let candidate_risk_filter_profile =
+        parse_candidate_risk_filter_profile(req.candidate_risk_filter.as_deref())?;
+    let risk_contribution_control_profile =
+        parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
 
     let sig_config = quant_backtest::signal_generator::PredictionSignalConfig {
         prediction_set_id: prediction_set_id.clone(),
@@ -1332,6 +1738,11 @@ pub(crate) async fn execute_prediction_backtest(
         risk_budget_lookback_days: req.risk_budget_lookback_days,
         capacity_penalty_strength: req.capacity_penalty_strength,
         industry_max_weight_pct,
+        style_risk_budget_profile,
+        candidate_risk_filter_profile,
+        risk_contribution_control_profile,
+        rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
+        partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
     };
 
     info!(
@@ -1388,6 +1799,7 @@ pub(crate) async fn execute_prediction_backtest(
             trades: output.trades.len(),
             equity_points: output.equity_curve.len(),
             metrics: output.metrics,
+            effective_coverage: None,
         })
         .map_err(|error| error.to_string())
 }
@@ -1508,6 +1920,123 @@ mod tests {
         assert_eq!(blend.factor_weight, 1.0);
         assert_eq!(blend.prediction_weight, 0.0);
         assert_eq!(blend.prediction_min_percentile, Some(0.2));
+    }
+
+    #[test]
+    fn event_gate_request_builds_conditional_signal_config() {
+        let req = factor_risk_control_request_template(
+            Some("phase7_event_window_earnings_v1"),
+            Some("exclude_negative"),
+            Some(0.0),
+            Some(0.0),
+            None,
+        );
+
+        let gate = build_event_gate_config(&req)
+            .expect("valid event gate")
+            .expect("event gate enabled");
+
+        assert_eq!(gate.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(gate.mode, EventGateMode::ExcludeNegative);
+        assert_eq!(gate.score_direction, ScoreDirection::Descending);
+    }
+
+    #[test]
+    fn event_gate_request_accepts_active_regime_scope() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "event_gate_combo_name": "phase7_valuation_v1",
+            "event_gate_mode": "exclude_negative",
+            "event_gate_min_score": 0.35,
+            "event_gate_active_regimes": ["bear", "high_volatility"]
+        }))
+        .expect("factor request");
+
+        let gate = build_event_gate_config(&req)
+            .expect("valid event gate")
+            .expect("event gate enabled");
+
+        assert_eq!(
+            gate.active_regimes,
+            vec![MarketRegime::Bear, MarketRegime::HighVolatility]
+        );
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_rebalance_smoothing() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "rebalance_hysteresis_pct": 0.01,
+            "partial_rebalance_ratio": 0.50
+        }))
+        .expect("factor request");
+
+        assert_eq!(req.rebalance_hysteresis_pct, Some(0.01));
+        assert_eq!(req.partial_rebalance_ratio, Some(0.50));
+        assert!(req.effective_coverage.is_none());
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_explicit_effective_coverage() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20160201",
+            "end_date": "20260515",
+            "effective_coverage": {
+                "enabled": true,
+                "mode": "adjust_start",
+                "min_rows": 80
+            }
+        }))
+        .expect("factor request");
+
+        let coverage = req.effective_coverage.expect("effective coverage");
+        assert_eq!(coverage.enabled, Some(true));
+        assert_eq!(coverage.mode.as_deref(), Some("adjust_start"));
+        assert_eq!(coverage.min_rows, Some(80));
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_candidate_risk_filter() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "candidate_risk_filter": "low_volatility_low_correlation_v1"
+        }))
+        .expect("factor request");
+
+        let profile = parse_candidate_risk_filter_profile(req.candidate_risk_filter.as_deref())
+            .expect("candidate risk filter");
+
+        assert_eq!(
+            profile,
+            CandidateRiskFilterProfile::LowVolatilityLowCorrelationV1
+        );
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_risk_contribution_control() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "risk_contribution_control": "soft_single_name_20pct_v1"
+        }))
+        .expect("factor request");
+
+        let profile =
+            parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())
+                .expect("risk contribution control");
+
+        assert_eq!(
+            profile,
+            RiskContributionControlProfile::SoftSingleName20PctV1
+        );
     }
 
     #[test]
@@ -1763,61 +2292,72 @@ mod tests {
     }
 
     #[test]
-    fn factor_request_builds_portfolio_drawdown_risk_control() {
-        let req = RunFactorBacktestReq {
-            combo_name: "phase7_financial_quality_v1".to_string(),
-            version: "1.0.0".to_string(),
-            strategy_version_id: "strategy-v1".to_string(),
-            data_version_id: "data-v1".to_string(),
-            research_dataset_id: None,
-            feature_set_version_id: None,
-            prediction_set_id: None,
-            prediction_blend_weight: None,
-            prediction_min_percentile: None,
-            portfolio_policy_id: None,
-            top_n: 20,
-            rebalance: "20".to_string(),
-            entry_delay: 0,
-            min_amount: 0.0,
-            max_position_pct: 0.1,
-            skip_top_pct: 0.0,
-            max_pairwise_correlation: None,
-            correlation_lookback_days: 60,
-            kelly_fraction: 0.0,
-            kelly_lookback_days: 60,
-            max_gross_exposure: 1.0,
-            score_direction: "descending".to_string(),
-            portfolio_method: "risk_budget".to_string(),
-            risk_budget_lookback_days: 60,
-            capacity_penalty_strength: 0.0,
-            industry_max_weight_pct: None,
-            score_candidate_pool_size: None,
-            universe_profile: None,
-            cost_model: None,
-            execution_rules: None,
-            benchmark: Some("000300.SH".to_string()),
-            market_regime: None,
-            stop_loss_pct: Some(0.12),
-            take_profit_pct: None,
-            trailing_stop_pct: Some(0.18),
-            time_stop_days: Some(120),
-            reentry_cooldown_days: Some(10),
-            start_date: "20250101".to_string(),
-            end_date: "20250131".to_string(),
-            initial_capital: 1_000_000.0,
-            mode: Some("standard".to_string()),
-            portfolio_drawdown_reduce_start_pct: Some(0.05),
-            portfolio_drawdown_reduce_full_pct: Some(0.15),
-            portfolio_drawdown_min_exposure: Some(0.4),
-            portfolio_drawdown_peak_lookback_days: Some(252),
-            portfolio_drawdown_recovery_start_pct: Some(0.30),
-            portfolio_drawdown_recovery_full_pct: Some(0.70),
-            portfolio_drawdown_recovery_boost: Some(1.0),
-            portfolio_volatility_target_pct: Some(0.16),
-            portfolio_volatility_lookback_days: Some(60),
-            portfolio_volatility_min_exposure: Some(0.45),
-            portfolio_volatility_max_exposure: Some(1.0),
+    fn market_regime_request_builds_regime_alpha_switch_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_regime_alpha_switch_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
         };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.lookback_days, 126);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.combo_name.as_deref()),
+            Some("phase7_industry_residual_quality_v1")
+        );
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.score_direction),
+            Some(quant_backtest::signal_generator::ScoreDirection::Descending)
+        );
+    }
+
+    #[test]
+    fn market_regime_request_builds_quality_bear_position_guard_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_bear_position_guard_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        assert_eq!(policy.benchmark, "000300.SH");
+        assert_eq!(policy.lookback_days, 126);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.top_n),
+            Some(25)
+        );
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.rebalance_freq_days),
+            Some(80)
+        );
+    }
+
+    #[test]
+    fn factor_request_builds_portfolio_drawdown_risk_control() {
+        let req = factor_risk_control_request_template(None, None, None, None, None);
 
         let risk_control = build_portfolio_risk_control(&req).expect("valid risk control");
 
@@ -1867,5 +2407,82 @@ mod tests {
         assert_eq!(risk_control.take_profit_pct, None);
         assert_eq!(risk_control.time_stop_days, Some(120));
         assert_eq!(risk_control.reentry_cooldown_days, Some(10));
+    }
+
+    fn factor_risk_control_request_template(
+        event_gate_combo_name: Option<&str>,
+        event_gate_mode: Option<&str>,
+        event_gate_min_score: Option<f64>,
+        event_gate_boost_weight: Option<f64>,
+        event_gate_active_regimes: Option<Vec<&str>>,
+    ) -> RunFactorBacktestReq {
+        RunFactorBacktestReq {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            strategy_version_id: "strategy-v1".to_string(),
+            data_version_id: "data-v1".to_string(),
+            research_dataset_id: None,
+            feature_set_version_id: None,
+            prediction_set_id: None,
+            prediction_blend_weight: None,
+            prediction_min_percentile: None,
+            event_gate_combo_name: event_gate_combo_name.map(str::to_string),
+            event_gate_version: "1.0.0".to_string(),
+            event_gate_mode: event_gate_mode.map(str::to_string),
+            event_gate_min_score,
+            event_gate_boost_weight,
+            event_gate_score_direction: Some("descending".to_string()),
+            event_gate_active_regimes: event_gate_active_regimes
+                .map(|values| values.into_iter().map(str::to_string).collect::<Vec<_>>()),
+            portfolio_policy_id: None,
+            top_n: 20,
+            rebalance: "20".to_string(),
+            entry_delay: 0,
+            min_amount: 0.0,
+            max_position_pct: 0.1,
+            skip_top_pct: 0.0,
+            max_pairwise_correlation: None,
+            correlation_lookback_days: 60,
+            kelly_fraction: 0.0,
+            kelly_lookback_days: 60,
+            max_gross_exposure: 1.0,
+            score_direction: "descending".to_string(),
+            portfolio_method: "risk_budget".to_string(),
+            risk_budget_lookback_days: 60,
+            capacity_penalty_strength: 0.0,
+            industry_max_weight_pct: None,
+            style_risk_budget: None,
+            candidate_risk_filter: None,
+            risk_contribution_control: None,
+            rebalance_hysteresis_pct: None,
+            partial_rebalance_ratio: None,
+            score_candidate_pool_size: None,
+            universe_profile: None,
+            effective_coverage: None,
+            cost_model: None,
+            execution_rules: None,
+            benchmark: Some("000300.SH".to_string()),
+            market_regime: None,
+            stop_loss_pct: Some(0.12),
+            take_profit_pct: None,
+            trailing_stop_pct: Some(0.18),
+            time_stop_days: Some(120),
+            reentry_cooldown_days: Some(10),
+            start_date: "20250101".to_string(),
+            end_date: "20250131".to_string(),
+            initial_capital: 1_000_000.0,
+            mode: Some("standard".to_string()),
+            portfolio_drawdown_reduce_start_pct: Some(0.05),
+            portfolio_drawdown_reduce_full_pct: Some(0.15),
+            portfolio_drawdown_min_exposure: Some(0.4),
+            portfolio_drawdown_peak_lookback_days: Some(252),
+            portfolio_drawdown_recovery_start_pct: Some(0.30),
+            portfolio_drawdown_recovery_full_pct: Some(0.70),
+            portfolio_drawdown_recovery_boost: Some(1.0),
+            portfolio_volatility_target_pct: Some(0.16),
+            portfolio_volatility_lookback_days: Some(60),
+            portfolio_volatility_min_exposure: Some(0.45),
+            portfolio_volatility_max_exposure: Some(1.0),
+        }
     }
 }

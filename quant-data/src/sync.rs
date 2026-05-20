@@ -1,6 +1,6 @@
 //! 数据同步服务 — Tushare → 标准化 → PostgreSQL
 
-use chrono::{Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockDailyBar,
-    MarketStockDailyBasic, MarketStockMoneyflow, MarketTradeCalendar,
+    MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockExpress, MarketStockForecast,
+    MarketStockMoneyflow, MarketTradeCalendar,
 };
 use crate::repository;
 use crate::tushare::client::TushareClient;
@@ -41,6 +42,36 @@ fn to_opt_decimal(v: Option<f64>) -> Option<Decimal> {
 }
 fn to_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y%m%d").ok()
+}
+
+fn quarter_end_dates_in_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    if start > end {
+        return Vec::new();
+    }
+
+    let mut periods = Vec::new();
+    for year in start.year()..=end.year() {
+        for (month, day) in [(3, 31), (6, 30), (9, 30), (12, 31)] {
+            if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+                if date >= start && date <= end {
+                    periods.push(date);
+                }
+            }
+        }
+    }
+    periods
+}
+
+fn raw_payload(item: &Map<String, Value>) -> Value {
+    Value::Object(item.clone())
+}
+
+fn list_or_stock_symbols<'a>(symbols: &'a [String], fallback: &'a [String]) -> &'a [String] {
+    if symbols.is_empty() {
+        fallback
+    } else {
+        symbols
+    }
 }
 
 // ─── sync_stock_basic ────────────────────────────────────────────
@@ -1394,6 +1425,443 @@ pub async fn sync_financial_data_with_task(
     Ok((stmt_count, ind_count))
 }
 
+// ─── sync_forecast ───────────────────────────────────────────────
+
+fn forecast_row_from_map(item: &Map<String, Value>) -> Option<MarketStockForecast> {
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    let first_ann_date = to_date(&get_str(item, "first_ann_date")).unwrap_or(ann_date);
+    Some(MarketStockForecast {
+        symbol: get_str(item, "ts_code"),
+        ann_date,
+        end_date,
+        forecast_type: get_str(item, "type"),
+        p_change_min: to_opt_decimal(get_f64(item, "p_change_min")),
+        p_change_max: to_opt_decimal(get_f64(item, "p_change_max")),
+        net_profit_min: to_opt_decimal(get_f64(item, "net_profit_min")),
+        net_profit_max: to_opt_decimal(get_f64(item, "net_profit_max")),
+        first_ann_date,
+        available_at: first_ann_date,
+        summary: get_opt_str(item, "summary"),
+        change_reason: get_opt_str(item, "change_reason"),
+        raw_payload: raw_payload(item),
+    })
+}
+
+pub async fn sync_forecast(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "forecast",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "earnings forecast sync",
+        "tushare",
+        &["market_stock_forecast"],
+        s,
+        e,
+    )
+    .await?;
+
+    let fallback_symbols = repository::list_listed_stock_symbols(pool).await?;
+    let symbols = list_or_stock_symbols(symbols, &fallback_symbols);
+    let total = symbols.len();
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    let mut total_rows = 0usize;
+    let page_limit = 2000usize;
+
+    for symbol in symbols {
+        let mut offset = 0usize;
+        let mut symbol_failed = false;
+        loop {
+            match client
+                .forecast(
+                    Some(symbol),
+                    None,
+                    Some(start),
+                    Some(end),
+                    None,
+                    None,
+                    Some(page_limit),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    let row_count = maps.len();
+                    let rows: Vec<MarketStockForecast> =
+                        maps.iter().filter_map(forecast_row_from_map).collect();
+                    if !rows.is_empty() {
+                        total_rows +=
+                            repository::upsert_forecast_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                    }
+                    if row_count < page_limit {
+                        break;
+                    }
+                    offset += page_limit;
+                }
+                Err(error) => {
+                    warn!("{} forecast failed: {}", symbol, error);
+                    failed += 1;
+                    symbol_failed = true;
+                    break;
+                }
+            }
+        }
+        if !symbol_failed {
+            ok += 1;
+        }
+        if ok % 100 == 0 {
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                total as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        total as i32,
+        ok as i32,
+        failed as i32,
+    )
+    .await?;
+    info!(
+        "forecast 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
+}
+
+// ─── sync_express ────────────────────────────────────────────────
+
+fn express_row_from_map(item: &Map<String, Value>) -> Option<MarketStockExpress> {
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    Some(MarketStockExpress {
+        symbol: get_str(item, "ts_code"),
+        ann_date,
+        end_date,
+        revenue: to_opt_decimal(get_f64(item, "revenue")),
+        n_income: to_opt_decimal(get_f64(item, "n_income")),
+        yoy_sales: to_opt_decimal(get_f64(item, "yoy_sales")),
+        yoy_dedu_np: to_opt_decimal(get_f64(item, "yoy_dedu_np")),
+        diluted_eps: to_opt_decimal(get_f64(item, "diluted_eps")),
+        diluted_roe: to_opt_decimal(get_f64(item, "diluted_roe")),
+        is_audit: get_i64(item, "is_audit").map(|v| v as i32),
+        available_at: ann_date,
+        perf_summary: get_opt_str(item, "perf_summary"),
+        remark: get_opt_str(item, "remark"),
+        raw_payload: raw_payload(item),
+    })
+}
+
+pub async fn sync_express(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "express",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "earnings express sync",
+        "tushare",
+        &["market_stock_express"],
+        s,
+        e,
+    )
+    .await?;
+
+    let fallback_symbols = repository::list_listed_stock_symbols(pool).await?;
+    let symbols = list_or_stock_symbols(symbols, &fallback_symbols);
+    let total = symbols.len();
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    let mut total_rows = 0usize;
+    let page_limit = 2000usize;
+
+    for symbol in symbols {
+        let mut offset = 0usize;
+        let mut symbol_failed = false;
+        loop {
+            match client
+                .express(
+                    symbol,
+                    None,
+                    Some(start),
+                    Some(end),
+                    None,
+                    Some(page_limit),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    let row_count = maps.len();
+                    let rows: Vec<MarketStockExpress> =
+                        maps.iter().filter_map(express_row_from_map).collect();
+                    if !rows.is_empty() {
+                        total_rows +=
+                            repository::upsert_express_batch(pool, &rows, dv_id, "tushare").await?;
+                    }
+                    if row_count < page_limit {
+                        break;
+                    }
+                    offset += page_limit;
+                }
+                Err(error) => {
+                    warn!("{} express failed: {}", symbol, error);
+                    failed += 1;
+                    symbol_failed = true;
+                    break;
+                }
+            }
+        }
+        if !symbol_failed {
+            ok += 1;
+        }
+        if ok % 100 == 0 {
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                total as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        total as i32,
+        ok as i32,
+        failed as i32,
+    )
+    .await?;
+    info!(
+        "express 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
+}
+
+// ─── sync_disclosure_date ───────────────────────────────────────
+
+fn disclosure_date_row_from_map(item: &Map<String, Value>) -> Option<MarketStockDisclosureDate> {
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let actual_date = to_date(&get_str(item, "actual_date"));
+    Some(MarketStockDisclosureDate {
+        symbol: get_str(item, "ts_code"),
+        end_date,
+        ann_date,
+        pre_date: to_date(&get_str(item, "pre_date")),
+        actual_date,
+        modify_date: to_date(&get_str(item, "modify_date")),
+        available_at: actual_date.unwrap_or(ann_date),
+        raw_payload: raw_payload(item),
+    })
+}
+
+pub async fn sync_disclosure_date(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "disclosure_date",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "financial disclosure date sync",
+        "tushare",
+        &["market_stock_disclosure_date"],
+        s,
+        e,
+    )
+    .await?;
+
+    let symbol_filter = if symbols.is_empty() {
+        None
+    } else {
+        Some(
+            symbols
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+    let periods = quarter_end_dates_in_range(s, e);
+    let total = periods.len();
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    let mut total_rows = 0usize;
+    let page_limit = 3000usize;
+
+    for period in &periods {
+        let mut offset = 0usize;
+        let mut period_failed = false;
+        loop {
+            let period_str = period.format("%Y%m%d").to_string();
+            match client
+                .disclosure_date(
+                    None,
+                    Some(&period_str),
+                    None,
+                    None,
+                    None,
+                    Some(page_limit),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    let row_count = maps.len();
+                    let rows: Vec<MarketStockDisclosureDate> = maps
+                        .iter()
+                        .filter_map(disclosure_date_row_from_map)
+                        .filter(|row| {
+                            symbol_filter
+                                .as_ref()
+                                .map(|filter| filter.contains(&row.symbol))
+                                .unwrap_or(true)
+                        })
+                        .collect();
+                    if !rows.is_empty() {
+                        total_rows +=
+                            repository::upsert_disclosure_date_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                    }
+                    if row_count < page_limit {
+                        break;
+                    }
+                    offset += page_limit;
+                }
+                Err(error) => {
+                    warn!(
+                        "disclosure_date {} failed: {}",
+                        period.format("%Y%m%d"),
+                        error
+                    );
+                    failed += 1;
+                    period_failed = true;
+                    break;
+                }
+            }
+        }
+        if !period_failed {
+            ok += 1;
+        }
+        if ok % 8 == 0 {
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                total as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        total as i32,
+        ok as i32,
+        failed as i32,
+    )
+    .await?;
+    info!(
+        "disclosure_date 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,5 +1947,103 @@ mod tests {
         assert_eq!(row.buy_elg_amount, Decimal::from_f64_retain(789.0));
         assert_eq!(row.sell_elg_amount, Decimal::from_f64_retain(654.3));
         assert_eq!(row.net_mf_amount, Decimal::from_f64_retain(293.5));
+    }
+
+    #[test]
+    fn quarter_end_dates_in_range_includes_supported_report_periods() {
+        let start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+
+        let periods = quarter_end_dates_in_range(start, end);
+
+        assert_eq!(
+            periods,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn forecast_row_maps_event_fields_and_available_at() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("600896.SH"));
+        item.insert("ann_date".to_string(), json!("20240501"));
+        item.insert("end_date".to_string(), json!("20231231"));
+        item.insert("type".to_string(), json!("续亏"));
+        item.insert("p_change_min".to_string(), json!(4.6273));
+        item.insert("p_change_max".to_string(), json!(4.6273));
+        item.insert("net_profit_min".to_string(), json!(-18900.0));
+        item.insert("net_profit_max".to_string(), json!(-18900.0));
+        item.insert("first_ann_date".to_string(), json!("20240430"));
+        item.insert("summary".to_string(), json!("sample summary"));
+        item.insert("change_reason".to_string(), json!("sample reason"));
+
+        let row = forecast_row_from_map(&item).expect("forecast row");
+
+        assert_eq!(row.symbol, "600896.SH");
+        assert_eq!(row.ann_date, NaiveDate::from_ymd_opt(2024, 5, 1).unwrap());
+        assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2023, 12, 31).unwrap());
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2024, 4, 30).unwrap()
+        );
+        assert_eq!(row.forecast_type, "续亏");
+        assert_eq!(row.p_change_min, Decimal::from_f64_retain(4.6273));
+        assert_eq!(row.net_profit_min, Decimal::from_f64_retain(-18900.0));
+        assert_eq!(row.raw_payload["ts_code"], json!("600896.SH"));
+    }
+
+    #[test]
+    fn express_row_maps_event_fields() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("ann_date".to_string(), json!("20230117"));
+        item.insert("end_date".to_string(), json!("20221231"));
+        item.insert("revenue".to_string(), json!(179895000000.0));
+        item.insert("n_income".to_string(), json!(45516000000.0));
+        item.insert("yoy_sales".to_string(), json!(6.2));
+        item.insert("yoy_dedu_np".to_string(), json!(25.3));
+        item.insert("diluted_eps".to_string(), json!(2.35));
+        item.insert("diluted_roe".to_string(), json!(12.8));
+        item.insert("is_audit".to_string(), json!(0));
+
+        let row = express_row_from_map(&item).expect("express row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2023, 1, 17).unwrap()
+        );
+        assert_eq!(row.revenue, Decimal::from_f64_retain(179895000000.0));
+        assert_eq!(row.n_income, Decimal::from_f64_retain(45516000000.0));
+        assert_eq!(row.yoy_sales, Decimal::from_f64_retain(6.2));
+        assert_eq!(row.is_audit, Some(0));
+    }
+
+    #[test]
+    fn disclosure_date_row_maps_available_at_from_actual_date() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("ann_date".to_string(), json!("20240131"));
+        item.insert("end_date".to_string(), json!("20231231"));
+        item.insert("pre_date".to_string(), json!("20240315"));
+        item.insert("actual_date".to_string(), json!("20240314"));
+        item.insert("modify_date".to_string(), json!("20240220"));
+
+        let row = disclosure_date_row_from_map(&item).expect("disclosure date row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2023, 12, 31).unwrap());
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2024, 3, 14).unwrap()
+        );
+        assert_eq!(
+            row.pre_date,
+            Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+        );
     }
 }

@@ -5,6 +5,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// 股票基本信息 (market_stock)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +83,56 @@ pub struct MarketStockMoneyflow {
     pub sell_elg_amount: Option<Decimal>,
     pub net_mf_vol: Option<Decimal>,
     pub net_mf_amount: Option<Decimal>,
+}
+
+/// 业绩预告 (market_stock_forecast)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockForecast {
+    pub symbol: String,
+    pub ann_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub forecast_type: String,
+    pub p_change_min: Option<Decimal>,
+    pub p_change_max: Option<Decimal>,
+    pub net_profit_min: Option<Decimal>,
+    pub net_profit_max: Option<Decimal>,
+    pub first_ann_date: NaiveDate,
+    pub available_at: NaiveDate,
+    pub summary: Option<String>,
+    pub change_reason: Option<String>,
+    pub raw_payload: Value,
+}
+
+/// 业绩快报 (market_stock_express)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockExpress {
+    pub symbol: String,
+    pub ann_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub revenue: Option<Decimal>,
+    pub n_income: Option<Decimal>,
+    pub yoy_sales: Option<Decimal>,
+    pub yoy_dedu_np: Option<Decimal>,
+    pub diluted_eps: Option<Decimal>,
+    pub diluted_roe: Option<Decimal>,
+    pub is_audit: Option<i32>,
+    pub available_at: NaiveDate,
+    pub perf_summary: Option<String>,
+    pub remark: Option<String>,
+    pub raw_payload: Value,
+}
+
+/// 财报披露日期 (market_stock_disclosure_date)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockDisclosureDate {
+    pub symbol: String,
+    pub end_date: NaiveDate,
+    pub ann_date: NaiveDate,
+    pub pre_date: Option<NaiveDate>,
+    pub actual_date: Option<NaiveDate>,
+    pub modify_date: Option<NaiveDate>,
+    pub available_at: NaiveDate,
+    pub raw_payload: Value,
 }
 
 /// 指数日线 (market_index_daily_bar)

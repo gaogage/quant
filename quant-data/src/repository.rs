@@ -5,11 +5,13 @@
 
 use chrono::NaiveDate;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use tracing::{debug, info};
 
 use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockDailyBar,
-    MarketStockDailyBasic, MarketStockMoneyflow, MarketTradeCalendar,
+    MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockExpress, MarketStockForecast,
+    MarketStockMoneyflow, MarketTradeCalendar,
 };
 
 // ─── market_stock ────────────────────────────────────────────────
@@ -60,6 +62,14 @@ pub async fn count_stocks(pool: &PgPool) -> Result<i64, sqlx::Error> {
         .fetch_one(pool)
         .await?;
     Ok(row.0)
+}
+
+pub async fn list_listed_stock_symbols(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|(symbol,)| symbol).collect())
 }
 
 // ─── market_stock_daily_bar ──────────────────────────────────────
@@ -361,6 +371,350 @@ pub async fn upsert_moneyflow_batch(
     }
 
     info!("批量 upsert {} 条每日资金流数据", saved);
+    Ok(saved)
+}
+
+// ─── market_stock_forecast ───────────────────────────────────────
+
+pub async fn upsert_forecast(
+    pool: &PgPool,
+    row: &MarketStockForecast,
+    data_version_id: &str,
+    source: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO market_stock_forecast
+             (symbol, ann_date, end_date, forecast_type, p_change_min, p_change_max,
+              net_profit_min, net_profit_max, first_ann_date, available_at, summary,
+              change_reason, raw_payload, source, data_version_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           ON CONFLICT (symbol, ann_date, end_date, forecast_type, first_ann_date, available_at) DO UPDATE SET
+             p_change_min = EXCLUDED.p_change_min,
+             p_change_max = EXCLUDED.p_change_max,
+             net_profit_min = EXCLUDED.net_profit_min,
+             net_profit_max = EXCLUDED.net_profit_max,
+             available_at = EXCLUDED.available_at,
+             summary = EXCLUDED.summary,
+             change_reason = EXCLUDED.change_reason,
+             raw_payload = EXCLUDED.raw_payload,
+             source = EXCLUDED.source,
+             data_version_id = EXCLUDED.data_version_id"#,
+    )
+    .bind(&row.symbol)
+    .bind(row.ann_date)
+    .bind(row.end_date)
+    .bind(&row.forecast_type)
+    .bind(row.p_change_min)
+    .bind(row.p_change_max)
+    .bind(row.net_profit_min)
+    .bind(row.net_profit_max)
+    .bind(row.first_ann_date)
+    .bind(row.available_at)
+    .bind(&row.summary)
+    .bind(&row.change_reason)
+    .bind(&row.raw_payload)
+    .bind(source)
+    .bind(data_version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_forecast_batch(
+    pool: &PgPool,
+    rows: &[MarketStockForecast],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketStockForecast> = rows
+        .iter()
+        .filter(|row| {
+            seen.insert((
+                row.symbol.clone(),
+                row.ann_date,
+                row.end_date,
+                row.forecast_type.clone(),
+                row.first_ann_date,
+                row.available_at,
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_forecast \
+             (symbol, ann_date, end_date, forecast_type, p_change_min, p_change_max, \
+              net_profit_min, net_profit_max, first_ann_date, available_at, summary, \
+              change_reason, raw_payload, source, data_version_id) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.ann_date)
+                .push_bind(item.end_date)
+                .push_bind(&item.forecast_type)
+                .push_bind(item.p_change_min)
+                .push_bind(item.p_change_max)
+                .push_bind(item.net_profit_min)
+                .push_bind(item.net_profit_max)
+                .push_bind(item.first_ann_date)
+                .push_bind(item.available_at)
+                .push_bind(&item.summary)
+                .push_bind(&item.change_reason)
+                .push_bind(&item.raw_payload)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+        builder.push(
+            " ON CONFLICT (symbol, ann_date, end_date, forecast_type, first_ann_date, available_at) DO UPDATE SET \
+              p_change_min = EXCLUDED.p_change_min, \
+              p_change_max = EXCLUDED.p_change_max, \
+              net_profit_min = EXCLUDED.net_profit_min, \
+              net_profit_max = EXCLUDED.net_profit_max, \
+              available_at = EXCLUDED.available_at, \
+              summary = EXCLUDED.summary, \
+              change_reason = EXCLUDED.change_reason, \
+              raw_payload = EXCLUDED.raw_payload, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条业绩预告数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
+// ─── market_stock_express ────────────────────────────────────────
+
+pub async fn upsert_express(
+    pool: &PgPool,
+    row: &MarketStockExpress,
+    data_version_id: &str,
+    source: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO market_stock_express
+             (symbol, ann_date, end_date, revenue, n_income, yoy_sales, yoy_dedu_np,
+              diluted_eps, diluted_roe, is_audit, available_at, perf_summary, remark,
+              raw_payload, source, data_version_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+           ON CONFLICT (symbol, ann_date, end_date, available_at) DO UPDATE SET
+             revenue = EXCLUDED.revenue,
+             n_income = EXCLUDED.n_income,
+             yoy_sales = EXCLUDED.yoy_sales,
+             yoy_dedu_np = EXCLUDED.yoy_dedu_np,
+             diluted_eps = EXCLUDED.diluted_eps,
+             diluted_roe = EXCLUDED.diluted_roe,
+             is_audit = EXCLUDED.is_audit,
+             available_at = EXCLUDED.available_at,
+             perf_summary = EXCLUDED.perf_summary,
+             remark = EXCLUDED.remark,
+             raw_payload = EXCLUDED.raw_payload,
+             source = EXCLUDED.source,
+             data_version_id = EXCLUDED.data_version_id"#,
+    )
+    .bind(&row.symbol)
+    .bind(row.ann_date)
+    .bind(row.end_date)
+    .bind(row.revenue)
+    .bind(row.n_income)
+    .bind(row.yoy_sales)
+    .bind(row.yoy_dedu_np)
+    .bind(row.diluted_eps)
+    .bind(row.diluted_roe)
+    .bind(row.is_audit)
+    .bind(row.available_at)
+    .bind(&row.perf_summary)
+    .bind(&row.remark)
+    .bind(&row.raw_payload)
+    .bind(source)
+    .bind(data_version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_express_batch(
+    pool: &PgPool,
+    rows: &[MarketStockExpress],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketStockExpress> = rows
+        .iter()
+        .filter(|row| {
+            seen.insert((
+                row.symbol.clone(),
+                row.ann_date,
+                row.end_date,
+                row.available_at,
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_express \
+             (symbol, ann_date, end_date, revenue, n_income, yoy_sales, yoy_dedu_np, \
+              diluted_eps, diluted_roe, is_audit, available_at, perf_summary, remark, \
+              raw_payload, source, data_version_id) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.ann_date)
+                .push_bind(item.end_date)
+                .push_bind(item.revenue)
+                .push_bind(item.n_income)
+                .push_bind(item.yoy_sales)
+                .push_bind(item.yoy_dedu_np)
+                .push_bind(item.diluted_eps)
+                .push_bind(item.diluted_roe)
+                .push_bind(item.is_audit)
+                .push_bind(item.available_at)
+                .push_bind(&item.perf_summary)
+                .push_bind(&item.remark)
+                .push_bind(&item.raw_payload)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+        builder.push(
+            " ON CONFLICT (symbol, ann_date, end_date, available_at) DO UPDATE SET \
+              revenue = EXCLUDED.revenue, \
+              n_income = EXCLUDED.n_income, \
+              yoy_sales = EXCLUDED.yoy_sales, \
+              yoy_dedu_np = EXCLUDED.yoy_dedu_np, \
+              diluted_eps = EXCLUDED.diluted_eps, \
+              diluted_roe = EXCLUDED.diluted_roe, \
+              is_audit = EXCLUDED.is_audit, \
+              available_at = EXCLUDED.available_at, \
+              perf_summary = EXCLUDED.perf_summary, \
+              remark = EXCLUDED.remark, \
+              raw_payload = EXCLUDED.raw_payload, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条业绩快报数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
+// ─── market_stock_disclosure_date ───────────────────────────────
+
+pub async fn upsert_disclosure_date(
+    pool: &PgPool,
+    row: &MarketStockDisclosureDate,
+    data_version_id: &str,
+    source: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO market_stock_disclosure_date
+             (symbol, end_date, ann_date, pre_date, actual_date, modify_date,
+              available_at, raw_payload, source, data_version_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (symbol, end_date, available_at) DO UPDATE SET
+             ann_date = EXCLUDED.ann_date,
+             pre_date = EXCLUDED.pre_date,
+             actual_date = EXCLUDED.actual_date,
+             modify_date = EXCLUDED.modify_date,
+             available_at = EXCLUDED.available_at,
+             raw_payload = EXCLUDED.raw_payload,
+             source = EXCLUDED.source,
+             data_version_id = EXCLUDED.data_version_id"#,
+    )
+    .bind(&row.symbol)
+    .bind(row.end_date)
+    .bind(row.ann_date)
+    .bind(row.pre_date)
+    .bind(row.actual_date)
+    .bind(row.modify_date)
+    .bind(row.available_at)
+    .bind(&row.raw_payload)
+    .bind(source)
+    .bind(data_version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_disclosure_date_batch(
+    pool: &PgPool,
+    rows: &[MarketStockDisclosureDate],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketStockDisclosureDate> = rows
+        .iter()
+        .filter(|row| seen.insert((row.symbol.clone(), row.end_date, row.available_at)))
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_disclosure_date \
+             (symbol, end_date, ann_date, pre_date, actual_date, modify_date, \
+              available_at, raw_payload, source, data_version_id) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.end_date)
+                .push_bind(item.ann_date)
+                .push_bind(item.pre_date)
+                .push_bind(item.actual_date)
+                .push_bind(item.modify_date)
+                .push_bind(item.available_at)
+                .push_bind(&item.raw_payload)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+        builder.push(
+            " ON CONFLICT (symbol, end_date, available_at) DO UPDATE SET \
+              ann_date = EXCLUDED.ann_date, \
+              pre_date = EXCLUDED.pre_date, \
+              actual_date = EXCLUDED.actual_date, \
+              modify_date = EXCLUDED.modify_date, \
+              available_at = EXCLUDED.available_at, \
+              raw_payload = EXCLUDED.raw_payload, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条财报披露日期数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
     Ok(saved)
 }
 

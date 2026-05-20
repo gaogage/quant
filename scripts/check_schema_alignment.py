@@ -48,6 +48,22 @@ if financial_prototype_sql.exists():
     if "PROTOTYPE ONLY" not in first_lines:
         failed.append(("phase3_financial.sql must be marked as prototype", str(financial_prototype_sql.relative_to(ROOT)), ["missing PROTOTYPE ONLY marker"]))
 
+event_alpha_sql = ROOT / "sql/phase7_event_alpha.sql"
+if event_alpha_sql.exists():
+    event_alpha_text = event_alpha_sql.read_text(encoding="utf-8")
+    for required in [
+        "CREATE TABLE IF NOT EXISTS public.market_stock_forecast",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_express",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_disclosure_date",
+        "PRIMARY KEY (symbol, ann_date, end_date, forecast_type, first_ann_date, available_at)",
+        "PRIMARY KEY (symbol, ann_date, end_date, available_at)",
+        "PRIMARY KEY (symbol, end_date, available_at)",
+    ]:
+        if required not in event_alpha_text:
+            failed.append(("phase7_event_alpha.sql must mirror official event schema", str(event_alpha_sql.relative_to(ROOT)), [required]))
+else:
+    failed.append(("phase7_event_alpha.sql must exist for local incremental DDL", "sql/phase7_event_alpha.sql", ["missing file"]))
+
 schema_sql = ROOT.parent / "docs/projects/quant/tasks/quant/sql/001_initial_schema.sql"
 if schema_sql.exists():
     schema_text = schema_sql.read_text(encoding="utf-8")
@@ -60,12 +76,24 @@ if schema_sql.exists():
         "CREATE TABLE IF NOT EXISTS public.market_financial_indicator",
         "CREATE TABLE IF NOT EXISTS public.market_stock_daily_basic",
         "CREATE TABLE IF NOT EXISTS public.market_stock_moneyflow",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_forecast",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_express",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_disclosure_date",
         "idx_market_stock_daily_basic_symbol_date",
         "idx_market_stock_moneyflow_symbol_date",
+        "idx_market_stock_forecast_symbol_date",
+        "idx_market_stock_express_symbol_date",
+        "idx_market_stock_disclosure_date_symbol_date",
         "fk_market_stock_daily_basic_data_version",
         "fk_market_stock_moneyflow_data_version",
+        "fk_market_stock_forecast_data_version",
+        "fk_market_stock_express_data_version",
+        "fk_market_stock_disclosure_date_data_version",
         "ann_date DATE NOT NULL",
         "idx_fin_ind_ann_date",
+        "PRIMARY KEY (symbol, ann_date, end_date, forecast_type, first_ann_date, available_at)",
+        "PRIMARY KEY (symbol, ann_date, end_date, available_at)",
+        "PRIMARY KEY (symbol, end_date, available_at)",
         "CREATE TABLE IF NOT EXISTS public.factor_evaluation",
         "CREATE TABLE IF NOT EXISTS public.multi_factor_weight",
         "CREATE TABLE IF NOT EXISTS public.multi_factor_value",
@@ -105,6 +133,8 @@ if factor_routes.exists():
         "Phase7GrowthRecoveryBackfillRequest",
         "Phase7ValuationBackfillRequest",
         "Phase7MoneyflowBackfillRequest",
+        "Phase7EventAlphaBackfillRequest",
+        "Phase7EventWindowAlphaBackfillRequest",
         "Phase7AlphaBlendBackfillRequest",
         "Phase7AlphaBlendProfilesBackfillRequest",
         "phase7_relative_strength_backfill_specs",
@@ -112,16 +142,38 @@ if factor_routes.exists():
         "phase7_growth_recovery_backfill_specs",
         "phase7_valuation_backfill_specs",
         "phase7_moneyflow_backfill_specs",
+        "phase7_event_alpha_backfill_specs",
+        "phase7_event_window_alpha_backfill_specs",
+        "phase7_event_surprise_backfill_specs",
         "phase7_alpha_blend_backfill_sql",
+        "phase7_optional_overlay_blend_backfill_sql",
         "phase7_relative_momentum_backfill_sql",
         "phase7_financial_annual_change_backfill_sql",
         "phase7_daily_basic_latest_backfill_sql",
         "phase7_moneyflow_backfill_sql",
+        "phase7_event_latest_backfill_sql",
+        "phase7_event_window_backfill_sql",
+        "phase7_combo_required_factor_count",
+        "weighted_event_earnings",
+        "weighted_event_window_earnings",
+        "weighted_event_surprise",
+        "weighted_combo_optional_overlay",
+        "phase7_event_surprise_v1",
+        "phase7_event_window_earnings_v1",
+        "phase7_quality_event_surprise_confirm_v1",
+        "phase7_quality_event_window_overlay_v1",
+        "HAVING COUNT(DISTINCT fv.factor_code) >= $6",
+        "/ NULLIF(SUM(weights.weight), 0.0) AS raw_score",
+        "set_local_combo_backfill_planner",
+        "SET LOCAL enable_bitmapscan = off",
         "backfill_phase7_relative_strength_background",
         "backfill_phase7_quality_relative_strength_background",
         "backfill_phase7_growth_recovery_background",
         "backfill_phase7_valuation_background",
         "backfill_phase7_moneyflow_background",
+        "backfill_phase7_event_alpha_background",
+        "backfill_phase7_event_surprise_background",
+        "backfill_phase7_event_window_alpha_background",
         "backfill_phase7_alpha_blend_background",
         "backfill_phase7_alpha_blend_profiles_background",
     ]:
@@ -151,6 +203,9 @@ if main_routes.exists():
         '"/api/v1/quant/factors/phase7-growth-recovery-backfill/background"',
         '"/api/v1/quant/factors/phase7-valuation-backfill/background"',
         '"/api/v1/quant/factors/phase7-moneyflow-backfill/background"',
+        '"/api/v1/quant/factors/phase7-event-alpha-backfill/background"',
+        '"/api/v1/quant/factors/phase7-event-surprise-backfill/background"',
+        '"/api/v1/quant/factors/phase7-event-window-alpha-backfill/background"',
         '"/api/v1/quant/factors/phase7-alpha-blend-backfill/background"',
         '"/api/v1/quant/factors/phase7-alpha-blend-profiles-backfill/background"',
         '"/api/v1/quant/optimizations"',
@@ -220,6 +275,24 @@ if optimization_routes.exists():
         if required not in optimization_text:
             failed.append(("optimization task/trial API must be present", str(optimization_routes.relative_to(ROOT)), [required]))
 
+phase7_common = ROOT / "quant-common/src/phase7.rs"
+if phase7_common.exists():
+    phase7_common_text = phase7_common.read_text(encoding="utf-8")
+    for required in [
+        "phase7_event_earnings_v1",
+        "phase7_event_surprise_v1",
+        "phase7_event_window_earnings_v1",
+        "phase7_quality_event_window_overlay_v1",
+        "phase7_quality_event_surprise_confirm_v1",
+        "phase7_quality_event_confirm_v1",
+        "phase7_quality_value_recovery_event_confirm_v1",
+        "quality_event_confirm_5pct",
+        "quality_event_surprise_confirm_5pct",
+        "quality_value_recovery_event_confirm_5pct",
+    ]:
+        if required not in phase7_common_text:
+            failed.append(("Phase 7 search space must include event alpha confirmation blends", str(phase7_common.relative_to(ROOT)), [required]))
+
 if schema_sql.exists():
     schema_text = schema_sql.read_text(encoding="utf-8")
     optimization_task_block = schema_text.split("CREATE TABLE IF NOT EXISTS public.optimization_task", 1)[-1]
@@ -272,6 +345,25 @@ if sync_rs.exists():
     ]:
         if required not in sync_text:
             failed.append(("moneyflow sync path must exist", str(sync_rs.relative_to(ROOT)), [required]))
+    for required in [
+        "MarketStockForecast",
+        "forecast_row_from_map",
+        "sync_forecast",
+        "market_stock_forecast",
+        ".forecast(",
+        "MarketStockExpress",
+        "express_row_from_map",
+        "sync_express",
+        "market_stock_express",
+        ".express(",
+        "MarketStockDisclosureDate",
+        "disclosure_date_row_from_map",
+        "sync_disclosure_date",
+        "market_stock_disclosure_date",
+        ".disclosure_date(",
+    ]:
+        if required not in sync_text:
+            failed.append(("event sync path must exist", str(sync_rs.relative_to(ROOT)), [required]))
 
 tushare_client = ROOT / "quant-data/src/tushare/client.rs"
 if tushare_client.exists():
@@ -294,6 +386,19 @@ if tushare_client.exists():
     ]:
         if required not in client_text:
             failed.append(("Tushare moneyflow client must expose fund-flow fields", str(tushare_client.relative_to(ROOT)), [required]))
+    for required in [
+        "pub async fn forecast(",
+        "\"forecast\"",
+        "\"first_ann_date\"",
+        "pub async fn express(",
+        "\"express\"",
+        "\"diluted_roe\"",
+        "pub async fn disclosure_date(",
+        "\"disclosure_date\"",
+        "\"modify_date\"",
+    ]:
+        if required not in client_text:
+            failed.append(("Tushare event client must expose corporate-event fields", str(tushare_client.relative_to(ROOT)), [required]))
 
 repository_rs = ROOT / "quant-data/src/repository.rs"
 if repository_rs.exists():
@@ -312,6 +417,23 @@ if repository_rs.exists():
     ]:
         if required not in repository_text:
             failed.append(("moneyflow repository upsert must exist", str(repository_rs.relative_to(ROOT)), [required]))
+    for required in [
+        "upsert_forecast",
+        "upsert_forecast_batch",
+        "INSERT INTO market_stock_forecast",
+        "ON CONFLICT (symbol, ann_date, end_date, forecast_type, first_ann_date, available_at)",
+        "upsert_express",
+        "upsert_express_batch",
+        "INSERT INTO market_stock_express",
+        "ON CONFLICT (symbol, ann_date, end_date, available_at)",
+        "upsert_disclosure_date",
+        "upsert_disclosure_date_batch",
+        "INSERT INTO market_stock_disclosure_date",
+        "ON CONFLICT (symbol, end_date, available_at)",
+        "list_listed_stock_symbols",
+    ]:
+        if required not in repository_text:
+            failed.append(("event repository upserts must exist", str(repository_rs.relative_to(ROOT)), [required]))
 
 sync_routes = ROOT / "quant-api/src/routes/sync.rs"
 if sync_routes.exists():
@@ -328,6 +450,16 @@ if sync_routes.exists():
     ]:
         if required not in sync_routes_text:
             failed.append(("moneyflow dataset must be routed", str(sync_routes.relative_to(ROOT)), [required]))
+    for required in [
+        '"forecast" | "stock_forecast"',
+        "sync_forecast",
+        '"express" | "stock_express"',
+        "sync_express",
+        '"disclosure_date" | "stock_disclosure_date"',
+        "sync_disclosure_date",
+    ]:
+        if required not in sync_routes_text:
+            failed.append(("event dataset must be routed", str(sync_routes.relative_to(ROOT)), [required]))
 
 combine_rs = ROOT / "quant-factor/src/combine.rs"
 if combine_rs.exists():

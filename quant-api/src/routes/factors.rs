@@ -95,6 +95,15 @@ pub struct Phase7FinancialQualityBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7IndustryResidualQualityBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7RelativeStrengthBackfillRequest {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
@@ -132,6 +141,33 @@ pub struct Phase7ValuationBackfillRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct Phase7MoneyflowBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7EventAlphaBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7EventWindowAlphaBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7EventSurpriseBackfillRequest {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub version: Option<String>,
@@ -195,11 +231,15 @@ struct SetBasedFactorBackfillPlan {
 
 type Phase7PriceVolumeBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7FinancialQualityBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7IndustryResidualQualityBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7RelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7QualityRelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7GrowthRecoveryBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7ValuationBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7MoneyflowBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7EventAlphaBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7EventWindowAlphaBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7EventSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +261,10 @@ enum Phase7BackfillFactorKind {
         source_column: &'static str,
         higher_is_better: bool,
     },
+    IndustryRelativeFinancialLatest {
+        source_column: &'static str,
+        higher_is_better: bool,
+    },
     DailyBasicLatest {
         source_column: &'static str,
         higher_is_better: bool,
@@ -229,6 +273,18 @@ enum Phase7BackfillFactorKind {
     MoneyflowRolling {
         amount_expression: &'static str,
         higher_is_better: bool,
+    },
+    EventLatest {
+        source_table: &'static str,
+        value_expression: &'static str,
+        higher_is_better: bool,
+    },
+    EventWindow {
+        source_table: &'static str,
+        value_expression: &'static str,
+        higher_is_better: bool,
+        window_days: i32,
+        decay_days: i32,
     },
     FinancialAnnualChange {
         source_column: &'static str,
@@ -422,6 +478,58 @@ impl Phase7FinancialQualityBackfillRequest {
             category: "fundamental",
             phase: "7-J",
             dependencies: &["market_financial_indicator", "market_trade_calendar"],
+            combo_method: "equal_weight",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7IndustryResidualQualityBackfillRequest {
+    fn into_plan(self) -> Result<Phase7IndustryResidualQualityBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "phase7_industry_residual_quality_v1",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7IndustryResidualQualityBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_industry_residual_quality_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_industry_residual_quality_v1",
+            category: "fundamental_residual",
+            phase: "7-AG/7-J",
+            dependencies: &[
+                "market_financial_indicator",
+                "market_trade_calendar",
+                "market_stock",
+            ],
             combo_method: "equal_weight",
             experiment_type: "phase7_factor_backfill_profile",
             source_combos: Vec::new(),
@@ -661,6 +769,159 @@ impl Phase7MoneyflowBackfillRequest {
     }
 }
 
+impl Phase7EventAlphaBackfillRequest {
+    fn into_plan(self) -> Result<Phase7EventAlphaBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_event_earnings_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7EventAlphaBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_event_alpha_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_event_earnings_v1",
+            category: "event_alpha",
+            phase: "7-Y",
+            dependencies: &[
+                "market_stock_forecast",
+                "market_stock_express",
+                "market_stock_disclosure_date",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_event_earnings",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7EventWindowAlphaBackfillRequest {
+    fn into_plan(self) -> Result<Phase7EventWindowAlphaBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "phase7_event_window_earnings_v1",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7EventWindowAlphaBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_event_window_alpha_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_event_window_earnings_v1",
+            category: "event_alpha",
+            phase: "7-Y2",
+            dependencies: &[
+                "market_stock_forecast",
+                "market_stock_express",
+                "market_stock_disclosure_date",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_event_window_earnings",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7EventSurpriseBackfillRequest {
+    fn into_plan(self) -> Result<Phase7EventSurpriseBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_event_surprise_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7EventSurpriseBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_event_surprise_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_event_surprise_v1",
+            category: "event_alpha",
+            phase: "7-Y4",
+            dependencies: &[
+                "market_stock_forecast",
+                "market_stock_express",
+                "market_stock_disclosure_date",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_event_surprise",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
 impl Phase7AlphaBlendBackfillRequest {
     fn into_plan(self) -> Result<Phase7AlphaBlendBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
@@ -818,6 +1079,11 @@ impl Phase7AlphaBlendProfilesBackfillRequest {
                     weight,
                 });
             }
+            let combo_method = if profile.combo_name == "phase7_quality_event_window_overlay_v1" {
+                "weighted_combo_optional_overlay"
+            } else {
+                "weighted_combo_blend_profile"
+            };
             plans.push(Phase7AlphaBlendBackfillPlan {
                 start_date,
                 end_date,
@@ -831,7 +1097,7 @@ impl Phase7AlphaBlendProfilesBackfillRequest {
                 category: "composite_alpha",
                 phase: "7-B/7-J",
                 dependencies: &["multi_factor_value"],
-                combo_method: "weighted_combo_blend_profile",
+                combo_method,
                 experiment_type: "phase7_factor_backfill_profile",
                 source_combos: sources,
             });
@@ -978,6 +1244,71 @@ fn phase7_financial_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
             name: "Phase 7 daily PIT low leverage rank",
             period: 0,
             kind: Phase7BackfillFactorKind::FinancialLatest {
+                source_column: "debt_to_assets",
+                higher_is_better: false,
+            },
+            weight: 1.0 / 6.0,
+        },
+    ]
+}
+
+fn phase7_industry_residual_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_roe_indrel_daily_std",
+            name: "Phase 7 daily PIT industry-residual ROE quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::IndustryRelativeFinancialLatest {
+                source_column: "roe",
+                higher_is_better: true,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_roa_indrel_daily_std",
+            name: "Phase 7 daily PIT industry-residual ROA quality rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::IndustryRelativeFinancialLatest {
+                source_column: "roa",
+                higher_is_better: true,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_gross_margin_indrel_daily_std",
+            name: "Phase 7 daily PIT industry-residual gross margin rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::IndustryRelativeFinancialLatest {
+                source_column: "gross_margin",
+                higher_is_better: true,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_netprofit_margin_indrel_daily_std",
+            name: "Phase 7 daily PIT industry-residual net profit margin rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::IndustryRelativeFinancialLatest {
+                source_column: "netprofit_margin",
+                higher_is_better: true,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_current_ratio_indrel_daily_std",
+            name: "Phase 7 daily PIT industry-residual current ratio rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::IndustryRelativeFinancialLatest {
+                source_column: "current_ratio",
+                higher_is_better: true,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_debt_to_assets_indrel_daily_std",
+            name: "Phase 7 daily PIT industry-residual low leverage rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::IndustryRelativeFinancialLatest {
                 source_column: "debt_to_assets",
                 higher_is_better: false,
             },
@@ -1277,6 +1608,208 @@ fn phase7_moneyflow_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
                 higher_is_better: false,
             },
             weight: 0.2,
+        },
+    ]
+}
+
+fn phase7_event_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "event_forecast_change_mid_std",
+            name: "Phase 7 PIT forecast profit-change midpoint rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_forecast",
+                value_expression: "(COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0",
+                higher_is_better: true,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_forecast_profit_floor_std",
+            name: "Phase 7 PIT forecast net-profit floor rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_forecast",
+                value_expression: "event.net_profit_min::double precision",
+                higher_is_better: true,
+            },
+            weight: 0.15,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_express_yoy_dedu_np_std",
+            name: "Phase 7 PIT express deducted net-profit YoY rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_express",
+                value_expression: "event.yoy_dedu_np::double precision",
+                higher_is_better: true,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_express_roe_std",
+            name: "Phase 7 PIT express diluted ROE rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_express",
+                value_expression: "event.diluted_roe::double precision",
+                higher_is_better: true,
+            },
+            weight: 0.20,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_disclosure_early_days_std",
+            name: "Phase 7 PIT early disclosure timing rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_disclosure_date",
+                value_expression: "CASE WHEN event.pre_date IS NOT NULL AND event.actual_date IS NOT NULL THEN (event.pre_date - event.actual_date)::double precision ELSE NULL END",
+                higher_is_better: true,
+            },
+            weight: 0.15,
+        },
+    ]
+}
+
+fn phase7_event_window_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "event_window_forecast_change_20d_decay_std",
+            name: "Phase 7 20d decayed forecast profit-change midpoint rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::EventWindow {
+                source_table: "market_stock_forecast",
+                value_expression: "(COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 0.35,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_window_forecast_profit_floor_20d_decay_std",
+            name: "Phase 7 20d decayed forecast net-profit floor rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::EventWindow {
+                source_table: "market_stock_forecast",
+                value_expression: "event.net_profit_min::double precision",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 0.20,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_window_express_roe_20d_decay_std",
+            name: "Phase 7 20d decayed express diluted ROE rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::EventWindow {
+                source_table: "market_stock_express",
+                value_expression: "event.diluted_roe::double precision",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_window_disclosure_early_days_20d_decay_std",
+            name: "Phase 7 20d decayed early disclosure timing rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::EventWindow {
+                source_table: "market_stock_disclosure_date",
+                value_expression: "CASE WHEN event.pre_date IS NOT NULL AND event.actual_date IS NOT NULL THEN (event.pre_date - event.actual_date)::double precision ELSE NULL END",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 0.20,
+        },
+    ]
+}
+
+fn phase7_event_surprise_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "event_forecast_surprise_bucket_std",
+            name: "Phase 7 PIT forecast surprise bucket rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_forecast",
+                value_expression: "CASE
+                    WHEN ((COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0) >= 100.0
+                         AND COALESCE(event.net_profit_min::double precision, 0.0) > 0.0 THEN 3.0
+                    WHEN ((COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0) >= 50.0
+                         AND COALESCE(event.net_profit_min::double precision, 0.0) > 0.0 THEN 2.0
+                    WHEN ((COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0) >= 20.0 THEN 1.0
+                    WHEN ((COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0) >= 0.0 THEN 0.0
+                    WHEN ((COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0) >= -20.0 THEN -1.0
+                    ELSE -2.0
+                END",
+                higher_is_better: true,
+            },
+            weight: 0.35,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_forecast_profit_floor_sign_std",
+            name: "Phase 7 PIT forecast profit-floor sign rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_forecast",
+                value_expression: "CASE
+                    WHEN COALESCE(event.net_profit_min::double precision, 0.0) > 0.0 THEN 1.0
+                    WHEN COALESCE(event.net_profit_min::double precision, 0.0) < 0.0 THEN -1.0
+                    ELSE 0.0
+                END",
+                higher_is_better: true,
+            },
+            weight: 0.20,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_express_roe_bucket_std",
+            name: "Phase 7 PIT express diluted ROE bucket rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_express",
+                value_expression: "CASE
+                    WHEN COALESCE(event.diluted_roe::double precision, 0.0) >= 20.0 THEN 3.0
+                    WHEN COALESCE(event.diluted_roe::double precision, 0.0) >= 10.0 THEN 2.0
+                    WHEN COALESCE(event.diluted_roe::double precision, 0.0) >= 5.0 THEN 1.0
+                    WHEN COALESCE(event.diluted_roe::double precision, 0.0) >= 0.0 THEN 0.0
+                    WHEN COALESCE(event.diluted_roe::double precision, 0.0) >= -5.0 THEN -1.0
+                    ELSE -2.0
+                END",
+                higher_is_better: true,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "event_disclosure_timing_bucket_std",
+            name: "Phase 7 PIT disclosure timing bucket rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::EventLatest {
+                source_table: "market_stock_disclosure_date",
+                value_expression: "CASE
+                    WHEN event.pre_date IS NOT NULL
+                         AND event.actual_date IS NOT NULL
+                         AND (event.pre_date - event.actual_date) >= 7 THEN 2.0
+                    WHEN event.pre_date IS NOT NULL
+                         AND event.actual_date IS NOT NULL
+                         AND (event.pre_date - event.actual_date) >= 1 THEN 1.0
+                    WHEN event.pre_date IS NOT NULL
+                         AND event.actual_date IS NOT NULL
+                         AND (event.pre_date - event.actual_date) = 0 THEN 0.0
+                    WHEN event.pre_date IS NOT NULL
+                         AND event.actual_date IS NOT NULL
+                         AND (event.pre_date - event.actual_date) >= -7 THEN -1.0
+                    WHEN event.pre_date IS NOT NULL
+                         AND event.actual_date IS NOT NULL THEN -2.0
+                    ELSE NULL
+                END",
+                higher_is_better: true,
+            },
+            weight: 0.20,
         },
     ]
 }
@@ -2691,6 +3224,135 @@ pub async fn backfill_phase7_financial_quality_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-industry-residual-quality-backfill/background
+///
+/// Set-based daily PIT financial quality backfill that removes same-industry
+/// mean exposure before ranking, so discovery can test quality alpha beyond
+/// broad industry tilts.
+pub async fn backfill_phase7_industry_residual_quality_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7IndustryResidualQualityBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 industry-residual quality backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result =
+            run_phase7_industry_residual_quality_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = report.total_rows();
+                let total_rows = usize_to_i32(total_rows);
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_industry_residual_quality_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 industry-residual quality profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 industry-residual quality backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 industry-residual quality backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-relative-strength-backfill/background
 ///
 /// Set-based market/industry-relative momentum backfill for expanding Phase 7
@@ -3322,6 +3984,386 @@ pub async fn backfill_phase7_moneyflow_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-event-alpha-backfill/background
+///
+/// Set-based PIT event alpha backfill from forecast, express, and disclosure
+/// date event tables.
+pub async fn backfill_phase7_event_alpha_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7EventAlphaBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 event alpha backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_event_alpha_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_event_alpha_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 event alpha backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 event alpha backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 event alpha backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-event-surprise-backfill/background
+///
+/// Set-based PIT event surprise backfill. This keeps the ordinary-permission
+/// forecast, express, and disclosure data path, but turns available fields into
+/// bucketed/nonlinear event surprise factors.
+pub async fn backfill_phase7_event_surprise_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7EventSurpriseBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 event surprise backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_event_surprise_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_event_surprise_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 event surprise backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 event surprise backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 event surprise backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-event-window-alpha-backfill/background
+///
+/// Set-based PIT event-window alpha backfill from forecast, express, and
+/// disclosure-date event tables. Unlike latest-event carry-forward, this keeps
+/// each event signal alive only for a decayed post-event window.
+pub async fn backfill_phase7_event_window_alpha_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7EventWindowAlphaBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 event-window alpha backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_event_window_alpha_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_event_window_alpha_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 event-window alpha backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 event-window alpha backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 event-window alpha backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-alpha-blend-backfill/background
 ///
 /// Combo-only backfill that blends existing multi-factor alpha scores by
@@ -3590,6 +4632,16 @@ async fn run_phase7_financial_quality_backfill(
     run_set_based_factor_backfill(db, task_id, job).await
 }
 
+async fn run_phase7_industry_residual_quality_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7IndustryResidualQualityBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_industry_residual_quality_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
 async fn run_phase7_relative_strength_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -3660,6 +4712,36 @@ async fn run_phase7_moneyflow_backfill(
     plan: &Phase7MoneyflowBackfillPlan,
 ) -> Result<Phase7BackfillCompletion, String> {
     let specs = phase7_moneyflow_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_event_alpha_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7EventAlphaBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_event_alpha_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_event_surprise_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7EventSurpriseBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_event_surprise_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_event_window_alpha_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7EventWindowAlphaBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_event_window_alpha_backfill_specs();
     let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
     run_set_based_factor_backfill(db, task_id, job).await
 }
@@ -3892,13 +4974,15 @@ async fn execute_set_based_combo_backfill(
     .await
     .map_err(|error| format!("Failed to upsert phase7 combo weights: {}", error))?;
 
+    set_local_combo_backfill_planner(&mut tx).await?;
+
     let result = sqlx::query(&phase7_combo_backfill_sql())
         .bind(&plan.combo_name)
         .bind(&plan.version)
         .bind(&weights_json)
         .bind(plan.start_date)
         .bind(plan.end_date)
-        .bind(specs.len() as i64)
+        .bind(phase7_combo_required_factor_count(specs, plan))
         .execute(&mut *tx)
         .await
         .map_err(|error| {
@@ -3913,6 +4997,16 @@ async fn execute_set_based_combo_backfill(
         .map_err(|error| format!("Failed to commit combo backfill transaction: {}", error))?;
 
     Ok(result.rows_affected() as usize)
+}
+
+fn phase7_combo_required_factor_count(
+    specs: &[SetBasedFactorSpec],
+    plan: &SetBasedFactorBackfillPlan,
+) -> i64 {
+    match plan.combo_method {
+        "weighted_event_earnings" | "weighted_event_window_earnings" => 1,
+        _ => specs.len() as i64,
+    }
 }
 
 async fn execute_phase7_alpha_blend_backfill(
@@ -3944,13 +5038,13 @@ async fn execute_phase7_alpha_blend_backfill(
     .await
     .map_err(|error| format!("Failed to upsert alpha blend weights: {}", error))?;
 
-    let result = sqlx::query(phase7_alpha_blend_backfill_sql())
+    let result = sqlx::query(phase7_alpha_blend_backfill_sql(plan.combo_method))
         .bind(&plan.combo_name)
         .bind(&plan.version)
         .bind(&source_records_json)
         .bind(plan.start_date)
         .bind(plan.end_date)
-        .bind(plan.source_combos.len() as i64)
+        .bind(phase7_alpha_blend_required_source_count(plan))
         .execute(&mut *tx)
         .await
         .map_err(|error| {
@@ -3967,6 +5061,13 @@ async fn execute_phase7_alpha_blend_backfill(
     Ok(result.rows_affected() as usize)
 }
 
+fn phase7_alpha_blend_required_source_count(plan: &Phase7AlphaBlendBackfillPlan) -> i64 {
+    match plan.combo_method {
+        "weighted_combo_optional_overlay" => 1,
+        _ => plan.source_combos.len() as i64,
+    }
+}
+
 async fn set_local_statement_timeout(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     statement_timeout_ms: u64,
@@ -3976,6 +5077,24 @@ async fn set_local_statement_timeout(
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("Failed to set statement_timeout: {}", error))?;
+    Ok(())
+}
+
+async fn set_local_combo_backfill_planner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), String> {
+    // Combo weights are tiny; nested-loop index scans by factor_code avoid
+    // scanning every factor in the trade-date chunk.
+    for statement in [
+        "SET LOCAL enable_bitmapscan = off",
+        "SET LOCAL enable_hashjoin = off",
+        "SET LOCAL enable_mergejoin = off",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("Failed to set combo planner hint: {}", error))?;
+    }
     Ok(())
 }
 
@@ -4165,6 +5284,12 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             source_column,
             higher_is_better,
         } => phase7_financial_latest_backfill_sql(source_column, higher_is_better),
+        Phase7BackfillFactorKind::IndustryRelativeFinancialLatest {
+            source_column,
+            higher_is_better,
+        } => {
+            phase7_industry_relative_financial_latest_backfill_sql(source_column, higher_is_better)
+        }
         Phase7BackfillFactorKind::DailyBasicLatest {
             source_column,
             higher_is_better,
@@ -4174,6 +5299,24 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             amount_expression,
             higher_is_better,
         } => phase7_moneyflow_backfill_sql(spec.period, amount_expression, higher_is_better),
+        Phase7BackfillFactorKind::EventLatest {
+            source_table,
+            value_expression,
+            higher_is_better,
+        } => phase7_event_latest_backfill_sql(source_table, value_expression, higher_is_better),
+        Phase7BackfillFactorKind::EventWindow {
+            source_table,
+            value_expression,
+            higher_is_better,
+            window_days,
+            decay_days,
+        } => phase7_event_window_backfill_sql(
+            source_table,
+            value_expression,
+            higher_is_better,
+            window_days,
+            decay_days,
+        ),
         Phase7BackfillFactorKind::FinancialAnnualChange {
             source_column,
             mode,
@@ -4544,6 +5687,83 @@ fn phase7_financial_latest_backfill_sql(
     )
 }
 
+fn phase7_industry_relative_financial_latest_backfill_sql(
+    source_column: &'static str,
+    higher_is_better: bool,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        symbols AS (
+            SELECT DISTINCT ts_code AS symbol
+            FROM market_financial_indicator
+            WHERE {source_column} IS NOT NULL
+        ),
+        latest AS (
+            SELECT
+                symbols.symbol,
+                td.trade_date,
+                COALESCE(NULLIF(ms.industry, ''), 'UNKNOWN') AS industry,
+                fi.ann_date,
+                fi.raw_value
+            FROM symbols
+            JOIN trade_days td ON true
+            JOIN market_stock ms ON ms.symbol = symbols.symbol
+            JOIN LATERAL (
+                SELECT
+                    ann_date,
+                    {source_column}::double precision AS raw_value
+                FROM market_financial_indicator fi
+                WHERE fi.ts_code = symbols.symbol
+                  AND fi.ann_date <= td.trade_date
+                  AND fi.{source_column} IS NOT NULL
+                ORDER BY fi.ann_date DESC, fi.end_date DESC
+                LIMIT 1
+            ) fi ON true
+        ),
+        residualized AS (
+            SELECT
+                symbol,
+                trade_date,
+                ann_date,
+                raw_value - AVG(raw_value) OVER (
+                    PARTITION BY trade_date, industry
+                ) AS raw_value
+            FROM latest
+            WHERE raw_value IS NOT NULL
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                ann_date,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order}) AS normalized_value
+            FROM residualized
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, ann_date
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
 fn phase7_financial_annual_change_backfill_sql(
     source_column: &'static str,
     mode: FinancialAnnualChangeMode,
@@ -4756,6 +5976,163 @@ fn phase7_moneyflow_backfill_sql(
     )
 }
 
+fn phase7_event_latest_backfill_sql(
+    source_table: &'static str,
+    value_expression: &'static str,
+    higher_is_better: bool,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        symbols AS (
+            SELECT DISTINCT symbol
+            FROM {source_table}
+        ),
+        latest AS (
+            SELECT
+                symbols.symbol,
+                td.trade_date,
+                event.available_at,
+                event.raw_value
+            FROM symbols
+            JOIN trade_days td ON true
+            JOIN LATERAL (
+                SELECT
+                    available_at,
+                    {value_expression} AS raw_value
+                FROM {source_table} event
+                WHERE event.symbol = symbols.symbol
+                  AND event.available_at <= td.trade_date
+                ORDER BY event.available_at DESC, event.end_date DESC, event.created_at DESC
+                LIMIT 1
+            ) event ON true
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                COUNT(*) OVER (PARTITION BY trade_date) AS symbol_count,
+                CASE
+                    WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                    ELSE percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order})
+                END AS normalized_value
+            FROM latest
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_event_window_backfill_sql(
+    source_table: &'static str,
+    value_expression: &'static str,
+    higher_is_better: bool,
+    window_days: i32,
+    decay_days: i32,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+    let window_days = window_days.max(1);
+    let decay_days = decay_days.max(1);
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        events AS (
+            SELECT
+                event.symbol,
+                event.available_at,
+                event.end_date,
+                event.created_at,
+                {value_expression} AS event_raw_value
+            FROM {source_table} event
+            WHERE event.available_at <= $4
+              AND event.available_at >= $3 - INTERVAL '{window_days} days'
+        ),
+        expanded AS (
+            SELECT
+                events.symbol,
+                td.trade_date,
+                events.available_at,
+                events.end_date,
+                events.created_at,
+                events.event_raw_value,
+                GREATEST(0.0, 1.0 - ((td.trade_date - events.available_at)::double precision / {decay_days}.0)) AS decay_weight,
+                ROW_NUMBER() OVER (
+                    PARTITION BY events.symbol, td.trade_date
+                    ORDER BY events.available_at DESC, events.end_date DESC, events.created_at DESC
+                ) AS event_rank
+            FROM events
+            JOIN trade_days td
+              ON td.trade_date >= events.available_at
+             AND td.trade_date <= events.available_at + INTERVAL '{window_days} days'
+            WHERE events.event_raw_value IS NOT NULL
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                event_raw_value * decay_weight AS raw_value
+            FROM expanded
+            WHERE event_rank = 1
+              AND decay_weight > 0.0
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                COUNT(*) OVER (PARTITION BY trade_date) AS symbol_count,
+                CASE
+                    WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                    ELSE percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order})
+                END AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
 fn phase7_combo_backfill_sql() -> &'static str {
     "WITH weights AS (
         SELECT key AS factor_code, value::double precision AS weight
@@ -4765,15 +6142,17 @@ fn phase7_combo_backfill_sql() -> &'static str {
         SELECT
             fv.symbol,
             fv.trade_date,
-            SUM(fv.normalized_value::double precision * weights.weight) AS raw_score,
+            SUM(fv.normalized_value::double precision * weights.weight)
+                / NULLIF(SUM(weights.weight), 0.0) AS raw_score,
             MAX(COALESCE(fv.available_at, fv.trade_date)) AS available_at
-        FROM factor_value fv
-        JOIN weights ON weights.factor_code = fv.factor_code
-        WHERE fv.factor_version = $2
-          AND fv.trade_date BETWEEN $4 AND $5
-          AND fv.normalized_value IS NOT NULL
+        FROM weights
+        JOIN factor_value fv
+          ON fv.factor_code = weights.factor_code
+         AND fv.factor_version = $2
+         AND fv.trade_date BETWEEN $4 AND $5
+         AND fv.normalized_value IS NOT NULL
         GROUP BY fv.symbol, fv.trade_date
-        HAVING COUNT(DISTINCT fv.factor_code) = $6
+        HAVING COUNT(DISTINCT fv.factor_code) >= $6
     )
     INSERT INTO multi_factor_value
         (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
@@ -4786,7 +6165,14 @@ fn phase7_combo_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-fn phase7_alpha_blend_backfill_sql() -> &'static str {
+fn phase7_alpha_blend_backfill_sql(combo_method: &str) -> &'static str {
+    match combo_method {
+        "weighted_combo_optional_overlay" => phase7_optional_overlay_blend_backfill_sql(),
+        _ => phase7_strict_alpha_blend_backfill_sql(),
+    }
+}
+
+fn phase7_strict_alpha_blend_backfill_sql() -> &'static str {
     "WITH sources AS (
         SELECT combo_name, version, weight
         FROM jsonb_to_recordset($3::jsonb)
@@ -4806,6 +6192,72 @@ fn phase7_alpha_blend_backfill_sql() -> &'static str {
           AND mfv.normalized_score IS NOT NULL
         GROUP BY mfv.symbol, mfv.trade_date
         HAVING COUNT(DISTINCT (sources.combo_name, sources.version)) = $6
+    )
+    INSERT INTO multi_factor_value
+        (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+    SELECT $1, $2, symbol, trade_date, raw_score, raw_score, available_at
+    FROM scores
+    ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        normalized_score = EXCLUDED.normalized_score,
+        available_at = EXCLUDED.available_at,
+        created_at = NOW()"
+}
+
+fn phase7_optional_overlay_blend_backfill_sql() -> &'static str {
+    "WITH sources AS (
+        SELECT
+            source_record.item ->> 'combo_name' AS combo_name,
+            source_record.item ->> 'version' AS version,
+            (source_record.item ->> 'weight')::double precision AS weight,
+            source_record.ordinality
+        FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY AS source_record(item, ordinality)
+    ),
+    required_sources AS (
+        SELECT combo_name, version, weight
+        FROM sources
+        WHERE ordinality = 1
+    ),
+    optional_sources AS (
+        SELECT combo_name, version, weight
+        FROM sources
+        WHERE ordinality > 1
+    ),
+    required_scores AS (
+        SELECT
+            mfv.symbol,
+            mfv.trade_date,
+            SUM(mfv.normalized_score::double precision * required_sources.weight) AS required_score,
+            MAX(COALESCE(mfv.available_at, mfv.trade_date)) AS required_available_at
+        FROM multi_factor_value mfv
+        JOIN required_sources
+          ON required_sources.combo_name = mfv.combo_name
+         AND required_sources.version = mfv.version
+        WHERE mfv.trade_date BETWEEN $4 AND $5
+          AND mfv.normalized_score IS NOT NULL
+        GROUP BY mfv.symbol, mfv.trade_date
+        HAVING COUNT(DISTINCT (required_sources.combo_name, required_sources.version)) = $6
+    ),
+    scores AS (
+        SELECT
+            required_scores.symbol,
+            required_scores.trade_date,
+            required_scores.required_score
+                + COALESCE(SUM(optional_mfv.normalized_score::double precision * optional_sources.weight), 0.0)
+                AS raw_score,
+            GREATEST(
+                required_scores.required_available_at,
+                COALESCE(MAX(COALESCE(optional_mfv.available_at, optional_mfv.trade_date)), required_scores.required_available_at)
+            ) AS available_at
+        FROM required_scores
+        LEFT JOIN optional_sources ON true
+        LEFT JOIN multi_factor_value optional_mfv
+          ON optional_mfv.combo_name = optional_sources.combo_name
+         AND optional_mfv.version = optional_sources.version
+         AND optional_mfv.symbol = required_scores.symbol
+         AND optional_mfv.trade_date = required_scores.trade_date
+         AND optional_mfv.normalized_score IS NOT NULL
+        GROUP BY required_scores.symbol, required_scores.trade_date, required_scores.required_score, required_scores.required_available_at
     )
     INSERT INTO multi_factor_value
         (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
@@ -5782,6 +7234,36 @@ mod tests {
     }
 
     #[test]
+    fn phase7_industry_residual_quality_backfill_request_builds_daily_pit_plan() {
+        let req = Phase7IndustryResidualQualityBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-11".to_string()),
+            version: Some("phase7ag-test".to_string()),
+            combo_name: None,
+            statement_timeout_ms: Some(180_000),
+        };
+
+        let plan = req
+            .into_plan()
+            .expect("valid industry-residual quality plan");
+
+        assert_eq!(plan.bundle_name, "phase7_industry_residual_quality_v1");
+        assert_eq!(plan.combo_name, "phase7_industry_residual_quality_v1");
+        assert_eq!(plan.task_type, "phase7_industry_residual_quality_backfill");
+        assert_eq!(plan.category, "fundamental_residual");
+        assert_eq!(plan.phase, "7-AG/7-J");
+        assert_eq!(
+            plan.dependencies,
+            &[
+                "market_financial_indicator",
+                "market_trade_calendar",
+                "market_stock"
+            ]
+        );
+        assert_eq!(plan.statement_timeout_ms, 180_000);
+    }
+
+    #[test]
     fn phase7_relative_strength_backfill_request_builds_market_industry_plan() {
         let req = Phase7RelativeStrengthBackfillRequest {
             start_date: Some("2016-02-01".to_string()),
@@ -6002,16 +7484,27 @@ mod tests {
             .map(|plan| plan.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(plans.len(), 6);
+        assert_eq!(plans.len(), 13);
         assert!(combo_names.contains("phase7_value_quality_growth_rel_v1"));
         assert!(combo_names.contains("phase7_blend_value_tilt_v1"));
         assert!(combo_names.contains("phase7_blend_quality_growth_v1"));
         assert!(combo_names.contains("phase7_blend_defensive_rel_v1"));
         assert!(combo_names.contains("phase7_blend_recovery_tilt_v1"));
         assert!(combo_names.contains("phase7_quality_moneyflow_pos_5pct_v1"));
+        assert!(combo_names.contains("phase7_quality_event_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_event_surprise_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_event_window_overlay_v1"));
+        assert!(combo_names.contains("phase7_quality_residual_confirm_5pct_v1"));
+        assert!(combo_names.contains("phase7_quality_residual_confirm_10pct_v1"));
+        assert!(combo_names.contains("phase7_quality_value_recovery_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_value_recovery_event_confirm_v1"));
         for plan in plans {
             assert_eq!(plan.task_type, "phase7_alpha_blend_profiles_backfill");
-            assert_eq!(plan.combo_method, "weighted_combo_blend_profile");
+            if plan.combo_name == "phase7_quality_event_window_overlay_v1" {
+                assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
+            } else {
+                assert_eq!(plan.combo_method, "weighted_combo_blend_profile");
+            }
             assert!(plan.source_combos.len() >= 2);
             assert!(
                 (plan
@@ -6180,6 +7673,163 @@ mod tests {
     }
 
     #[test]
+    fn phase7_event_alpha_specs_focus_on_pit_earnings_events() {
+        let specs = phase7_event_alpha_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "event_forecast_change_mid_std",
+                "event_forecast_profit_floor_std",
+                "event_express_yoy_dedu_np_std",
+                "event_express_roe_std",
+                "event_disclosure_early_days_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn phase7_event_window_alpha_plan_uses_decayed_event_combo_metadata() {
+        let req = Phase7EventWindowAlphaBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-19".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: Some(300_000),
+        };
+
+        let plan = req.into_plan().expect("valid event-window alpha plan");
+
+        assert_eq!(plan.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(plan.bundle_name, "phase7_event_window_earnings_v1");
+        assert_eq!(plan.combo_method, "weighted_event_window_earnings");
+        assert_eq!(plan.phase, "7-Y2");
+        assert_eq!(plan.category, "event_alpha");
+        assert_eq!(plan.statement_timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn phase7_event_window_alpha_specs_use_available_event_sources_only() {
+        let specs = phase7_event_window_alpha_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "event_window_forecast_change_20d_decay_std",
+                "event_window_forecast_profit_floor_20d_decay_std",
+                "event_window_express_roe_20d_decay_std",
+                "event_window_disclosure_early_days_20d_decay_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(
+            !codes
+                .iter()
+                .any(|code| code.contains("yoy_dedu_np")),
+            "ordinary Tushare express data currently leaves yoy_dedu_np empty, so the first event-window bundle should not spend weight there"
+        );
+    }
+
+    #[test]
+    fn phase7_event_surprise_alpha_plan_uses_segmented_event_combo_metadata() {
+        let req = Phase7EventSurpriseBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-19".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: Some(300_000),
+        };
+
+        let plan = req.into_plan().expect("valid event-surprise alpha plan");
+
+        assert_eq!(plan.combo_name, "phase7_event_surprise_v1");
+        assert_eq!(plan.bundle_name, "phase7_event_surprise_v1");
+        assert_eq!(plan.combo_method, "weighted_event_surprise");
+        assert_eq!(plan.phase, "7-Y4");
+        assert_eq!(plan.category, "event_alpha");
+        assert_eq!(plan.statement_timeout_ms, 300_000);
+        assert!(plan.dependencies.contains(&"market_stock_forecast"));
+        assert!(plan.dependencies.contains(&"market_stock_express"));
+        assert!(plan.dependencies.contains(&"market_stock_disclosure_date"));
+    }
+
+    #[test]
+    fn phase7_event_surprise_alpha_specs_use_segmented_surprise_only() {
+        let specs = phase7_event_surprise_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "event_forecast_surprise_bucket_std",
+                "event_forecast_profit_floor_sign_std",
+                "event_express_roe_bucket_std",
+                "event_disclosure_timing_bucket_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(
+            !codes.iter().any(|code| code.contains("yoy_dedu_np")),
+            "event surprise bundle should avoid empty ordinary express yoy_dedu_np fields"
+        );
+    }
+
+    #[test]
+    fn phase7_event_surprise_alpha_sql_uses_case_buckets_and_pit_carry_forward() {
+        let specs = phase7_event_surprise_backfill_specs();
+        let forecast = specs
+            .iter()
+            .find(|spec| spec.factor_code == "event_forecast_surprise_bucket_std")
+            .expect("forecast surprise spec");
+        let express = specs
+            .iter()
+            .find(|spec| spec.factor_code == "event_express_roe_bucket_std")
+            .expect("express surprise spec");
+        let disclosure = specs
+            .iter()
+            .find(|spec| spec.factor_code == "event_disclosure_timing_bucket_std")
+            .expect("disclosure surprise spec");
+
+        let forecast_sql = phase7_factor_backfill_sql(forecast);
+        let express_sql = phase7_factor_backfill_sql(express);
+        let disclosure_sql = phase7_factor_backfill_sql(disclosure);
+
+        assert!(forecast_sql.contains("market_stock_forecast"));
+        assert!(forecast_sql.contains("CASE"));
+        assert!(forecast_sql.contains("WHEN ((COALESCE(event.p_change_min, event.p_change_max)"));
+        assert!(forecast_sql.contains("COALESCE(event.p_change_min, event.p_change_max)"));
+        assert!(forecast_sql.contains("COALESCE(event.net_profit_min::double precision, 0.0)"));
+        assert!(forecast_sql.contains("event.available_at <= td.trade_date"));
+        assert!(forecast_sql
+            .contains("percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value)"));
+
+        assert!(express_sql.contains("market_stock_express"));
+        assert!(express_sql.contains("COALESCE(event.diluted_roe::double precision, 0.0)"));
+        assert!(express_sql.contains("CASE"));
+        assert!(express_sql.contains("event.available_at <= td.trade_date"));
+
+        assert!(disclosure_sql.contains("market_stock_disclosure_date"));
+        assert!(disclosure_sql.contains("event.pre_date"));
+        assert!(disclosure_sql.contains("event.actual_date"));
+        assert!(disclosure_sql.contains("CASE"));
+    }
+
+    #[test]
     fn set_based_factor_backfill_job_wraps_specs_plan_and_sql_builder() {
         let req = Phase7PriceVolumeBackfillRequest {
             start_date: Some("2016-02-01".to_string()),
@@ -6214,7 +7864,8 @@ mod tests {
 
         let combo_sql = phase7_combo_backfill_sql();
         assert!(combo_sql.contains("multi_factor_value"));
-        assert!(combo_sql.contains("HAVING COUNT(DISTINCT fv.factor_code) = $6"));
+        assert!(combo_sql.contains("HAVING COUNT(DISTINCT fv.factor_code) >= $6"));
+        assert!(combo_sql.contains("/ NULLIF(SUM(weights.weight), 0.0) AS raw_score"));
     }
 
     #[test]
@@ -6236,6 +7887,30 @@ mod tests {
         assert!(roe_sql.contains("JOIN LATERAL"));
         assert!(roe_sql.contains("fi.ann_date <= td.trade_date"));
         assert!(roe_sql.contains("available_at"));
+        assert!(roe_sql.contains("ORDER BY raw_value) AS normalized_value"));
+        assert!(debt_sql.contains("ORDER BY raw_value DESC) AS normalized_value"));
+    }
+
+    #[test]
+    fn phase7_industry_residual_quality_sql_removes_same_industry_mean() {
+        let specs = phase7_industry_residual_quality_backfill_specs();
+        let roe = specs
+            .iter()
+            .find(|spec| spec.factor_code == "fin_roe_indrel_daily_std")
+            .expect("industry residual roe spec");
+        let debt = specs
+            .iter()
+            .find(|spec| spec.factor_code == "fin_debt_to_assets_indrel_daily_std")
+            .expect("industry residual debt spec");
+
+        let roe_sql = phase7_factor_backfill_sql(roe);
+        let debt_sql = phase7_factor_backfill_sql(debt);
+
+        assert!(roe_sql.contains("JOIN market_stock ms ON ms.symbol = symbols.symbol"));
+        assert!(roe_sql.contains("COALESCE(NULLIF(ms.industry, ''), 'UNKNOWN') AS industry"));
+        assert!(roe_sql.contains("PARTITION BY trade_date, industry"));
+        assert!(roe_sql.contains("raw_value - AVG(raw_value)"));
+        assert!(roe_sql.contains("fi.ann_date <= td.trade_date"));
         assert!(roe_sql.contains("ORDER BY raw_value) AS normalized_value"));
         assert!(debt_sql.contains("ORDER BY raw_value DESC) AS normalized_value"));
     }
@@ -6342,13 +8017,127 @@ mod tests {
     }
 
     #[test]
+    fn phase7_event_alpha_sql_uses_available_at_pit_carry_forward() {
+        let specs = phase7_event_alpha_backfill_specs();
+        let plan = Phase7EventAlphaBackfillRequest {
+            start_date: Some("2024-01-01".to_string()),
+            end_date: Some("2024-05-31".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: None,
+        }
+        .into_plan()
+        .expect("valid event alpha plan");
+        let forecast = specs
+            .iter()
+            .find(|spec| spec.factor_code == "event_forecast_change_mid_std")
+            .expect("forecast event spec");
+        let disclosure = specs
+            .iter()
+            .find(|spec| spec.factor_code == "event_disclosure_early_days_std")
+            .expect("disclosure event spec");
+
+        let forecast_sql = phase7_factor_backfill_sql(forecast);
+        let disclosure_sql = phase7_factor_backfill_sql(disclosure);
+
+        assert!(forecast_sql.contains("market_stock_forecast"));
+        assert!(forecast_sql.contains("event.available_at <= td.trade_date"));
+        assert!(forecast_sql.contains("ORDER BY event.available_at DESC"));
+        assert!(forecast_sql
+            .contains("percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value)"));
+        assert!(forecast_sql.contains("WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0"));
+        assert!(forecast_sql.contains("normalized_value, available_at"));
+        assert!(disclosure_sql.contains("market_stock_disclosure_date"));
+        assert!(disclosure_sql.contains("event.pre_date - event.actual_date"));
+        assert_eq!(phase7_combo_required_factor_count(&specs, &plan), 1);
+    }
+
+    #[test]
+    fn phase7_event_window_sql_limits_event_life_and_decays_signal() {
+        let spec = Phase7BackfillFactorSpec {
+            factor_code: "event_window_forecast_change_20d_decay_std",
+            name: "Phase 7 20d decayed forecast event window rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::EventWindow {
+                source_table: "market_stock_forecast",
+                value_expression: "(COALESCE(event.p_change_min, event.p_change_max)::double precision + COALESCE(event.p_change_max, event.p_change_min)::double precision) / 2.0",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 1.0,
+        };
+
+        let sql = phase7_factor_backfill_sql(&spec);
+
+        assert!(sql.contains("market_stock_forecast"));
+        assert!(sql.contains("FROM market_stock_forecast event"));
+        assert!(sql.contains("td.trade_date >= events.available_at"));
+        assert!(sql.contains("td.trade_date <= events.available_at + INTERVAL '20 days'"));
+        assert!(!sql.contains("JOIN LATERAL"));
+        assert!(sql.contains(
+            "GREATEST(0.0, 1.0 - ((td.trade_date - events.available_at)::double precision / 20.0))"
+        ));
+        assert!(sql.contains("event_raw_value * decay_weight AS raw_value"));
+        assert!(sql.contains("percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value)"));
+    }
+
+    #[test]
+    fn phase7_event_window_combo_allows_sparse_event_days() {
+        let specs = phase7_event_window_alpha_backfill_specs();
+        let plan = Phase7EventWindowAlphaBackfillRequest {
+            start_date: Some("2024-01-01".to_string()),
+            end_date: Some("2024-05-31".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: None,
+        }
+        .into_plan()
+        .expect("valid event-window alpha plan");
+
+        assert_eq!(phase7_combo_required_factor_count(&specs, &plan), 1);
+    }
+
+    #[test]
     fn phase7_alpha_blend_sql_combines_existing_combo_scores_by_weight() {
-        let sql = phase7_alpha_blend_backfill_sql();
+        let sql = phase7_alpha_blend_backfill_sql("weighted_combo_blend");
 
         assert!(sql.contains("jsonb_to_recordset($3::jsonb)"));
         assert!(sql.contains("FROM multi_factor_value mfv"));
         assert!(sql.contains("SUM(mfv.normalized_score::double precision * sources.weight)"));
         assert!(sql.contains("HAVING COUNT(DISTINCT (sources.combo_name, sources.version)) = $6"));
+    }
+
+    #[test]
+    fn phase7_alpha_blend_sql_supports_optional_sparse_event_overlay() {
+        let sql = phase7_alpha_blend_backfill_sql("weighted_combo_optional_overlay");
+
+        assert!(sql.contains("jsonb_array_elements($3::jsonb) WITH ORDINALITY"));
+        assert!(sql.contains("required_sources AS"));
+        assert!(sql.contains("optional_sources AS"));
+        assert!(sql.contains("LEFT JOIN multi_factor_value optional_mfv"));
+        assert!(sql.contains("COALESCE(SUM(optional_mfv.normalized_score::double precision * optional_sources.weight), 0.0)"));
+        assert!(sql.contains(
+            "HAVING COUNT(DISTINCT (required_sources.combo_name, required_sources.version)) = $6"
+        ));
+    }
+
+    #[test]
+    fn phase7_optional_overlay_requires_only_the_base_source() {
+        let req = Phase7AlphaBlendProfilesBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2016-02-05".to_string()),
+            version: None,
+            profile_names: Some(vec!["quality_event_window_overlay_5pct".to_string()]),
+            statement_timeout_ms: Some(0),
+        };
+        let plans = req.into_plans().expect("valid optional overlay profile");
+        let plan = plans.first().expect("one selected profile");
+
+        assert_eq!(plan.combo_name, "phase7_quality_event_window_overlay_v1");
+        assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
+        assert_eq!(plan.source_combos.len(), 2);
+        assert_eq!(phase7_alpha_blend_required_source_count(plan), 1);
     }
 
     #[test]
