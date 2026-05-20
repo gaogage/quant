@@ -1511,6 +1511,17 @@ impl MarketRegimePolicy {
         )
     }
 
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_075pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            0.075,
+            ScoreDirection::Descending,
+        )
+    }
+
     pub fn quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1(
         benchmark: impl Into<String>,
     ) -> Self {
@@ -1518,6 +1529,17 @@ impl MarketRegimePolicy {
             benchmark,
             "phase7_event_window_earnings_v1",
             0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            0.125,
             ScoreDirection::Descending,
         )
     }
@@ -6302,6 +6324,28 @@ mod tests {
                 .combo_name,
             "phase7_event_window_earnings_v1"
         );
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_can_allocate_fractional_event_window_sleeve() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+        let policy =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1(
+                "000300.SH",
+            );
+
+        let bear = policy.apply(&base, MarketRegime::Bear);
+
+        let sleeve = bear.portfolio_sleeve.expect("event window sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+        assert!((sleeve.weight - 0.125).abs() < 1e-9);
     }
 
     #[test]
