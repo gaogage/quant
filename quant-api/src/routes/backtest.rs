@@ -1345,6 +1345,26 @@ fn build_market_regime_policy(
         "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1" => {
             MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_blend_10pct_v1(benchmark)
         }
+        "quality_regime_alpha_portfolio_sleeve_event_window_05pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_05pct_v1(
+                benchmark,
+            )
+        }
+        "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1(
+                benchmark,
+            )
+        }
+        "quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1(
+                benchmark,
+            )
+        }
+        "quality_regime_alpha_portfolio_sleeve_event_surprise_10pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_10pct_v1(
+                benchmark,
+            )
+        }
         "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1" => {
             MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1(benchmark)
         }
@@ -2398,6 +2418,33 @@ mod tests {
             quant_backtest::signal_generator::ScoreDirection::Ascending
         );
         assert!((sleeve.weight - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn market_regime_request_builds_event_portfolio_sleeve_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        let sleeve = policy
+            .rules
+            .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .expect("bear event sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(
+            sleeve.score_direction,
+            quant_backtest::signal_generator::ScoreDirection::Descending
+        );
+        assert!((sleeve.weight - 0.10).abs() < 1e-9);
     }
 
     #[test]

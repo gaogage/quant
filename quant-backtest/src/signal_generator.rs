@@ -1500,6 +1500,50 @@ impl MarketRegimePolicy {
         )
     }
 
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_05pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            0.05,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_surprise_v1",
+            0.05,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_surprise_10pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_surprise_v1",
+            0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
     pub fn quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1(
         benchmark: impl Into<String>,
     ) -> Self {
@@ -6225,6 +6269,39 @@ mod tests {
         assert_eq!(sleeve.version, "1.0.0");
         assert_eq!(sleeve.score_direction, ScoreDirection::Ascending);
         assert!((sleeve.weight - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_can_allocate_event_sleeve() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+        let policy =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1(
+                "000300.SH",
+            );
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert!(bull.portfolio_sleeve.is_none());
+        let bear_sleeve = bear.portfolio_sleeve.expect("event portfolio sleeve");
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(bear_sleeve.version, "1.0.0");
+        assert_eq!(bear_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((bear_sleeve.weight - 0.10).abs() < 1e-9);
+        assert_eq!(
+            high_volatility
+                .portfolio_sleeve
+                .expect("high-vol event sleeve")
+                .combo_name,
+            "phase7_event_window_earnings_v1"
+        );
     }
 
     #[test]

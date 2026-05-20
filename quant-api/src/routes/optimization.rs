@@ -369,6 +369,13 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_nearest_candidate_risk_model".to_string(),
             LayeredSearchConfig::professional_nearest_candidate_risk_model_default(),
         ),
+        "professional_event_regime_sleeve"
+        | "event_regime_sleeve"
+        | "phase7_event_regime_sleeve"
+        | "phase7_av" => (
+            "professional_event_regime_sleeve".to_string(),
+            LayeredSearchConfig::professional_event_regime_sleeve_default(),
+        ),
         "professional_volatility_sharpe" | "volatility_sharpe" | "phase7_ai" => (
             "professional_volatility_sharpe".to_string(),
             LayeredSearchConfig::professional_volatility_sharpe_default(),
@@ -2421,6 +2428,10 @@ fn market_regime_request_from_value(
             | "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
             | "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
             | "quality_regime_alpha_portfolio_sleeve_blend_10pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_event_window_05pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1"
+            | "quality_regime_alpha_portfolio_sleeve_event_surprise_10pct_v1"
             | "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1"
             | "quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1"
             | "quality_bear_position_guard_v1"
@@ -5113,6 +5124,42 @@ mod tests {
                 == "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
                 && trial.parameters["portfolio_method"] == "min_variance"
                 && trial.parameters["risk_budget_lookback_days"] == 180
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_event_regime_sleeve_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_av".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_event_regime_sleeve"
+        );
+        assert_eq!(bundle.plan.planned_trials, 6);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial.parameters["portfolio_method"] == "risk_budget"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1"
         }));
     }
 
