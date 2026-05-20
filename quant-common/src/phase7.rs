@@ -3068,6 +3068,98 @@ fn professional_event_window_sleeve_weight_seed_trials() -> Vec<Value> {
     seeds
 }
 
+fn professional_event_window_sleeve_upper_bound_seed_trials() -> Vec<Value> {
+    let mut anchor_seeds = phase7_u2_exact_anchor_seed_trials();
+    let Some(vol22_anchor) = anchor_seeds.drain(..).next() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(vol22_anchor, "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let value40_anchor = with_event_combo_gate_seed_with_min_score(
+        vol18_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let sleeve_policies = [
+        "quality_regime_alpha_portfolio_sleeve_value_15pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+    ];
+    let mut seeds = Vec::new();
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_portfolio_method_seed(
+            value40_anchor.clone(),
+            "risk_budget",
+            120,
+        )],
+    );
+    for policy in sleeve_policies {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_portfolio_method_seed(
+                with_market_regime_seed(value40_anchor.clone(), policy),
+                "risk_budget",
+                120,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_event_window_regime_placement_seed_trials() -> Vec<Value> {
+    let mut anchor_seeds = phase7_u2_exact_anchor_seed_trials();
+    let Some(vol22_anchor) = anchor_seeds.drain(..).next() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(vol22_anchor, "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let value40_anchor = with_event_combo_gate_seed_with_min_score(
+        vol18_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let sleeve_policies = [
+        "quality_regime_alpha_portfolio_sleeve_value_15pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_window_15pct_highvol_only_v1",
+    ];
+    let mut seeds = Vec::new();
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_portfolio_method_seed(
+            value40_anchor.clone(),
+            "risk_budget",
+            120,
+        )],
+    );
+    for policy in sleeve_policies {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_portfolio_method_seed(
+                with_market_regime_seed(value40_anchor.clone(), policy),
+                "risk_budget",
+                120,
+            )],
+        );
+    }
+
+    seeds
+}
+
 fn professional_volatility_sharpe_seed_trials() -> Vec<Value> {
     let anchor_seeds = phase7_u2_exact_anchor_seed_trials();
     let tighter_profiles = [
@@ -4228,6 +4320,32 @@ impl LayeredSearchConfig {
             "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1".to_string(),
         ];
         config.seed_trials = professional_event_window_sleeve_weight_seed_trials();
+        config
+    }
+
+    pub fn professional_event_window_sleeve_upper_bound_default() -> Self {
+        let mut config = Self::professional_event_window_sleeve_weight_default();
+        config.market_regime_policies = vec![
+            "quality_bear_window_guard_v2".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_value_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+        ];
+        config.seed_trials = professional_event_window_sleeve_upper_bound_seed_trials();
+        config
+    }
+
+    pub fn professional_event_window_regime_placement_default() -> Self {
+        let mut config = Self::professional_event_window_sleeve_upper_bound_default();
+        config.market_regime_policies = vec![
+            "quality_bear_window_guard_v2".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_value_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_highvol_only_v1".to_string(),
+        ];
+        config.seed_trials = professional_event_window_regime_placement_seed_trials();
         config
     }
 
@@ -6590,6 +6708,58 @@ mod tests {
         }));
         assert!(config.seed_trials.iter().any(|trial| {
             trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_event_window_sleeve_upper_bound_profile_searches_upper_bound_weight() {
+        let config = LayeredSearchConfig::professional_event_window_sleeve_upper_bound_default();
+
+        assert_eq!(
+            config.combo_versions[0].combo_name,
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![120]);
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string()));
+        assert_eq!(config.seed_trials.len(), 5);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 120
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_event_window_regime_placement_profile_searches_regime_routes() {
+        let config = LayeredSearchConfig::professional_event_window_regime_placement_default();
+
+        assert_eq!(
+            config.combo_versions[0].combo_name,
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![120]);
+        assert!(config.market_regime_policies.contains(
+            &"quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1".to_string()
+        ));
+        assert!(config.market_regime_policies.contains(
+            &"quality_regime_alpha_portfolio_sleeve_event_window_15pct_highvol_only_v1".to_string()
+        ));
+        assert_eq!(config.seed_trials.len(), 5);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 120
         }));
     }
 

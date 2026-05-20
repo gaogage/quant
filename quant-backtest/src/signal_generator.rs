@@ -1544,6 +1544,41 @@ impl MarketRegimePolicy {
         )
     }
 
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            0.15,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve_for_regimes(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            0.15,
+            ScoreDirection::Descending,
+            [MarketRegime::Bear],
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_window_15pct_highvol_only_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve_for_regimes(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            0.15,
+            ScoreDirection::Descending,
+            [MarketRegime::HighVolatility],
+        )
+    }
+
     pub fn quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1(
         benchmark: impl Into<String>,
     ) -> Self {
@@ -1638,6 +1673,22 @@ impl MarketRegimePolicy {
         sleeve_weight: f64,
         sleeve_score_direction: ScoreDirection,
     ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve_for_regimes(
+            benchmark,
+            sleeve_combo_name,
+            sleeve_weight,
+            sleeve_score_direction,
+            [MarketRegime::Bear, MarketRegime::HighVolatility],
+        )
+    }
+
+    fn quality_regime_alpha_portfolio_sleeve_for_regimes(
+        benchmark: impl Into<String>,
+        sleeve_combo_name: &str,
+        sleeve_weight: f64,
+        sleeve_score_direction: ScoreDirection,
+        regimes: impl IntoIterator<Item = MarketRegime>,
+    ) -> Self {
         let mut policy = Self::quality_bear_window_guard_v2(benchmark);
         let sleeve = FactorPortfolioSleeveConfig {
             combo_name: sleeve_combo_name.to_string(),
@@ -1645,7 +1696,7 @@ impl MarketRegimePolicy {
             weight: sleeve_weight.clamp(0.0, 1.0),
             score_direction: sleeve_score_direction,
         };
-        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+        for regime in regimes {
             if let Some(rule) = policy.rules.get_mut(&regime) {
                 rule.portfolio_sleeve = Some(sleeve.clone());
             }
@@ -6346,6 +6397,61 @@ mod tests {
         assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
         assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
         assert!((sleeve.weight - 0.125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_can_allocate_upper_bound_event_window_sleeve() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+        let policy =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1(
+                "000300.SH",
+            );
+
+        let bear = policy.apply(&base, MarketRegime::Bear);
+
+        let sleeve = bear.portfolio_sleeve.expect("event window sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+        assert!((sleeve.weight - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_can_route_event_window_by_regime() {
+        let bear_only =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1(
+                "000300.SH",
+            );
+        let highvol_only =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_highvol_only_v1(
+                "000300.SH",
+            );
+
+        assert!(bear_only
+            .rules
+            .get(&MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .is_some());
+        assert!(bear_only
+            .rules
+            .get(&MarketRegime::HighVolatility)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .is_none());
+        assert!(highvol_only
+            .rules
+            .get(&MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .is_none());
+        assert!(highvol_only
+            .rules
+            .get(&MarketRegime::HighVolatility)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .is_some());
     }
 
     #[test]
