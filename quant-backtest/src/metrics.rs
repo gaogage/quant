@@ -18,6 +18,7 @@ pub struct BacktestMetrics {
     pub sharpe_ratio: Decimal,
     pub sortino_ratio: Decimal,
     pub calmar_ratio: Decimal,
+    pub max_drawdown_duration_days: usize,
     pub benchmark_return_pct: Decimal,
     pub excess_return_pct: Decimal,
     pub information_ratio: Decimal,
@@ -40,6 +41,7 @@ impl Default for BacktestMetrics {
             sharpe_ratio: Decimal::zero(),
             sortino_ratio: Decimal::zero(),
             calmar_ratio: Decimal::zero(),
+            max_drawdown_duration_days: 0,
             benchmark_return_pct: Decimal::zero(),
             excess_return_pct: Decimal::zero(),
             information_ratio: Decimal::zero(),
@@ -134,15 +136,31 @@ impl BacktestMetrics {
         // 最大回撤
         let mut max_dd: Decimal = Decimal::zero();
         let mut peak = nav[0];
+        let mut current_drawdown_duration_days = 0usize;
+        let mut max_drawdown_duration_days = 0usize;
         for v in nav {
-            if *v > peak {
+            if *v >= peak {
                 peak = *v;
+                current_drawdown_duration_days = 0;
+            } else {
+                current_drawdown_duration_days += 1;
+                max_drawdown_duration_days =
+                    max_drawdown_duration_days.max(current_drawdown_duration_days);
             }
             let dd = (peak - *v) / peak;
             if dd > max_dd {
                 max_dd = dd;
             }
         }
+        let calmar_ratio = if max_dd.is_zero() {
+            if annual_return_pct > Decimal::zero() {
+                Decimal::new(999, 0)
+            } else {
+                Decimal::zero()
+            }
+        } else {
+            annual_return_pct / max_dd
+        };
 
         // 基准
         let bm_return = if !bm_nav.is_empty() && !bm_nav[0].is_zero() {
@@ -161,7 +179,8 @@ impl BacktestMetrics {
             annualized_volatility: annual_vol,
             sharpe_ratio: sharpe,
             sortino_ratio: sortino,
-            calmar_ratio: Decimal::zero(),
+            calmar_ratio,
+            max_drawdown_duration_days,
             benchmark_return_pct: bm_return,
             excess_return_pct: excess,
             information_ratio: Decimal::zero(),
@@ -195,5 +214,7 @@ mod tests {
 
         assert!(metrics.sortino_ratio > Decimal::ZERO);
         assert!(metrics.sortino_ratio > metrics.sharpe_ratio);
+        assert!(metrics.calmar_ratio > Decimal::ZERO);
+        assert!(metrics.max_drawdown_duration_days > 0);
     }
 }

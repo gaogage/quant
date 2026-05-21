@@ -814,6 +814,7 @@ impl BacktestRunner {
         output: &BacktestOutput,
     ) -> Result<(), sqlx::Error> {
         let result_id = format!("result-{}", Uuid::new_v4());
+        let metrics_json = serde_json::to_value(&output.metrics).unwrap_or(serde_json::Value::Null);
 
         // Backtest result
         sqlx::query(
@@ -840,7 +841,7 @@ impl BacktestRunner {
         .bind(output.metrics.turnover)
         .bind(output.metrics.num_trades as i32)
         .bind(output.metrics.win_rate_pct)
-        .bind(serde_json::Value::Null)
+        .bind(metrics_json)
         .bind(output.metrics.calmar_ratio)
         .bind(output.metrics.annualized_volatility)
         .bind(output.reproducibility_hash.as_deref().unwrap_or(""))

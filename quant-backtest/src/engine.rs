@@ -1204,6 +1204,8 @@ impl BacktestEngine {
         let mut buy_queue: HashMap<String, Vec<(Decimal, Decimal, Decimal)>> = HashMap::new();
         let mut winning_trades: usize = 0;
         let mut completed_trades: usize = 0;
+        let mut gross_profit = Decimal::zero();
+        let mut gross_loss_abs = Decimal::zero();
         for trade in &self.portfolio.trades {
             if trade.side == super::portfolio::TradeSide::Buy {
                 buy_queue.entry(trade.symbol.clone()).or_default().push((
@@ -1258,6 +1260,9 @@ impl BacktestEngine {
                             - buy_comm;
                         if pnl > Decimal::zero() {
                             winning_trades += 1;
+                            gross_profit += pnl;
+                        } else if pnl < Decimal::zero() {
+                            gross_loss_abs += Decimal::zero() - pnl;
                         }
                         completed_trades += 1;
                         if remaining >= bought_qty {
@@ -1283,9 +1288,22 @@ impl BacktestEngine {
         } else {
             Decimal::zero()
         };
+        metrics.profit_factor = if gross_loss_abs.is_zero() {
+            if gross_profit > Decimal::zero() {
+                Decimal::new(999, 0)
+            } else {
+                Decimal::zero()
+            }
+        } else {
+            gross_profit / gross_loss_abs
+        };
 
         metrics.calmar_ratio = if metrics.max_drawdown_pct.is_zero() {
-            Decimal::zero()
+            if metrics.annual_return_pct > Decimal::zero() {
+                Decimal::new(999, 0)
+            } else {
+                Decimal::zero()
+            }
         } else {
             metrics.annual_return_pct / metrics.max_drawdown_pct
         };

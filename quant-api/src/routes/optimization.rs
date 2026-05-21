@@ -226,6 +226,7 @@ struct RobustnessMetricSummary {
     annual_return: f64,
     sharpe_ratio: f64,
     sortino_ratio: f64,
+    calmar_ratio: f64,
     max_drawdown: f64,
     benchmark_return: Option<f64>,
     excess_return: Option<f64>,
@@ -297,6 +298,7 @@ fn normalize_limit(value: Option<i64>) -> i64 {
 
 fn default_professional_robustness_policy() -> Value {
     json!({
+        "candidate_tier": "professional_observation",
         "min_trade_count": 1,
         "min_annual_return": 0.15,
         "min_excess_return": 0.0,
@@ -316,6 +318,68 @@ fn default_professional_robustness_policy() -> Value {
         "bootstrap_trials": 512,
         "bootstrap_seed": 42
     })
+}
+
+fn default_professional_elite_robustness_policy() -> Value {
+    json!({
+        "candidate_tier": "professional_elite",
+        "min_trade_count": 200,
+        "min_annual_return": 0.15,
+        "min_excess_return": 0.0,
+        "min_sharpe": 1.5,
+        "min_sortino": 1.8,
+        "min_calmar": 2.0,
+        "min_profit_factor": 1.5,
+        "max_drawdown_duration_days": 126,
+        "max_drawdown": 0.35,
+        "min_score_gap": 0.0,
+        "walk_forward_window_days": 756,
+        "walk_forward_step_days": 63,
+        "min_walk_forward_windows": 4,
+        "min_positive_excess_window_ratio": 0.50,
+        "min_positive_annual_return_window_ratio": 0.60,
+        "min_walk_forward_median_sharpe": 0.80,
+        "min_walk_forward_median_calmar": 1.2,
+        "min_bootstrap_positive_return_probability": 0.80,
+        "min_bootstrap_sharpe_p05": 0.0,
+        "min_bootstrap_calmar_p05": 0.0,
+        "max_bootstrap_drawdown_p95": 0.35,
+        "min_market_scenarios": 2,
+        "bootstrap_trials": 1000,
+        "bootstrap_seed": 42
+    })
+}
+
+fn resolve_robustness_gate_policy(gate_policy: Option<&Value>) -> Value {
+    match gate_policy {
+        Some(policy) => {
+            let preset = policy
+                .get("preset")
+                .or_else(|| policy.get("candidate_tier"))
+                .or_else(|| policy.get("tier"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match preset {
+                "elite" | "professional_elite" => {
+                    merge_gate_policy(default_professional_elite_robustness_policy(), policy)
+                }
+                "professional" | "professional_observation" | "observation" | "default" => {
+                    merge_gate_policy(default_professional_robustness_policy(), policy)
+                }
+                _ => policy.clone(),
+            }
+        }
+        None => default_professional_robustness_policy(),
+    }
+}
+
+fn merge_gate_policy(mut base: Value, overrides: &Value) -> Value {
+    if let (Some(base_map), Some(override_map)) = (base.as_object_mut(), overrides.as_object()) {
+        for (key, value) in override_map {
+            base_map.insert(key.clone(), value.clone());
+        }
+    }
+    base
 }
 
 fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchConfig) {
@@ -1414,10 +1478,7 @@ async fn execute_phase7_professional_discovery(
     let max_batches = max_batches.clamp(1, 10_000);
     let robustness_top_n = req.robustness_top_n.unwrap_or(3).clamp(1, 20);
     let targets = CandidateTargets::default();
-    let gate_policy = req
-        .robustness_gate_policy
-        .clone()
-        .unwrap_or_else(default_professional_robustness_policy);
+    let gate_policy = resolve_robustness_gate_policy(req.robustness_gate_policy.as_ref());
     let stop_after_professional = req.stop_after_professional_candidate.unwrap_or(true);
     let stop_after_robust_approval = req.stop_after_robust_approval.unwrap_or(true);
 
@@ -2199,9 +2260,7 @@ async fn evaluate_and_persist_robustness_for_trial(
     .map_err(|error| format!("Failed to load runner-up optimization trial: {}", error))?
     .map(|row| row.0);
 
-    let policy = gate_policy
-        .cloned()
-        .unwrap_or_else(|| default_professional_robustness_policy());
+    let policy = resolve_robustness_gate_policy(gate_policy);
     let analysis = if let Some(backtest_task_id) = trial.3.as_deref() {
         load_robustness_timeseries_analysis(db, backtest_task_id, &policy).await?
     } else {
@@ -3313,6 +3372,30 @@ fn score_trial(
             }));
         }
     }
+    if let Some(limit) = constraint_decimal(constraints, "min_calmar") {
+        if metrics.calmar_ratio <= limit {
+            let gap = limit - metrics.calmar_ratio;
+            score -= gap.max(Decimal::ZERO) * Decimal::new(2, 0);
+            violations.push(json!({
+                "constraint": "min_calmar",
+                "limit": limit,
+                "actual": metrics.calmar_ratio,
+                "severity": "hard"
+            }));
+        }
+    }
+    if let Some(limit) = constraint_decimal(constraints, "min_profit_factor") {
+        if metrics.profit_factor < limit {
+            let gap = limit - metrics.profit_factor;
+            score -= gap.max(Decimal::ZERO);
+            violations.push(json!({
+                "constraint": "min_profit_factor",
+                "limit": limit,
+                "actual": metrics.profit_factor,
+                "severity": "hard"
+            }));
+        }
+    }
     if let Some(limit) = constraint_decimal(constraints, "max_turnover") {
         if metrics.turnover > limit {
             let excess = metrics.turnover - limit;
@@ -3337,6 +3420,20 @@ fn score_trial(
             }));
         }
     }
+    if let Some(limit) = constraint_i64(constraints, "max_drawdown_duration_days") {
+        if (metrics.max_drawdown_duration_days as i64) > limit {
+            score -= Decimal::new(
+                (metrics.max_drawdown_duration_days as i64 - limit).max(0),
+                0,
+            ) * Decimal::new(1, 3);
+            violations.push(json!({
+                "constraint": "max_drawdown_duration_days",
+                "limit": limit,
+                "actual": metrics.max_drawdown_duration_days,
+                "severity": "hard"
+            }));
+        }
+    }
     if let Some(limit) = constraint_decimal(constraints, "min_information_ratio") {
         if metrics.information_ratio < limit {
             let gap = limit - metrics.information_ratio;
@@ -3357,13 +3454,17 @@ fn score_trial(
             "annual_return_pct": metrics.annual_return_pct,
             "sharpe_ratio": metrics.sharpe_ratio,
             "sortino_ratio": metrics.sortino_ratio,
+            "calmar_ratio": metrics.calmar_ratio,
             "max_drawdown_pct": metrics.max_drawdown_pct,
+            "max_drawdown_duration_days": metrics.max_drawdown_duration_days,
+            "annualized_volatility": metrics.annualized_volatility,
             "benchmark_return_pct": metrics.benchmark_return_pct,
             "excess_return_pct": metrics.excess_return_pct,
             "information_ratio": metrics.information_ratio,
             "turnover": metrics.turnover,
             "num_trades": metrics.num_trades,
             "win_rate_pct": metrics.win_rate_pct,
+            "profit_factor": metrics.profit_factor,
         }),
         constraint_violations: Value::Array(violations),
     }
@@ -3379,6 +3480,7 @@ fn professional_candidate_objective_score(
         constraint_decimal(constraints, "min_excess_return").unwrap_or(Decimal::ZERO);
     let min_sharpe = constraint_decimal(constraints, "min_sharpe").unwrap_or(Decimal::ONE);
     let min_sortino = constraint_decimal(constraints, "min_sortino").unwrap_or(Decimal::new(15, 1));
+    let min_calmar = constraint_decimal(constraints, "min_calmar");
     let max_drawdown =
         constraint_decimal(constraints, "max_drawdown").unwrap_or(Decimal::new(35, 2));
 
@@ -3386,23 +3488,31 @@ fn professional_candidate_objective_score(
     let excess_gap = positive_decimal_gap(min_excess_return, metrics.excess_return_pct);
     let sharpe_gap = positive_decimal_gap(min_sharpe, metrics.sharpe_ratio);
     let sortino_gap = positive_decimal_gap(min_sortino, metrics.sortino_ratio);
+    let calmar_gap = min_calmar
+        .map(|limit| positive_decimal_gap(limit, metrics.calmar_ratio))
+        .unwrap_or(Decimal::ZERO);
     let drawdown_gap = positive_decimal_gap(metrics.max_drawdown_pct, max_drawdown);
     let target_gap_score = annual_gap * Decimal::new(4, 0)
         + excess_gap * Decimal::new(2, 0)
         + sharpe_gap * Decimal::new(6, 0)
         + sortino_gap * Decimal::new(2, 0)
+        + calmar_gap * Decimal::new(3, 0)
         + drawdown_gap * Decimal::new(5, 0);
 
     let annual_floor_passed = metrics.annual_return_pct >= min_annual_return;
     let excess_floor_passed = metrics.excess_return_pct > min_excess_return;
     let drawdown_passed = metrics.max_drawdown_pct < max_drawdown;
     let sortino_passed = metrics.sortino_ratio >= min_sortino;
+    let calmar_passed = min_calmar
+        .map(|limit| metrics.calmar_ratio > limit)
+        .unwrap_or(false);
 
     let floor_bonus = [
         annual_floor_passed,
         excess_floor_passed,
         drawdown_passed,
         sortino_passed,
+        calmar_passed,
     ]
     .into_iter()
     .filter(|passed| *passed)
@@ -3411,6 +3521,7 @@ fn professional_candidate_objective_score(
     Decimal::new(floor_bonus, 0) - target_gap_score
         + metrics.sharpe_ratio * Decimal::new(3, 0)
         + metrics.sortino_ratio * Decimal::new(1, 0)
+        + metrics.calmar_ratio * Decimal::new(5, 1)
         + metrics.annual_return_pct
         + metrics.excess_return_pct * Decimal::new(1, 2)
         - metrics.max_drawdown_pct
@@ -3503,6 +3614,7 @@ fn build_walk_forward_analysis(
     let mut excess_returns = Vec::new();
     let mut sharpes = Vec::new();
     let mut sortinos = Vec::new();
+    let mut calmars = Vec::new();
     let mut idx = 0;
     while idx + window_size <= points.len() {
         let slice = &points[idx..idx + window_size];
@@ -3515,6 +3627,7 @@ fn build_walk_forward_analysis(
         }
         sharpes.push(summary.sharpe_ratio);
         sortinos.push(summary.sortino_ratio);
+        calmars.push(summary.calmar_ratio);
         windows.push(json!({
             "window_index": windows.len() + 1,
             "start_date": slice.first().map(|point| point.trade_date),
@@ -3561,6 +3674,7 @@ fn build_walk_forward_analysis(
         "excess_return": distribution_summary(&mut excess_returns),
         "sharpe_ratio": distribution_summary(&mut sharpes),
         "sortino_ratio": distribution_summary(&mut sortinos),
+        "calmar_ratio": distribution_summary(&mut calmars),
         "windows": windows
     })
 }
@@ -3582,6 +3696,8 @@ fn build_bootstrap_analysis(
     let mut total_returns = Vec::with_capacity(trials);
     let mut sharpes = Vec::with_capacity(trials);
     let mut sortinos = Vec::with_capacity(trials);
+    let mut calmars = Vec::with_capacity(trials);
+    let mut drawdowns = Vec::with_capacity(trials);
     let mut positive = 0usize;
 
     for _ in 0..trials {
@@ -3595,6 +3711,8 @@ fn build_bootstrap_analysis(
         total_returns.push(summary.total_return);
         sharpes.push(summary.sharpe_ratio);
         sortinos.push(summary.sortino_ratio);
+        calmars.push(summary.calmar_ratio);
+        drawdowns.push(summary.max_drawdown);
     }
 
     Ok(json!({
@@ -3603,7 +3721,9 @@ fn build_bootstrap_analysis(
         "positive_return_probability": positive as f64 / trials as f64,
         "total_return": distribution_summary(&mut total_returns),
         "sharpe_ratio": distribution_summary(&mut sharpes),
-        "sortino_ratio": distribution_summary(&mut sortinos)
+        "sortino_ratio": distribution_summary(&mut sortinos),
+        "calmar_ratio": distribution_summary(&mut calmars),
+        "max_drawdown": distribution_summary(&mut drawdowns)
     }))
 }
 
@@ -3646,12 +3766,17 @@ fn summarize_points(points: &[RobustnessDailyPoint]) -> RobustnessMetricSummary 
         .into()
     };
     let sample = summarize_return_sample(&portfolio_returns);
+    let max_drawdown = max_drawdown(&mut nav);
     RobustnessMetricSummary {
         total_return,
         annual_return: annualized_return(total_return, points.len().saturating_sub(1)),
         sharpe_ratio: sample.sharpe_ratio,
         sortino_ratio: sample.sortino_ratio,
-        max_drawdown: max_drawdown(&mut nav),
+        calmar_ratio: calmar_ratio(
+            annualized_return(total_return, points.len().saturating_sub(1)),
+            max_drawdown,
+        ),
+        max_drawdown,
         benchmark_return,
         excess_return: benchmark_return.map(|value| total_return - value),
     }
@@ -3661,6 +3786,7 @@ fn summarize_return_sample(returns: &[f64]) -> RobustnessMetricSummary {
     let total_return = returns.iter().fold(1.0, |acc, value| acc * (1.0 + value)) - 1.0;
     let volatility = annualized_volatility(returns);
     let annual_return = annualized_return(total_return, returns.len());
+    let max_drawdown = drawdown_from_returns(returns);
     RobustnessMetricSummary {
         total_return,
         annual_return,
@@ -3670,7 +3796,8 @@ fn summarize_return_sample(returns: &[f64]) -> RobustnessMetricSummary {
             0.0
         },
         sortino_ratio: sortino_ratio(annual_return, returns),
-        max_drawdown: drawdown_from_returns(returns),
+        calmar_ratio: calmar_ratio(annual_return, max_drawdown),
+        max_drawdown,
         benchmark_return: None,
         excess_return: None,
     }
@@ -3682,6 +3809,7 @@ fn metric_summary_json(summary: &RobustnessMetricSummary) -> Value {
         "annual_return": summary.annual_return,
         "sharpe_ratio": summary.sharpe_ratio,
         "sortino_ratio": summary.sortino_ratio,
+        "calmar_ratio": summary.calmar_ratio,
         "max_drawdown": summary.max_drawdown,
         "benchmark_return": summary.benchmark_return,
         "excess_return": summary.excess_return
@@ -3753,6 +3881,16 @@ fn sortino_ratio(annual_return: f64, returns: &[f64]) -> f64 {
     let downside_deviation = (downside_sum / (returns.len() - 1) as f64).sqrt() * 252.0_f64.sqrt();
     if downside_deviation > 0.0 {
         annual_return / downside_deviation
+    } else {
+        0.0
+    }
+}
+
+fn calmar_ratio(annual_return: f64, max_drawdown: f64) -> f64 {
+    if max_drawdown > 0.0 {
+        annual_return / max_drawdown
+    } else if annual_return > 0.0 {
+        999.0
     } else {
         0.0
     }
@@ -3838,6 +3976,10 @@ fn evaluate_robustness_gates_with_analysis(
     let min_excess_return = constraint_decimal(gate_policy, "min_excess_return");
     let min_sharpe = constraint_decimal(gate_policy, "min_sharpe");
     let min_sortino = constraint_decimal(gate_policy, "min_sortino");
+    let min_calmar = constraint_decimal(gate_policy, "min_calmar");
+    let min_profit_factor = constraint_decimal(gate_policy, "min_profit_factor");
+    let min_win_rate = constraint_decimal(gate_policy, "min_win_rate");
+    let max_drawdown_duration_days = constraint_i64(gate_policy, "max_drawdown_duration_days");
     let max_drawdown =
         constraint_decimal(gate_policy, "max_drawdown").unwrap_or(Decimal::new(20, 2));
     let min_score_gap = constraint_decimal(gate_policy, "min_score_gap").unwrap_or(Decimal::ZERO);
@@ -3849,10 +3991,14 @@ fn evaluate_robustness_gates_with_analysis(
         constraint_f64(gate_policy, "min_positive_annual_return_window_ratio").unwrap_or(0.0);
     let min_walk_forward_median_sharpe =
         constraint_f64(gate_policy, "min_walk_forward_median_sharpe").unwrap_or(0.0);
+    let min_walk_forward_median_calmar =
+        constraint_f64(gate_policy, "min_walk_forward_median_calmar");
     let min_bootstrap_positive_return_probability =
         constraint_f64(gate_policy, "min_bootstrap_positive_return_probability").unwrap_or(0.0);
     let min_bootstrap_sharpe_p05 =
         constraint_f64(gate_policy, "min_bootstrap_sharpe_p05").unwrap_or(f64::NEG_INFINITY);
+    let min_bootstrap_calmar_p05 = constraint_f64(gate_policy, "min_bootstrap_calmar_p05");
+    let max_bootstrap_drawdown_p95 = constraint_f64(gate_policy, "max_bootstrap_drawdown_p95");
     let min_market_scenarios = constraint_i64(gate_policy, "min_market_scenarios").unwrap_or(1);
 
     let num_trades = metrics
@@ -3865,7 +4011,13 @@ fn evaluate_robustness_gates_with_analysis(
         decimal_from_json(metrics.get("excess_return_pct")).unwrap_or(Decimal::ZERO);
     let sharpe = decimal_from_json(metrics.get("sharpe_ratio")).unwrap_or(Decimal::ZERO);
     let sortino = decimal_from_json(metrics.get("sortino_ratio")).unwrap_or(Decimal::ZERO);
+    let calmar = decimal_from_json(metrics.get("calmar_ratio")).unwrap_or(Decimal::ZERO);
+    let profit_factor = decimal_from_json(metrics.get("profit_factor")).unwrap_or(Decimal::ZERO);
+    let win_rate = decimal_from_json(metrics.get("win_rate_pct")).unwrap_or(Decimal::ZERO);
     let drawdown = decimal_from_json(metrics.get("max_drawdown_pct")).unwrap_or(Decimal::ZERO);
+    let drawdown_duration_days = metrics
+        .get("max_drawdown_duration_days")
+        .and_then(Value::as_i64);
     let hard_violations = constraint_violations
         .as_array()
         .map(|items| !items.is_empty())
@@ -3937,6 +4089,38 @@ fn evaluate_robustness_gates_with_analysis(
             "actual": sortino,
         }));
     }
+    if let Some(limit) = min_calmar {
+        gates.push(json!({
+            "gate": "min_calmar",
+            "passed": calmar > limit,
+            "limit": limit,
+            "actual": calmar,
+        }));
+    }
+    if let Some(limit) = min_profit_factor {
+        gates.push(json!({
+            "gate": "min_profit_factor",
+            "passed": profit_factor > limit,
+            "limit": limit,
+            "actual": profit_factor,
+        }));
+    }
+    if let Some(limit) = min_win_rate {
+        gates.push(json!({
+            "gate": "min_win_rate",
+            "passed": win_rate >= limit,
+            "limit": limit,
+            "actual": win_rate,
+        }));
+    }
+    if let Some(limit) = max_drawdown_duration_days {
+        gates.push(json!({
+            "gate": "max_drawdown_duration_days",
+            "passed": drawdown_duration_days.map(|actual| actual <= limit).unwrap_or(false),
+            "limit": limit,
+            "actual": drawdown_duration_days,
+        }));
+    }
     if let Some(analysis) = analysis {
         let window_count = analysis.walk_forward["window_count"].as_i64().unwrap_or(0);
         let positive_excess_window_ratio = analysis.walk_forward["positive_excess_window_ratio"]
@@ -3948,6 +4132,9 @@ fn evaluate_robustness_gates_with_analysis(
         let walk_forward_median_sharpe = analysis.walk_forward["sharpe_ratio"]["median"]
             .as_f64()
             .unwrap_or(0.0);
+        let walk_forward_median_calmar = analysis.walk_forward["calmar_ratio"]["median"]
+            .as_f64()
+            .unwrap_or(0.0);
         let bootstrap_positive_return_probability = analysis.bootstrap
             ["positive_return_probability"]
             .as_f64()
@@ -3955,6 +4142,12 @@ fn evaluate_robustness_gates_with_analysis(
         let bootstrap_sharpe_p05 = analysis.bootstrap["sharpe_ratio"]["p05"]
             .as_f64()
             .unwrap_or(f64::NEG_INFINITY);
+        let bootstrap_calmar_p05 = analysis.bootstrap["calmar_ratio"]["p05"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let bootstrap_drawdown_p95 = analysis.bootstrap["max_drawdown"]["p95"]
+            .as_f64()
+            .unwrap_or(0.0);
         let market_scenario_count = analysis.walk_forward["scenario_count"]
             .as_i64()
             .or_else(|| analysis.market_scenarios["scenario_count"].as_i64())
@@ -3989,6 +4182,15 @@ fn evaluate_robustness_gates_with_analysis(
             "actual": walk_forward_median_sharpe,
             "details": analysis.walk_forward["sharpe_ratio"].clone(),
         }));
+        if let Some(limit) = min_walk_forward_median_calmar {
+            gates.push(json!({
+                "gate": "walk_forward_median_calmar",
+                "passed": walk_forward_median_calmar >= limit,
+                "limit": limit,
+                "actual": walk_forward_median_calmar,
+                "details": analysis.walk_forward["calmar_ratio"].clone(),
+            }));
+        }
         gates.push(json!({
             "gate": "bootstrap_positive_return_probability",
             "passed": bootstrap_positive_return_probability >= min_bootstrap_positive_return_probability,
@@ -4003,6 +4205,24 @@ fn evaluate_robustness_gates_with_analysis(
             "actual": bootstrap_sharpe_p05,
             "details": analysis.bootstrap["sharpe_ratio"].clone(),
         }));
+        if let Some(limit) = min_bootstrap_calmar_p05 {
+            gates.push(json!({
+                "gate": "bootstrap_calmar_p05",
+                "passed": bootstrap_calmar_p05 >= limit,
+                "limit": limit,
+                "actual": bootstrap_calmar_p05,
+                "details": analysis.bootstrap["calmar_ratio"].clone(),
+            }));
+        }
+        if let Some(limit) = max_bootstrap_drawdown_p95 {
+            gates.push(json!({
+                "gate": "bootstrap_drawdown_p95",
+                "passed": bootstrap_drawdown_p95 <= limit,
+                "limit": limit,
+                "actual": bootstrap_drawdown_p95,
+                "details": analysis.bootstrap["max_drawdown"].clone(),
+            }));
+        }
         gates.push(json!({
             "gate": "market_scenario_coverage",
             "passed": market_scenario_count >= min_market_scenarios,
@@ -4080,8 +4300,20 @@ fn build_primary_failure_modes(failed_gates: &[Value]) -> Vec<Value> {
             "min_sortino" => {
                 modes.insert("sortino_shortfall");
             }
+            "min_calmar" | "walk_forward_median_calmar" | "bootstrap_calmar_p05" => {
+                modes.insert("calmar_shortfall");
+            }
+            "min_profit_factor" => {
+                modes.insert("profit_factor_shortfall");
+            }
             "max_drawdown" => {
                 modes.insert("drawdown_excess");
+            }
+            "max_drawdown_duration_days" => {
+                modes.insert("drawdown_duration_excess");
+            }
+            "bootstrap_drawdown_p95" => {
+                modes.insert("bootstrap_drawdown_tail_risk");
             }
             "walk_forward_positive_excess_ratio" | "walk_forward_min_window_count" => {
                 modes.insert("walk_forward_instability");
@@ -4240,6 +4472,8 @@ fn extract_bootstrap_tail(gate_items: &[Value]) -> Value {
                 "total_return": gate["details"]["total_return"].clone(),
                 "sharpe_ratio": gate["details"]["sharpe_ratio"].clone(),
                 "sortino_ratio": gate["details"]["sortino_ratio"].clone(),
+                "calmar_ratio": gate["details"]["calmar_ratio"].clone(),
+                "max_drawdown": gate["details"]["max_drawdown"].clone(),
             })
         })
         .unwrap_or_else(|| json!({}))
@@ -9089,6 +9323,26 @@ mod tests {
     }
 
     #[test]
+    fn professional_elite_robustness_policy_encodes_metric_matrix() {
+        let policy = default_professional_elite_robustness_policy();
+
+        assert_eq!(policy["candidate_tier"], "professional_elite");
+        assert_eq!(policy["min_annual_return"], 0.15);
+        assert_eq!(policy["min_sharpe"], 1.5);
+        assert_eq!(policy["min_sortino"], 1.8);
+        assert_eq!(policy["min_calmar"], 2.0);
+        assert_eq!(policy["min_profit_factor"], 1.5);
+        assert_eq!(policy["min_trade_count"], 200);
+        assert_eq!(policy["max_drawdown_duration_days"], 126);
+        assert_eq!(policy["bootstrap_trials"], 1000);
+        assert_eq!(
+            resolve_robustness_gate_policy(Some(&json!({"preset": "professional_elite"})))
+                ["min_calmar"],
+            2.0
+        );
+    }
+
+    #[test]
     fn professional_robustness_gate_rejects_low_sortino_candidate() {
         let evaluation = evaluate_robustness_gates(
             Decimal::new(10, 1),
@@ -9099,6 +9353,8 @@ mod tests {
                 "excess_return_pct": "0.04",
                 "sharpe_ratio": "1.10",
                 "sortino_ratio": "1.00",
+                "calmar_ratio": "0.90",
+                "profit_factor": "1.20",
                 "max_drawdown_pct": "0.20"
             }),
             &json!([]),
@@ -9115,12 +9371,46 @@ mod tests {
     }
 
     #[test]
+    fn elite_robustness_gate_rejects_low_calmar_and_profit_factor() {
+        let evaluation = evaluate_robustness_gates(
+            Decimal::new(10, 1),
+            Some(Decimal::new(6, 1)),
+            &json!({
+                "num_trades": 250,
+                "annual_return_pct": "0.18",
+                "excess_return_pct": "0.04",
+                "sharpe_ratio": "1.60",
+                "sortino_ratio": "1.90",
+                "calmar_ratio": "1.20",
+                "profit_factor": "1.20",
+                "max_drawdown_duration_days": 180,
+                "max_drawdown_pct": "0.15"
+            }),
+            &json!([]),
+            Some(&default_professional_elite_robustness_policy()),
+        );
+
+        assert_eq!(evaluation.status, "rejected");
+        let gates = evaluation.gates.as_array().expect("gates");
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "min_calmar" && gate["passed"] == false));
+        assert!(gates
+            .iter()
+            .any(|gate| { gate["gate"] == "min_profit_factor" && gate["passed"] == false }));
+        assert!(gates.iter().any(|gate| {
+            gate["gate"] == "max_drawdown_duration_days" && gate["passed"] == false
+        }));
+    }
+
+    #[test]
     fn market_scenario_classifies_regime_from_benchmark_path() {
         let bull = RobustnessMetricSummary {
             total_return: 0.18,
             annual_return: 0.20,
             sharpe_ratio: 1.2,
             sortino_ratio: 1.8,
+            calmar_ratio: 5.0,
             max_drawdown: 0.04,
             benchmark_return: Some(0.18),
             excess_return: Some(0.02),
@@ -9130,6 +9420,7 @@ mod tests {
             annual_return: -0.02,
             sharpe_ratio: -0.3,
             sortino_ratio: -0.2,
+            calmar_ratio: -0.08,
             max_drawdown: 0.24,
             benchmark_return: Some(-0.18),
             excess_return: Some(0.16),
@@ -9139,6 +9430,7 @@ mod tests {
             annual_return: 0.01,
             sharpe_ratio: 0.1,
             sortino_ratio: 0.1,
+            calmar_ratio: 0.1,
             max_drawdown: 0.10,
             benchmark_return: Some(0.01),
             excess_return: Some(0.0),
@@ -9166,6 +9458,7 @@ mod tests {
         assert_eq!(analysis["windows"][1]["scenario"], "bear");
         assert!(analysis["positive_excess_window_ratio"].as_f64().unwrap() > 0.0);
         assert!(analysis["worst_window_drawdown"].as_f64().unwrap() > 0.0);
+        assert!(analysis["calmar_ratio"]["median"].is_number());
     }
 
     #[test]
@@ -9183,6 +9476,8 @@ mod tests {
         assert!(analysis["positive_return_probability"].as_f64().unwrap() > 0.50);
         assert!(analysis["total_return"]["p05"].is_number());
         assert!(analysis["sharpe_ratio"]["median"].is_number());
+        assert!(analysis["calmar_ratio"]["median"].is_number());
+        assert!(analysis["max_drawdown"]["p95"].is_number());
     }
 
     #[test]

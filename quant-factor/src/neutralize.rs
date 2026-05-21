@@ -101,7 +101,6 @@ pub fn neutralize(
                 continue;
             }
 
-            let n = indices.len() as f64;
             let pairs: Vec<(f64, f64)> = indices
                 .iter()
                 .filter_map(|&i| {
