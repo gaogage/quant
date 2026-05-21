@@ -37,6 +37,14 @@ pub struct SignalConfig {
     pub min_daily_amount_cny: Option<f64>,
     /// Max position weight per stock (e.g. 0.10 = 10%)
     pub max_position_pct: Decimal,
+    /// Portfolio notional used to translate ADV/participation limits into target weight caps.
+    pub portfolio_notional_cny: Option<f64>,
+    /// Optional target-weight cap derived from average trading amount and participation rate.
+    pub max_participation_rate: Option<f64>,
+    /// Portfolio-level capacity budget applied after initial target-weight construction.
+    pub capacity_risk_budget_profile: CapacityRiskBudgetProfile,
+    /// Rebalance-path execution budget applied against previous target weights.
+    pub execution_impact_budget_profile: ExecutionImpactBudgetProfile,
     /// Skip top N% of ranked stocks to avoid value traps (extreme reversal = junk).
     /// e.g. 0.15 = skip top 15%, pick from the 15th-100th percentile.
     /// Default: 0.0 (pick from top)
@@ -103,6 +111,14 @@ pub struct PredictionSignalConfig {
     pub min_daily_amount_cny: Option<f64>,
     /// Max position weight per stock.
     pub max_position_pct: Decimal,
+    /// Portfolio notional used to translate ADV/participation limits into target weight caps.
+    pub portfolio_notional_cny: Option<f64>,
+    /// Optional target-weight cap derived from average trading amount and participation rate.
+    pub max_participation_rate: Option<f64>,
+    /// Portfolio-level capacity budget applied after initial target-weight construction.
+    pub capacity_risk_budget_profile: CapacityRiskBudgetProfile,
+    /// Rebalance-path execution budget applied against previous target weights.
+    pub execution_impact_budget_profile: ExecutionImpactBudgetProfile,
     /// Skip top N% of ranked stocks.
     pub skip_top_pct: f64,
     /// Optional max absolute pairwise correlation among selected holdings.
@@ -191,6 +207,10 @@ impl Default for PredictionSignalConfig {
             entry_delay_days: 0,
             min_daily_amount_cny: None,
             max_position_pct: Decimal::new(10, 2),
+            portfolio_notional_cny: None,
+            max_participation_rate: None,
+            capacity_risk_budget_profile: CapacityRiskBudgetProfile::Off,
+            execution_impact_budget_profile: ExecutionImpactBudgetProfile::Off,
             skip_top_pct: 0.0,
             max_pairwise_correlation: None,
             correlation_lookback_days: 60,
@@ -755,6 +775,10 @@ impl Default for SignalConfig {
             entry_delay_days: 0,        // no delay by default
             min_daily_amount_cny: None, // no filter by default
             max_position_pct: Decimal::new(10, 2),
+            portfolio_notional_cny: None,
+            max_participation_rate: None,
+            capacity_risk_budget_profile: CapacityRiskBudgetProfile::Off,
+            execution_impact_budget_profile: ExecutionImpactBudgetProfile::Off,
             skip_top_pct: 0.0,
             max_pairwise_correlation: None,
             correlation_lookback_days: 60,
@@ -794,6 +818,120 @@ pub enum PortfolioConstructionMethod {
     Heuristic,
     RiskBudget,
     MinVariance,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityRiskBudgetProfile {
+    #[default]
+    Off,
+    ParticipationBalancedV1,
+    ParticipationStrictV1,
+}
+
+impl CapacityRiskBudgetProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "participation_balanced_v1"
+            | "participation-balanced-v1"
+            | "capacity_participation_balanced_v1"
+            | "capacity-participation-balanced-v1" => Ok(Self::ParticipationBalancedV1),
+            "participation_strict_v1"
+            | "participation-strict-v1"
+            | "capacity_participation_strict_v1"
+            | "capacity-participation-strict-v1" => Ok(Self::ParticipationStrictV1),
+            other => Err(format!("unsupported capacity_risk_budget: {}", other)),
+        }
+    }
+
+    fn params(self) -> Option<CapacityRiskBudgetParams> {
+        match self {
+            Self::Off => None,
+            Self::ParticipationBalancedV1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.30,
+                low_capacity_max_weight_pct: 0.30,
+                refill_gross_exposure: true,
+            }),
+            Self::ParticipationStrictV1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.40,
+                low_capacity_max_weight_pct: 0.20,
+                refill_gross_exposure: true,
+            }),
+        }
+    }
+
+    fn uses_capacity(self) -> bool {
+        self.params().is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CapacityRiskBudgetParams {
+    low_capacity_quantile: f64,
+    low_capacity_max_weight_pct: f64,
+    refill_gross_exposure: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionImpactBudgetProfile {
+    #[default]
+    Off,
+    Turnover30PctV1,
+    Turnover20PctV1,
+    Turnover15PctV1,
+}
+
+impl ExecutionImpactBudgetProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "turnover_30pct_v1"
+            | "turnover-30pct-v1"
+            | "impact_turnover_30pct_v1"
+            | "impact-turnover-30pct-v1"
+            | "execution_impact_turnover_30pct_v1"
+            | "execution-impact-turnover-30pct-v1" => Ok(Self::Turnover30PctV1),
+            "turnover_20pct_v1"
+            | "turnover-20pct-v1"
+            | "impact_turnover_20pct_v1"
+            | "impact-turnover-20pct-v1"
+            | "execution_impact_turnover_20pct_v1"
+            | "execution-impact-turnover-20pct-v1" => Ok(Self::Turnover20PctV1),
+            "turnover_15pct_v1"
+            | "turnover-15pct-v1"
+            | "impact_turnover_15pct_v1"
+            | "impact-turnover-15pct-v1"
+            | "execution_impact_turnover_15pct_v1"
+            | "execution-impact-turnover-15pct-v1" => Ok(Self::Turnover15PctV1),
+            other => Err(format!("unsupported execution_impact_budget: {}", other)),
+        }
+    }
+
+    fn params(self) -> Option<ExecutionImpactBudgetParams> {
+        match self {
+            Self::Off => None,
+            Self::Turnover30PctV1 => Some(ExecutionImpactBudgetParams {
+                max_rebalance_turnover_pct: 0.30,
+                max_new_name_weight_pct: 0.06,
+            }),
+            Self::Turnover20PctV1 => Some(ExecutionImpactBudgetParams {
+                max_rebalance_turnover_pct: 0.20,
+                max_new_name_weight_pct: 0.04,
+            }),
+            Self::Turnover15PctV1 => Some(ExecutionImpactBudgetParams {
+                max_rebalance_turnover_pct: 0.15,
+                max_new_name_weight_pct: 0.03,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecutionImpactBudgetParams {
+    max_rebalance_turnover_pct: f64,
+    max_new_name_weight_pct: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3340,6 +3478,9 @@ impl MarketRegimePolicy {
 struct PortfolioConstructionConfig {
     top_n: usize,
     max_position_pct: Decimal,
+    portfolio_notional_cny: Option<f64>,
+    max_participation_rate: Option<f64>,
+    capacity_risk_budget_profile: CapacityRiskBudgetProfile,
     max_pairwise_correlation: Option<f64>,
     correlation_lookback_days: usize,
     kelly_fraction: f64,
@@ -3359,6 +3500,9 @@ impl Default for PortfolioConstructionConfig {
         Self {
             top_n: 20,
             max_position_pct: Decimal::new(10, 2),
+            portfolio_notional_cny: None,
+            max_participation_rate: None,
+            capacity_risk_budget_profile: CapacityRiskBudgetProfile::Off,
             max_pairwise_correlation: None,
             correlation_lookback_days: 60,
             kelly_fraction: 0.0,
@@ -3380,6 +3524,9 @@ impl From<&SignalConfig> for PortfolioConstructionConfig {
         Self {
             top_n: capped_portfolio_top_n(config.top_n, config.portfolio_method),
             max_position_pct: config.max_position_pct,
+            portfolio_notional_cny: config.portfolio_notional_cny,
+            max_participation_rate: config.max_participation_rate,
+            capacity_risk_budget_profile: config.capacity_risk_budget_profile,
             max_pairwise_correlation: config.max_pairwise_correlation,
             correlation_lookback_days: config.correlation_lookback_days,
             kelly_fraction: config.kelly_fraction,
@@ -3401,6 +3548,9 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
         Self {
             top_n: capped_portfolio_top_n(config.top_n, config.portfolio_method),
             max_position_pct: config.max_position_pct,
+            portfolio_notional_cny: config.portfolio_notional_cny,
+            max_participation_rate: config.max_participation_rate,
+            capacity_risk_budget_profile: config.capacity_risk_budget_profile,
             max_pairwise_correlation: config.max_pairwise_correlation,
             correlation_lookback_days: config.correlation_lookback_days,
             kelly_fraction: config.kelly_fraction,
@@ -3414,6 +3564,15 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
             candidate_risk_filter_profile: config.candidate_risk_filter_profile,
             risk_contribution_control_profile: config.risk_contribution_control_profile,
         }
+    }
+}
+
+impl PortfolioConstructionConfig {
+    fn uses_capacity_inputs(&self) -> bool {
+        self.portfolio_method == PortfolioConstructionMethod::RiskBudget
+            || self.style_risk_budget_profile.uses_liquidity()
+            || self.capacity_risk_budget_profile.uses_capacity()
+            || (self.max_participation_rate.is_some() && self.portfolio_notional_cny.is_some())
     }
 }
 
@@ -4519,6 +4678,11 @@ where
             active_config.rebalance_hysteresis_pct,
             active_config.partial_rebalance_ratio,
         );
+        apply_execution_impact_budget(
+            &mut target_weights,
+            previous_target_weights.as_ref(),
+            active_config.execution_impact_budget_profile,
+        );
 
         signals.insert(
             day,
@@ -4892,6 +5056,11 @@ fn build_rebalance_prediction_signals(
             config.rebalance_hysteresis_pct,
             config.partial_rebalance_ratio,
         );
+        apply_execution_impact_budget(
+            &mut target_weights,
+            previous_target_weights.as_ref(),
+            config.execution_impact_budget_profile,
+        );
 
         signals.insert(
             day,
@@ -4978,6 +5147,147 @@ fn apply_rebalance_path_smoothing(
         }
     }
     target_weights.retain(|_, weight| *weight > Decimal::ZERO);
+}
+
+fn apply_execution_impact_budget(
+    target_weights: &mut HashMap<String, Decimal>,
+    previous_target_weights: Option<&HashMap<String, Decimal>>,
+    profile: ExecutionImpactBudgetProfile,
+) {
+    let Some(params) = profile.params() else {
+        return;
+    };
+    let Some(previous_target_weights) = previous_target_weights else {
+        return;
+    };
+    if target_weights.is_empty() || previous_target_weights.is_empty() {
+        return;
+    }
+
+    let max_turnover =
+        finite_decimal(params.max_rebalance_turnover_pct, 1.0, 0.0, 2.0).max(Decimal::ZERO);
+    if max_turnover.is_zero() {
+        target_weights.clear();
+        return;
+    }
+    let max_new_name_weight =
+        finite_decimal(params.max_new_name_weight_pct, 1.0, 0.0, 1.0).max(Decimal::ZERO);
+
+    let mut desired = target_weights.clone();
+    let mut released = Decimal::ZERO;
+    let previous_symbols = previous_target_weights
+        .iter()
+        .filter(|(_, weight)| **weight > Decimal::ZERO)
+        .map(|(symbol, _)| symbol.clone())
+        .collect::<HashSet<_>>();
+
+    for (symbol, weight) in desired.iter_mut() {
+        let previous = previous_target_weights
+            .get(symbol)
+            .copied()
+            .unwrap_or_default();
+        if previous.is_zero() && *weight > max_new_name_weight {
+            released += *weight - max_new_name_weight;
+            *weight = max_new_name_weight;
+        }
+    }
+
+    if released > Decimal::ZERO && !previous_symbols.is_empty() {
+        redistribute_released_weight_to_existing_positions(
+            &mut desired,
+            previous_target_weights,
+            &previous_symbols,
+            released,
+        );
+    }
+
+    let mut symbols = previous_target_weights
+        .keys()
+        .chain(desired.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    symbols.sort();
+    symbols.dedup();
+
+    let gross_turnover = symbols.iter().fold(Decimal::ZERO, |acc, symbol| {
+        let previous = previous_target_weights
+            .get(symbol)
+            .copied()
+            .unwrap_or_default();
+        let target = desired.get(symbol).copied().unwrap_or_default();
+        acc + (target - previous).abs()
+    });
+
+    if gross_turnover.is_zero() {
+        target_weights.clear();
+        for (symbol, weight) in previous_target_weights {
+            if *weight > Decimal::ZERO {
+                target_weights.insert(symbol.clone(), *weight);
+            }
+        }
+        return;
+    }
+
+    let scale = if gross_turnover > max_turnover {
+        max_turnover / gross_turnover
+    } else {
+        Decimal::ONE
+    };
+
+    target_weights.clear();
+    for symbol in symbols {
+        let previous = previous_target_weights
+            .get(&symbol)
+            .copied()
+            .unwrap_or_default();
+        let target = desired.get(&symbol).copied().unwrap_or_default();
+        let adjusted = previous + (target - previous) * scale;
+        if adjusted > Decimal::ZERO {
+            target_weights.insert(symbol, adjusted);
+        }
+    }
+    target_weights.retain(|_, weight| *weight > Decimal::ZERO);
+}
+
+fn redistribute_released_weight_to_existing_positions(
+    weights: &mut HashMap<String, Decimal>,
+    previous_target_weights: &HashMap<String, Decimal>,
+    previous_symbols: &HashSet<String>,
+    released: Decimal,
+) {
+    let mut rooms = previous_symbols
+        .iter()
+        .filter_map(|symbol| {
+            let previous = previous_target_weights
+                .get(symbol)
+                .copied()
+                .unwrap_or_default();
+            let current = weights.get(symbol).copied().unwrap_or_default();
+            let room = (previous - current).max(Decimal::ZERO);
+            if room > Decimal::ZERO {
+                Some((symbol.clone(), room))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    rooms.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    let total_room = rooms
+        .iter()
+        .map(|(_, room)| *room)
+        .fold(Decimal::ZERO, |acc, room| acc + room);
+    if total_room.is_zero() {
+        return;
+    }
+
+    let allocation = released.min(total_room);
+    for (symbol, room) in rooms {
+        let add = allocation * room / total_room;
+        if add > Decimal::ZERO {
+            *weights.entry(symbol).or_insert(Decimal::ZERO) += add.min(room);
+        }
+    }
 }
 
 fn finite_decimal(value: f64, default: f64, min: f64, max: f64) -> Decimal {
@@ -5210,9 +5520,7 @@ async fn load_portfolio_capacity_inputs(
     end_date: NaiveDate,
     config: &PortfolioConstructionConfig,
 ) -> Result<HashMap<String, f64>, String> {
-    if config.portfolio_method == PortfolioConstructionMethod::RiskBudget
-        || config.style_risk_budget_profile.uses_liquidity()
-    {
+    if config.uses_capacity_inputs() {
         load_average_amounts(pool, symbols, start_date, end_date).await
     } else {
         Ok(HashMap::new())
@@ -5227,9 +5535,7 @@ async fn load_portfolio_capacity_inputs_cached(
     end_date: NaiveDate,
     config: &PortfolioConstructionConfig,
 ) -> Result<Arc<AverageAmounts>, String> {
-    if config.portfolio_method == PortfolioConstructionMethod::RiskBudget
-        || config.style_risk_budget_profile.uses_liquidity()
-    {
+    if config.uses_capacity_inputs() {
         load_average_amounts_cached(pool, cache, symbols, start_date, end_date).await
     } else {
         Ok(Arc::new(HashMap::new()))
@@ -5369,7 +5675,8 @@ fn build_portfolio_weights(
         ),
     };
 
-    let mut weights = normalize_and_cap_weights(&selected, &raw_weights, config);
+    let mut weights = normalize_and_cap_weights(&selected, &raw_weights, average_amounts, config);
+    apply_capacity_risk_budget(&mut weights, average_amounts, config);
     apply_style_risk_budget(
         &mut weights,
         return_history,
@@ -5645,6 +5952,7 @@ fn build_min_variance_raw_weights(
 fn normalize_and_cap_weights(
     symbols: &[String],
     raw_weights: &[f64],
+    average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> HashMap<String, Decimal> {
     let positive_sum: f64 = raw_weights
@@ -5663,14 +5971,222 @@ fn normalize_and_cap_weights(
             continue;
         }
         let normalized = (*raw_weight / positive_sum * gross).max(0.0);
+        let symbol_cap = participation_weight_cap(symbol, average_amounts, config)
+            .unwrap_or(config.max_position_pct);
         let weight = Decimal::from_f64(normalized)
             .unwrap_or(Decimal::zero())
-            .min(config.max_position_pct);
+            .min(config.max_position_pct)
+            .min(symbol_cap);
         if !weight.is_zero() {
             target_weights.insert(symbol.clone(), weight);
         }
     }
     target_weights
+}
+
+fn participation_weight_cap(
+    symbol: &str,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Option<Decimal> {
+    let participation_rate = config.max_participation_rate?;
+    let notional = config.portfolio_notional_cny?;
+    if !participation_rate.is_finite()
+        || !notional.is_finite()
+        || participation_rate <= 0.0
+        || notional <= 0.0
+    {
+        return None;
+    }
+    let average_amount = average_amounts.get(symbol).copied()?;
+    if !average_amount.is_finite() || average_amount <= 0.0 {
+        return None;
+    }
+    let cap = (average_amount * participation_rate / notional).clamp(0.0, 1.0);
+    Decimal::from_f64(cap)
+}
+
+fn target_weight_cap(
+    symbol: &str,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Decimal {
+    participation_weight_cap(symbol, average_amounts, config)
+        .unwrap_or(config.max_position_pct)
+        .min(config.max_position_pct)
+        .max(Decimal::ZERO)
+}
+
+fn apply_capacity_risk_budget(
+    weights: &mut HashMap<String, Decimal>,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) {
+    let Some(params) = config.capacity_risk_budget_profile.params() else {
+        return;
+    };
+    if weights.is_empty() {
+        return;
+    }
+
+    let liquidity_scores = weights
+        .keys()
+        .filter_map(|symbol| {
+            average_amounts
+                .get(symbol)
+                .copied()
+                .filter(|amount| amount.is_finite() && *amount > 0.0)
+                .map(|amount| (symbol.clone(), amount))
+        })
+        .collect::<Vec<_>>();
+    if liquidity_scores.is_empty() {
+        return;
+    }
+
+    let mut low_capacity_symbols =
+        low_style_bucket_symbols(&liquidity_scores, params.low_capacity_quantile);
+    for symbol in weights.keys() {
+        let has_valid_amount = average_amounts
+            .get(symbol)
+            .copied()
+            .map(|amount| amount.is_finite() && amount > 0.0)
+            .unwrap_or(false);
+        if !has_valid_amount {
+            low_capacity_symbols.insert(symbol.clone());
+        }
+    }
+
+    let caps = weights
+        .keys()
+        .map(|symbol| {
+            (
+                symbol.clone(),
+                target_weight_cap(symbol, average_amounts, config),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let low_capacity_cap = Decimal::from_f64(params.low_capacity_max_weight_pct.clamp(0.0, 1.0))
+        .unwrap_or(Decimal::ONE);
+    cap_bucket_and_redistribute(weights, &low_capacity_symbols, low_capacity_cap, &caps, 8);
+
+    if params.refill_gross_exposure {
+        let target_gross =
+            Decimal::from_f64(config.max_gross_exposure.clamp(0.0, 1.0)).unwrap_or(Decimal::ONE);
+        let current_gross = weights.values().copied().sum::<Decimal>();
+        if target_gross > current_gross {
+            redistribute_weight(
+                weights,
+                &low_capacity_symbols,
+                target_gross - current_gross,
+                &caps,
+                8,
+            );
+        }
+    }
+    weights.retain(|_, weight| *weight > Decimal::ZERO);
+}
+
+fn cap_bucket_and_redistribute(
+    weights: &mut HashMap<String, Decimal>,
+    bucket_symbols: &HashSet<String>,
+    cap: Decimal,
+    caps: &HashMap<String, Decimal>,
+    iterations: usize,
+) {
+    if weights.is_empty() || bucket_symbols.is_empty() || cap >= Decimal::ONE {
+        return;
+    }
+
+    let bucket_total = weights
+        .iter()
+        .filter(|(symbol, _)| bucket_symbols.contains(*symbol))
+        .map(|(_, weight)| *weight)
+        .sum::<Decimal>();
+    if bucket_total <= cap || bucket_total.is_zero() {
+        return;
+    }
+
+    let scale = cap / bucket_total;
+    for (symbol, weight) in weights.iter_mut() {
+        if bucket_symbols.contains(symbol) {
+            *weight *= scale;
+        }
+    }
+    redistribute_weight(
+        weights,
+        bucket_symbols,
+        bucket_total - cap,
+        caps,
+        iterations,
+    );
+    weights.retain(|_, weight| *weight > Decimal::ZERO);
+}
+
+fn redistribute_weight(
+    weights: &mut HashMap<String, Decimal>,
+    excluded_symbols: &HashSet<String>,
+    amount: Decimal,
+    caps: &HashMap<String, Decimal>,
+    iterations: usize,
+) -> Decimal {
+    let mut remaining = amount.max(Decimal::ZERO);
+    if remaining.is_zero() {
+        return Decimal::ZERO;
+    }
+    let epsilon = Decimal::new(1, 8);
+
+    for _ in 0..iterations.max(1) {
+        let eligible = weights
+            .iter()
+            .filter_map(|(symbol, weight)| {
+                if excluded_symbols.contains(symbol) {
+                    return None;
+                }
+                let cap = caps.get(symbol).copied().unwrap_or(Decimal::ONE);
+                let headroom = cap - *weight;
+                if headroom > epsilon {
+                    Some((symbol.clone(), *weight, headroom))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            break;
+        }
+
+        let base_sum = eligible
+            .iter()
+            .map(|(_, weight, _)| *weight)
+            .sum::<Decimal>();
+        let equal_share = Decimal::ONE / Decimal::from(eligible.len() as u64);
+        let mut allocated = Decimal::ZERO;
+        for (symbol, weight, headroom) in eligible {
+            let share = if base_sum > Decimal::ZERO {
+                weight / base_sum
+            } else {
+                equal_share
+            };
+            let addition = (remaining * share).min(headroom);
+            if addition <= Decimal::ZERO {
+                continue;
+            }
+            if let Some(target) = weights.get_mut(&symbol) {
+                *target += addition;
+                allocated += addition;
+            }
+        }
+
+        if allocated <= epsilon {
+            break;
+        }
+        remaining -= allocated;
+        if remaining <= epsilon {
+            return Decimal::ZERO;
+        }
+    }
+
+    remaining
 }
 
 fn apply_industry_cap(
@@ -6644,6 +7160,77 @@ mod tests {
         assert!(weights["LOW_RISK"] <= Decimal::new(80, 2));
         let gross: Decimal = weights.values().copied().sum();
         assert!(gross <= Decimal::ONE);
+    }
+
+    #[test]
+    fn portfolio_construction_caps_target_weight_by_participation_capacity() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![("LIQUID".to_string(), 3.0), ("THIN".to_string(), 2.9)];
+        let average_amounts = HashMap::from([
+            ("LIQUID".to_string(), 5_000_000.0),
+            ("THIN".to_string(), 1_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(80, 2),
+            max_gross_exposure: 1.0,
+            portfolio_notional_cny: Some(1_000_000.0),
+            max_participation_rate: Some(0.05),
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert_eq!(weights["LIQUID"], Decimal::new(25, 2));
+        assert_eq!(weights["THIN"], Decimal::new(5, 2));
+    }
+
+    #[test]
+    fn capacity_risk_budget_caps_low_capacity_bucket_and_redistributes() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("DEEP_A".to_string(), 4.0),
+            ("THIN_A".to_string(), 3.0),
+            ("DEEP_B".to_string(), 2.0),
+            ("THIN_B".to_string(), 1.0),
+        ];
+        let average_amounts = HashMap::from([
+            ("DEEP_A".to_string(), 900_000_000.0),
+            ("DEEP_B".to_string(), 800_000_000.0),
+            ("THIN_A".to_string(), 20_000_000.0),
+            ("THIN_B".to_string(), 10_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 4,
+            max_position_pct: Decimal::new(80, 2),
+            max_gross_exposure: 1.0,
+            capacity_risk_budget_profile: CapacityRiskBudgetProfile::ParticipationStrictV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        let low_capacity_weight = weights["THIN_A"] + weights["THIN_B"];
+        let deep_capacity_weight = weights["DEEP_A"] + weights["DEEP_B"];
+
+        assert!(low_capacity_weight <= Decimal::new(20, 2));
+        assert!(deep_capacity_weight >= Decimal::new(80, 2));
+        assert!(weights["DEEP_A"] > Decimal::new(25, 2));
+        assert!(weights["DEEP_B"] > Decimal::new(25, 2));
     }
 
     #[test]
@@ -8349,6 +8936,43 @@ mod tests {
 
         assert_eq!(next.get("AAA"), Some(&Decimal::new(10, 2)));
         assert_eq!(next.get("BBB"), Some(&Decimal::new(10, 2)));
+    }
+
+    #[test]
+    fn impact_risk_budget_limits_aggregate_rebalance_turnover() {
+        let previous = HashMap::from([
+            ("OLD_A".to_string(), Decimal::new(50, 2)),
+            ("OLD_B".to_string(), Decimal::new(50, 2)),
+        ]);
+        let mut next = HashMap::from([
+            ("NEW_A".to_string(), Decimal::new(50, 2)),
+            ("NEW_B".to_string(), Decimal::new(50, 2)),
+        ]);
+
+        apply_execution_impact_budget(
+            &mut next,
+            Some(&previous),
+            ExecutionImpactBudgetProfile::Turnover20PctV1,
+        );
+
+        let mut symbols = previous
+            .keys()
+            .chain(next.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        symbols.sort();
+        symbols.dedup();
+        let turnover = symbols.iter().fold(Decimal::ZERO, |acc, symbol| {
+            let prev = previous.get(symbol).copied().unwrap_or_default();
+            let target = next.get(symbol).copied().unwrap_or_default();
+            acc + (target - prev).abs()
+        });
+
+        assert!(turnover <= Decimal::new(20, 2));
+        assert!(next.get("OLD_A").copied().unwrap_or_default() > Decimal::new(40, 2));
+        assert!(next.get("OLD_B").copied().unwrap_or_default() > Decimal::new(40, 2));
+        assert!(next.get("NEW_A").copied().unwrap_or_default() <= Decimal::new(4, 2));
+        assert!(next.get("NEW_B").copied().unwrap_or_default() <= Decimal::new(4, 2));
     }
 
     #[test]

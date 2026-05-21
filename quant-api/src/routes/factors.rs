@@ -1676,10 +1676,6 @@ fn phase7_event_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_event_window_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
-    phase7_event_window_alpha_backfill_specs_for_days(20)
-}
-
 fn phase7_event_window_alpha_backfill_specs_for_plan(
     plan: &Phase7EventWindowAlphaBackfillPlan,
 ) -> Vec<Phase7BackfillFactorSpec> {
@@ -7773,7 +7769,7 @@ mod tests {
 
     #[test]
     fn phase7_event_window_alpha_specs_use_available_event_sources_only() {
-        let specs = phase7_event_window_alpha_backfill_specs();
+        let specs = phase7_event_window_alpha_backfill_specs_for_days(20);
         let codes = specs
             .iter()
             .map(|spec| spec.factor_code)
@@ -8207,7 +8203,7 @@ mod tests {
 
     #[test]
     fn phase7_event_window_combo_allows_sparse_event_days() {
-        let specs = phase7_event_window_alpha_backfill_specs();
+        let specs = phase7_event_window_alpha_backfill_specs_for_days(20);
         let plan = Phase7EventWindowAlphaBackfillRequest {
             start_date: Some("2024-01-01".to_string()),
             end_date: Some("2024-05-31".to_string()),

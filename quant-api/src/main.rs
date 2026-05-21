@@ -313,6 +313,14 @@ async fn main() {
             post(routes::optimization::run_phase7_professional_discovery),
         )
         .route(
+            "/api/v1/quant/optimizations/phase7-oos-walk-forward-discovery",
+            post(routes::optimization::run_phase7_oos_walk_forward_discovery),
+        )
+        .route(
+            "/api/v1/quant/experiments/{experiment_run_id}",
+            get(routes::optimization::get_experiment_run),
+        )
+        .route(
             "/api/v1/quant/optimizations/{optimization_task_id}",
             get(routes::optimization::get_optimization),
         )
@@ -331,6 +339,10 @@ async fn main() {
         .route(
             "/api/v1/quant/optimizations/{optimization_task_id}/robustness-gates",
             post(routes::optimization::evaluate_optimization_robustness),
+        )
+        .route(
+            "/api/v1/quant/optimizations/{optimization_task_id}/elite-validation-report",
+            post(routes::optimization::generate_elite_validation_report),
         )
         .route(
             "/api/v1/quant/optimizations/{optimization_task_id}/trials/{trial_id}/robustness-gates",

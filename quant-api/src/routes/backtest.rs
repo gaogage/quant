@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use chrono::NaiveDate;
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -21,9 +21,10 @@ use quant_backtest::engine::{
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::{BacktestDataCache, BacktestRunner};
 use quant_backtest::signal_generator::{
-    CandidateRiskFilterProfile, EventGateConfig, EventGateMode, MarketRegime, MarketRegimePolicy,
-    PortfolioConstructionMethod, PredictionBlendConfig, RiskContributionControlProfile,
-    ScoreDirection, SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
+    CandidateRiskFilterProfile, CapacityRiskBudgetProfile, EventGateConfig, EventGateMode,
+    ExecutionImpactBudgetProfile, MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod,
+    PredictionBlendConfig, RiskContributionControlProfile, ScoreDirection, SignalDataCache,
+    StyleRiskBudgetProfile, TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -348,6 +349,14 @@ fn parse_execution_price(value: Option<&str>) -> Result<ExecutionPrice, String> 
 
 fn decimal_from_f64(value: f64, field: &str) -> Result<Decimal, String> {
     Decimal::from_f64(value).ok_or_else(|| format!("{} must be a finite number", field))
+}
+
+fn positive_notional(value: f64) -> Option<f64> {
+    if value.is_finite() && value > 0.0 {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 fn apply_cost_model(base: FeeConfig, req: Option<&CostModelReq>) -> Result<FeeConfig, String> {
@@ -812,6 +821,8 @@ pub struct RunFactorBacktestReq {
     #[serde(default)]
     pub capacity_penalty_strength: f64,
     pub industry_max_weight_pct: Option<f64>,
+    pub capacity_risk_budget: Option<String>,
+    pub execution_impact_budget: Option<String>,
     pub style_risk_budget: Option<String>,
     pub candidate_risk_filter: Option<String>,
     pub risk_contribution_control: Option<String>,
@@ -904,6 +915,8 @@ pub struct RunPredictionBacktestReq {
     #[serde(default)]
     pub capacity_penalty_strength: f64,
     pub industry_max_weight_pct: Option<f64>,
+    pub capacity_risk_budget: Option<String>,
+    pub execution_impact_budget: Option<String>,
     pub style_risk_budget: Option<String>,
     pub candidate_risk_filter: Option<String>,
     pub risk_contribution_control: Option<String>,
@@ -1007,6 +1020,26 @@ fn parse_style_risk_budget_profile(value: Option<&str>) -> Result<StyleRiskBudge
         .filter(|value| !value.is_empty())
         .map(StyleRiskBudgetProfile::parse)
         .unwrap_or(Ok(StyleRiskBudgetProfile::Off))
+}
+
+fn parse_capacity_risk_budget_profile(
+    value: Option<&str>,
+) -> Result<CapacityRiskBudgetProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(CapacityRiskBudgetProfile::parse)
+        .unwrap_or(Ok(CapacityRiskBudgetProfile::Off))
+}
+
+fn parse_execution_impact_budget_profile(
+    value: Option<&str>,
+) -> Result<ExecutionImpactBudgetProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ExecutionImpactBudgetProfile::parse)
+        .unwrap_or(Ok(ExecutionImpactBudgetProfile::Off))
 }
 
 fn parse_candidate_risk_filter_profile(
@@ -1828,6 +1861,10 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     let universe_profile = parse_tradable_universe_profile(req.universe_profile.as_deref())?;
     let industry_max_weight_pct =
         optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
+    let capacity_risk_budget_profile =
+        parse_capacity_risk_budget_profile(req.capacity_risk_budget.as_deref())?;
+    let execution_impact_budget_profile =
+        parse_execution_impact_budget_profile(req.execution_impact_budget.as_deref())?;
     let style_risk_budget_profile =
         parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
     let candidate_risk_filter_profile =
@@ -1847,6 +1884,10 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             None
         },
         max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
+        portfolio_notional_cny: positive_notional(req.initial_capital),
+        max_participation_rate: max_participation_rate.and_then(|value| value.to_f64()),
+        capacity_risk_budget_profile,
+        execution_impact_budget_profile,
         skip_top_pct: req.skip_top_pct,
         max_pairwise_correlation: req.max_pairwise_correlation,
         correlation_lookback_days: req.correlation_lookback_days,
@@ -2028,6 +2069,10 @@ pub(crate) async fn execute_prediction_backtest(
     let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
     let industry_max_weight_pct =
         optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
+    let capacity_risk_budget_profile =
+        parse_capacity_risk_budget_profile(req.capacity_risk_budget.as_deref())?;
+    let execution_impact_budget_profile =
+        parse_execution_impact_budget_profile(req.execution_impact_budget.as_deref())?;
     let style_risk_budget_profile =
         parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
     let candidate_risk_filter_profile =
@@ -2046,6 +2091,10 @@ pub(crate) async fn execute_prediction_backtest(
             None
         },
         max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
+        portfolio_notional_cny: positive_notional(req.initial_capital),
+        max_participation_rate: max_participation_rate.and_then(|value| value.to_f64()),
+        capacity_risk_budget_profile,
+        execution_impact_budget_profile,
         skip_top_pct: req.skip_top_pct,
         max_pairwise_correlation: req.max_pairwise_correlation,
         correlation_lookback_days: req.correlation_lookback_days,
@@ -2364,6 +2413,38 @@ mod tests {
             profile,
             RiskContributionControlProfile::SoftSingleName20PctV1
         );
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_capacity_risk_budget() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "capacity_risk_budget": "capacity_participation_strict_v1"
+        }))
+        .expect("factor request");
+
+        let profile = parse_capacity_risk_budget_profile(req.capacity_risk_budget.as_deref())
+            .expect("capacity risk budget");
+
+        assert_eq!(profile, CapacityRiskBudgetProfile::ParticipationStrictV1);
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_execution_impact_budget() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "execution_impact_budget": "impact_turnover_20pct_v1"
+        }))
+        .expect("factor request");
+
+        let profile = parse_execution_impact_budget_profile(req.execution_impact_budget.as_deref())
+            .expect("execution impact budget");
+
+        assert_eq!(profile, ExecutionImpactBudgetProfile::Turnover20PctV1);
     }
 
     #[test]
@@ -2973,6 +3054,8 @@ mod tests {
             risk_budget_lookback_days: 60,
             capacity_penalty_strength: 0.0,
             industry_max_weight_pct: None,
+            capacity_risk_budget: None,
+            execution_impact_budget: None,
             style_risk_budget: None,
             candidate_risk_filter: None,
             risk_contribution_control: None,

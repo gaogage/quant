@@ -300,6 +300,68 @@ impl PositionRiskControlProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CostCapacityStressProfile {
+    pub profile_name: String,
+    pub cost_multiplier: Option<Decimal>,
+    pub slippage_bps: Option<Decimal>,
+    pub impact_cost_coefficient: Option<Decimal>,
+    pub max_participation_rate: Option<Decimal>,
+}
+
+impl CostCapacityStressProfile {
+    pub fn off() -> Self {
+        Self {
+            profile_name: "off".to_string(),
+            cost_multiplier: None,
+            slippage_bps: None,
+            impact_cost_coefficient: None,
+            max_participation_rate: None,
+        }
+    }
+
+    pub fn cost_up(
+        profile_name: impl Into<String>,
+        cost_multiplier: Decimal,
+        slippage_bps: Decimal,
+    ) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            cost_multiplier: Some(cost_multiplier),
+            slippage_bps: Some(slippage_bps),
+            impact_cost_coefficient: None,
+            max_participation_rate: None,
+        }
+    }
+
+    pub fn impact_limited(
+        profile_name: impl Into<String>,
+        impact_cost_coefficient: Decimal,
+        max_participation_rate: Decimal,
+    ) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            cost_multiplier: None,
+            slippage_bps: None,
+            impact_cost_coefficient: Some(impact_cost_coefficient),
+            max_participation_rate: Some(max_participation_rate),
+        }
+    }
+
+    pub fn participation_limited(
+        profile_name: impl Into<String>,
+        max_participation_rate: Decimal,
+    ) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            cost_multiplier: None,
+            slippage_bps: None,
+            impact_cost_coefficient: None,
+            max_participation_rate: Some(max_participation_rate),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventGateProfile {
     pub profile_name: String,
     pub combo_name: Option<String>,
@@ -2279,6 +2341,16 @@ fn with_risk_contribution_control_seed(mut seed: Value, risk_contribution_contro
     seed
 }
 
+fn with_capacity_risk_budget_seed(mut seed: Value, capacity_risk_budget: &str) -> Value {
+    seed["capacity_risk_budget"] = json!(capacity_risk_budget);
+    seed
+}
+
+fn with_execution_impact_budget_seed(mut seed: Value, execution_impact_budget: &str) -> Value {
+    seed["execution_impact_budget"] = json!(execution_impact_budget);
+    seed
+}
+
 fn with_prediction_confirmation_seed(
     mut seed: Value,
     prediction_set_id: &str,
@@ -3775,6 +3847,20 @@ fn with_position_shape_seed(
     seed["position_shape_profile"] = json!(profile_name);
     seed["max_position_pct"] = json!(max_position_pct);
     seed["max_pairwise_correlation"] = json!(max_pairwise_correlation);
+    seed
+}
+
+fn with_execution_robustness_seed(
+    mut seed: Value,
+    profile_name: &str,
+    capacity_penalty_strength: &str,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+) -> Value {
+    seed["execution_robustness_profile"] = json!(profile_name);
+    seed["capacity_penalty_strength"] = json!(capacity_penalty_strength);
+    seed["rebalance_hysteresis_pct"] = json!(rebalance_hysteresis_pct);
+    seed["partial_rebalance_ratio"] = json!(partial_rebalance_ratio);
     seed
 }
 
@@ -9430,6 +9516,428 @@ fn professional_v14_corr70_annual_edge_seed_trials() -> Vec<Value> {
     seeds
 }
 
+fn professional_execution_robust_candidate_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let base =
+        with_risk_contribution_control_seed(with_candidate_risk_filter_seed(anchor, "off"), "off");
+
+    let mut seeds = Vec::new();
+    for (
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_pairwise_correlation,
+        risk_budget_lookback_days,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        sharpe_profile,
+        sharpe_min_exposure,
+        capacity_penalty_strength,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        score_candidate_pool_size,
+    ) in [
+        (
+            20,
+            60,
+            "0.15",
+            "0.70",
+            165,
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_66",
+            "0.66",
+            "1",
+            "0.01",
+            "0.75",
+            500,
+        ),
+        (
+            20,
+            80,
+            "0.12",
+            "0.70",
+            165,
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.67",
+            "1",
+            "0.01",
+            "0.75",
+            500,
+        ),
+        (
+            30,
+            80,
+            "0.10",
+            "0.70",
+            168,
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.67",
+            "1",
+            "0.01",
+            "0.75",
+            500,
+        ),
+        (
+            30,
+            80,
+            "0.12",
+            "0.70",
+            168,
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_68",
+            "0.68",
+            "1.25",
+            "0.01",
+            "0.75",
+            500,
+        ),
+        (
+            30,
+            120,
+            "0.10",
+            "0.68",
+            168,
+            "vol120_1425_466_100",
+            "0.1425",
+            "0.466",
+            "roll_sharpe180_050_neg10_68",
+            "0.68",
+            "1.25",
+            "0.02",
+            "0.50",
+            650,
+        ),
+        (
+            50,
+            120,
+            "0.12",
+            "0.70",
+            180,
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            "roll_sharpe180_050_neg10_67",
+            "0.67",
+            "1.25",
+            "0.02",
+            "0.50",
+            650,
+        ),
+        (
+            50,
+            120,
+            "0.10",
+            "0.68",
+            180,
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_66",
+            "0.66",
+            "1",
+            "0.02",
+            "0.50",
+            650,
+        ),
+    ] {
+        let seed = with_execution_robustness_seed(
+            with_top_n_seed(
+                with_rebalance_days_seed(
+                    with_position_shape_seed(
+                        with_sharpe_profile_seed(
+                            with_risk_budget_lookback_seed(
+                                with_volatility_profile_seed(
+                                    base.clone(),
+                                    vol_profile,
+                                    target_pct,
+                                    120,
+                                    min_exposure,
+                                    "1",
+                                ),
+                                &format!(
+                                    "bp_rb{risk_budget_lookback_days}_execution_robust_candidate"
+                                ),
+                                risk_budget_lookback_days,
+                            ),
+                            sharpe_profile,
+                            "0.50",
+                            "-0.10",
+                            180,
+                            sharpe_min_exposure,
+                        ),
+                        &format!(
+                            "maxpos{}_corr{}_execution_robust",
+                            max_position_pct.replace('.', ""),
+                            max_pairwise_correlation.replace('.', "")
+                        ),
+                        max_position_pct,
+                        max_pairwise_correlation,
+                    ),
+                    rebalance_days,
+                    &format!("rebalance{rebalance_days}_execution_robust"),
+                ),
+                top_n,
+                &format!("top{top_n}_execution_robust"),
+            ),
+            &format!(
+                "cap{}_hyst{}_partial{}_execution_robust",
+                capacity_penalty_strength.replace('.', ""),
+                rebalance_hysteresis_pct.replace('.', ""),
+                partial_rebalance_ratio.replace('.', "")
+            ),
+            capacity_penalty_strength,
+            rebalance_hysteresis_pct,
+            partial_rebalance_ratio,
+        );
+        let mut seed = with_event_sleeve_seed(
+            seed,
+            "quality_mixed_state_risk_memory_router_v14",
+            &format!("{vol_profile}_{sharpe_profile}_execution_robust_candidate"),
+        );
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_execution_low_turnover_alpha_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    for (
+        market_regime,
+        candidate_risk_filter,
+        risk_contribution_control,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_pairwise_correlation,
+        risk_budget_lookback_days,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        sharpe_profile,
+        sharpe_min_exposure,
+        capacity_penalty_strength,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            50,
+            160,
+            "0.10",
+            "0.68",
+            180,
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.67",
+            "1.25",
+            "0.02",
+            "0.50",
+            650,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            80,
+            180,
+            "0.08",
+            "0.65",
+            220,
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            "roll_sharpe180_050_neg10_68",
+            "0.68",
+            "1.5",
+            "0.03",
+            "0.35",
+            650,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "soft_low_volatility_v1",
+            "soft_single_name_20pct_v1",
+            50,
+            180,
+            "0.10",
+            "0.70",
+            220,
+            "vol120_1425_466_100",
+            "0.1425",
+            "0.466",
+            "roll_sharpe180_050_neg10_67",
+            "0.67",
+            "1.5",
+            "0.03",
+            "0.35",
+            650,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            50,
+            160,
+            "0.10",
+            "0.68",
+            180,
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.67",
+            "1.25",
+            "0.02",
+            "0.50",
+            650,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "soft_low_volatility_v1",
+            "soft_single_name_15pct_v1",
+            30,
+            120,
+            "0.12",
+            "0.70",
+            180,
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_66",
+            "0.66",
+            "1.25",
+            "0.02",
+            "0.50",
+            500,
+        ),
+    ] {
+        let base = with_risk_contribution_control_seed(
+            with_candidate_risk_filter_seed(anchor.clone(), candidate_risk_filter),
+            risk_contribution_control,
+        );
+        let seed = with_execution_robustness_seed(
+            with_top_n_seed(
+                with_rebalance_days_seed(
+                    with_position_shape_seed(
+                        with_sharpe_profile_seed(
+                            with_risk_budget_lookback_seed(
+                                with_volatility_profile_seed(
+                                    base,
+                                    vol_profile,
+                                    target_pct,
+                                    120,
+                                    min_exposure,
+                                    "1",
+                                ),
+                                &format!("bp_rb{risk_budget_lookback_days}_execution_low_turnover"),
+                                risk_budget_lookback_days,
+                            ),
+                            sharpe_profile,
+                            "0.50",
+                            "-0.10",
+                            180,
+                            sharpe_min_exposure,
+                        ),
+                        &format!(
+                            "maxpos{}_corr{}_execution_low_turnover",
+                            max_position_pct.replace('.', ""),
+                            max_pairwise_correlation.replace('.', "")
+                        ),
+                        max_position_pct,
+                        max_pairwise_correlation,
+                    ),
+                    rebalance_days,
+                    &format!("rebalance{rebalance_days}_execution_low_turnover"),
+                ),
+                top_n,
+                &format!("top{top_n}_execution_low_turnover"),
+            ),
+            &format!(
+                "cap{}_hyst{}_partial{}_execution_low_turnover",
+                capacity_penalty_strength.replace('.', ""),
+                rebalance_hysteresis_pct.replace('.', ""),
+                partial_rebalance_ratio.replace('.', "")
+            ),
+            capacity_penalty_strength,
+            rebalance_hysteresis_pct,
+            partial_rebalance_ratio,
+        );
+        let mut seed = with_event_sleeve_seed(
+            seed,
+            market_regime,
+            &format!("{vol_profile}_{sharpe_profile}_execution_low_turnover_alpha"),
+        );
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        seed["universe_profile"] = json!("listed_non_st");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_execution_capacity_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    for seed in professional_execution_low_turnover_alpha_seed_trials() {
+        for capacity_risk_budget in [
+            "capacity_participation_balanced_v1",
+            "capacity_participation_strict_v1",
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_capacity_risk_budget_seed(
+                    seed.clone(),
+                    capacity_risk_budget,
+                )],
+            );
+        }
+    }
+    seeds
+}
+
+fn professional_execution_impact_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    for seed in professional_execution_capacity_budget_seed_trials() {
+        for execution_impact_budget in [
+            "impact_turnover_30pct_v1",
+            "impact_turnover_20pct_v1",
+            "impact_turnover_15pct_v1",
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_execution_impact_budget_seed(
+                    seed.clone(),
+                    execution_impact_budget,
+                )],
+            );
+        }
+    }
+    seeds
+}
+
 fn professional_return_alpha_sharpe_bridge_seed_trials() -> Vec<Value> {
     let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
         return Vec::new();
@@ -10909,6 +11417,9 @@ pub struct LayeredSearchConfig {
     pub portfolio_methods: Vec<String>,
     pub risk_budget_lookback_days: Vec<usize>,
     pub capacity_penalty_strength: Vec<Decimal>,
+    pub capacity_risk_budget_profiles: Vec<String>,
+    pub execution_impact_budget_profiles: Vec<String>,
+    pub cost_capacity_stress_profiles: Vec<CostCapacityStressProfile>,
     pub industry_max_weight_pct: Vec<Option<Decimal>>,
     pub style_risk_budget_profiles: Vec<String>,
     pub candidate_risk_filter_profiles: Vec<String>,
@@ -10979,6 +11490,9 @@ impl LayeredSearchConfig {
             portfolio_methods: vec!["heuristic".to_string(), "risk_budget".to_string()],
             risk_budget_lookback_days: vec![60, 120],
             capacity_penalty_strength: vec![Decimal::ZERO, Decimal::new(75, 2)],
+            capacity_risk_budget_profiles: vec!["off".to_string()],
+            execution_impact_budget_profiles: vec!["off".to_string()],
+            cost_capacity_stress_profiles: vec![CostCapacityStressProfile::off()],
             industry_max_weight_pct: vec![
                 None,
                 Some(Decimal::new(20, 2)),
@@ -14411,10 +14925,184 @@ impl LayeredSearchConfig {
             Decimal::new(72, 2),
         ];
         config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.cost_capacity_stress_profiles = vec![
+            CostCapacityStressProfile::off(),
+            CostCapacityStressProfile::cost_up(
+                "cost_up_125pct_slip_2bps",
+                Decimal::new(125, 2),
+                Decimal::new(2, 4),
+            ),
+            CostCapacityStressProfile::impact_limited(
+                "impact_2pct_participation_10pct",
+                Decimal::new(2, 2),
+                Decimal::new(10, 2),
+            ),
+            CostCapacityStressProfile::participation_limited(
+                "participation_5pct",
+                Decimal::new(5, 2),
+            ),
+        ];
         config.candidate_risk_filter_profiles = vec!["off".to_string()];
         config.risk_contribution_control_profiles = vec!["off".to_string()];
         config.score_candidate_pool_sizes = vec![500, 650];
         config.seed_trials = professional_v14_corr70_annual_edge_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_robust_candidate_default() -> Self {
+        let mut config = Self::professional_v14_corr70_annual_edge_default();
+        config.top_n = vec![20, 30, 50];
+        config.rebalance_days = vec![60, 80, 120];
+        config.risk_budget_lookback_days = vec![165, 168, 180];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(68, 2),
+            Decimal::new(70, 2),
+            Decimal::new(72, 2),
+        ];
+        config.max_position_pct = vec![
+            Decimal::new(10, 2),
+            Decimal::new(12, 2),
+            Decimal::new(15, 2),
+        ];
+        config.capacity_penalty_strength =
+            vec![Decimal::new(75, 2), Decimal::ONE, Decimal::new(125, 2)];
+        config.cost_capacity_stress_profiles = vec![
+            CostCapacityStressProfile::off(),
+            CostCapacityStressProfile::cost_up(
+                "cost_up_125pct_slip_2bps",
+                Decimal::new(125, 2),
+                Decimal::new(2, 4),
+            ),
+            CostCapacityStressProfile::impact_limited(
+                "impact_2pct_participation_10pct",
+                Decimal::new(2, 2),
+                Decimal::new(10, 2),
+            ),
+            CostCapacityStressProfile::participation_limited(
+                "participation_5pct",
+                Decimal::new(5, 2),
+            ),
+        ];
+        config.rebalance_hysteresis_pct =
+            vec![Decimal::ZERO, Decimal::new(1, 2), Decimal::new(2, 2)];
+        config.partial_rebalance_ratio =
+            vec![Decimal::ONE, Decimal::new(75, 2), Decimal::new(50, 2)];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.seed_trials = professional_execution_robust_candidate_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_low_turnover_alpha_default() -> Self {
+        let mut config = Self::professional_execution_robust_candidate_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.top_n = vec![30, 50, 80];
+        config.rebalance_days = vec![120, 160, 180];
+        config.risk_budget_lookback_days = vec![180, 220];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(65, 2),
+            Decimal::new(68, 2),
+            Decimal::new(70, 2),
+        ];
+        config.max_position_pct =
+            vec![Decimal::new(8, 2), Decimal::new(10, 2), Decimal::new(12, 2)];
+        config.capacity_penalty_strength =
+            vec![Decimal::ONE, Decimal::new(125, 2), Decimal::new(150, 2)];
+        config.cost_capacity_stress_profiles = vec![
+            CostCapacityStressProfile::off(),
+            CostCapacityStressProfile::cost_up(
+                "cost_up_125pct_slip_2bps",
+                Decimal::new(125, 2),
+                Decimal::new(2, 4),
+            ),
+            CostCapacityStressProfile::impact_limited(
+                "impact_2pct_participation_10pct",
+                Decimal::new(2, 2),
+                Decimal::new(10, 2),
+            ),
+            CostCapacityStressProfile::participation_limited(
+                "participation_5pct",
+                Decimal::new(5, 2),
+            ),
+            CostCapacityStressProfile::participation_limited(
+                "participation_3pct",
+                Decimal::new(3, 2),
+            ),
+        ];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_low_volatility_v1".to_string(),
+            "soft_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(2, 2), Decimal::new(3, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(50, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.universe_profiles =
+            vec!["listed_non_st".to_string(), "main_board_non_st".to_string()];
+        config.seed_trials = professional_execution_low_turnover_alpha_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_capacity_budget_default() -> Self {
+        let mut config = Self::professional_execution_low_turnover_alpha_default();
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_participation_balanced_v1".to_string(),
+            "capacity_participation_strict_v1".to_string(),
+        ];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(125, 2),
+            Decimal::new(150, 2),
+            Decimal::new(200, 2),
+        ];
+        config.style_risk_budget_profiles = vec!["off".to_string()];
+        config.cost_capacity_stress_profiles = vec![
+            CostCapacityStressProfile::off(),
+            CostCapacityStressProfile::cost_up(
+                "cost_up_125pct_slip_2bps",
+                Decimal::new(125, 2),
+                Decimal::new(2, 4),
+            ),
+            CostCapacityStressProfile::impact_limited(
+                "impact_2pct_participation_10pct",
+                Decimal::new(2, 2),
+                Decimal::new(10, 2),
+            ),
+            CostCapacityStressProfile::participation_limited(
+                "participation_5pct",
+                Decimal::new(5, 2),
+            ),
+            CostCapacityStressProfile::participation_limited(
+                "participation_3pct",
+                Decimal::new(3, 2),
+            ),
+        ];
+        config.seed_trials = professional_execution_capacity_budget_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_impact_budget_default() -> Self {
+        let mut config = Self::professional_execution_capacity_budget_default();
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_30pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+            "impact_turnover_15pct_v1".to_string(),
+        ];
+        config.rebalance_hysteresis_pct =
+            vec![Decimal::new(2, 2), Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![
+            Decimal::new(50, 2),
+            Decimal::new(35, 2),
+            Decimal::new(25, 2),
+        ];
+        config.seed_trials = professional_execution_impact_budget_seed_trials();
         config
     }
 
@@ -15326,6 +16014,9 @@ impl LayeredSearchConfig {
             self.portfolio_methods.len(),
             self.risk_budget_lookback_days.len(),
             self.capacity_penalty_strength.len(),
+            self.capacity_risk_budget_profiles.len(),
+            self.execution_impact_budget_profiles.len(),
+            self.cost_capacity_stress_profiles.len(),
             self.industry_max_weight_pct.len(),
             self.style_risk_budget_profiles.len(),
             self.candidate_risk_filter_profiles.len(),
@@ -15431,6 +16122,12 @@ pub fn build_layered_search_plan(
             config.risk_budget_lookback_days[indices.risk_budget_lookback_days];
         let capacity_penalty_strength =
             config.capacity_penalty_strength[indices.capacity_penalty_strength];
+        let capacity_risk_budget_profile =
+            &config.capacity_risk_budget_profiles[indices.capacity_risk_budget_profile];
+        let execution_impact_budget_profile =
+            &config.execution_impact_budget_profiles[indices.execution_impact_budget_profile];
+        let cost_capacity_stress_profile =
+            &config.cost_capacity_stress_profiles[indices.cost_capacity_stress_profile];
         let industry_max_weight_pct =
             config.industry_max_weight_pct[indices.industry_max_weight_pct];
         let style_risk_budget_profile =
@@ -15471,6 +16168,9 @@ pub fn build_layered_search_plan(
             "portfolio_method": portfolio_method,
             "risk_budget_lookback_days": risk_budget_lookback_days,
             "capacity_penalty_strength": decimal_string(capacity_penalty_strength),
+            "capacity_risk_budget": capacity_risk_budget_profile,
+            "execution_impact_budget": execution_impact_budget_profile,
+            "cost_capacity_stress_profile": cost_capacity_stress_profile.profile_name,
             "industry_max_weight_pct": industry_max_weight_pct.map(decimal_string),
             "style_risk_budget": style_risk_budget_profile,
             "candidate_risk_filter": candidate_risk_filter_profile,
@@ -15486,6 +16186,7 @@ pub fn build_layered_search_plan(
             "event_gate_profile": event_gate_profile.profile_name,
             "benchmark": config.benchmark,
         });
+        apply_cost_capacity_stress_profile(&mut parameters, cost_capacity_stress_profile);
         if let (Some(start), Some(full), Some(min_exposure)) = (
             portfolio_drawdown_control.reduce_start_pct,
             portfolio_drawdown_control.reduce_full_pct,
@@ -15614,6 +16315,46 @@ pub fn build_layered_search_plan(
     }
 }
 
+fn apply_cost_capacity_stress_profile(parameters: &mut Value, profile: &CostCapacityStressProfile) {
+    let mut cost_model = serde_json::Map::new();
+    insert_decimal_if_some(&mut cost_model, "cost_multiplier", profile.cost_multiplier);
+    insert_decimal_if_some(&mut cost_model, "slippage_bps", profile.slippage_bps);
+    insert_decimal_if_some(
+        &mut cost_model,
+        "impact_cost_coefficient",
+        profile.impact_cost_coefficient,
+    );
+    if !cost_model.is_empty() {
+        parameters["cost_model"] = Value::Object(cost_model);
+    }
+
+    let mut execution_rules = serde_json::Map::new();
+    insert_decimal_if_some(
+        &mut execution_rules,
+        "max_participation_rate",
+        profile.max_participation_rate,
+    );
+    if !execution_rules.is_empty() {
+        parameters["execution_rules"] = Value::Object(execution_rules);
+    }
+}
+
+fn insert_decimal_if_some(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<Decimal>,
+) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), json!(decimal_f64(value)));
+    }
+}
+
+fn decimal_f64(value: Decimal) -> f64 {
+    value
+        .to_f64()
+        .expect("phase7 decimal search parameter should fit f64")
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LayeredTrialIndices {
     market_regime_policy: usize,
@@ -15629,6 +16370,9 @@ struct LayeredTrialIndices {
     portfolio_method: usize,
     risk_budget_lookback_days: usize,
     capacity_penalty_strength: usize,
+    capacity_risk_budget_profile: usize,
+    execution_impact_budget_profile: usize,
+    cost_capacity_stress_profile: usize,
     industry_max_weight_pct: usize,
     style_risk_budget_profile: usize,
     candidate_risk_filter_profile: usize,
@@ -15650,6 +16394,12 @@ impl LayeredTrialIndices {
             take_axis_index(&mut index, config.market_regime_policies.len())?;
         let capacity_penalty_strength =
             take_axis_index(&mut index, config.capacity_penalty_strength.len())?;
+        let capacity_risk_budget_profile =
+            take_axis_index(&mut index, config.capacity_risk_budget_profiles.len())?;
+        let execution_impact_budget_profile =
+            take_axis_index(&mut index, config.execution_impact_budget_profiles.len())?;
+        let cost_capacity_stress_profile =
+            take_axis_index(&mut index, config.cost_capacity_stress_profiles.len())?;
         let industry_max_weight_pct =
             take_axis_index(&mut index, config.industry_max_weight_pct.len())?;
         let style_risk_budget_profile =
@@ -15702,6 +16452,9 @@ impl LayeredTrialIndices {
             portfolio_method,
             risk_budget_lookback_days,
             capacity_penalty_strength,
+            capacity_risk_budget_profile,
+            execution_impact_budget_profile,
+            cost_capacity_stress_profile,
             industry_max_weight_pct,
             style_risk_budget_profile,
             candidate_risk_filter_profile,
@@ -16081,6 +16834,9 @@ mod tests {
             portfolio_methods: vec!["heuristic".to_string(), "risk_budget".to_string()],
             risk_budget_lookback_days: vec![60],
             capacity_penalty_strength: vec![Decimal::ZERO],
+            capacity_risk_budget_profiles: vec!["off".to_string()],
+            execution_impact_budget_profiles: vec!["off".to_string()],
+            cost_capacity_stress_profiles: vec![CostCapacityStressProfile::off()],
             industry_max_weight_pct: vec![None],
             style_risk_budget_profiles: vec!["off".to_string()],
             candidate_risk_filter_profiles: vec!["off".to_string()],
@@ -16236,6 +16992,10 @@ mod tests {
         assert!(config
             .capacity_penalty_strength
             .contains(&Decimal::new(75, 2)));
+        assert_eq!(
+            config.cost_capacity_stress_profiles,
+            vec![CostCapacityStressProfile::off()]
+        );
         assert!(config.score_candidate_pool_sizes.contains(&0));
         assert!(config.score_candidate_pool_sizes.contains(&500));
         assert!(config.universe_profiles.contains(&"all".to_string()));
@@ -16277,6 +17037,28 @@ mod tests {
             .portfolio_volatility_controls
             .iter()
             .any(|profile| profile.profile_name == "vol60_20_60_100"));
+    }
+
+    #[test]
+    fn layered_search_plan_emits_cost_capacity_stress_parameters() {
+        let mut config = LayeredSearchConfig::local_professional_default();
+        config.cost_capacity_stress_profiles = vec![CostCapacityStressProfile::impact_limited(
+            "impact_2pct_participation_10pct",
+            Decimal::new(2, 2),
+            Decimal::new(10, 2),
+        )];
+        let mut resource_plan = LocalResourcePlan::for_machine(4, 16);
+        resource_plan.max_trials = 1;
+
+        let plan = build_layered_search_plan(&config, &resource_plan);
+        let params = &plan.trials[0].parameters;
+
+        assert_eq!(
+            params["cost_capacity_stress_profile"],
+            "impact_2pct_participation_10pct"
+        );
+        assert_eq!(params["cost_model"]["impact_cost_coefficient"], 0.02);
+        assert_eq!(params["execution_rules"]["max_participation_rate"], 0.10);
     }
 
     #[test]
@@ -19872,6 +20654,18 @@ mod tests {
             config.candidate_risk_filter_profiles,
             vec!["off".to_string()]
         );
+        assert!(config
+            .cost_capacity_stress_profiles
+            .iter()
+            .any(|profile| profile.profile_name == "cost_up_125pct_slip_2bps"));
+        assert!(config
+            .cost_capacity_stress_profiles
+            .iter()
+            .any(|profile| profile.profile_name == "impact_2pct_participation_10pct"));
+        assert!(config
+            .cost_capacity_stress_profiles
+            .iter()
+            .any(|profile| profile.profile_name == "participation_5pct"));
         assert_eq!(config.seed_trials.len(), 20);
         assert!(config.seed_trials.iter().any(|trial| {
             trial["portfolio_volatility_control"] == "vol120_1415_464_100"
@@ -19915,6 +20709,187 @@ mod tests {
             assert!(!serialized.contains("event_window"));
             assert!(!serialized.contains("prediction"));
         }
+    }
+
+    #[test]
+    fn professional_execution_robust_candidate_profile_targets_capacity_fragility() {
+        let config = LayeredSearchConfig::professional_execution_robust_candidate_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.top_n, vec![20, 30, 50]);
+        assert_eq!(config.rebalance_days, vec![60, 80, 120]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![
+                Decimal::new(10, 2),
+                Decimal::new(12, 2),
+                Decimal::new(15, 2)
+            ]
+        );
+        assert!(config.capacity_penalty_strength.contains(&Decimal::ONE));
+        assert!(config
+            .capacity_penalty_strength
+            .contains(&Decimal::new(125, 2)));
+        assert!(config
+            .cost_capacity_stress_profiles
+            .iter()
+            .any(|profile| profile.profile_name == "impact_2pct_participation_10pct"));
+        assert!(config
+            .cost_capacity_stress_profiles
+            .iter()
+            .any(|profile| profile.profile_name == "participation_5pct"));
+        assert!(config
+            .rebalance_hysteresis_pct
+            .contains(&Decimal::new(1, 2)));
+        assert!(config
+            .rebalance_hysteresis_pct
+            .contains(&Decimal::new(2, 2)));
+        assert!(config
+            .partial_rebalance_ratio
+            .contains(&Decimal::new(75, 2)));
+        assert!(config
+            .partial_rebalance_ratio
+            .contains(&Decimal::new(50, 2)));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["max_position_pct"] == "0.10"
+                && trial["capacity_penalty_strength"] == "1"
+                && trial["rebalance_hysteresis_pct"] == "0.01"
+                && trial["partial_rebalance_ratio"] == "0.75"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 50
+                && trial["rebalance"] == "120"
+                && trial["capacity_penalty_strength"] == "1.25"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_execution_low_turnover_alpha_profile_targets_capacity_friendly_orthogonal_sources(
+    ) {
+        let config = LayeredSearchConfig::professional_execution_low_turnover_alpha_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.top_n, vec![30, 50, 80]);
+        assert_eq!(config.rebalance_days, vec![120, 160, 180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_mixed_state_risk_memory_router_v14".to_string()
+            ]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec![
+                "soft_low_volatility_v1".to_string(),
+                "soft_low_volatility_low_correlation_v1".to_string()
+            ]
+        );
+        assert!(config
+            .capacity_penalty_strength
+            .contains(&Decimal::new(150, 2)));
+        assert!(config
+            .rebalance_hysteresis_pct
+            .contains(&Decimal::new(3, 2)));
+        assert!(config
+            .partial_rebalance_ratio
+            .contains(&Decimal::new(35, 2)));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["candidate_risk_filter"] == "soft_low_volatility_low_correlation_v1"
+                && trial["rebalance"] == "180"
+                && trial["capacity_penalty_strength"] == "1.5"
+                && trial["partial_rebalance_ratio"] == "0.35"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_execution_capacity_budget_profile_adds_capacity_budget_axis() {
+        let config = LayeredSearchConfig::professional_execution_capacity_budget_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_participation_balanced_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_participation_strict_v1".to_string()));
+        assert!(config
+            .cost_capacity_stress_profiles
+            .iter()
+            .any(|profile| profile.profile_name == "participation_5pct"));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["capacity_risk_budget"] == "capacity_participation_strict_v1"
+                && trial["capacity_penalty_strength"] == "1.5"
+        }));
+
+        let resource_plan = LocalResourcePlan {
+            max_trials: 24,
+            batch_size: 8,
+            ..LocalResourcePlan::for_machine(10, 32)
+        };
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert!(plan.trials.iter().any(|trial| {
+            trial.parameters["capacity_risk_budget"] == "capacity_participation_strict_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_impact_budget_profile_adds_turnover_budget_axis() {
+        let config = LayeredSearchConfig::professional_execution_impact_budget_default();
+
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_participation_strict_v1".to_string()));
+        assert!(config
+            .execution_impact_budget_profiles
+            .contains(&"impact_turnover_20pct_v1".to_string()));
+        assert!(config
+            .execution_impact_budget_profiles
+            .contains(&"impact_turnover_15pct_v1".to_string()));
+        assert!(config
+            .partial_rebalance_ratio
+            .contains(&Decimal::new(25, 2)));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["capacity_risk_budget"] == "capacity_participation_strict_v1"
+                && trial["execution_impact_budget"] == "impact_turnover_20pct_v1"
+        }));
+
+        let resource_plan = LocalResourcePlan {
+            max_trials: 32,
+            batch_size: 8,
+            ..LocalResourcePlan::for_machine(10, 32)
+        };
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert!(plan.trials.iter().any(|trial| {
+            trial.parameters["execution_impact_budget"] == "impact_turnover_20pct_v1"
+        }));
     }
 
     #[test]

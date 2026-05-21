@@ -5,23 +5,24 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use quant_common::phase7::{
     build_layered_search_plan, CandidateMetrics, CandidateTargets, CandidateType,
     LayeredSearchConfig, LayeredSearchPlan, LocalResourcePlan,
 };
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::error;
 use uuid::Uuid;
 
 use crate::routes::backtest::{
-    execute_factor_backtest_with_caches, execute_prediction_backtest, EffectiveCoverageReq,
-    FactorBacktestRunOutput, MarketRegimeBacktestReq, RunFactorBacktestReq,
-    RunPredictionBacktestReq,
+    execute_factor_backtest_with_caches, execute_prediction_backtest, CostModelReq,
+    EffectiveCoverageReq, ExecutionRulesReq, FactorBacktestRunOutput, MarketRegimeBacktestReq,
+    RunFactorBacktestReq, RunPredictionBacktestReq,
 };
 use crate::AppState;
 use quant_backtest::runner::{BacktestDataCache, BacktestDataCacheStats};
@@ -75,6 +76,55 @@ pub struct Phase7ProfessionalDiscoveryRequest {
     pub stop_after_robust_approval: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Phase7OosWalkForwardDiscoveryRequest {
+    pub strategy_version_id: String,
+    pub data_version_id: String,
+    pub objective: Option<Value>,
+    pub constraints: Option<Value>,
+    pub walk_forward: Option<Value>,
+    pub backtest_template: Option<Value>,
+    pub prediction_set_ids: Option<Vec<String>>,
+    pub max_trials_per_window: Option<usize>,
+    pub search_profile: Option<String>,
+    pub trial_batch_limit: Option<i64>,
+    pub trial_concurrency: Option<usize>,
+    pub train_cache_mode: Option<String>,
+    pub max_batches_per_window: Option<usize>,
+    pub train_window_days: Option<i64>,
+    pub test_window_days: Option<i64>,
+    pub step_days: Option<i64>,
+    pub validation_mode: Option<String>,
+    pub in_sample_ratio: Option<f64>,
+    pub include_partial_last_window: Option<bool>,
+    pub plan_only: Option<bool>,
+    pub execution_mode: Option<String>,
+    pub exhaustive_search: Option<bool>,
+    pub require_train_robustness_approval: Option<bool>,
+    pub train_robustness_gate_policy: Option<Value>,
+    pub train_selection_gate_policy: Option<Value>,
+    pub final_promotion_gate_policy: Option<Value>,
+    pub min_stitched_oos_calmar: Option<f64>,
+    pub min_positive_oos_window_ratio: Option<f64>,
+    pub min_oos_window_count: Option<usize>,
+    pub oos_top_n: Option<usize>,
+    pub enable_cost_capacity_perturbation_gate: Option<bool>,
+    pub cost_capacity_perturbations: Option<Vec<OosCostCapacityPerturbationRequest>>,
+    pub min_cost_capacity_perturbation_pass_ratio: Option<f64>,
+    pub min_perturbed_oos_calmar: Option<f64>,
+    pub max_perturbed_oos_drawdown_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OosCostCapacityPerturbationRequest {
+    pub name: Option<String>,
+    pub cost_multiplier: Option<f64>,
+    pub slippage_bps: Option<f64>,
+    pub impact_cost_coefficient: Option<f64>,
+    pub max_participation_rate: Option<f64>,
+    pub capacity_penalty_strength: Option<f64>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TrialListQuery {
     pub status: Option<String>,
@@ -112,6 +162,13 @@ pub struct EvaluateRobustnessRequest {
     pub gate_policy: Option<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EliteValidationReportRequest {
+    pub top_n: Option<usize>,
+    pub gate_policy: Option<Value>,
+}
+
+#[derive(Clone)]
 struct OptimizationTaskExecutionContext {
     strategy_version_id: String,
     data_version_id: String,
@@ -239,10 +296,96 @@ struct RobustnessTimeSeriesAnalysis {
     bootstrap: Value,
 }
 
+#[derive(Debug, Clone)]
+struct OosDiscoveryWindow {
+    window_index: usize,
+    validation_mode: String,
+    train_start: NaiveDate,
+    train_end: NaiveDate,
+    test_start: NaiveDate,
+    test_end: NaiveDate,
+}
+
+#[derive(Debug, Clone)]
+struct OosDiscoveryPlan {
+    validation_mode: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    train_window_days: i64,
+    test_window_days: i64,
+    step_days: i64,
+    in_sample_ratio: f64,
+    include_partial_last_window: bool,
+    windows: Vec<OosDiscoveryWindow>,
+}
+
+struct OosWindowExecution {
+    window: OosDiscoveryWindow,
+    train_optimization_task_id: String,
+    train_batches: Vec<Value>,
+    selected_candidate: DiscoveryCandidate,
+    train_robustness: Option<Value>,
+    train_cost_capacity_perturbations: Vec<OosCostCapacityPerturbationResult>,
+    oos_backtest_task_id: String,
+    oos_output: FactorBacktestRunOutput,
+    oos_points: Vec<RobustnessDailyPoint>,
+    cost_capacity_perturbations: Vec<OosCostCapacityPerturbationResult>,
+}
+
+struct OosCostCapacityPerturbationResult {
+    name: String,
+    perturbation: OosCostCapacityPerturbationRequest,
+    backtest_task_id: String,
+    output: FactorBacktestRunOutput,
+    passed: bool,
+}
+
+struct OosTrainCandidateEvaluation {
+    candidate: DiscoveryCandidate,
+    robustness: Value,
+    train_cost_capacity_perturbations: Vec<OosCostCapacityPerturbationResult>,
+    stress_summary: CostCapacityPerturbationSummary,
+    stress_adjusted_score: Decimal,
+    train_cost_gate_passed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CostCapacityPerturbationSummary {
+    passed_count: usize,
+    total_count: usize,
+    pass_ratio_ppm: i64,
+    min_calmar: Decimal,
+    avg_calmar: Decimal,
+    max_drawdown: Decimal,
+    min_annual_return: Decimal,
+    avg_sharpe: Decimal,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OosCostCapacityGateConfig {
+    enabled: bool,
+    min_pass_ratio: f64,
+    min_perturbed_calmar: f64,
+    max_perturbed_drawdown_pct: f64,
+}
+
 struct OptimizationPerformanceGatePolicy {
     min_completed_trials: i64,
     max_failed_trials: i64,
     max_elapsed_ms: Option<i64>,
+}
+
+struct TrialExecutionOutcome {
+    completed: i64,
+    failed: i64,
+    signal_cache_stats: SignalDataCacheStats,
+    backtest_cache_stats: BacktestDataCacheStats,
+}
+
+struct RobustnessOverlayPersistenceFields {
+    gate_result_id: String,
+    status: String,
+    gate_results: Value,
 }
 
 struct NormalizedPromoteRequest {
@@ -273,6 +416,32 @@ struct DiscoveryCandidate {
     professional_gap_score: Decimal,
     metrics: CandidateMetrics,
     parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+struct CompletedTrialSnapshot {
+    trial_id: String,
+    trial_index: i32,
+    backtest_task_id: Option<String>,
+    score: Option<Decimal>,
+    metrics: Value,
+    metric_sources: Value,
+    missing_elite_metrics: Value,
+    constraint_violations: Value,
+    parameters: Value,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EliteMetricProfile {
+    annual_return: f64,
+    excess_return: f64,
+    sharpe: f64,
+    sortino: f64,
+    calmar: f64,
+    profit_factor: f64,
+    max_drawdown: f64,
+    max_drawdown_duration_days: f64,
+    num_trades: f64,
 }
 
 enum OptimizationTrialBacktestRequest {
@@ -350,6 +519,49 @@ fn default_professional_elite_robustness_policy() -> Value {
     })
 }
 
+fn default_oos_train_selection_gate_policy() -> Value {
+    json!({
+        "candidate_tier": "oos_train_selection",
+        "enforce_trial_constraint_violations": false,
+        "min_trade_count": 20,
+        "min_annual_return": 0.0,
+        "min_excess_return": 0.0,
+        "min_sharpe": 0.0,
+        "max_drawdown": 0.50,
+        "min_score_gap": -999.0,
+        "walk_forward_window_days": 504,
+        "walk_forward_step_days": 126,
+        "min_walk_forward_windows": 1,
+        "min_positive_excess_window_ratio": 0.0,
+        "min_positive_annual_return_window_ratio": 0.50,
+        "min_walk_forward_median_sharpe": 0.0,
+        "min_bootstrap_positive_return_probability": 0.50,
+        "min_bootstrap_sharpe_p05": -1.0,
+        "min_market_scenarios": 1,
+        "bootstrap_trials": 256,
+        "bootstrap_seed": 42
+    })
+}
+
+fn default_oos_final_promotion_gate_policy(validation_mode: &str) -> Value {
+    let min_oos_window_count = if validation_mode == "holdout_80_20" {
+        1
+    } else {
+        3
+    };
+    json!({
+        "candidate_tier": "oos_final_promotion",
+        "min_stitched_oos_calmar": 1.2,
+        "min_positive_oos_window_ratio": 0.60,
+        "min_oos_window_count": min_oos_window_count,
+        "require_train_selection_approval": true,
+        "require_no_train_test_overlap": true,
+        "min_cost_capacity_perturbation_pass_ratio": 0.80,
+        "min_perturbed_oos_calmar": 1.2,
+        "max_perturbed_oos_drawdown_pct": 0.35
+    })
+}
+
 fn resolve_robustness_gate_policy(gate_policy: Option<&Value>) -> Value {
     match gate_policy {
         Some(policy) => {
@@ -370,6 +582,87 @@ fn resolve_robustness_gate_policy(gate_policy: Option<&Value>) -> Value {
             }
         }
         None => default_professional_robustness_policy(),
+    }
+}
+
+fn resolve_oos_train_selection_gate_policy(req: &Phase7OosWalkForwardDiscoveryRequest) -> Value {
+    if let Some(policy) = req.train_selection_gate_policy.as_ref() {
+        return resolve_oos_train_selection_policy(Some(policy));
+    }
+    if let Some(policy) = req.train_robustness_gate_policy.as_ref() {
+        return resolve_robustness_gate_policy(Some(policy));
+    }
+    default_oos_train_selection_gate_policy()
+}
+
+fn resolve_oos_train_selection_policy(gate_policy: Option<&Value>) -> Value {
+    match gate_policy {
+        Some(policy) => {
+            let preset = policy
+                .get("preset")
+                .or_else(|| policy.get("candidate_tier"))
+                .or_else(|| policy.get("tier"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match preset {
+                "professional"
+                | "professional_observation"
+                | "observation"
+                | "default"
+                | "elite"
+                | "professional_elite" => resolve_robustness_gate_policy(Some(policy)),
+                "oos_train_selection" | "train_selection" | "relaxed_train_selection" | "" => {
+                    merge_gate_policy(default_oos_train_selection_gate_policy(), policy)
+                }
+                _ => merge_gate_policy(default_oos_train_selection_gate_policy(), policy),
+            }
+        }
+        None => default_oos_train_selection_gate_policy(),
+    }
+}
+
+fn resolve_oos_final_promotion_gate_policy(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    validation_mode: &str,
+) -> Value {
+    let mut policy = default_oos_final_promotion_gate_policy(validation_mode);
+    if let Some(overrides) = req.final_promotion_gate_policy.as_ref() {
+        policy = merge_gate_policy(policy, overrides);
+    }
+    if let Some(value) = req.min_stitched_oos_calmar {
+        insert_policy_number(&mut policy, "min_stitched_oos_calmar", value);
+    }
+    if let Some(value) = req.min_positive_oos_window_ratio {
+        insert_policy_number(&mut policy, "min_positive_oos_window_ratio", value);
+    }
+    if let Some(value) = req.min_oos_window_count {
+        insert_policy_integer(&mut policy, "min_oos_window_count", value as i64);
+    }
+    if let Some(value) = req.min_cost_capacity_perturbation_pass_ratio {
+        insert_policy_number(
+            &mut policy,
+            "min_cost_capacity_perturbation_pass_ratio",
+            value,
+        );
+    }
+    if let Some(value) = req.min_perturbed_oos_calmar {
+        insert_policy_number(&mut policy, "min_perturbed_oos_calmar", value);
+    }
+    if let Some(value) = req.max_perturbed_oos_drawdown_pct {
+        insert_policy_number(&mut policy, "max_perturbed_oos_drawdown_pct", value);
+    }
+    policy
+}
+
+fn insert_policy_number(policy: &mut Value, key: &str, value: f64) {
+    if let Some(object) = policy.as_object_mut() {
+        object.insert(key.to_string(), json!(value));
+    }
+}
+
+fn insert_policy_integer(policy: &mut Value, key: &str, value: i64) {
+    if let Some(object) = policy.as_object_mut() {
+        object.insert(key.to_string(), json!(value));
     }
 }
 
@@ -872,6 +1165,34 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_v14_corr70_annual_edge".to_string(),
             LayeredSearchConfig::professional_v14_corr70_annual_edge_default(),
         ),
+        "professional_execution_robust_candidate"
+        | "execution_robust_candidate"
+        | "phase7_execution_robust_candidate"
+        | "phase7_dj" => (
+            "professional_execution_robust_candidate".to_string(),
+            LayeredSearchConfig::professional_execution_robust_candidate_default(),
+        ),
+        "professional_execution_low_turnover_alpha"
+        | "execution_low_turnover_alpha"
+        | "phase7_execution_low_turnover_alpha"
+        | "phase7_dn" => (
+            "professional_execution_low_turnover_alpha".to_string(),
+            LayeredSearchConfig::professional_execution_low_turnover_alpha_default(),
+        ),
+        "professional_execution_capacity_budget"
+        | "execution_capacity_budget"
+        | "phase7_execution_capacity_budget"
+        | "phase7_dq" => (
+            "professional_execution_capacity_budget".to_string(),
+            LayeredSearchConfig::professional_execution_capacity_budget_default(),
+        ),
+        "professional_execution_impact_budget"
+        | "execution_impact_budget"
+        | "phase7_execution_impact_budget"
+        | "phase7_dr" => (
+            "professional_execution_impact_budget".to_string(),
+            LayeredSearchConfig::professional_execution_impact_budget_default(),
+        ),
         "professional_return_alpha_sharpe_bridge"
         | "return_alpha_sharpe_bridge"
         | "phase7_return_alpha_sharpe_bridge"
@@ -992,12 +1313,21 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
     }
 }
 
+#[cfg(test)]
 fn build_phase7_layered_plan_bundle(
     req: &Phase7LayeredOptimizationRequest,
+    resource_plan: LocalResourcePlan,
+) -> Phase7LayeredPlanBundle {
+    build_phase7_layered_plan_bundle_with_trial_cap(req, resource_plan, 500)
+}
+
+fn build_phase7_layered_plan_bundle_with_trial_cap(
+    req: &Phase7LayeredOptimizationRequest,
     mut resource_plan: LocalResourcePlan,
+    max_trials_cap: usize,
 ) -> Phase7LayeredPlanBundle {
     if let Some(max_trials) = req.max_trials {
-        resource_plan.max_trials = normalize_max_trials(max_trials);
+        resource_plan.max_trials = max_trials.clamp(1, max_trials_cap.max(1));
     }
 
     let (search_profile, mut config) = phase7_search_config(req.search_profile.as_deref());
@@ -1026,23 +1356,6 @@ fn build_phase7_layered_plan_bundle(
 fn phase7_discovery_layered_request(
     req: &Phase7ProfessionalDiscoveryRequest,
 ) -> Phase7LayeredOptimizationRequest {
-    let default_backtest_template = || {
-        json!({
-            "mode": "standard",
-            "persistence_mode": "summary_only",
-            "benchmark": "000300.SH",
-            "start_date": "20160201",
-            "end_date": "20260515",
-            "initial_capital": 1000000.0,
-            "signal_timing": "close",
-            "execution_timing": "next_open",
-            "execution_price": "next_open",
-            "effective_coverage": {
-                "enabled": true,
-                "mode": "adjust_start"
-            }
-        })
-    };
     Phase7LayeredOptimizationRequest {
         strategy_version_id: req.strategy_version_id.clone(),
         data_version_id: req.data_version_id.clone(),
@@ -1067,7 +1380,7 @@ fn phase7_discovery_layered_request(
         backtest_template: Some(
             req.backtest_template
                 .clone()
-                .unwrap_or_else(default_backtest_template),
+                .unwrap_or_else(default_phase7_backtest_template),
         ),
         prediction_set_ids: req.prediction_set_ids.clone(),
         max_trials: req.max_trials,
@@ -1080,6 +1393,24 @@ fn phase7_discovery_layered_request(
                 .to_string(),
         ),
     }
+}
+
+fn default_phase7_backtest_template() -> Value {
+    json!({
+        "mode": "standard",
+        "persistence_mode": "summary_only",
+        "benchmark": "000300.SH",
+        "start_date": "20160201",
+        "end_date": "20260515",
+        "initial_capital": 1000000.0,
+        "signal_timing": "close",
+        "execution_timing": "next_open",
+        "execution_price": "next_open",
+        "effective_coverage": {
+            "enabled": true,
+            "mode": "adjust_start"
+        }
+    })
 }
 
 fn normalize_prediction_set_ids(values: &[String]) -> Vec<String> {
@@ -1282,7 +1613,17 @@ async fn insert_phase7_layered_optimization(
     req: &Phase7LayeredOptimizationRequest,
     resource_plan: LocalResourcePlan,
 ) -> Result<(String, Phase7LayeredPlanBundle), String> {
-    let bundle = build_phase7_layered_plan_bundle(req, resource_plan);
+    insert_phase7_layered_optimization_with_trial_cap(db, req, resource_plan, 500).await
+}
+
+async fn insert_phase7_layered_optimization_with_trial_cap(
+    db: &sqlx::PgPool,
+    req: &Phase7LayeredOptimizationRequest,
+    resource_plan: LocalResourcePlan,
+    max_trials_cap: usize,
+) -> Result<(String, Phase7LayeredPlanBundle), String> {
+    let bundle =
+        build_phase7_layered_plan_bundle_with_trial_cap(req, resource_plan, max_trials_cap);
     let task_id = format!("opt-phase7-{}", Uuid::new_v4());
     let mut tx = db
         .begin()
@@ -1447,6 +1788,87 @@ pub async fn run_phase7_professional_discovery(
     }
 }
 
+pub async fn run_phase7_oos_walk_forward_discovery(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7OosWalkForwardDiscoveryRequest>,
+) -> impl IntoResponse {
+    let result = match normalize_oos_execution_mode(req.execution_mode.as_deref()) {
+        Ok("background") if !req.plan_only.unwrap_or(false) => {
+            start_phase7_oos_walk_forward_discovery_background(&state.db, req).await
+        }
+        Ok(_) => execute_phase7_oos_walk_forward_discovery(&state.db, req, None).await,
+        Err(message) => Err(message),
+    };
+
+    match result {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn get_experiment_run(
+    State(state): State<Arc<AppState>>,
+    Path(experiment_run_id): Path<String>,
+) -> impl IntoResponse {
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Value,
+            Option<Value>,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ),
+    >(
+        "SELECT experiment_run_id,
+                experiment_type,
+                related_entity_type,
+                related_entity_id,
+                config,
+                metrics,
+                status,
+                started_at::text,
+                completed_at::text,
+                created_at::text
+         FROM experiment_run
+         WHERE experiment_run_id = $1",
+    )
+    .bind(&experiment_run_id)
+    .fetch_optional(&state.db)
+    .await;
+
+    match row {
+        Ok(Some(row)) => Json(json!({
+            "code": 0,
+            "data": {
+                "experiment_run_id": row.0,
+                "experiment_type": row.1,
+                "related_entity_type": row.2,
+                "related_entity_id": row.3,
+                "config": row.4,
+                "metrics": row.5,
+                "status": row.6,
+                "started_at": row.7,
+                "completed_at": row.8,
+                "created_at": row.9,
+            }
+        })),
+        Ok(None) => Json(json!({
+            "code": 1,
+            "message": format!("experiment_run not found: {}", experiment_run_id)
+        })),
+        Err(error) => Json(json!({
+            "code": 1,
+            "message": format!("Failed to get experiment_run: {}", error)
+        })),
+    }
+}
+
 pub async fn promote_optimization_trial(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -1578,6 +2000,2004 @@ async fn execute_phase7_professional_discovery(
     }))
 }
 
+fn normalize_oos_execution_mode(mode: Option<&str>) -> Result<&'static str, String> {
+    match mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("inline")
+    {
+        "inline" | "sync" | "synchronous" => Ok("inline"),
+        "background" | "async" | "asynchronous" => Ok("background"),
+        other => Err(format!("unsupported execution_mode: {}", other)),
+    }
+}
+
+fn normalized_trial_concurrency(value: Option<usize>) -> usize {
+    value
+        .unwrap_or_else(|| LocalResourcePlan::local_mac().batch_size.min(4).max(1))
+        .clamp(1, 16)
+}
+
+fn normalize_oos_train_cache_mode(mode: Option<&str>) -> Result<&'static str, String> {
+    match mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("shared_window")
+    {
+        "shared_window" | "shared" | "window_shared" | "reuse" => Ok("shared_window"),
+        "per_trial_isolated" | "isolated" | "parallel_isolated" => Ok("per_trial_isolated"),
+        other => Err(format!("unsupported train_cache_mode: {}", other)),
+    }
+}
+
+fn oos_train_trial_concurrency(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+) -> Result<usize, String> {
+    match normalize_oos_train_cache_mode(req.train_cache_mode.as_deref())? {
+        "shared_window" => Ok(1),
+        "per_trial_isolated" => Ok(normalized_trial_concurrency(req.trial_concurrency)),
+        other => Err(format!("unsupported train_cache_mode: {}", other)),
+    }
+}
+
+async fn start_phase7_oos_walk_forward_discovery_background(
+    db: &sqlx::PgPool,
+    req: Phase7OosWalkForwardDiscoveryRequest,
+) -> Result<Value, String> {
+    let plan = build_oos_discovery_plan(&req)?;
+    let plan_json = oos_discovery_plan_json(&plan);
+    let experiment_run_id =
+        create_running_oos_walk_forward_experiment(db, &req, &plan_json).await?;
+    let db = db.clone();
+    let background_req = req.clone();
+    let background_experiment_run_id = experiment_run_id.clone();
+    tokio::spawn(async move {
+        if let Err(message) = execute_phase7_oos_walk_forward_discovery(
+            &db,
+            background_req,
+            Some(background_experiment_run_id.clone()),
+        )
+        .await
+        {
+            error!(
+                experiment_run_id = %background_experiment_run_id,
+                error = %message,
+                "Phase 7 OOS walk-forward discovery failed"
+            );
+            let _ = mark_oos_walk_forward_experiment_failed(
+                &db,
+                &background_experiment_run_id,
+                &message,
+            )
+            .await;
+        }
+    });
+
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "search_method": "phase7_oos_walk_forward_discovery",
+        "execution_mode": "background",
+        "status": "running",
+        "plan": plan_json,
+        "resource_plan": LocalResourcePlan::local_mac(),
+        "poll_url": format!("/api/v1/quant/experiments/{}", experiment_run_id),
+    }))
+}
+
+async fn execute_phase7_oos_walk_forward_discovery(
+    db: &sqlx::PgPool,
+    req: Phase7OosWalkForwardDiscoveryRequest,
+    experiment_run_id: Option<String>,
+) -> Result<Value, String> {
+    let plan = build_oos_discovery_plan(&req)?;
+    let plan_json = oos_discovery_plan_json(&plan);
+    if req.plan_only.unwrap_or(false) {
+        return Ok(json!({
+            "search_method": "phase7_oos_walk_forward_discovery",
+            "plan_only": true,
+            "plan": plan_json,
+            "resource_plan": LocalResourcePlan::local_mac(),
+        }));
+    }
+
+    let mut window_results = Vec::new();
+    let mut stitched_points = Vec::new();
+    let mut oos_signal_cache = SignalDataCache::default();
+    let mut oos_backtest_cache = BacktestDataCache::default();
+    let train_gate_policy = resolve_oos_train_selection_gate_policy(&req);
+    let final_promotion_gate_policy =
+        resolve_oos_final_promotion_gate_policy(&req, &plan.validation_mode);
+    let oos_top_n = req.oos_top_n.unwrap_or(1).clamp(1, 20);
+
+    for window in &plan.windows {
+        let execution = execute_oos_discovery_window(
+            db,
+            &req,
+            window,
+            oos_top_n,
+            &train_gate_policy,
+            &final_promotion_gate_policy,
+            &mut oos_signal_cache,
+            &mut oos_backtest_cache,
+        )
+        .await?;
+        append_stitched_oos_points(&mut stitched_points, &execution.oos_points);
+        window_results.push(oos_window_execution_json(&execution, &train_gate_policy));
+        if let Some(experiment_run_id) = experiment_run_id.as_deref() {
+            let stitched_summary = if stitched_points.len() >= 2 {
+                metric_summary_json(&summarize_points(&stitched_points))
+            } else {
+                json!({})
+            };
+            update_oos_walk_forward_experiment_progress(
+                db,
+                experiment_run_id,
+                &plan,
+                &window_results,
+                &stitched_summary,
+            )
+            .await?;
+        }
+    }
+
+    let stitched_summary = if stitched_points.len() >= 2 {
+        metric_summary_json(&summarize_points(&stitched_points))
+    } else {
+        json!({})
+    };
+    let gate_report = build_oos_gate_report(
+        &req,
+        &plan,
+        &window_results,
+        &stitched_summary,
+        &final_promotion_gate_policy,
+    );
+    let experiment_run_id = match experiment_run_id {
+        Some(existing_experiment_run_id) => {
+            complete_oos_walk_forward_experiment(
+                db,
+                &existing_experiment_run_id,
+                &req,
+                &plan_json,
+                &window_results,
+                &stitched_summary,
+                &gate_report,
+            )
+            .await?;
+            existing_experiment_run_id
+        }
+        None => {
+            persist_oos_walk_forward_experiment(
+                db,
+                &req,
+                &plan_json,
+                &window_results,
+                &stitched_summary,
+                &gate_report,
+            )
+            .await?
+        }
+    };
+
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "search_method": "phase7_oos_walk_forward_discovery",
+        "execution_mode": normalize_oos_execution_mode(req.execution_mode.as_deref()).unwrap_or("inline"),
+        "plan": plan_json,
+        "window_count": plan.windows.len(),
+        "windows": window_results,
+        "stitched_oos": {
+            "point_count": stitched_points.len(),
+            "metrics": stitched_summary,
+            "gates": gate_report,
+            "status": oos_gate_status(&gate_report),
+        },
+        "cache": {
+            "oos_signal_cache": signal_cache_stats_delta(SignalDataCacheStats::default(), oos_signal_cache.stats()),
+            "oos_backtest_cache": backtest_cache_stats_delta(BacktestDataCacheStats::default(), oos_backtest_cache.stats()),
+        }
+    }))
+}
+
+async fn execute_oos_discovery_window(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    window: &OosDiscoveryWindow,
+    oos_top_n: usize,
+    train_gate_policy: &Value,
+    final_promotion_gate_policy: &Value,
+    oos_signal_cache: &mut SignalDataCache,
+    oos_backtest_cache: &mut BacktestDataCache,
+) -> Result<OosWindowExecution, String> {
+    let train_template = backtest_template_for_window(
+        req.backtest_template
+            .clone()
+            .unwrap_or_else(default_phase7_backtest_template),
+        window.train_start,
+        window.train_end,
+        "summary_only",
+    )?;
+    let train_template_for_selection = train_template.clone();
+    let train_req = Phase7ProfessionalDiscoveryRequest {
+        strategy_version_id: req.strategy_version_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        objective: req.objective.clone(),
+        constraints: req.constraints.clone(),
+        walk_forward: req.walk_forward.clone(),
+        backtest_template: Some(train_template),
+        prediction_set_ids: req.prediction_set_ids.clone(),
+        max_trials: req
+            .max_trials_per_window
+            .or_else(|| req.exhaustive_search.unwrap_or(false).then_some(100_000)),
+        search_profile: req.search_profile.clone(),
+        trial_batch_limit: req.trial_batch_limit,
+        max_batches: None,
+        robustness_top_n: Some(oos_top_n),
+        robustness_gate_policy: Some(train_gate_policy.clone()),
+        stop_after_professional_candidate: Some(false),
+        stop_after_robust_approval: Some(false),
+    };
+    let layered_req = phase7_discovery_layered_request(&train_req);
+    let (train_task_id, bundle) = insert_phase7_layered_optimization_with_trial_cap(
+        db,
+        &layered_req,
+        LocalResourcePlan::local_mac(),
+        100_000,
+    )
+    .await?;
+    let trial_batch_limit = req
+        .trial_batch_limit
+        .unwrap_or(bundle.plan.batch_size as i64)
+        .clamp(1, 2_000);
+    let max_batches = req.max_batches_per_window.unwrap_or_else(|| {
+        let planned = bundle.plan.planned_trials.max(1);
+        let batch = trial_batch_limit.max(1) as usize;
+        planned.div_ceil(batch)
+    });
+    let max_batches = max_batches.clamp(1, 100_000);
+    let mut train_signal_cache = SignalDataCache::default();
+    let mut train_backtest_cache = BacktestDataCache::default();
+    let mut train_batches = Vec::new();
+    let trial_concurrency = oos_train_trial_concurrency(req)?;
+    for _ in 0..max_batches {
+        let batch = execute_pending_trials_with_caches_and_concurrency(
+            db,
+            &train_task_id,
+            trial_batch_limit,
+            None,
+            &mut train_signal_cache,
+            &mut train_backtest_cache,
+            trial_concurrency,
+        )
+        .await?;
+        let executed = batch["executed"].as_i64().unwrap_or(0);
+        train_batches.push(batch);
+        if executed == 0 {
+            break;
+        }
+    }
+
+    let training_candidates = load_oos_training_candidates(db, &train_task_id, oos_top_n).await?;
+    let require_train_approval = req.require_train_robustness_approval.unwrap_or(true);
+    let (selected_candidate, train_robustness, train_cost_capacity_perturbations) =
+        select_oos_training_candidate(
+            db,
+            req,
+            &train_template_for_selection,
+            &train_task_id,
+            training_candidates,
+            train_gate_policy,
+            require_train_approval,
+            window.window_index,
+            &mut train_signal_cache,
+            &mut train_backtest_cache,
+        )
+        .await?;
+
+    let test_template = backtest_template_for_window(
+        req.backtest_template
+            .clone()
+            .unwrap_or_else(default_phase7_backtest_template),
+        window.test_start,
+        window.test_end,
+        "summary_only",
+    )?;
+    let oos_backtest_task_id = format!("oosbt-{}", Uuid::new_v4());
+    let perturbation_template = test_template.clone();
+    let oos_output = execute_oos_candidate_backtest(
+        db,
+        req,
+        test_template,
+        &selected_candidate.parameters,
+        &oos_backtest_task_id,
+        oos_signal_cache,
+        oos_backtest_cache,
+    )
+    .await?;
+    let oos_points = load_oos_equity_points(db, &oos_backtest_task_id).await?;
+    let cost_capacity_perturbations = execute_oos_cost_capacity_perturbations(
+        db,
+        req,
+        perturbation_template,
+        &selected_candidate.parameters,
+        final_promotion_gate_policy,
+        oos_signal_cache,
+        oos_backtest_cache,
+    )
+    .await?;
+
+    Ok(OosWindowExecution {
+        window: window.clone(),
+        train_optimization_task_id: train_task_id,
+        train_batches,
+        selected_candidate,
+        train_robustness,
+        train_cost_capacity_perturbations,
+        oos_backtest_task_id,
+        oos_output,
+        oos_points,
+        cost_capacity_perturbations,
+    })
+}
+
+async fn execute_oos_cost_capacity_perturbations(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    test_template: Value,
+    parameters: &Value,
+    final_promotion_gate_policy: &Value,
+    signal_cache: &mut SignalDataCache,
+    backtest_cache: &mut BacktestDataCache,
+) -> Result<Vec<OosCostCapacityPerturbationResult>, String> {
+    let perturbations = resolved_oos_cost_capacity_perturbations(req);
+    let mut results = Vec::with_capacity(perturbations.len());
+    for (index, perturbation) in perturbations.into_iter().enumerate() {
+        let name = oos_cost_capacity_perturbation_name(&perturbation, index);
+        let perturbed_parameters =
+            apply_cost_capacity_perturbation_to_parameters(parameters, &perturbation)?;
+        let backtest_task_id = format!("oosstress-{}", Uuid::new_v4());
+        let output = execute_oos_candidate_backtest(
+            db,
+            req,
+            test_template.clone(),
+            &perturbed_parameters,
+            &backtest_task_id,
+            signal_cache,
+            backtest_cache,
+        )
+        .await?;
+        let passed =
+            oos_cost_capacity_perturbation_passed(req, final_promotion_gate_policy, &output);
+        results.push(OosCostCapacityPerturbationResult {
+            name,
+            perturbation,
+            backtest_task_id,
+            output,
+            passed,
+        });
+    }
+    Ok(results)
+}
+
+async fn execute_train_cost_capacity_perturbations(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    train_template: &Value,
+    parameters: &Value,
+    train_gate_policy: &Value,
+    signal_cache: &mut SignalDataCache,
+    backtest_cache: &mut BacktestDataCache,
+) -> Result<Vec<OosCostCapacityPerturbationResult>, String> {
+    let gate = train_cost_capacity_perturbation_gate_config(req, train_gate_policy);
+    if !gate.enabled {
+        return Ok(Vec::new());
+    }
+
+    let perturbations = resolved_oos_cost_capacity_perturbations(req);
+    let mut results = Vec::with_capacity(perturbations.len());
+    for (index, perturbation) in perturbations.into_iter().enumerate() {
+        let name = oos_cost_capacity_perturbation_name(&perturbation, index);
+        let perturbed_parameters =
+            apply_cost_capacity_perturbation_to_parameters(parameters, &perturbation)?;
+        let backtest_task_id = format!("trainstress-{}", Uuid::new_v4());
+        let output = execute_oos_candidate_backtest(
+            db,
+            req,
+            train_template.clone(),
+            &perturbed_parameters,
+            &backtest_task_id,
+            signal_cache,
+            backtest_cache,
+        )
+        .await?;
+        let passed = cost_capacity_perturbation_passed_with_thresholds(
+            &output,
+            gate.min_perturbed_calmar,
+            gate.max_perturbed_drawdown_pct,
+        );
+        results.push(OosCostCapacityPerturbationResult {
+            name,
+            perturbation,
+            backtest_task_id,
+            output,
+            passed,
+        });
+    }
+    Ok(results)
+}
+
+async fn execute_oos_candidate_backtest(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    test_template: Value,
+    parameters: &Value,
+    backtest_task_id: &str,
+    signal_cache: &mut SignalDataCache,
+    backtest_cache: &mut BacktestDataCache,
+) -> Result<FactorBacktestRunOutput, String> {
+    let task = OptimizationTaskExecutionContext {
+        strategy_version_id: req.strategy_version_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        backtest_template: test_template,
+        objective: req.objective.clone().unwrap_or_else(|| {
+            json!({
+                "type": "professional_candidate",
+                "benchmark": "000300.SH",
+                "maximize": true
+            })
+        }),
+        constraints: req.constraints.clone(),
+    };
+    match build_optimization_trial_request(&task, parameters)? {
+        OptimizationTrialBacktestRequest::Factor(request) => {
+            execute_factor_backtest_with_caches(
+                db,
+                backtest_task_id,
+                request,
+                Some(signal_cache),
+                Some(backtest_cache),
+            )
+            .await
+        }
+        OptimizationTrialBacktestRequest::Prediction(request) => {
+            execute_prediction_backtest(db, backtest_task_id, request).await
+        }
+    }
+}
+
+fn cost_capacity_perturbation_gate_enabled(req: &Phase7OosWalkForwardDiscoveryRequest) -> bool {
+    req.enable_cost_capacity_perturbation_gate
+        .unwrap_or_else(|| {
+            req.cost_capacity_perturbations
+                .as_ref()
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        })
+}
+
+fn resolved_oos_cost_capacity_perturbations(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+) -> Vec<OosCostCapacityPerturbationRequest> {
+    if !cost_capacity_perturbation_gate_enabled(req) {
+        return Vec::new();
+    }
+    req.cost_capacity_perturbations
+        .clone()
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(default_oos_cost_capacity_perturbations)
+}
+
+fn train_cost_capacity_perturbation_gate_config(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    train_gate_policy: &Value,
+) -> OosCostCapacityGateConfig {
+    let enabled = constraint_bool(
+        Some(train_gate_policy),
+        "enable_train_cost_capacity_perturbation_gate",
+    )
+    .or_else(|| {
+        constraint_bool(
+            Some(train_gate_policy),
+            "enable_cost_capacity_perturbation_gate",
+        )
+    })
+    .unwrap_or(false);
+    let min_pass_ratio = constraint_f64(
+        Some(train_gate_policy),
+        "min_train_cost_capacity_perturbation_pass_ratio",
+    )
+    .or_else(|| {
+        constraint_f64(
+            Some(train_gate_policy),
+            "min_cost_capacity_perturbation_pass_ratio",
+        )
+    })
+    .or(req.min_cost_capacity_perturbation_pass_ratio)
+    .unwrap_or(0.80)
+    .clamp(0.0, 1.0);
+    let min_perturbed_calmar =
+        constraint_f64(Some(train_gate_policy), "min_train_perturbed_calmar")
+            .or_else(|| constraint_f64(Some(train_gate_policy), "min_perturbed_oos_calmar"))
+            .or(req.min_perturbed_oos_calmar)
+            .unwrap_or(1.2);
+    let max_perturbed_drawdown_pct =
+        constraint_f64(Some(train_gate_policy), "max_train_perturbed_drawdown_pct")
+            .or_else(|| constraint_f64(Some(train_gate_policy), "max_perturbed_oos_drawdown_pct"))
+            .or(req.max_perturbed_oos_drawdown_pct)
+            .unwrap_or(0.35);
+
+    OosCostCapacityGateConfig {
+        enabled,
+        min_pass_ratio,
+        min_perturbed_calmar,
+        max_perturbed_drawdown_pct,
+    }
+}
+
+fn train_cost_capacity_stress_aware_selection_enabled(
+    train_gate_policy: &Value,
+    gate: &OosCostCapacityGateConfig,
+) -> bool {
+    if !gate.enabled {
+        return false;
+    }
+    constraint_bool(
+        Some(train_gate_policy),
+        "enable_train_cost_capacity_stress_aware_selection",
+    )
+    .or_else(|| constraint_bool(Some(train_gate_policy), "stress_aware_train_selection"))
+    .unwrap_or(true)
+}
+
+fn default_oos_cost_capacity_perturbations() -> Vec<OosCostCapacityPerturbationRequest> {
+    vec![
+        OosCostCapacityPerturbationRequest {
+            name: Some("cost_up_150pct".to_string()),
+            cost_multiplier: Some(1.5),
+            slippage_bps: Some(0.0002),
+            impact_cost_coefficient: None,
+            max_participation_rate: None,
+            capacity_penalty_strength: None,
+        },
+        OosCostCapacityPerturbationRequest {
+            name: Some("impact_cost_2pct_participation_10pct".to_string()),
+            cost_multiplier: Some(1.0),
+            slippage_bps: None,
+            impact_cost_coefficient: Some(0.02),
+            max_participation_rate: Some(0.10),
+            capacity_penalty_strength: None,
+        },
+        OosCostCapacityPerturbationRequest {
+            name: Some("capacity_tight_participation_5pct".to_string()),
+            cost_multiplier: None,
+            slippage_bps: None,
+            impact_cost_coefficient: None,
+            max_participation_rate: Some(0.05),
+            capacity_penalty_strength: Some(1.0),
+        },
+    ]
+}
+
+fn oos_cost_capacity_perturbation_name(
+    perturbation: &OosCostCapacityPerturbationRequest,
+    index: usize,
+) -> String {
+    perturbation
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("cost_capacity_perturbation_{}", index + 1))
+}
+
+fn apply_cost_capacity_perturbation_to_parameters(
+    parameters: &Value,
+    perturbation: &OosCostCapacityPerturbationRequest,
+) -> Result<Value, String> {
+    let mut object = parameters
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "selected candidate parameters must be a JSON object".to_string())?;
+    if let Some(value) = perturbation.capacity_penalty_strength {
+        object.insert("capacity_penalty_strength".to_string(), json!(value));
+    }
+    upsert_nested_number(
+        &mut object,
+        "cost_model",
+        "cost_multiplier",
+        perturbation.cost_multiplier,
+    )?;
+    upsert_nested_number(
+        &mut object,
+        "cost_model",
+        "slippage_bps",
+        perturbation.slippage_bps,
+    )?;
+    upsert_nested_number(
+        &mut object,
+        "cost_model",
+        "impact_cost_coefficient",
+        perturbation.impact_cost_coefficient,
+    )?;
+    upsert_nested_number(
+        &mut object,
+        "execution_rules",
+        "max_participation_rate",
+        perturbation.max_participation_rate,
+    )?;
+    Ok(Value::Object(object))
+}
+
+fn upsert_nested_number(
+    object: &mut Map<String, Value>,
+    parent: &str,
+    child: &str,
+    value: Option<f64>,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    match object.entry(parent.to_string()) {
+        serde_json::map::Entry::Vacant(entry) => {
+            entry.insert(json!({ child: value }));
+        }
+        serde_json::map::Entry::Occupied(mut entry) => {
+            let parent_object = entry
+                .get_mut()
+                .as_object_mut()
+                .ok_or_else(|| format!("{} must be a JSON object", parent))?;
+            parent_object.insert(child.to_string(), json!(value));
+        }
+    }
+    Ok(())
+}
+
+fn oos_cost_capacity_perturbation_passed(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    final_promotion_gate_policy: &Value,
+    output: &FactorBacktestRunOutput,
+) -> bool {
+    let min_calmar = req
+        .min_perturbed_oos_calmar
+        .or_else(|| {
+            constraint_f64(
+                Some(final_promotion_gate_policy),
+                "min_perturbed_oos_calmar",
+            )
+        })
+        .unwrap_or(1.2);
+    let max_drawdown = req
+        .max_perturbed_oos_drawdown_pct
+        .or_else(|| {
+            constraint_f64(
+                Some(final_promotion_gate_policy),
+                "max_perturbed_oos_drawdown_pct",
+            )
+        })
+        .unwrap_or(0.35);
+    cost_capacity_perturbation_passed_with_thresholds(output, min_calmar, max_drawdown)
+}
+
+fn cost_capacity_perturbation_passed_with_thresholds(
+    output: &FactorBacktestRunOutput,
+    min_calmar: f64,
+    max_drawdown: f64,
+) -> bool {
+    let min_calmar = Decimal::from_f64_retain(min_calmar).unwrap_or(Decimal::ZERO);
+    let max_drawdown = Decimal::from_f64_retain(max_drawdown).unwrap_or(Decimal::MAX);
+    output.metrics.calmar_ratio >= min_calmar && output.metrics.max_drawdown_pct <= max_drawdown
+}
+
+fn build_cost_capacity_pass_ratio_gate(
+    gate_name: &str,
+    passed_count: usize,
+    total_count: usize,
+    gate: &OosCostCapacityGateConfig,
+) -> Value {
+    let pass_ratio = ratio(passed_count, total_count);
+    json!({
+        "gate": gate_name,
+        "passed": total_count > 0 && pass_ratio >= gate.min_pass_ratio,
+        "limit": gate.min_pass_ratio,
+        "actual": pass_ratio,
+        "passed_count": passed_count,
+        "total_count": total_count,
+        "min_perturbed_oos_calmar": gate.min_perturbed_calmar,
+        "max_perturbed_oos_drawdown_pct": gate.max_perturbed_drawdown_pct,
+    })
+}
+
+fn cost_capacity_perturbation_pass_counts(
+    results: &[OosCostCapacityPerturbationResult],
+) -> (usize, usize) {
+    (
+        results.iter().filter(|result| result.passed).count(),
+        results.len(),
+    )
+}
+
+fn cost_capacity_perturbation_summary(
+    results: &[OosCostCapacityPerturbationResult],
+) -> CostCapacityPerturbationSummary {
+    let (passed_count, total_count) = cost_capacity_perturbation_pass_counts(results);
+    let pass_ratio_ppm = if total_count == 0 {
+        0
+    } else {
+        ((passed_count as i64) * 1_000_000) / total_count as i64
+    };
+    let mut min_calmar = Decimal::MAX;
+    let mut total_calmar = Decimal::ZERO;
+    let mut max_drawdown = Decimal::ZERO;
+    let mut min_annual_return = Decimal::MAX;
+    let mut total_sharpe = Decimal::ZERO;
+
+    for result in results {
+        let metrics = &result.output.metrics;
+        min_calmar = min_calmar.min(metrics.calmar_ratio);
+        total_calmar += metrics.calmar_ratio;
+        max_drawdown = max_drawdown.max(metrics.max_drawdown_pct);
+        min_annual_return = min_annual_return.min(metrics.annual_return_pct);
+        total_sharpe += metrics.sharpe_ratio;
+    }
+
+    if total_count == 0 {
+        min_calmar = Decimal::ZERO;
+        min_annual_return = Decimal::ZERO;
+    }
+    let denominator = Decimal::from(total_count.max(1) as i64);
+    CostCapacityPerturbationSummary {
+        passed_count,
+        total_count,
+        pass_ratio_ppm,
+        min_calmar,
+        avg_calmar: total_calmar / denominator,
+        max_drawdown,
+        min_annual_return,
+        avg_sharpe: total_sharpe / denominator,
+    }
+}
+
+#[cfg(test)]
+fn cost_capacity_perturbation_summary_from_counts(
+    passed_count: usize,
+    total_count: usize,
+) -> CostCapacityPerturbationSummary {
+    let pass_ratio_ppm = if total_count == 0 {
+        0
+    } else {
+        ((passed_count as i64) * 1_000_000) / total_count as i64
+    };
+    CostCapacityPerturbationSummary {
+        passed_count,
+        total_count,
+        pass_ratio_ppm,
+        min_calmar: Decimal::ZERO,
+        avg_calmar: Decimal::ZERO,
+        max_drawdown: Decimal::ZERO,
+        min_annual_return: Decimal::ZERO,
+        avg_sharpe: Decimal::ZERO,
+    }
+}
+
+fn clamp_decimal(value: Decimal, lower: Decimal, upper: Decimal) -> Decimal {
+    value.max(lower).min(upper)
+}
+
+fn train_cost_capacity_stress_score_profile(train_gate_policy: &Value) -> &'static str {
+    let profile = constraint_str(Some(train_gate_policy), "train_stress_score_profile")
+        .or_else(|| constraint_str(Some(train_gate_policy), "stress_aware_selection_score"))
+        .or_else(|| {
+            constraint_str(
+                Some(train_gate_policy),
+                "train_cost_capacity_stress_score_profile",
+            )
+        })
+        .unwrap_or("train_stress_adjusted_score_v1")
+        .trim();
+    match profile {
+        "capacity_stress_calmar_score_v1"
+        | "capacity_stress"
+        | "capacity_aware"
+        | "capacity_calmar" => "capacity_stress_calmar_score_v1",
+        _ => "train_stress_adjusted_score_v1",
+    }
+}
+
+fn train_candidate_stress_adjusted_score(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+) -> Decimal {
+    let pass_ratio_score = Decimal::from(summary.pass_ratio_ppm);
+    let min_calmar_score = clamp_decimal(summary.min_calmar, Decimal::from(-5), Decimal::from(5))
+        * Decimal::from(100_000);
+    let avg_calmar_score = clamp_decimal(summary.avg_calmar, Decimal::from(-5), Decimal::from(5))
+        * Decimal::from(25_000);
+    let avg_sharpe_score = clamp_decimal(summary.avg_sharpe, Decimal::from(-5), Decimal::from(5))
+        * Decimal::from(20_000);
+    let min_return_score = clamp_decimal(
+        summary.min_annual_return,
+        Decimal::from(-1),
+        Decimal::from(1),
+    ) * Decimal::from(30_000);
+    let drawdown_penalty = clamp_decimal(summary.max_drawdown, Decimal::ZERO, Decimal::from(1))
+        * Decimal::from(50_000);
+    let professional_gap_penalty = clamp_decimal(
+        candidate.professional_gap_score,
+        Decimal::ZERO,
+        Decimal::from(10),
+    ) * Decimal::from(20_000);
+    let raw_score_bonus = clamp_decimal(
+        candidate.score.unwrap_or(Decimal::ZERO),
+        Decimal::from(-100),
+        Decimal::from(100),
+    ) * Decimal::from(1_000);
+    let base_quality_score = candidate.metrics.sharpe * Decimal::from(10_000)
+        + candidate.metrics.sortino * Decimal::from(5_000)
+        + candidate.metrics.annual_return * Decimal::from(5_000)
+        - candidate.metrics.max_drawdown * Decimal::from(20_000)
+        - professional_gap_penalty
+        + raw_score_bonus;
+
+    pass_ratio_score + min_calmar_score + avg_calmar_score + avg_sharpe_score + min_return_score
+        - drawdown_penalty
+        + base_quality_score
+}
+
+fn train_candidate_capacity_stress_calmar_score(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> Decimal {
+    let target_calmar =
+        constraint_decimal(Some(train_gate_policy), "capacity_stress_target_calmar")
+            .or_else(|| constraint_decimal(Some(train_gate_policy), "min_train_perturbed_calmar"))
+            .or_else(|| constraint_decimal(Some(train_gate_policy), "min_perturbed_oos_calmar"))
+            .unwrap_or_else(|| Decimal::new(12, 1));
+    let target_annual_return = constraint_decimal(
+        Some(train_gate_policy),
+        "capacity_stress_target_annual_return",
+    )
+    .unwrap_or_else(|| Decimal::new(5, 2));
+    let pass_ratio_score = Decimal::from(summary.pass_ratio_ppm) * Decimal::from(2);
+    let min_calmar_score = clamp_decimal(summary.min_calmar, Decimal::from(-5), Decimal::from(5))
+        * Decimal::from(220_000);
+    let avg_calmar_score = clamp_decimal(summary.avg_calmar, Decimal::from(-5), Decimal::from(5))
+        * Decimal::from(60_000);
+    let min_return_score = clamp_decimal(
+        summary.min_annual_return,
+        Decimal::from(-1),
+        Decimal::from(1),
+    ) * Decimal::from(120_000);
+    let avg_sharpe_score = clamp_decimal(summary.avg_sharpe, Decimal::from(-5), Decimal::from(5))
+        * Decimal::from(15_000);
+    let drawdown_penalty = clamp_decimal(summary.max_drawdown, Decimal::ZERO, Decimal::from(1))
+        * Decimal::from(120_000);
+    let calmar_shortfall_penalty =
+        (target_calmar - summary.min_calmar).max(Decimal::ZERO) * Decimal::from(300_000);
+    let annual_return_shortfall_penalty = (target_annual_return - summary.min_annual_return)
+        .max(Decimal::ZERO)
+        * Decimal::from(220_000);
+    let base_quality_score = candidate.metrics.sharpe * Decimal::from(2_000)
+        + candidate.metrics.sortino * Decimal::from(1_000)
+        + candidate.metrics.annual_return * Decimal::from(2_000)
+        - candidate.metrics.max_drawdown * Decimal::from(5_000);
+
+    pass_ratio_score
+        + min_calmar_score
+        + avg_calmar_score
+        + min_return_score
+        + avg_sharpe_score
+        + base_quality_score
+        - drawdown_penalty
+        - calmar_shortfall_penalty
+        - annual_return_shortfall_penalty
+}
+
+fn train_candidate_stress_adjusted_score_for_policy(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> Decimal {
+    match train_cost_capacity_stress_score_profile(train_gate_policy) {
+        "capacity_stress_calmar_score_v1" => {
+            train_candidate_capacity_stress_calmar_score(candidate, summary, train_gate_policy)
+        }
+        _ => train_candidate_stress_adjusted_score(candidate, summary),
+    }
+}
+
+fn train_candidate_evaluation_order(
+    left: &OosTrainCandidateEvaluation,
+    right: &OosTrainCandidateEvaluation,
+) -> std::cmp::Ordering {
+    right
+        .stress_summary
+        .pass_ratio_ppm
+        .cmp(&left.stress_summary.pass_ratio_ppm)
+        .then_with(|| right.stress_adjusted_score.cmp(&left.stress_adjusted_score))
+        .then_with(|| {
+            right
+                .stress_summary
+                .min_calmar
+                .cmp(&left.stress_summary.min_calmar)
+        })
+        .then_with(|| {
+            right
+                .stress_summary
+                .avg_calmar
+                .cmp(&left.stress_summary.avg_calmar)
+        })
+        .then_with(|| {
+            left.stress_summary
+                .max_drawdown
+                .cmp(&right.stress_summary.max_drawdown)
+        })
+        .then_with(|| {
+            right
+                .stress_summary
+                .min_annual_return
+                .cmp(&left.stress_summary.min_annual_return)
+        })
+        .then_with(|| {
+            right
+                .stress_summary
+                .avg_sharpe
+                .cmp(&left.stress_summary.avg_sharpe)
+        })
+        .then_with(|| discovery_candidate_order(&left.candidate, &right.candidate))
+}
+
+fn attach_train_cost_capacity_gate_to_robustness(
+    mut robustness: Value,
+    passed_count: usize,
+    total_count: usize,
+    gate: &OosCostCapacityGateConfig,
+) -> (Value, bool) {
+    if !gate.enabled {
+        return (robustness, true);
+    }
+
+    let gate_report = build_cost_capacity_pass_ratio_gate(
+        "train_cost_capacity_perturbation_pass_ratio",
+        passed_count,
+        total_count,
+        gate,
+    );
+    let passed = gate_report["passed"].as_bool().unwrap_or(false);
+    if let Some(object) = robustness.as_object_mut() {
+        match object.entry("gate_results".to_string()) {
+            serde_json::map::Entry::Vacant(entry) => {
+                entry.insert(Value::Array(vec![gate_report.clone()]));
+            }
+            serde_json::map::Entry::Occupied(mut entry) => {
+                if let Some(items) = entry.get_mut().as_array_mut() {
+                    items.push(gate_report.clone());
+                }
+            }
+        }
+        object.insert("train_cost_capacity_gate".to_string(), gate_report);
+        if !passed {
+            object.insert("status".to_string(), json!("rejected"));
+        }
+    }
+    (robustness, passed)
+}
+
+fn train_cost_capacity_overlay_persistence_fields(
+    robustness: &Value,
+) -> Result<RobustnessOverlayPersistenceFields, String> {
+    let gate_result_id = robustness["gate_result_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "train cost/capacity robustness overlay missing gate_result_id".to_string())?
+        .to_string();
+    let status = robustness["status"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "train cost/capacity robustness overlay missing status".to_string())?
+        .to_string();
+    let gate_results = robustness
+        .get("gate_results")
+        .cloned()
+        .ok_or_else(|| "train cost/capacity robustness overlay missing gate_results".to_string())?;
+    Ok(RobustnessOverlayPersistenceFields {
+        gate_result_id,
+        status,
+        gate_results,
+    })
+}
+
+async fn persist_train_cost_capacity_robustness_overlay(
+    db: &sqlx::PgPool,
+    robustness: &Value,
+) -> Result<(), String> {
+    let fields = train_cost_capacity_overlay_persistence_fields(robustness)?;
+    sqlx::query(
+        "UPDATE robustness_gate_result
+         SET gate_results = $2,
+             status = $3,
+             summary = $4
+         WHERE gate_result_id = $1",
+    )
+    .bind(&fields.gate_result_id)
+    .bind(&fields.gate_results)
+    .bind(&fields.status)
+    .bind(format!(
+        "OOS walk-forward train-window robustness gate evaluated as {}",
+        fields.status
+    ))
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to persist train cost/capacity robustness overlay: {}",
+            error
+        )
+    })?;
+    Ok(())
+}
+
+fn build_oos_discovery_plan(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+) -> Result<OosDiscoveryPlan, String> {
+    let template = req
+        .backtest_template
+        .clone()
+        .unwrap_or_else(default_phase7_backtest_template);
+    let start_date = parse_template_date(&template, "start_date", "20160201")?;
+    let end_date = parse_template_date(&template, "end_date", "20260515")?;
+    if start_date >= end_date {
+        return Err("backtest_template.start_date must be before end_date".into());
+    }
+    normalize_oos_train_cache_mode(req.train_cache_mode.as_deref())?;
+    let validation_mode = req
+        .validation_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("walk_forward")
+        .to_string();
+    let train_window_days = req.train_window_days.unwrap_or(365 * 3).max(30);
+    let test_window_days = req.test_window_days.unwrap_or(365).max(5);
+    let step_days = req.step_days.unwrap_or(test_window_days).max(1);
+    let in_sample_ratio = req.in_sample_ratio.unwrap_or(0.80).clamp(0.50, 0.95);
+    let include_partial_last_window = req.include_partial_last_window.unwrap_or(false);
+    let windows = match validation_mode.as_str() {
+        "holdout" | "holdout_80_20" | "oos_holdout" => {
+            build_holdout_oos_windows(start_date, end_date, in_sample_ratio)?
+        }
+        "walk_forward" | "rolling_walk_forward" | "wfa" => build_rolling_oos_windows(
+            start_date,
+            end_date,
+            train_window_days,
+            test_window_days,
+            step_days,
+            include_partial_last_window,
+        )?,
+        other => return Err(format!("unsupported validation_mode: {}", other)),
+    };
+    if windows.is_empty() {
+        return Err("OOS discovery plan has no valid train/test windows".into());
+    }
+    Ok(OosDiscoveryPlan {
+        validation_mode,
+        start_date,
+        end_date,
+        train_window_days,
+        test_window_days,
+        step_days,
+        in_sample_ratio,
+        include_partial_last_window,
+        windows,
+    })
+}
+
+fn build_holdout_oos_windows(
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    in_sample_ratio: f64,
+) -> Result<Vec<OosDiscoveryWindow>, String> {
+    let total_days = (end_date - start_date).num_days();
+    if total_days < 30 {
+        return Err("holdout OOS requires at least 30 calendar days".into());
+    }
+    let train_days = ((total_days as f64) * in_sample_ratio).round() as i64;
+    let train_end = start_date + Duration::days(train_days.max(1));
+    let test_start = train_end + Duration::days(1);
+    if test_start > end_date {
+        return Err("holdout split leaves no OOS test period".into());
+    }
+    Ok(vec![OosDiscoveryWindow {
+        window_index: 1,
+        validation_mode: "holdout_80_20".to_string(),
+        train_start: start_date,
+        train_end,
+        test_start,
+        test_end: end_date,
+    }])
+}
+
+fn build_rolling_oos_windows(
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    train_window_days: i64,
+    test_window_days: i64,
+    step_days: i64,
+    include_partial_last_window: bool,
+) -> Result<Vec<OosDiscoveryWindow>, String> {
+    if train_window_days <= 0 || test_window_days <= 0 || step_days <= 0 {
+        return Err("walk-forward train/test/step days must be positive".into());
+    }
+    let mut windows = Vec::new();
+    let mut train_start = start_date;
+    loop {
+        let train_end = train_start + Duration::days(train_window_days - 1);
+        let test_start = train_end + Duration::days(1);
+        let mut test_end = test_start + Duration::days(test_window_days - 1);
+        if test_start > end_date {
+            break;
+        }
+        if test_end > end_date {
+            if include_partial_last_window {
+                test_end = end_date;
+            } else {
+                break;
+            }
+        }
+        windows.push(OosDiscoveryWindow {
+            window_index: windows.len() + 1,
+            validation_mode: "walk_forward".to_string(),
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+        });
+        train_start += Duration::days(step_days);
+    }
+    Ok(windows)
+}
+
+fn parse_template_date(template: &Value, key: &str, default: &str) -> Result<NaiveDate, String> {
+    let value = template
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+        .trim();
+    parse_oos_yyyymmdd(value, key)
+}
+
+fn parse_oos_yyyymmdd(value: &str, field: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value, "%Y%m%d").map_err(|_| format!("{} must be YYYYMMDD", field))
+}
+
+fn format_oos_yyyymmdd(date: NaiveDate) -> String {
+    date.format("%Y%m%d").to_string()
+}
+
+fn backtest_template_for_window(
+    mut template: Value,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    persistence_mode: &str,
+) -> Result<Value, String> {
+    if start_date > end_date {
+        return Err("OOS window start_date must be <= end_date".into());
+    }
+    let object = template
+        .as_object_mut()
+        .ok_or_else(|| "backtest_template must be a JSON object".to_string())?;
+    object.insert(
+        "start_date".to_string(),
+        json!(format_oos_yyyymmdd(start_date)),
+    );
+    object.insert("end_date".to_string(), json!(format_oos_yyyymmdd(end_date)));
+    object
+        .entry("mode".to_string())
+        .or_insert_with(|| json!("standard"));
+    object.insert(
+        "persistence_mode".to_string(),
+        json!(persistence_mode.to_string()),
+    );
+    object
+        .entry("effective_coverage".to_string())
+        .or_insert_with(|| json!({"enabled": true, "mode": "adjust_start"}));
+    Ok(template)
+}
+
+async fn load_oos_training_candidates(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    limit: usize,
+) -> Result<Vec<DiscoveryCandidate>, String> {
+    let targets = CandidateTargets::default();
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<Decimal>,
+            Option<Value>,
+            Option<String>,
+            Value,
+        ),
+    >(
+        "SELECT trial_id, score, metrics, backtest_task_id, parameters
+         FROM optimization_trial
+         WHERE optimization_task_id = $1 AND status = 'completed' AND metrics IS NOT NULL",
+    )
+    .bind(task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load OOS training candidates: {}", error))?;
+
+    let mut candidates = rows
+        .into_iter()
+        .filter_map(|(trial_id, score, metrics, backtest_task_id, parameters)| {
+            let metrics_json = metrics?;
+            let candidate_metrics = CandidateMetrics::from_optimization_metrics(&metrics_json);
+            let candidate_type = targets.classify(&candidate_metrics);
+            let professional_gap_score =
+                professional_candidate_gap_score(&candidate_metrics, &targets);
+            Some(DiscoveryCandidate {
+                trial_id,
+                backtest_task_id,
+                score,
+                candidate_type,
+                professional_gap_score,
+                metrics: candidate_metrics,
+                parameters,
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(discovery_candidate_order);
+    candidates.truncate(limit.max(1));
+    Ok(candidates)
+}
+
+async fn select_oos_training_candidate(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    train_template: &Value,
+    task_id: &str,
+    candidates: Vec<DiscoveryCandidate>,
+    gate_policy: &Value,
+    require_train_approval: bool,
+    window_index: usize,
+    train_signal_cache: &mut SignalDataCache,
+    train_backtest_cache: &mut BacktestDataCache,
+) -> Result<
+    (
+        DiscoveryCandidate,
+        Option<Value>,
+        Vec<OosCostCapacityPerturbationResult>,
+    ),
+    String,
+> {
+    if candidates.is_empty() {
+        return Err(format!(
+            "window {} has no completed training candidates",
+            window_index
+        ));
+    }
+
+    let mut first_rejected: Option<(DiscoveryCandidate, Value)> = None;
+    let train_cost_gate = train_cost_capacity_perturbation_gate_config(req, gate_policy);
+    let stress_aware_selection =
+        train_cost_capacity_stress_aware_selection_enabled(gate_policy, &train_cost_gate);
+    let mut evaluated_candidates = Vec::new();
+    for candidate in candidates {
+        let robustness = evaluate_and_persist_robustness_for_trial(
+            db,
+            task_id,
+            &candidate.trial_id,
+            Some(gate_policy),
+            "OOS walk-forward train-window robustness gate evaluated",
+        )
+        .await?;
+        if !require_train_approval || robustness_result_is_approved(&robustness) {
+            let train_cost_capacity_perturbations = execute_train_cost_capacity_perturbations(
+                db,
+                req,
+                train_template,
+                &candidate.parameters,
+                gate_policy,
+                train_signal_cache,
+                train_backtest_cache,
+            )
+            .await?;
+            let (passed_count, total_count) =
+                cost_capacity_perturbation_pass_counts(&train_cost_capacity_perturbations);
+            let (robustness, train_cost_gate_passed) =
+                attach_train_cost_capacity_gate_to_robustness(
+                    robustness,
+                    passed_count,
+                    total_count,
+                    &train_cost_gate,
+                );
+            if train_cost_gate.enabled {
+                persist_train_cost_capacity_robustness_overlay(db, &robustness).await?;
+            }
+            if !stress_aware_selection && train_cost_gate_passed {
+                return Ok((
+                    candidate,
+                    Some(robustness),
+                    train_cost_capacity_perturbations,
+                ));
+            }
+            let stress_summary =
+                cost_capacity_perturbation_summary(&train_cost_capacity_perturbations);
+            let stress_adjusted_score = train_candidate_stress_adjusted_score_for_policy(
+                &candidate,
+                &stress_summary,
+                gate_policy,
+            );
+            evaluated_candidates.push(OosTrainCandidateEvaluation {
+                candidate: candidate.clone(),
+                robustness: robustness.clone(),
+                train_cost_capacity_perturbations,
+                stress_summary,
+                stress_adjusted_score,
+                train_cost_gate_passed,
+            });
+            if first_rejected.is_none() {
+                first_rejected = Some((candidate, robustness));
+            }
+            continue;
+        }
+        if first_rejected.is_none() {
+            first_rejected = Some((candidate, robustness));
+        }
+    }
+
+    if stress_aware_selection {
+        evaluated_candidates.sort_by(train_candidate_evaluation_order);
+        if let Some(index) = evaluated_candidates
+            .iter()
+            .position(|evaluation| evaluation.train_cost_gate_passed)
+        {
+            let evaluation = evaluated_candidates.remove(index);
+            return Ok((
+                evaluation.candidate,
+                Some(evaluation.robustness),
+                evaluation.train_cost_capacity_perturbations,
+            ));
+        }
+        if let Some(evaluation) = evaluated_candidates.first() {
+            return Err(format!(
+                "window {} has no training candidate passing robustness; best stress-aware rejected trial {} status {} train cost/capacity pass ratio {}/{} stress_adjusted_score {}",
+                window_index,
+                evaluation.candidate.trial_id,
+                evaluation
+                    .robustness
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                evaluation.stress_summary.passed_count,
+                evaluation.stress_summary.total_count,
+                evaluation.stress_adjusted_score,
+            ));
+        }
+    }
+
+    if let Some((candidate, robustness)) = first_rejected {
+        return Err(format!(
+            "window {} has no training candidate passing robustness; best rejected trial {} status {}",
+            window_index,
+            candidate.trial_id,
+            robustness
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ));
+    }
+
+    Err(format!(
+        "window {} has no training candidate passing robustness",
+        window_index
+    ))
+}
+
+async fn load_oos_equity_points(
+    db: &sqlx::PgPool,
+    backtest_task_id: &str,
+) -> Result<Vec<RobustnessDailyPoint>, String> {
+    sqlx::query_as::<_, (NaiveDate, f64, Option<f64>)>(
+        "SELECT trade_date,
+                portfolio_value::double precision,
+                benchmark_value::double precision
+         FROM backtest_equity_curve
+         WHERE task_id = $1
+         ORDER BY trade_date",
+    )
+    .bind(backtest_task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load OOS equity curve: {}", error))
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(trade_date, portfolio_value, benchmark_value)| RobustnessDailyPoint {
+                    trade_date,
+                    portfolio_value,
+                    benchmark_value,
+                },
+            )
+            .collect()
+    })
+}
+
+fn append_stitched_oos_points(
+    stitched: &mut Vec<RobustnessDailyPoint>,
+    window_points: &[RobustnessDailyPoint],
+) {
+    if window_points.len() < 2 {
+        return;
+    }
+    if stitched.is_empty() {
+        stitched.push(RobustnessDailyPoint {
+            trade_date: window_points[0].trade_date,
+            portfolio_value: 1.0,
+            benchmark_value: Some(1.0),
+        });
+    }
+    let mut portfolio_nav = stitched
+        .last()
+        .map(|point| point.portfolio_value)
+        .unwrap_or(1.0);
+    let mut benchmark_nav = stitched
+        .last()
+        .and_then(|point| point.benchmark_value)
+        .unwrap_or(1.0);
+    let mut last_date = stitched.last().map(|point| point.trade_date);
+    for pair in window_points.windows(2) {
+        let prev = &pair[0];
+        let next = &pair[1];
+        if last_date
+            .map(|date| next.trade_date <= date)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if prev.portfolio_value > 0.0 && next.portfolio_value.is_finite() {
+            portfolio_nav *= next.portfolio_value / prev.portfolio_value;
+        }
+        let benchmark_value = match (prev.benchmark_value, next.benchmark_value) {
+            (Some(prev_benchmark), Some(next_benchmark))
+                if prev_benchmark > 0.0 && next_benchmark.is_finite() =>
+            {
+                benchmark_nav *= next_benchmark / prev_benchmark;
+                Some(benchmark_nav)
+            }
+            _ => None,
+        };
+        stitched.push(RobustnessDailyPoint {
+            trade_date: next.trade_date,
+            portfolio_value: portfolio_nav,
+            benchmark_value,
+        });
+        last_date = Some(next.trade_date);
+    }
+}
+
+fn build_oos_gate_report(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    plan: &OosDiscoveryPlan,
+    window_results: &[Value],
+    stitched_summary: &Value,
+    final_promotion_gate_policy: &Value,
+) -> Value {
+    let min_calmar =
+        constraint_f64(Some(final_promotion_gate_policy), "min_stitched_oos_calmar").unwrap_or(1.2);
+    let min_positive_ratio = constraint_f64(
+        Some(final_promotion_gate_policy),
+        "min_positive_oos_window_ratio",
+    )
+    .unwrap_or(0.60);
+    let min_window_count =
+        constraint_i64(Some(final_promotion_gate_policy), "min_oos_window_count")
+            .map(|value| value.max(0) as usize)
+            .unwrap_or_else(|| {
+                if plan.validation_mode == "holdout_80_20" {
+                    1
+                } else {
+                    3
+                }
+            });
+    let require_train_selection = final_promotion_gate_policy
+        .get("require_train_selection_approval")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let require_no_overlap = final_promotion_gate_policy
+        .get("require_no_train_test_overlap")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let positive_windows = window_results
+        .iter()
+        .filter(|window| {
+            value_as_f64(&window["oos_metrics"]["annual_return_pct"])
+                .map(|value| value > 0.0)
+                .unwrap_or(false)
+        })
+        .count();
+    let positive_ratio = ratio(positive_windows, window_results.len());
+    let stitched_calmar = stitched_summary["calmar_ratio"].as_f64().unwrap_or(0.0);
+    let no_overlap = plan
+        .windows
+        .iter()
+        .all(|window| window.train_end < window.test_start);
+    let train_robustness_passed = window_results.iter().all(|window| {
+        window["train_robustness"]["status"]
+            .as_str()
+            .map(|status| status == "approved_candidate")
+            .unwrap_or(false)
+    });
+    let mut gates = vec![
+        {
+            json!({
+                "gate": "oos_window_count",
+                "passed": window_results.len() >= min_window_count,
+                "limit": min_window_count,
+                "actual": window_results.len(),
+            })
+        },
+        {
+            json!({
+                "gate": "no_train_test_overlap",
+                "passed": !require_no_overlap || no_overlap,
+                "actual": no_overlap,
+                "required": require_no_overlap,
+            })
+        },
+        {
+            json!({
+                "gate": "train_window_robustness_approved",
+                "passed": !require_train_selection || train_robustness_passed,
+                "actual": train_robustness_passed,
+                "required": require_train_selection,
+            })
+        },
+        {
+            json!({
+                "gate": "stitched_oos_calmar",
+                "passed": stitched_calmar > min_calmar,
+                "limit": min_calmar,
+                "actual": stitched_calmar,
+            })
+        },
+        {
+            json!({
+                "gate": "positive_oos_window_ratio",
+                "passed": positive_ratio >= min_positive_ratio,
+                "limit": min_positive_ratio,
+                "actual": positive_ratio,
+            })
+        },
+    ];
+    if cost_capacity_perturbation_gate_enabled(req) {
+        let perturbation_results = window_results
+            .iter()
+            .filter_map(|window| window["cost_capacity_perturbations"].as_array())
+            .flat_map(|items| items.iter())
+            .collect::<Vec<_>>();
+        let perturbation_count = perturbation_results.len();
+        let passed_count = perturbation_results
+            .iter()
+            .filter(|result| result["passed"].as_bool().unwrap_or(false))
+            .count();
+        let pass_ratio = ratio(passed_count, perturbation_count);
+        let min_pass_ratio = req
+            .min_cost_capacity_perturbation_pass_ratio
+            .or_else(|| {
+                constraint_f64(
+                    Some(final_promotion_gate_policy),
+                    "min_cost_capacity_perturbation_pass_ratio",
+                )
+            })
+            .unwrap_or(0.80)
+            .clamp(0.0, 1.0);
+        let min_perturbed_oos_calmar = req
+            .min_perturbed_oos_calmar
+            .or_else(|| {
+                constraint_f64(
+                    Some(final_promotion_gate_policy),
+                    "min_perturbed_oos_calmar",
+                )
+            })
+            .unwrap_or(1.2);
+        let max_perturbed_oos_drawdown_pct = req
+            .max_perturbed_oos_drawdown_pct
+            .or_else(|| {
+                constraint_f64(
+                    Some(final_promotion_gate_policy),
+                    "max_perturbed_oos_drawdown_pct",
+                )
+            })
+            .unwrap_or(0.35);
+        gates.push(json!({
+            "gate": "cost_capacity_perturbation_pass_ratio",
+            "passed": perturbation_count > 0 && pass_ratio >= min_pass_ratio,
+            "limit": min_pass_ratio,
+            "actual": pass_ratio,
+            "passed_count": passed_count,
+            "total_count": perturbation_count,
+            "min_perturbed_oos_calmar": min_perturbed_oos_calmar,
+            "max_perturbed_oos_drawdown_pct": max_perturbed_oos_drawdown_pct,
+        }));
+    }
+    Value::Array(gates)
+}
+
+fn oos_gate_status(gates: &Value) -> &'static str {
+    let passed = gates
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .all(|item| item["passed"].as_bool().unwrap_or(false))
+        })
+        .unwrap_or(false);
+    if passed {
+        "approved_oos_candidate"
+    } else {
+        "rejected"
+    }
+}
+
+fn oos_discovery_plan_json(plan: &OosDiscoveryPlan) -> Value {
+    json!({
+        "validation_mode": plan.validation_mode,
+        "start_date": plan.start_date,
+        "end_date": plan.end_date,
+        "train_window_days": plan.train_window_days,
+        "test_window_days": plan.test_window_days,
+        "step_days": plan.step_days,
+        "in_sample_ratio": plan.in_sample_ratio,
+        "include_partial_last_window": plan.include_partial_last_window,
+        "window_count": plan.windows.len(),
+        "windows": plan.windows.iter().map(oos_window_json).collect::<Vec<_>>(),
+        "point_in_time_contract": {
+            "rule": "available_at <= signal_date/cutoff",
+            "train_selection_scope": "train window only",
+            "test_evaluation_scope": "selected train-window parameters only",
+            "execution_timing": "next_open by default",
+        },
+    })
+}
+
+fn oos_window_json(window: &OosDiscoveryWindow) -> Value {
+    json!({
+        "window_index": window.window_index,
+        "validation_mode": window.validation_mode,
+        "train_start": window.train_start,
+        "train_end": window.train_end,
+        "test_start": window.test_start,
+        "test_end": window.test_end,
+    })
+}
+
+fn oos_window_execution_json(execution: &OosWindowExecution, train_gate_policy: &Value) -> Value {
+    let train_cost_capacity_summary =
+        cost_capacity_perturbation_summary(&execution.train_cost_capacity_perturbations);
+    let train_stress_score_profile = train_cost_capacity_stress_score_profile(train_gate_policy);
+    let train_stress_adjusted_score = train_candidate_stress_adjusted_score_for_policy(
+        &execution.selected_candidate,
+        &train_cost_capacity_summary,
+        train_gate_policy,
+    );
+    json!({
+        "window": oos_window_json(&execution.window),
+        "train_optimization_task_id": execution.train_optimization_task_id,
+        "train_batches": execution.train_batches,
+        "selected_candidate": discovery_candidate_json(&execution.selected_candidate),
+        "train_robustness": execution.train_robustness,
+        "train_cost_capacity_perturbations": execution.train_cost_capacity_perturbations.iter().map(oos_cost_capacity_perturbation_result_json).collect::<Vec<_>>(),
+        "train_cost_capacity_summary": cost_capacity_perturbation_summary_json(&train_cost_capacity_summary),
+        "train_stress_score_profile": train_stress_score_profile,
+        "train_stress_adjusted_score": train_stress_adjusted_score,
+        "oos_backtest_task_id": execution.oos_backtest_task_id,
+        "oos_metrics": {
+            "annual_return_pct": execution.oos_output.metrics.annual_return_pct,
+            "excess_return_pct": execution.oos_output.metrics.excess_return_pct,
+            "sharpe_ratio": execution.oos_output.metrics.sharpe_ratio,
+            "sortino_ratio": execution.oos_output.metrics.sortino_ratio,
+            "calmar_ratio": execution.oos_output.metrics.calmar_ratio,
+            "max_drawdown_pct": execution.oos_output.metrics.max_drawdown_pct,
+            "max_drawdown_duration_days": execution.oos_output.metrics.max_drawdown_duration_days,
+            "profit_factor": execution.oos_output.metrics.profit_factor,
+            "num_trades": execution.oos_output.metrics.num_trades,
+        },
+        "oos_point_count": execution.oos_points.len(),
+        "cost_capacity_perturbations": execution.cost_capacity_perturbations.iter().map(oos_cost_capacity_perturbation_result_json).collect::<Vec<_>>(),
+    })
+}
+
+fn cost_capacity_perturbation_summary_json(summary: &CostCapacityPerturbationSummary) -> Value {
+    json!({
+        "passed_count": summary.passed_count,
+        "total_count": summary.total_count,
+        "pass_ratio": ratio(summary.passed_count, summary.total_count),
+        "min_calmar": summary.min_calmar,
+        "avg_calmar": summary.avg_calmar,
+        "max_drawdown_pct": summary.max_drawdown,
+        "min_annual_return_pct": summary.min_annual_return,
+        "avg_sharpe": summary.avg_sharpe,
+    })
+}
+
+fn oos_cost_capacity_perturbation_result_json(result: &OosCostCapacityPerturbationResult) -> Value {
+    json!({
+        "name": result.name,
+        "perturbation": result.perturbation,
+        "backtest_task_id": result.backtest_task_id,
+        "passed": result.passed,
+        "metrics": {
+            "annual_return_pct": result.output.metrics.annual_return_pct,
+            "excess_return_pct": result.output.metrics.excess_return_pct,
+            "sharpe_ratio": result.output.metrics.sharpe_ratio,
+            "sortino_ratio": result.output.metrics.sortino_ratio,
+            "calmar_ratio": result.output.metrics.calmar_ratio,
+            "max_drawdown_pct": result.output.metrics.max_drawdown_pct,
+            "profit_factor": result.output.metrics.profit_factor,
+            "num_trades": result.output.metrics.num_trades,
+        }
+    })
+}
+
+async fn persist_oos_walk_forward_experiment(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    plan: &Value,
+    windows: &[Value],
+    stitched_summary: &Value,
+    gates: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let config = oos_walk_forward_experiment_config(req, plan);
+    let metrics = json!({
+        "windows": windows,
+        "stitched_oos": {
+            "metrics": stitched_summary,
+            "gates": gates,
+            "status": oos_gate_status(gates),
+        }
+    });
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'phase7_oos_walk_forward_discovery', 'oos_discovery', $2,
+                 $3, $4, 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(&experiment_run_id)
+    .bind(&config)
+    .bind(&metrics)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to insert OOS walk-forward experiment_run: {}",
+            error
+        )
+    })?;
+    Ok(experiment_run_id)
+}
+
+async fn create_running_oos_walk_forward_experiment(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    plan: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let config = oos_walk_forward_experiment_config(req, plan);
+    let metrics = oos_walk_forward_progress_metrics(
+        plan["window_count"].as_u64().unwrap_or(0) as usize,
+        &[],
+        &json!({}),
+    );
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at)
+         VALUES ($1, 'phase7_oos_walk_forward_discovery', 'oos_discovery', $2,
+                 $3, $4, 'running', now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(&experiment_run_id)
+    .bind(&config)
+    .bind(&metrics)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to insert running OOS walk-forward experiment_run: {}",
+            error
+        )
+    })?;
+    Ok(experiment_run_id)
+}
+
+async fn update_oos_walk_forward_experiment_progress(
+    db: &sqlx::PgPool,
+    experiment_run_id: &str,
+    plan: &OosDiscoveryPlan,
+    windows: &[Value],
+    stitched_summary: &Value,
+) -> Result<(), String> {
+    let metrics = oos_walk_forward_progress_metrics(plan.windows.len(), windows, stitched_summary);
+    sqlx::query(
+        "UPDATE experiment_run
+         SET metrics = $2,
+             status = 'running'
+         WHERE experiment_run_id = $1",
+    )
+    .bind(experiment_run_id)
+    .bind(&metrics)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to update OOS walk-forward experiment progress: {}",
+            error
+        )
+    })?;
+    Ok(())
+}
+
+async fn complete_oos_walk_forward_experiment(
+    db: &sqlx::PgPool,
+    experiment_run_id: &str,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    plan: &Value,
+    windows: &[Value],
+    stitched_summary: &Value,
+    gates: &Value,
+) -> Result<(), String> {
+    let config = oos_walk_forward_experiment_config(req, plan);
+    let metrics = json!({
+        "windows": windows,
+        "stitched_oos": {
+            "metrics": stitched_summary,
+            "gates": gates,
+            "status": oos_gate_status(gates),
+        }
+    });
+    sqlx::query(
+        "UPDATE experiment_run
+         SET config = $2,
+             metrics = $3,
+             status = 'completed',
+             completed_at = now()
+         WHERE experiment_run_id = $1",
+    )
+    .bind(experiment_run_id)
+    .bind(&config)
+    .bind(&metrics)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to complete OOS walk-forward experiment_run: {}",
+            error
+        )
+    })?;
+    Ok(())
+}
+
+async fn mark_oos_walk_forward_experiment_failed(
+    db: &sqlx::PgPool,
+    experiment_run_id: &str,
+    message: &str,
+) -> Result<(), String> {
+    let metrics = json!({
+        "status": "failed",
+        "error_message": message,
+    });
+    sqlx::query(
+        "UPDATE experiment_run
+         SET metrics = coalesce(metrics, '{}'::jsonb) || $2::jsonb,
+             status = 'failed',
+             completed_at = now()
+         WHERE experiment_run_id = $1",
+    )
+    .bind(experiment_run_id)
+    .bind(&metrics)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to mark OOS walk-forward experiment_run failed: {}",
+            error
+        )
+    })?;
+    Ok(())
+}
+
+fn oos_walk_forward_experiment_config(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    plan: &Value,
+) -> Value {
+    let train_selection_gate_policy = resolve_oos_train_selection_gate_policy(req);
+    let train_cost_gate =
+        train_cost_capacity_perturbation_gate_config(req, &train_selection_gate_policy);
+    let requested_trial_concurrency = normalized_trial_concurrency(req.trial_concurrency);
+    let train_cache_mode =
+        normalize_oos_train_cache_mode(req.train_cache_mode.as_deref()).unwrap_or("shared_window");
+    let train_trial_concurrency = oos_train_trial_concurrency(req).unwrap_or(1);
+    let train_stress_score_profile =
+        train_cost_capacity_stress_score_profile(&train_selection_gate_policy);
+    json!({
+        "strategy_version_id": req.strategy_version_id,
+        "data_version_id": req.data_version_id,
+        "search_profile": req.search_profile,
+        "max_trials_per_window": req.max_trials_per_window,
+        "exhaustive_search": req.exhaustive_search.unwrap_or(false),
+        "trial_batch_limit": req.trial_batch_limit,
+        "requested_trial_concurrency": requested_trial_concurrency,
+        "trial_concurrency": requested_trial_concurrency,
+        "train_trial_concurrency": train_trial_concurrency,
+        "train_cache_mode": train_cache_mode,
+        "max_batches_per_window": req.max_batches_per_window,
+        "require_train_robustness_approval": req.require_train_robustness_approval.unwrap_or(true),
+        "train_selection_gate_policy": train_selection_gate_policy,
+        "train_cost_capacity_perturbation_gate": {
+            "enabled": train_cost_gate.enabled,
+            "stress_aware_selection_enabled": train_cost_capacity_stress_aware_selection_enabled(
+                &train_selection_gate_policy,
+                &train_cost_gate
+            ),
+            "stress_aware_selection_score": train_stress_score_profile,
+            "perturbations": resolved_oos_cost_capacity_perturbations(req),
+            "min_pass_ratio": train_cost_gate.min_pass_ratio,
+            "min_perturbed_oos_calmar": train_cost_gate.min_perturbed_calmar,
+            "max_perturbed_oos_drawdown_pct": train_cost_gate.max_perturbed_drawdown_pct,
+        },
+        "legacy_train_robustness_gate_policy": req.train_robustness_gate_policy,
+        "final_promotion_gate_policy": resolve_oos_final_promotion_gate_policy(
+            req,
+            plan["validation_mode"].as_str().unwrap_or("walk_forward")
+        ),
+        "min_oos_window_count": req.min_oos_window_count,
+        "min_stitched_oos_calmar": req.min_stitched_oos_calmar.unwrap_or(1.2),
+        "min_positive_oos_window_ratio": req.min_positive_oos_window_ratio.unwrap_or(0.60),
+        "oos_top_n": req.oos_top_n.unwrap_or(1),
+        "cost_capacity_perturbation_gate": {
+            "enabled": cost_capacity_perturbation_gate_enabled(req),
+            "perturbations": resolved_oos_cost_capacity_perturbations(req),
+            "min_pass_ratio": req.min_cost_capacity_perturbation_pass_ratio.unwrap_or(0.80),
+            "min_perturbed_oos_calmar": req.min_perturbed_oos_calmar.unwrap_or(1.2),
+            "max_perturbed_oos_drawdown_pct": req.max_perturbed_oos_drawdown_pct.unwrap_or(0.35),
+        },
+        "execution_mode": normalize_oos_execution_mode(req.execution_mode.as_deref()).unwrap_or("inline"),
+        "resource_plan": LocalResourcePlan::local_mac(),
+        "plan": plan,
+    })
+}
+
+fn oos_walk_forward_progress_metrics(
+    total_windows: usize,
+    windows: &[Value],
+    stitched_summary: &Value,
+) -> Value {
+    let completed_windows = windows.len();
+    let progress_pct = if total_windows == 0 {
+        0
+    } else {
+        ((completed_windows * 100) / total_windows).min(100)
+    };
+    json!({
+        "status": "running",
+        "completed_windows": completed_windows,
+        "total_windows": total_windows,
+        "progress_pct": progress_pct,
+        "latest_window": windows.last(),
+        "windows": windows,
+        "stitched_oos": {
+            "metrics": stitched_summary,
+        }
+    })
+}
+
 async fn evaluate_discovery_candidates(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -1637,6 +4057,17 @@ pub async fn evaluate_optimization_trial_robustness(
     )
     .await
     {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn generate_elite_validation_report(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    Json(req): Json<EliteValidationReportRequest>,
+) -> impl IntoResponse {
+    match build_and_persist_elite_validation_report(&state.db, &task_id, req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -1757,6 +4188,27 @@ async fn execute_pending_trials_with_caches(
     signal_cache: &mut SignalDataCache,
     backtest_cache: &mut BacktestDataCache,
 ) -> Result<Value, String> {
+    execute_pending_trials_with_caches_and_concurrency(
+        db,
+        task_id,
+        trial_limit,
+        performance_gate,
+        signal_cache,
+        backtest_cache,
+        1,
+    )
+    .await
+}
+
+async fn execute_pending_trials_with_caches_and_concurrency(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    trial_limit: i64,
+    performance_gate: Option<&OptimizationPerformanceGateRequest>,
+    signal_cache: &mut SignalDataCache,
+    backtest_cache: &mut BacktestDataCache,
+    trial_concurrency: usize,
+) -> Result<Value, String> {
     let started = Instant::now();
     let gate_policy = normalize_performance_gate(performance_gate, trial_limit)?;
     let task = load_execution_context(db, task_id).await?;
@@ -1819,6 +4271,21 @@ async fn execute_pending_trials_with_caches(
     .execute(db)
     .await
     .map_err(|error| format!("Failed to mark optimization task running: {}", error))?;
+
+    let trial_concurrency = trial_concurrency.clamp(1, pending_trials.len().max(1));
+    if trial_concurrency > 1 {
+        return execute_loaded_pending_trials_concurrently(
+            db,
+            task_id,
+            trial_limit,
+            &task,
+            pending_trials,
+            &gate_policy,
+            started,
+            trial_concurrency,
+        )
+        .await;
+    }
 
     let mut completed = 0;
     let mut failed = 0;
@@ -1921,9 +4388,213 @@ async fn execute_pending_trials_with_caches(
         "experiment_run_id": experiment_run_id,
         "performance_gate_status": gate_status,
         "performance_gates": gates,
+        "trial_concurrency": 1,
+        "cache_mode": "shared_window",
         "signal_cache": signal_cache_stats,
         "backtest_cache": backtest_cache_stats,
     }))
+}
+
+async fn execute_loaded_pending_trials_concurrently(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    trial_limit: i64,
+    task: &OptimizationTaskExecutionContext,
+    pending_trials: Vec<(String, i32, Value)>,
+    gate_policy: &OptimizationPerformanceGatePolicy,
+    started: Instant,
+    trial_concurrency: usize,
+) -> Result<Value, String> {
+    let pending_count = pending_trials.len();
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut completed = 0;
+    let mut failed = 0;
+    let mut signal_cache_stats = SignalDataCacheStats::default();
+    let mut backtest_cache_stats = BacktestDataCacheStats::default();
+
+    for (trial_id, _trial_index, params) in pending_trials {
+        while join_set.len() >= trial_concurrency {
+            merge_trial_execution_join(
+                join_set
+                    .join_next()
+                    .await
+                    .ok_or_else(|| "trial concurrency join set ended unexpectedly".to_string())?,
+                &mut completed,
+                &mut failed,
+                &mut signal_cache_stats,
+                &mut backtest_cache_stats,
+            );
+        }
+        let db = db.clone();
+        let task_id = task_id.to_string();
+        let task = task.clone();
+        join_set.spawn(async move {
+            execute_single_pending_trial(db, task_id, task, trial_id, params).await
+        });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        merge_trial_execution_join(
+            result,
+            &mut completed,
+            &mut failed,
+            &mut signal_cache_stats,
+            &mut backtest_cache_stats,
+        );
+    }
+
+    let best_trial_id = refresh_task_progress(db, task_id).await?;
+    let elapsed_ms = started.elapsed().as_millis() as i64;
+    let signal_cache_stats_json = json!(signal_cache_stats);
+    let backtest_cache_stats_json = json!(backtest_cache_stats);
+    let gates = evaluate_optimization_performance_gates(
+        pending_count as i64,
+        completed,
+        failed,
+        elapsed_ms,
+        gate_policy,
+    );
+    let gate_status = performance_gate_status(&gates);
+    let best_trial_value = json!(best_trial_id);
+    let experiment_run_id = persist_optimization_experiment_run(
+        db,
+        task_id,
+        trial_limit,
+        pending_count as i64,
+        completed,
+        failed,
+        elapsed_ms,
+        &best_trial_value,
+        gate_policy,
+        &gates,
+        gate_status,
+        Some(&signal_cache_stats_json),
+        Some(&backtest_cache_stats_json),
+    )
+    .await?;
+
+    Ok(json!({
+        "optimization_task_id": task_id,
+        "executed": pending_count,
+        "completed": completed,
+        "failed": failed,
+        "best_trial_id": best_trial_id,
+        "elapsed_ms": elapsed_ms,
+        "experiment_run_id": experiment_run_id,
+        "performance_gate_status": gate_status,
+        "performance_gates": gates,
+        "trial_concurrency": trial_concurrency,
+        "cache_mode": "per_trial_isolated",
+        "signal_cache": signal_cache_stats_json,
+        "backtest_cache": backtest_cache_stats_json,
+    }))
+}
+
+fn merge_trial_execution_join(
+    result: Result<TrialExecutionOutcome, tokio::task::JoinError>,
+    completed: &mut i64,
+    failed: &mut i64,
+    signal_cache_stats: &mut SignalDataCacheStats,
+    backtest_cache_stats: &mut BacktestDataCacheStats,
+) {
+    match result {
+        Ok(outcome) => {
+            *completed += outcome.completed;
+            *failed += outcome.failed;
+            add_signal_cache_stats(signal_cache_stats, outcome.signal_cache_stats);
+            add_backtest_cache_stats(backtest_cache_stats, outcome.backtest_cache_stats);
+        }
+        Err(_) => {
+            *failed += 1;
+        }
+    }
+}
+
+async fn execute_single_pending_trial(
+    db: sqlx::PgPool,
+    task_id: String,
+    task: OptimizationTaskExecutionContext,
+    trial_id: String,
+    params: Value,
+) -> TrialExecutionOutcome {
+    let mut signal_cache = SignalDataCache::default();
+    let mut backtest_cache = BacktestDataCache::default();
+    let mut completed = 0;
+    let mut failed = 0;
+    let backtest_task_id = format!("optbt-{}", Uuid::new_v4());
+
+    let execution = async {
+        mark_trial_running(&db, &trial_id).await?;
+        if let Some(reused) = find_reusable_trial(&db, &task_id, &task, &trial_id, &params).await? {
+            mark_trial_reused(&db, &trial_id, &reused).await?;
+            return Ok::<bool, String>(true);
+        }
+
+        let request = build_optimization_trial_request(&task, &params)?;
+        let output = match request {
+            OptimizationTrialBacktestRequest::Factor(request) => {
+                execute_factor_backtest_with_caches(
+                    &db,
+                    &backtest_task_id,
+                    request,
+                    Some(&mut signal_cache),
+                    Some(&mut backtest_cache),
+                )
+                .await
+            }
+            OptimizationTrialBacktestRequest::Prediction(request) => {
+                execute_prediction_backtest(&db, &backtest_task_id, request).await
+            }
+        }?;
+        let scored = score_trial_with_output(&output, &task.objective, task.constraints.as_ref());
+        mark_trial_completed(&db, &trial_id, &backtest_task_id, &scored).await?;
+        Ok::<bool, String>(true)
+    }
+    .await;
+
+    match execution {
+        Ok(true) => completed += 1,
+        Ok(false) => failed += 1,
+        Err(error) => {
+            failed += 1;
+            let _ = mark_trial_failed(&db, &trial_id, &error).await;
+        }
+    }
+
+    TrialExecutionOutcome {
+        completed,
+        failed,
+        signal_cache_stats: signal_cache.stats(),
+        backtest_cache_stats: backtest_cache.stats(),
+    }
+}
+
+fn add_signal_cache_stats(total: &mut SignalDataCacheStats, value: SignalDataCacheStats) {
+    total.combo_score_hits += value.combo_score_hits;
+    total.combo_score_misses += value.combo_score_misses;
+    total.trading_day_hits += value.trading_day_hits;
+    total.trading_day_misses += value.trading_day_misses;
+    total.return_history_hits += value.return_history_hits;
+    total.return_history_misses += value.return_history_misses;
+    total.average_amount_hits += value.average_amount_hits;
+    total.average_amount_misses += value.average_amount_misses;
+    total.prediction_score_hits += value.prediction_score_hits;
+    total.prediction_score_misses += value.prediction_score_misses;
+    total.industry_classification_hits += value.industry_classification_hits;
+    total.industry_classification_misses += value.industry_classification_misses;
+    total.benchmark_return_hits += value.benchmark_return_hits;
+    total.benchmark_return_misses += value.benchmark_return_misses;
+}
+
+fn add_backtest_cache_stats(total: &mut BacktestDataCacheStats, value: BacktestDataCacheStats) {
+    total.trading_day_hits += value.trading_day_hits;
+    total.trading_day_misses += value.trading_day_misses;
+    total.benchmark_data_hits += value.benchmark_data_hits;
+    total.benchmark_data_misses += value.benchmark_data_misses;
+    total.daily_bar_symbol_hits += value.daily_bar_symbol_hits;
+    total.daily_bar_symbol_misses += value.daily_bar_symbol_misses;
+    total.trading_profile_symbol_hits += value.trading_profile_symbol_hits;
+    total.trading_profile_symbol_misses += value.trading_profile_symbol_misses;
 }
 
 fn normalize_performance_gate(
@@ -2234,8 +4905,8 @@ async fn evaluate_and_persist_robustness_for_trial(
     gate_policy: Option<&Value>,
     summary_prefix: &str,
 ) -> Result<Value, String> {
-    let trial = sqlx::query_as::<_, (Decimal, Option<Value>, Option<Value>, Option<String>)>(
-        "SELECT score, metrics, constraint_violations, backtest_task_id
+    let trial = sqlx::query_as::<_, (Decimal, Option<Value>, Option<Value>, Option<String>, i32)>(
+        "SELECT score, metrics, constraint_violations, backtest_task_id, trial_index
          FROM optimization_trial
          WHERE optimization_task_id = $1 AND trial_id = $2 AND status = 'completed'",
     )
@@ -2249,12 +4920,18 @@ async fn evaluate_and_persist_robustness_for_trial(
     let runner_up = sqlx::query_as::<_, (Decimal,)>(
         "SELECT score
          FROM optimization_trial
-         WHERE optimization_task_id = $1 AND trial_id <> $2 AND status = 'completed' AND score IS NOT NULL
+         WHERE optimization_task_id = $1
+           AND trial_id <> $2
+           AND status = 'completed'
+           AND score IS NOT NULL
+           AND (score < $3 OR (score = $3 AND trial_index > $4))
          ORDER BY score DESC NULLS LAST, trial_index ASC
          LIMIT 1",
     )
     .bind(task_id)
     .bind(trial_id)
+    .bind(trial.0)
+    .bind(trial.4)
     .fetch_optional(db)
     .await
     .map_err(|error| format!("Failed to load runner-up optimization trial: {}", error))?
@@ -2266,10 +4943,13 @@ async fn evaluate_and_persist_robustness_for_trial(
     } else {
         None
     };
+    let raw_metrics = trial.1.unwrap_or_else(|| json!({}));
+    let (metrics, metric_sources, missing_elite_metrics) =
+        enrich_trial_metrics(db, trial.3.as_deref(), raw_metrics).await?;
     let evaluation = evaluate_robustness_gates_with_analysis(
         trial.0,
         runner_up,
-        trial.1.as_ref().unwrap_or(&json!({})),
+        &metrics,
         trial.2.as_ref().unwrap_or(&json!([])),
         Some(&policy),
         analysis.as_ref(),
@@ -2299,8 +4979,888 @@ async fn evaluate_and_persist_robustness_for_trial(
         "trial_id": trial_id,
         "status": evaluation.status,
         "gate_results": evaluation.gates,
+        "metrics": metrics,
+        "metric_sources": metric_sources,
+        "missing_elite_metrics": missing_elite_metrics,
         "failure_attribution": build_robustness_failure_attribution(&evaluation.gates),
     }))
+}
+
+async fn build_and_persist_elite_validation_report(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    req: EliteValidationReportRequest,
+) -> Result<Value, String> {
+    let top_n = req.top_n.unwrap_or(3).clamp(1, 10);
+    let requested_policy = req
+        .gate_policy
+        .unwrap_or_else(|| json!({"preset": "professional_elite"}));
+    let gate_policy = resolve_robustness_gate_policy(Some(&requested_policy));
+    let snapshots = load_completed_trial_snapshots(db, task_id).await?;
+    if snapshots.is_empty() {
+        return Err("optimization task has no completed trials with metrics".to_string());
+    }
+
+    let mut ranked = snapshots.clone();
+    ranked.sort_by(elite_trial_report_order);
+    let selected = ranked.into_iter().take(top_n).collect::<Vec<_>>();
+
+    let mut rows = Vec::new();
+    for (rank, trial) in selected.iter().enumerate() {
+        let robustness = evaluate_and_persist_robustness_for_trial(
+            db,
+            task_id,
+            &trial.trial_id,
+            Some(&gate_policy),
+            "Professional elite validation report gate evaluated",
+        )
+        .await?;
+        rows.push(json!({
+            "rank": rank + 1,
+            "trial_id": trial.trial_id,
+            "trial_index": trial.trial_index,
+            "backtest_task_id": trial.backtest_task_id,
+            "score": trial.score,
+            "elite_gap_score": elite_gap_score(&trial.metrics),
+            "metrics": trial.metrics,
+            "metric_sources": trial.metric_sources,
+            "missing_elite_metrics": trial.missing_elite_metrics,
+            "constraint_violations": trial.constraint_violations,
+            "parameters": trial.parameters,
+            "elite_status": robustness["status"],
+            "elite_robustness": robustness,
+            "parameter_plateau": build_parameter_plateau_analysis(trial, &snapshots),
+            "portfolio_correlation_contribution": build_portfolio_correlation_contribution_score(
+                trial,
+                &snapshots
+            ),
+        }));
+    }
+
+    let summary = summarize_elite_validation_rows(&rows);
+    let metrics = json!({
+        "top_n": top_n,
+        "candidate_count": rows.len(),
+        "summary": summary,
+        "candidates": rows,
+    });
+    let config = json!({
+        "optimization_task_id": task_id,
+        "gate_policy": gate_policy,
+        "ranking": "elite_gap_score_then_drawdown_then_sortino_sharpe_annual",
+    });
+    let experiment_run_id =
+        persist_elite_validation_report_experiment(db, task_id, &config, &metrics).await?;
+
+    Ok(json!({
+        "optimization_task_id": task_id,
+        "experiment_run_id": experiment_run_id,
+        "gate_policy": config["gate_policy"],
+        "top_n": top_n,
+        "summary": metrics["summary"],
+        "candidates": metrics["candidates"],
+    }))
+}
+
+async fn load_completed_trial_snapshots(
+    db: &sqlx::PgPool,
+    task_id: &str,
+) -> Result<Vec<CompletedTrialSnapshot>, String> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i32,
+            Value,
+            Option<Decimal>,
+            Option<Value>,
+            Option<Value>,
+            Option<String>,
+        ),
+    >(
+        "SELECT trial_id, trial_index, parameters, score, metrics, constraint_violations,
+                backtest_task_id
+         FROM optimization_trial
+         WHERE optimization_task_id = $1
+           AND status = 'completed'
+           AND metrics IS NOT NULL",
+    )
+    .bind(task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load completed optimization trials: {}", error))?;
+
+    let mut snapshots = Vec::new();
+    for (trial_id, trial_index, parameters, score, metrics, violations, backtest_task_id) in rows {
+        let Some(metrics) = metrics else {
+            continue;
+        };
+        let (metrics, metric_sources, missing_elite_metrics) =
+            enrich_trial_metrics(db, backtest_task_id.as_deref(), metrics).await?;
+        snapshots.push(CompletedTrialSnapshot {
+            trial_id,
+            trial_index,
+            backtest_task_id,
+            score,
+            metrics,
+            metric_sources,
+            missing_elite_metrics,
+            constraint_violations: violations.unwrap_or_else(|| json!([])),
+            parameters,
+        });
+    }
+    Ok(snapshots)
+}
+
+async fn enrich_trial_metrics(
+    db: &sqlx::PgPool,
+    backtest_task_id: Option<&str>,
+    mut metrics: Value,
+) -> Result<(Value, Value, Value), String> {
+    let mut sources = existing_metric_sources(&metrics);
+    if let Some(backtest_task_id) = backtest_task_id {
+        enrich_trial_metrics_from_backtest_result(db, backtest_task_id, &mut metrics, &mut sources)
+            .await?;
+        if !metric_has_number(&metrics, "max_drawdown_duration_days") {
+            if let Some(duration_days) =
+                derive_max_drawdown_duration_days(db, backtest_task_id).await?
+            {
+                insert_metric_if_missing(
+                    &mut metrics,
+                    &mut sources,
+                    "max_drawdown_duration_days",
+                    Some(json!(duration_days)),
+                    "backtest_equity_curve.portfolio_value",
+                );
+            }
+        }
+    }
+    let missing = missing_elite_metrics(&metrics);
+    Ok((metrics, Value::Object(sources), json!(missing)))
+}
+
+async fn enrich_trial_metrics_from_backtest_result(
+    db: &sqlx::PgPool,
+    backtest_task_id: &str,
+    metrics: &mut Value,
+    sources: &mut Map<String, Value>,
+) -> Result<(), String> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            Option<Value>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<i32>,
+            Option<Decimal>,
+            Option<Decimal>,
+            Option<Decimal>,
+        ),
+    >(
+        "SELECT metrics,
+                total_return,
+                annualized_return,
+                benchmark_return,
+                excess_return,
+                annualized_excess_return,
+                sharpe_ratio,
+                sortino_ratio,
+                information_ratio,
+                max_drawdown,
+                turnover,
+                total_trades,
+                win_rate,
+                calmar_ratio,
+                annualized_volatility
+         FROM backtest_result
+         WHERE task_id = $1",
+    )
+    .bind(backtest_task_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("Failed to load backtest_result metrics: {}", error))?;
+
+    let Some(row) = row else {
+        return Ok(());
+    };
+
+    if let Some(backtest_metrics) = row.0.as_ref().and_then(Value::as_object) {
+        for key in ELITE_REPORT_METRIC_KEYS {
+            insert_metric_if_missing(
+                metrics,
+                sources,
+                key,
+                backtest_metrics.get(*key).cloned(),
+                "backtest_result.metrics",
+            );
+        }
+    }
+
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "total_return",
+        row.1.map(|value| json!(value)),
+        "backtest_result.total_return",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "annual_return_pct",
+        row.2.map(|value| json!(value)),
+        "backtest_result.annualized_return",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "benchmark_return_pct",
+        row.3.map(|value| json!(value)),
+        "backtest_result.benchmark_return",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "excess_return_pct",
+        row.4.or(row.5).map(|value| json!(value)),
+        "backtest_result.excess_return",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "sharpe_ratio",
+        row.6.map(|value| json!(value)),
+        "backtest_result.sharpe_ratio",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "sortino_ratio",
+        row.7.map(|value| json!(value)),
+        "backtest_result.sortino_ratio",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "information_ratio",
+        row.8.map(|value| json!(value)),
+        "backtest_result.information_ratio",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "max_drawdown_pct",
+        row.9.map(|value| json!(value)),
+        "backtest_result.max_drawdown",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "turnover",
+        row.10.map(|value| json!(value)),
+        "backtest_result.turnover",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "num_trades",
+        row.11.map(|value| json!(value)),
+        "backtest_result.total_trades",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "win_rate_pct",
+        row.12.map(|value| json!(value)),
+        "backtest_result.win_rate",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "calmar_ratio",
+        row.13.map(|value| json!(value)),
+        "backtest_result.calmar_ratio",
+    );
+    insert_metric_if_missing(
+        metrics,
+        sources,
+        "annualized_volatility",
+        row.14.map(|value| json!(value)),
+        "backtest_result.annualized_volatility",
+    );
+
+    Ok(())
+}
+
+async fn derive_max_drawdown_duration_days(
+    db: &sqlx::PgPool,
+    backtest_task_id: &str,
+) -> Result<Option<i64>, String> {
+    let rows = sqlx::query_as::<_, (Option<Decimal>,)>(
+        "SELECT portfolio_value
+         FROM backtest_equity_curve
+         WHERE task_id = $1
+         ORDER BY trade_date ASC",
+    )
+    .bind(backtest_task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load backtest equity curve: {}", error))?;
+
+    let mut peak: Option<Decimal> = None;
+    let mut current_duration = 0i64;
+    let mut max_duration = 0i64;
+    let mut observed = false;
+    for (portfolio_value,) in rows {
+        let Some(portfolio_value) = portfolio_value else {
+            continue;
+        };
+        if portfolio_value <= Decimal::ZERO {
+            continue;
+        }
+        observed = true;
+        if peak.map(|value| portfolio_value >= value).unwrap_or(true) {
+            peak = Some(portfolio_value);
+            current_duration = 0;
+        } else {
+            current_duration += 1;
+            max_duration = max_duration.max(current_duration);
+        }
+    }
+
+    Ok(observed.then_some(max_duration))
+}
+
+const ELITE_REPORT_METRIC_KEYS: &[&str] = &[
+    "annual_return_pct",
+    "excess_return_pct",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "profit_factor",
+    "max_drawdown_pct",
+    "max_drawdown_duration_days",
+    "num_trades",
+];
+
+fn existing_metric_sources(metrics: &Value) -> Map<String, Value> {
+    let mut sources = Map::new();
+    for key in ELITE_REPORT_METRIC_KEYS {
+        if metric_has_number(metrics, key) {
+            sources.insert((*key).to_string(), json!("optimization_trial.metrics"));
+        }
+    }
+    sources
+}
+
+fn insert_metric_if_missing(
+    metrics: &mut Value,
+    sources: &mut Map<String, Value>,
+    key: &str,
+    value: Option<Value>,
+    source: &str,
+) {
+    if metric_has_number(metrics, key) {
+        return;
+    }
+    let Some(value) = value else {
+        return;
+    };
+    if value_as_f64(&value).map(|value| value.is_finite()) != Some(true) {
+        return;
+    }
+    ensure_metrics_object(metrics).insert(key.to_string(), value);
+    sources.insert(key.to_string(), json!(source));
+}
+
+fn ensure_metrics_object(metrics: &mut Value) -> &mut Map<String, Value> {
+    if !metrics.is_object() {
+        *metrics = json!({});
+    }
+    metrics.as_object_mut().expect("metrics object")
+}
+
+fn metric_has_number(metrics: &Value, key: &str) -> bool {
+    metrics
+        .get(key)
+        .and_then(value_as_f64)
+        .map(|value| value.is_finite())
+        .unwrap_or(false)
+}
+
+fn missing_elite_metrics(metrics: &Value) -> Vec<&'static str> {
+    ELITE_REPORT_METRIC_KEYS
+        .iter()
+        .copied()
+        .filter(|key| !metric_has_number(metrics, key))
+        .collect()
+}
+
+async fn persist_elite_validation_report_experiment(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    config: &Value,
+    metrics: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'professional_elite_validation_report', 'optimization_task', $2,
+                 $3, $4, 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(task_id)
+    .bind(config)
+    .bind(metrics)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to insert elite validation experiment_run: {}",
+            error
+        )
+    })?;
+
+    Ok(experiment_run_id)
+}
+
+fn summarize_elite_validation_rows(rows: &[Value]) -> Value {
+    let approved = rows
+        .iter()
+        .filter(|row| row["elite_status"] == "approved_candidate")
+        .count();
+    let review_required = rows
+        .iter()
+        .filter(|row| row["elite_status"] == "review_required")
+        .count();
+    let rejected = rows
+        .iter()
+        .filter(|row| row["elite_status"] == "rejected")
+        .count();
+    let best = rows.first().cloned().unwrap_or_else(|| json!({}));
+    json!({
+        "approved_count": approved,
+        "review_required_count": review_required,
+        "rejected_count": rejected,
+        "missing_elite_metric_counts": summarize_missing_elite_metric_counts(rows),
+        "best_trial_id": best["trial_id"],
+        "best_elite_status": best["elite_status"],
+        "best_elite_gap_score": best["elite_gap_score"],
+        "best_metrics": best["metrics"],
+        "best_missing_elite_metrics": best["missing_elite_metrics"],
+    })
+}
+
+fn summarize_missing_elite_metric_counts(rows: &[Value]) -> Value {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for row in rows {
+        let Some(missing) = row["missing_elite_metrics"].as_array() else {
+            continue;
+        };
+        for item in missing {
+            if let Some(key) = item.as_str() {
+                *counts.entry(key.to_string()).or_default() += 1;
+            }
+        }
+    }
+    json!(counts)
+}
+
+fn elite_trial_report_order(
+    left: &CompletedTrialSnapshot,
+    right: &CompletedTrialSnapshot,
+) -> std::cmp::Ordering {
+    elite_gap_score(&left.metrics)
+        .partial_cmp(&elite_gap_score(&right.metrics))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            metric_number(&left.metrics, "max_drawdown_pct")
+                .partial_cmp(&metric_number(&right.metrics, "max_drawdown_pct"))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            metric_number(&right.metrics, "sortino_ratio")
+                .partial_cmp(&metric_number(&left.metrics, "sortino_ratio"))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            metric_number(&right.metrics, "sharpe_ratio")
+                .partial_cmp(&metric_number(&left.metrics, "sharpe_ratio"))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            metric_number(&right.metrics, "annual_return_pct")
+                .partial_cmp(&metric_number(&left.metrics, "annual_return_pct"))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| left.trial_index.cmp(&right.trial_index))
+}
+
+fn elite_gap_score(metrics: &Value) -> f64 {
+    let profile = EliteMetricProfile::from_metrics(metrics);
+    positive_shortfall(0.15, profile.annual_return) * 4.0
+        + positive_shortfall(0.0, profile.excess_return) * 2.0
+        + positive_shortfall(1.5, profile.sharpe) * 1.5
+        + positive_shortfall(1.8, profile.sortino)
+        + positive_shortfall(2.0, profile.calmar) * 0.75
+        + positive_shortfall(1.5, profile.profit_factor) * 0.75
+        + positive_shortfall(profile.max_drawdown, 0.35) * 3.0
+        + positive_shortfall(profile.max_drawdown_duration_days, 126.0) / 252.0
+        + positive_shortfall(200.0, profile.num_trades) / 200.0
+}
+
+fn build_parameter_plateau_analysis(
+    candidate: &CompletedTrialSnapshot,
+    trials: &[CompletedTrialSnapshot],
+) -> Value {
+    let candidate_metrics = EliteMetricProfile::from_metrics(&candidate.metrics);
+    let mut near_neighbor_count = 0usize;
+    let mut stable_neighbor_count = 0usize;
+    let mut axis_peers: BTreeMap<String, Vec<&CompletedTrialSnapshot>> = BTreeMap::new();
+
+    for peer in trials {
+        if peer.trial_id == candidate.trial_id {
+            continue;
+        }
+        let diff_keys = differing_parameter_keys(&candidate.parameters, &peer.parameters);
+        if diff_keys.is_empty() {
+            continue;
+        }
+        if diff_keys.len() <= 3 {
+            near_neighbor_count += 1;
+            if is_plateau_stable_neighbor(candidate_metrics, &peer.metrics) {
+                stable_neighbor_count += 1;
+            }
+        }
+        if diff_keys.len() == 1 {
+            axis_peers
+                .entry(diff_keys[0].clone())
+                .or_default()
+                .push(peer);
+        }
+    }
+
+    let axes = axis_peers
+        .iter()
+        .map(|(axis, peers)| parameter_axis_plateau_summary(axis, candidate, peers))
+        .collect::<Vec<_>>();
+    let plateau_score = ratio(stable_neighbor_count, near_neighbor_count);
+
+    json!({
+        "plateau_score": plateau_score,
+        "near_neighbor_count": near_neighbor_count,
+        "stable_neighbor_count": stable_neighbor_count,
+        "stable_neighbor_ratio": plateau_score,
+        "stability_rule": {
+            "annual_return_drawdown": "peer annual_return >= candidate - 1pp and max_drawdown <= candidate + 3pp",
+            "risk_adjusted": "peer Sharpe >= candidate - 0.10 and Sortino >= candidate - 0.15",
+            "near_neighbor": "parameter diff count <= 3"
+        },
+        "single_axis": axes,
+    })
+}
+
+fn parameter_axis_plateau_summary(
+    axis: &str,
+    candidate: &CompletedTrialSnapshot,
+    peers: &[&CompletedTrialSnapshot],
+) -> Value {
+    let stable = peers
+        .iter()
+        .filter(|peer| {
+            is_plateau_stable_neighbor(
+                EliteMetricProfile::from_metrics(&candidate.metrics),
+                &peer.metrics,
+            )
+        })
+        .count();
+    let mut values = peers
+        .iter()
+        .map(|peer| parameter_value(&peer.parameters, axis))
+        .collect::<Vec<_>>();
+    values.sort_by_key(canonical_json);
+    values.dedup();
+
+    let best_peer = peers
+        .iter()
+        .min_by(|left, right| elite_trial_report_order(left, right))
+        .map(|peer| compact_trial_metrics(peer));
+    json!({
+        "parameter": axis,
+        "candidate_value": parameter_value(&candidate.parameters, axis),
+        "peer_values": values,
+        "peer_count": peers.len(),
+        "stable_peer_count": stable,
+        "stable_ratio": ratio(stable, peers.len()),
+        "best_peer": best_peer,
+    })
+}
+
+fn is_plateau_stable_neighbor(candidate: EliteMetricProfile, peer_metrics: &Value) -> bool {
+    let peer = EliteMetricProfile::from_metrics(peer_metrics);
+    peer.annual_return >= candidate.annual_return - 0.01
+        && peer.sharpe >= candidate.sharpe - 0.10
+        && peer.sortino >= candidate.sortino - 0.15
+        && peer.max_drawdown <= candidate.max_drawdown + 0.03
+}
+
+fn build_portfolio_correlation_contribution_score(
+    candidate: &CompletedTrialSnapshot,
+    trials: &[CompletedTrialSnapshot],
+) -> Value {
+    let explicit_score = correlation_control_score(&candidate.parameters);
+    let controlled = trials
+        .iter()
+        .filter(|trial| correlation_control_score(&trial.parameters) > 0.0)
+        .collect::<Vec<_>>();
+    let uncontrolled = trials
+        .iter()
+        .filter(|trial| correlation_control_score(&trial.parameters) == 0.0)
+        .collect::<Vec<_>>();
+    let controlled_summary = summarize_trial_metric_group(&controlled);
+    let uncontrolled_summary = summarize_trial_metric_group(&uncontrolled);
+    let peer_impact = correlation_peer_impact(&controlled_summary, &uncontrolled_summary);
+    let contribution_score = (explicit_score * 0.70
+        + peer_impact["normalized_score"].as_f64().unwrap_or(0.0) * 0.30)
+        .clamp(0.0, 1.0);
+
+    json!({
+        "contribution_score": contribution_score,
+        "explicit_control_score": explicit_score,
+        "active_controls": active_correlation_controls(&candidate.parameters),
+        "controlled_peer_summary": controlled_summary,
+        "uncontrolled_peer_summary": uncontrolled_summary,
+        "peer_impact": peer_impact,
+    })
+}
+
+fn active_correlation_controls(parameters: &Value) -> Vec<Value> {
+    let mut controls = Vec::new();
+    if let Some(limit) = parameter_f64(parameters, "max_pairwise_correlation") {
+        controls.push(json!({"name": "max_pairwise_correlation", "value": limit}));
+    }
+    if let Some(lookback) = parameter_f64(parameters, "correlation_lookback_days") {
+        controls.push(json!({"name": "correlation_lookback_days", "value": lookback}));
+    }
+    if let Some(filter) = parameter_str(parameters, "candidate_risk_filter") {
+        if filter.contains("correlation") {
+            controls.push(json!({"name": "candidate_risk_filter", "value": filter}));
+        }
+    }
+    if let Some(method) = parameter_str(parameters, "portfolio_method") {
+        if method == "risk_budget" || method == "min_variance" {
+            controls.push(json!({"name": "portfolio_method", "value": method}));
+        }
+    }
+    if let Some(control) = parameter_str(parameters, "risk_contribution_control") {
+        if control != "off" {
+            controls.push(json!({"name": "risk_contribution_control", "value": control}));
+        }
+    }
+    if let Some(budget) = parameter_str(parameters, "style_risk_budget") {
+        if budget != "off" {
+            controls.push(json!({"name": "style_risk_budget", "value": budget}));
+        }
+    }
+    if let Some(budget) = parameter_str(parameters, "capacity_risk_budget") {
+        if budget != "off" {
+            controls.push(json!({"name": "capacity_risk_budget", "value": budget}));
+        }
+    }
+    if let Some(budget) = parameter_str(parameters, "execution_impact_budget") {
+        if budget != "off" {
+            controls.push(json!({"name": "execution_impact_budget", "value": budget}));
+        }
+    }
+    controls
+}
+
+fn correlation_control_score(parameters: &Value) -> f64 {
+    let mut score: f64 = 0.0;
+    if let Some(limit) = parameter_f64(parameters, "max_pairwise_correlation") {
+        score += if limit <= 0.68 {
+            0.35
+        } else if limit <= 0.70 {
+            0.30
+        } else if limit <= 0.75 {
+            0.20
+        } else {
+            0.10
+        };
+    }
+    if parameter_str(parameters, "candidate_risk_filter")
+        .map(|value| value.contains("correlation"))
+        .unwrap_or(false)
+    {
+        score += 0.25;
+    }
+    if parameter_str(parameters, "portfolio_method")
+        .map(|value| value == "risk_budget" || value == "min_variance")
+        .unwrap_or(false)
+    {
+        score += 0.15;
+    }
+    if parameter_str(parameters, "risk_contribution_control")
+        .map(|value| value != "off")
+        .unwrap_or(false)
+    {
+        score += 0.15;
+    }
+    if parameter_str(parameters, "style_risk_budget")
+        .map(|value| value != "off")
+        .unwrap_or(false)
+    {
+        score += 0.10;
+    }
+    if parameter_str(parameters, "capacity_risk_budget")
+        .map(|value| value != "off")
+        .unwrap_or(false)
+    {
+        score += 0.10;
+    }
+    if parameter_str(parameters, "execution_impact_budget")
+        .map(|value| value != "off")
+        .unwrap_or(false)
+    {
+        score += 0.10;
+    }
+    if let Some(lookback) = parameter_f64(parameters, "correlation_lookback_days") {
+        score += if lookback >= 120.0 { 0.10 } else { 0.05 };
+    }
+    score.clamp(0.0, 1.0)
+}
+
+fn summarize_trial_metric_group(trials: &[&CompletedTrialSnapshot]) -> Value {
+    if trials.is_empty() {
+        return json!({
+            "count": 0,
+            "annual_return_avg": null,
+            "sharpe_avg": null,
+            "sortino_avg": null,
+            "calmar_avg": null,
+            "max_drawdown_avg": null,
+        });
+    }
+    let count = trials.len() as f64;
+    let profiles = trials
+        .iter()
+        .map(|trial| EliteMetricProfile::from_metrics(&trial.metrics))
+        .collect::<Vec<_>>();
+    json!({
+        "count": trials.len(),
+        "annual_return_avg": profiles.iter().map(|item| item.annual_return).sum::<f64>() / count,
+        "sharpe_avg": profiles.iter().map(|item| item.sharpe).sum::<f64>() / count,
+        "sortino_avg": profiles.iter().map(|item| item.sortino).sum::<f64>() / count,
+        "calmar_avg": profiles.iter().map(|item| item.calmar).sum::<f64>() / count,
+        "max_drawdown_avg": profiles.iter().map(|item| item.max_drawdown).sum::<f64>() / count,
+    })
+}
+
+fn correlation_peer_impact(controlled: &Value, uncontrolled: &Value) -> Value {
+    let controlled_count = controlled["count"].as_u64().unwrap_or(0);
+    let uncontrolled_count = uncontrolled["count"].as_u64().unwrap_or(0);
+    if controlled_count == 0 || uncontrolled_count == 0 {
+        return json!({
+            "normalized_score": 0.0,
+            "reason": "insufficient_controlled_or_uncontrolled_peers",
+        });
+    }
+    let sharpe_delta = controlled["sharpe_avg"].as_f64().unwrap_or(0.0)
+        - uncontrolled["sharpe_avg"].as_f64().unwrap_or(0.0);
+    let drawdown_delta = controlled["max_drawdown_avg"].as_f64().unwrap_or(0.0)
+        - uncontrolled["max_drawdown_avg"].as_f64().unwrap_or(0.0);
+    let annual_delta = controlled["annual_return_avg"].as_f64().unwrap_or(0.0)
+        - uncontrolled["annual_return_avg"].as_f64().unwrap_or(0.0);
+    let normalized_score = (0.50
+        + sharpe_delta * 0.50
+        + positive_shortfall(0.0, drawdown_delta) * 0.80
+        + annual_delta.max(-0.05) * 0.20)
+        .clamp(0.0, 1.0);
+    json!({
+        "normalized_score": normalized_score,
+        "annual_return_delta": annual_delta,
+        "sharpe_delta": sharpe_delta,
+        "max_drawdown_delta": drawdown_delta,
+    })
+}
+
+fn differing_parameter_keys(left: &Value, right: &Value) -> Vec<String> {
+    let Some(left_map) = left.as_object() else {
+        return Vec::new();
+    };
+    let Some(right_map) = right.as_object() else {
+        return Vec::new();
+    };
+    let keys = left_map
+        .keys()
+        .chain(right_map.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    keys.into_iter()
+        .filter(|key| left_map.get(key) != right_map.get(key))
+        .collect()
+}
+
+fn parameter_value(parameters: &Value, key: &str) -> Value {
+    parameters.get(key).cloned().unwrap_or(Value::Null)
+}
+
+fn parameter_f64(parameters: &Value, key: &str) -> Option<f64> {
+    parameters.get(key).and_then(value_as_f64)
+}
+
+fn parameter_str<'a>(parameters: &'a Value, key: &str) -> Option<&'a str> {
+    parameters.get(key).and_then(Value::as_str)
+}
+
+fn compact_trial_metrics(trial: &CompletedTrialSnapshot) -> Value {
+    json!({
+        "trial_id": trial.trial_id,
+        "trial_index": trial.trial_index,
+        "elite_gap_score": elite_gap_score(&trial.metrics),
+        "annual_return_pct": metric_number(&trial.metrics, "annual_return_pct"),
+        "sharpe_ratio": metric_number(&trial.metrics, "sharpe_ratio"),
+        "sortino_ratio": metric_number(&trial.metrics, "sortino_ratio"),
+        "calmar_ratio": metric_number(&trial.metrics, "calmar_ratio"),
+        "max_drawdown_pct": metric_number(&trial.metrics, "max_drawdown_pct"),
+    })
+}
+
+fn metric_number(metrics: &Value, name: &str) -> f64 {
+    metrics.get(name).and_then(value_as_f64).unwrap_or(0.0)
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+impl EliteMetricProfile {
+    fn from_metrics(metrics: &Value) -> Self {
+        Self {
+            annual_return: metric_number(metrics, "annual_return_pct"),
+            excess_return: metric_number(metrics, "excess_return_pct"),
+            sharpe: metric_number(metrics, "sharpe_ratio"),
+            sortino: metric_number(metrics, "sortino_ratio"),
+            calmar: metric_number(metrics, "calmar_ratio"),
+            profit_factor: metric_number(metrics, "profit_factor"),
+            max_drawdown: metric_number(metrics, "max_drawdown_pct"),
+            max_drawdown_duration_days: metric_number(metrics, "max_drawdown_duration_days"),
+            num_trades: metric_number(metrics, "num_trades"),
+        }
+    }
 }
 
 async fn load_discovery_candidates(
@@ -2802,6 +6362,8 @@ fn build_factor_trial_request(
         risk_budget_lookback_days: usize_value("risk_budget_lookback_days", 60)?,
         capacity_penalty_strength: f64_value("capacity_penalty_strength", 0.0)?,
         industry_max_weight_pct: optional_f64_value("industry_max_weight_pct")?,
+        capacity_risk_budget: optional_string("capacity_risk_budget")?,
+        execution_impact_budget: optional_string("execution_impact_budget")?,
         style_risk_budget: optional_string("style_risk_budget")?,
         candidate_risk_filter: optional_string("candidate_risk_filter")?,
         risk_contribution_control: optional_string("risk_contribution_control")?,
@@ -2823,8 +6385,8 @@ fn build_factor_trial_request(
         },
         universe_profile: optional_string("universe_profile")?,
         effective_coverage,
-        cost_model: None,
-        execution_rules: None,
+        cost_model: optional_cost_model_from_maps(params, template)?,
+        execution_rules: optional_execution_rules_from_maps(params, template)?,
         benchmark,
         market_regime,
         stop_loss_pct: optional_f64_value("stop_loss_pct")?,
@@ -2901,6 +6463,60 @@ fn build_factor_trial_request(
         persistence_mode: optional_string("persistence_mode")?
             .or_else(|| Some("summary_only".into())),
     })
+}
+
+fn optional_cost_model_from_maps(
+    params: &Map<String, Value>,
+    template: &Map<String, Value>,
+) -> Result<Option<CostModelReq>, String> {
+    optional_struct_from_merged_maps(params, template, "cost_model")
+}
+
+fn optional_execution_rules_from_maps(
+    params: &Map<String, Value>,
+    template: &Map<String, Value>,
+) -> Result<Option<ExecutionRulesReq>, String> {
+    optional_struct_from_merged_maps(params, template, "execution_rules")
+}
+
+fn optional_struct_from_merged_maps<T>(
+    params: &Map<String, Value>,
+    template: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<T>, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let Some(merged) = merged_object_from_maps(params, template, key)? else {
+        return Ok(None);
+    };
+    serde_json::from_value(Value::Object(merged))
+        .map(Some)
+        .map_err(|error| format!("{} must be a valid object: {}", key, error))
+}
+
+fn merged_object_from_maps(
+    params: &Map<String, Value>,
+    template: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<Map<String, Value>>, String> {
+    let mut merged = Map::new();
+    for value in [template.get(key), params.get(key)].into_iter().flatten() {
+        match value {
+            Value::Null => {}
+            Value::Object(object) => {
+                for (object_key, object_value) in object {
+                    merged.insert(object_key.clone(), object_value.clone());
+                }
+            }
+            _ => return Err(format!("{} must be a JSON object", key)),
+        }
+    }
+    if merged.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(merged))
+    }
 }
 
 fn build_prediction_trial_request(
@@ -2999,6 +6615,8 @@ fn build_prediction_trial_request(
         risk_budget_lookback_days: usize_value("risk_budget_lookback_days", 60)?,
         capacity_penalty_strength: f64_value("capacity_penalty_strength", 0.0)?,
         industry_max_weight_pct: optional_f64_value("industry_max_weight_pct")?,
+        capacity_risk_budget: optional_string("capacity_risk_budget")?,
+        execution_impact_budget: optional_string("execution_impact_budget")?,
         style_risk_budget: optional_string("style_risk_budget")?,
         candidate_risk_filter: optional_string("candidate_risk_filter")?,
         risk_contribution_control: optional_string("risk_contribution_control")?,
@@ -4000,6 +7618,8 @@ fn evaluate_robustness_gates_with_analysis(
     let min_bootstrap_calmar_p05 = constraint_f64(gate_policy, "min_bootstrap_calmar_p05");
     let max_bootstrap_drawdown_p95 = constraint_f64(gate_policy, "max_bootstrap_drawdown_p95");
     let min_market_scenarios = constraint_i64(gate_policy, "min_market_scenarios").unwrap_or(1);
+    let enforce_trial_constraint_violations =
+        constraint_bool(gate_policy, "enforce_trial_constraint_violations").unwrap_or(true);
 
     let num_trades = metrics
         .get("num_trades")
@@ -4027,7 +7647,8 @@ fn evaluate_robustness_gates_with_analysis(
     let mut gates = vec![
         json!({
             "gate": "no_hard_constraint_violations",
-            "passed": !hard_violations,
+            "passed": !enforce_trial_constraint_violations || !hard_violations,
+            "enforced": enforce_trial_constraint_violations,
             "actual": constraint_violations,
         }),
         json!({
@@ -4522,6 +8143,18 @@ fn constraint_f64(constraints: Option<&Value>, name: &str) -> Option<f64> {
         .and_then(Value::as_f64)
 }
 
+fn constraint_bool(constraints: Option<&Value>, name: &str) -> Option<bool> {
+    constraints
+        .and_then(|value| value.get(name))
+        .and_then(Value::as_bool)
+}
+
+fn constraint_str<'a>(constraints: Option<&'a Value>, name: &str) -> Option<&'a str> {
+    constraints
+        .and_then(|value| value.get(name))
+        .and_then(Value::as_str)
+}
+
 async fn mark_trial_running(db: &sqlx::PgPool, trial_id: &str) -> Result<(), String> {
     sqlx::query(
         "UPDATE optimization_trial
@@ -4728,6 +8361,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn report_trial(
+        trial_id: &str,
+        trial_index: i32,
+        parameters: Value,
+        metrics: Value,
+    ) -> CompletedTrialSnapshot {
+        CompletedTrialSnapshot {
+            trial_id: trial_id.to_string(),
+            trial_index,
+            backtest_task_id: Some(format!("bt-{trial_id}")),
+            score: None,
+            metrics,
+            metric_sources: json!({}),
+            missing_elite_metrics: json!([]),
+            constraint_violations: json!([]),
+            parameters,
+        }
+    }
+
     #[test]
     fn random_search_trial_generation_is_seed_deterministic() {
         let search_space = json!({
@@ -4742,6 +8394,633 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), 3);
         assert!(first.iter().all(|params| params.get("top_n").is_some()));
+    }
+
+    #[test]
+    fn oos_walk_forward_plan_uses_non_overlapping_train_and_test_windows() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20200101",
+                "end_date": "20250101",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials_per_window: Some(16),
+            search_profile: Some("phase7_db".to_string()),
+            trial_batch_limit: Some(4),
+            trial_concurrency: None,
+            train_cache_mode: None,
+            max_batches_per_window: Some(4),
+            train_window_days: Some(365 * 3),
+            test_window_days: Some(365),
+            step_days: Some(365),
+            validation_mode: Some("walk_forward".to_string()),
+            in_sample_ratio: None,
+            include_partial_last_window: Some(false),
+            plan_only: Some(true),
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: Some(1),
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let plan = build_oos_discovery_plan(&req).expect("oos plan");
+
+        assert_eq!(plan.validation_mode, "walk_forward");
+        assert_eq!(plan.windows.len(), 2);
+        assert!(plan.windows.iter().all(|window| {
+            window.train_start <= window.train_end && window.train_end < window.test_start
+        }));
+        assert_eq!(
+            plan.windows[1].train_start - plan.windows[0].train_start,
+            Duration::days(365)
+        );
+    }
+
+    #[test]
+    fn oos_holdout_plan_uses_single_in_sample_out_of_sample_split() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20200101",
+                "end_date": "20210101"
+            })),
+            prediction_set_ids: None,
+            max_trials_per_window: None,
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: None,
+            train_cache_mode: None,
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: Some("holdout_80_20".to_string()),
+            in_sample_ratio: Some(0.80),
+            include_partial_last_window: None,
+            plan_only: Some(true),
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let plan = build_oos_discovery_plan(&req).expect("holdout plan");
+
+        assert_eq!(plan.windows.len(), 1);
+        assert_eq!(plan.windows[0].validation_mode, "holdout_80_20");
+        assert!(plan.windows[0].train_end < plan.windows[0].test_start);
+        assert_eq!(plan.windows[0].test_end, plan.end_date);
+    }
+
+    #[test]
+    fn stitched_oos_curve_compounds_only_test_window_returns() {
+        let first = vec![
+            RobustnessDailyPoint {
+                trade_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                portfolio_value: 100.0,
+                benchmark_value: Some(100.0),
+            },
+            RobustnessDailyPoint {
+                trade_date: NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
+                portfolio_value: 110.0,
+                benchmark_value: Some(105.0),
+            },
+        ];
+        let second = vec![
+            RobustnessDailyPoint {
+                trade_date: NaiveDate::from_ymd_opt(2021, 1, 1).unwrap(),
+                portfolio_value: 200.0,
+                benchmark_value: Some(100.0),
+            },
+            RobustnessDailyPoint {
+                trade_date: NaiveDate::from_ymd_opt(2021, 1, 2).unwrap(),
+                portfolio_value: 220.0,
+                benchmark_value: Some(110.0),
+            },
+        ];
+        let mut stitched = Vec::new();
+
+        append_stitched_oos_points(&mut stitched, &first);
+        append_stitched_oos_points(&mut stitched, &second);
+
+        assert_eq!(stitched.len(), 3);
+        assert!((stitched.last().unwrap().portfolio_value - 1.21).abs() < 1e-12);
+    }
+
+    #[test]
+    fn oos_execution_mode_accepts_background_aliases() {
+        assert_eq!(
+            normalize_oos_execution_mode(Some("background")).unwrap(),
+            "background"
+        );
+        assert_eq!(
+            normalize_oos_execution_mode(Some("async")).unwrap(),
+            "background"
+        );
+        assert_eq!(normalize_oos_execution_mode(None).unwrap(), "inline");
+        assert!(normalize_oos_execution_mode(Some("manual")).is_err());
+    }
+
+    #[test]
+    fn oos_train_execution_defaults_to_shared_cache_even_when_concurrency_requested() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: None,
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: Some(4),
+            train_cache_mode: None,
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        assert_eq!(
+            normalize_oos_train_cache_mode(None).unwrap(),
+            "shared_window"
+        );
+        assert_eq!(oos_train_trial_concurrency(&req).unwrap(), 1);
+
+        let config =
+            oos_walk_forward_experiment_config(&req, &json!({"validation_mode": "walk_forward"}));
+        assert_eq!(config["requested_trial_concurrency"], json!(4));
+        assert_eq!(config["train_trial_concurrency"], json!(1));
+        assert_eq!(config["train_cache_mode"], json!("shared_window"));
+    }
+
+    #[test]
+    fn oos_train_execution_allows_explicit_isolated_parallel_cache() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: None,
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: Some(4),
+            train_cache_mode: Some("per_trial_isolated".to_string()),
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        assert_eq!(
+            normalize_oos_train_cache_mode(Some("isolated")).unwrap(),
+            "per_trial_isolated"
+        );
+        assert_eq!(oos_train_trial_concurrency(&req).unwrap(), 4);
+
+        let config =
+            oos_walk_forward_experiment_config(&req, &json!({"validation_mode": "walk_forward"}));
+        assert_eq!(config["requested_trial_concurrency"], json!(4));
+        assert_eq!(config["train_trial_concurrency"], json!(4));
+        assert_eq!(config["train_cache_mode"], json!("per_trial_isolated"));
+    }
+
+    #[test]
+    fn oos_gate_report_rejects_weak_cost_capacity_perturbations() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20200101",
+                "end_date": "20250101",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials_per_window: Some(16),
+            search_profile: Some("phase7_db".to_string()),
+            trial_batch_limit: Some(4),
+            trial_concurrency: Some(2),
+            train_cache_mode: None,
+            max_batches_per_window: Some(4),
+            train_window_days: Some(365 * 3),
+            test_window_days: Some(365),
+            step_days: Some(365),
+            validation_mode: Some("walk_forward".to_string()),
+            in_sample_ratio: None,
+            include_partial_last_window: Some(false),
+            plan_only: Some(true),
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: Some(1.2),
+            min_positive_oos_window_ratio: Some(0.5),
+            min_oos_window_count: Some(1),
+            oos_top_n: Some(1),
+            enable_cost_capacity_perturbation_gate: Some(true),
+            cost_capacity_perturbations: Some(vec![OosCostCapacityPerturbationRequest {
+                name: Some("cost_up".to_string()),
+                cost_multiplier: Some(1.5),
+                slippage_bps: Some(0.0002),
+                impact_cost_coefficient: None,
+                max_participation_rate: None,
+                capacity_penalty_strength: None,
+            }]),
+            min_cost_capacity_perturbation_pass_ratio: Some(0.75),
+            min_perturbed_oos_calmar: Some(1.0),
+            max_perturbed_oos_drawdown_pct: Some(0.35),
+        };
+        let plan = build_oos_discovery_plan(&req).expect("plan");
+        let window_results = vec![
+            json!({
+                "oos_metrics": {"annual_return_pct": 0.10},
+                "train_robustness": {"status": "approved_candidate"},
+                "cost_capacity_perturbations": [
+                    {"name": "cost_up", "passed": true}
+                ]
+            }),
+            json!({
+                "oos_metrics": {"annual_return_pct": 0.08},
+                "train_robustness": {"status": "approved_candidate"},
+                "cost_capacity_perturbations": [
+                    {"name": "cost_up", "passed": false}
+                ]
+            }),
+        ];
+
+        let gates = build_oos_gate_report(
+            &req,
+            &plan,
+            &window_results,
+            &json!({"calmar_ratio": 1.4}),
+            &resolve_oos_final_promotion_gate_policy(&req, &plan.validation_mode),
+        );
+
+        let perturbation_gate = gates
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|gate| gate["gate"] == "cost_capacity_perturbation_pass_ratio")
+            .expect("cost/capacity gate");
+        assert_eq!(perturbation_gate["passed"], json!(false));
+        assert_eq!(perturbation_gate["actual"], json!(0.5));
+    }
+
+    #[test]
+    fn train_selection_cost_capacity_gate_is_policy_scoped() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: None,
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: None,
+            train_cache_mode: None,
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: Some(true),
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: Some(0.80),
+            min_perturbed_oos_calmar: Some(1.2),
+            max_perturbed_oos_drawdown_pct: Some(0.35),
+        };
+        let train_policy = json!({
+            "enable_train_cost_capacity_perturbation_gate": true,
+            "min_train_cost_capacity_perturbation_pass_ratio": 0.67,
+            "min_train_perturbed_calmar": 0.50,
+            "max_train_perturbed_drawdown_pct": 0.45
+        });
+
+        let gate = train_cost_capacity_perturbation_gate_config(&req, &train_policy);
+
+        assert!(gate.enabled);
+        assert_eq!(gate.min_pass_ratio, 0.67);
+        assert_eq!(gate.min_perturbed_calmar, 0.50);
+        assert_eq!(gate.max_perturbed_drawdown_pct, 0.45);
+    }
+
+    #[test]
+    fn train_cost_capacity_stress_aware_selection_defaults_on_when_gate_enabled() {
+        let gate = OosCostCapacityGateConfig {
+            enabled: true,
+            min_pass_ratio: 0.80,
+            min_perturbed_calmar: 1.2,
+            max_perturbed_drawdown_pct: 0.35,
+        };
+
+        assert!(train_cost_capacity_stress_aware_selection_enabled(
+            &json!({}),
+            &gate
+        ));
+        assert!(!train_cost_capacity_stress_aware_selection_enabled(
+            &json!({"enable_train_cost_capacity_stress_aware_selection": false}),
+            &gate
+        ));
+    }
+
+    #[test]
+    fn train_cost_capacity_score_profile_accepts_capacity_stress_calmar_objective() {
+        let policy = json!({
+            "enable_train_cost_capacity_perturbation_gate": true,
+            "train_stress_score_profile": "capacity_stress_calmar_score_v1"
+        });
+
+        assert_eq!(
+            train_cost_capacity_stress_score_profile(&policy),
+            "capacity_stress_calmar_score_v1"
+        );
+    }
+
+    #[test]
+    fn capacity_stress_calmar_score_prefers_capacity_resilience_when_pass_ratio_ties() {
+        let candidate = |trial_id: &str,
+                         annual_return: Decimal,
+                         sharpe: Decimal,
+                         max_drawdown: Decimal|
+         -> DiscoveryCandidate {
+            DiscoveryCandidate {
+                trial_id: trial_id.to_string(),
+                backtest_task_id: None,
+                score: Some(Decimal::new(50, 0)),
+                candidate_type: CandidateType::ReviewRequired,
+                professional_gap_score: Decimal::ZERO,
+                metrics: CandidateMetrics {
+                    annual_return,
+                    excess_return: Decimal::new(10, 2),
+                    sharpe,
+                    sortino: Decimal::new(18, 1),
+                    max_drawdown,
+                    ..CandidateMetrics::default()
+                },
+                parameters: json!({}),
+            }
+        };
+        let mut high_return_fragile = cost_capacity_perturbation_summary_from_counts(2, 3);
+        high_return_fragile.min_calmar = Decimal::new(30, 2);
+        high_return_fragile.avg_calmar = Decimal::new(75, 2);
+        high_return_fragile.avg_sharpe = Decimal::new(90, 2);
+        high_return_fragile.min_annual_return = Decimal::new(-5, 2);
+        high_return_fragile.max_drawdown = Decimal::new(30, 2);
+        let mut lower_return_resilient = cost_capacity_perturbation_summary_from_counts(2, 3);
+        lower_return_resilient.min_calmar = Decimal::new(140, 2);
+        lower_return_resilient.avg_calmar = Decimal::new(180, 2);
+        lower_return_resilient.avg_sharpe = Decimal::new(160, 2);
+        lower_return_resilient.min_annual_return = Decimal::new(7, 2);
+        lower_return_resilient.max_drawdown = Decimal::new(18, 2);
+        let policy = json!({
+            "train_stress_score_profile": "capacity_stress_calmar_score_v1",
+            "min_train_perturbed_calmar": 1.2,
+            "capacity_stress_target_annual_return": 0.05
+        });
+
+        let fragile_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate(
+                "high-return-fragile",
+                Decimal::new(36, 2),
+                Decimal::new(24, 1),
+                Decimal::new(10, 2),
+            ),
+            &high_return_fragile,
+            &policy,
+        );
+        let resilient_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate(
+                "lower-return-resilient",
+                Decimal::new(22, 2),
+                Decimal::new(16, 1),
+                Decimal::new(16, 2),
+            ),
+            &lower_return_resilient,
+            &policy,
+        );
+
+        assert!(
+            resilient_score > fragile_score,
+            "resilient_score={resilient_score}, fragile_score={fragile_score}"
+        );
+    }
+
+    #[test]
+    fn train_candidate_evaluation_order_prefers_stress_resilience() {
+        let base_candidate = |trial_id: &str, annual_return: Decimal| DiscoveryCandidate {
+            trial_id: trial_id.to_string(),
+            backtest_task_id: None,
+            score: None,
+            candidate_type: CandidateType::ReviewRequired,
+            professional_gap_score: Decimal::new(25, 2),
+            metrics: CandidateMetrics {
+                annual_return,
+                excess_return: Decimal::new(10, 2),
+                sharpe: Decimal::new(90, 2),
+                sortino: Decimal::new(16, 1),
+                max_drawdown: Decimal::new(25, 2),
+                ..CandidateMetrics::default()
+            },
+            parameters: json!({}),
+        };
+        let mut fragile_summary = cost_capacity_perturbation_summary_from_counts(1, 3);
+        fragile_summary.min_calmar = Decimal::new(36, 2);
+        fragile_summary.max_drawdown = Decimal::new(9, 2);
+        let mut resilient_summary = cost_capacity_perturbation_summary_from_counts(2, 3);
+        resilient_summary.min_calmar = Decimal::new(125, 2);
+        resilient_summary.max_drawdown = Decimal::new(12, 2);
+        let fragile = OosTrainCandidateEvaluation {
+            candidate: base_candidate("high-return-fragile", Decimal::new(32, 2)),
+            robustness: json!({"status": "rejected"}),
+            train_cost_capacity_perturbations: Vec::new(),
+            stress_adjusted_score: train_candidate_stress_adjusted_score(
+                &base_candidate("high-return-fragile", Decimal::new(32, 2)),
+                &fragile_summary,
+            ),
+            stress_summary: fragile_summary,
+            train_cost_gate_passed: false,
+        };
+        let resilient = OosTrainCandidateEvaluation {
+            candidate: base_candidate("lower-return-resilient", Decimal::new(24, 2)),
+            robustness: json!({"status": "approved_candidate"}),
+            train_cost_capacity_perturbations: Vec::new(),
+            stress_adjusted_score: train_candidate_stress_adjusted_score(
+                &base_candidate("lower-return-resilient", Decimal::new(24, 2)),
+                &resilient_summary,
+            ),
+            stress_summary: resilient_summary,
+            train_cost_gate_passed: true,
+        };
+        let mut evaluations = vec![fragile, resilient];
+
+        evaluations.sort_by(train_candidate_evaluation_order);
+
+        assert_eq!(evaluations[0].candidate.trial_id, "lower-return-resilient");
+        assert!(evaluations[0].stress_adjusted_score > evaluations[1].stress_adjusted_score);
+    }
+
+    #[test]
+    fn train_cost_capacity_gate_report_rejects_weak_pass_ratio() {
+        let gate = OosCostCapacityGateConfig {
+            enabled: true,
+            min_pass_ratio: 0.75,
+            min_perturbed_calmar: 1.0,
+            max_perturbed_drawdown_pct: 0.35,
+        };
+        let report = build_cost_capacity_pass_ratio_gate(
+            "train_cost_capacity_perturbation_pass_ratio",
+            1,
+            2,
+            &gate,
+        );
+
+        assert_eq!(report["passed"], json!(false));
+        assert_eq!(report["actual"], json!(0.5));
+        assert_eq!(report["limit"], json!(0.75));
+    }
+
+    #[test]
+    fn train_cost_capacity_gate_rejects_candidate_robustness() {
+        let gate = OosCostCapacityGateConfig {
+            enabled: true,
+            min_pass_ratio: 0.75,
+            min_perturbed_calmar: 1.0,
+            max_perturbed_drawdown_pct: 0.35,
+        };
+        let (robustness, passed) = attach_train_cost_capacity_gate_to_robustness(
+            json!({
+                "status": "approved_candidate",
+                "gate_results": []
+            }),
+            1,
+            2,
+            &gate,
+        );
+
+        assert!(!passed);
+        assert_eq!(robustness["status"], json!("rejected"));
+        assert_eq!(
+            robustness["gate_results"][0]["gate"],
+            json!("train_cost_capacity_perturbation_pass_ratio")
+        );
+        assert_eq!(robustness["gate_results"][0]["passed"], json!(false));
+    }
+
+    #[test]
+    fn train_cost_capacity_overlay_persistence_fields_use_updated_status_and_gates() {
+        let fields = train_cost_capacity_overlay_persistence_fields(&json!({
+            "gate_result_id": "gate-train-cost",
+            "status": "rejected",
+            "gate_results": [
+                {
+                    "gate": "train_cost_capacity_perturbation_pass_ratio",
+                    "passed": false
+                }
+            ]
+        }))
+        .expect("persistence fields");
+
+        assert_eq!(fields.gate_result_id, "gate-train-cost");
+        assert_eq!(fields.status, "rejected");
+        assert_eq!(
+            fields.gate_results[0]["gate"],
+            json!("train_cost_capacity_perturbation_pass_ratio")
+        );
     }
 
     #[test]
@@ -4818,6 +9097,8 @@ mod tests {
             "risk_budget_lookback_days": 80,
             "capacity_penalty_strength": 0.75,
             "industry_max_weight_pct": 0.35,
+            "capacity_risk_budget": "capacity_participation_strict_v1",
+            "execution_impact_budget": "impact_turnover_20pct_v1",
             "style_risk_budget": "defensive_style_budget_v1",
             "candidate_risk_filter": "low_volatility_low_correlation_v1",
             "score_candidate_pool_size": 300,
@@ -4866,6 +9147,14 @@ mod tests {
         assert_eq!(req.risk_budget_lookback_days, 80);
         assert_eq!(req.capacity_penalty_strength, 0.75);
         assert_eq!(req.industry_max_weight_pct, Some(0.35));
+        assert_eq!(
+            req.capacity_risk_budget.as_deref(),
+            Some("capacity_participation_strict_v1")
+        );
+        assert_eq!(
+            req.execution_impact_budget.as_deref(),
+            Some("impact_turnover_20pct_v1")
+        );
         assert_eq!(
             req.style_risk_budget.as_deref(),
             Some("defensive_style_budget_v1")
@@ -4968,6 +9257,62 @@ mod tests {
         assert_eq!(coverage.min_rows, Some(180));
         assert_eq!(coverage.include_rebalance_warmup, Some(true));
         assert_eq!(coverage.warmup_trading_days, Some(19));
+    }
+
+    #[test]
+    fn trial_backtest_request_passes_cost_and_execution_rules() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "cost_model": {
+                    "commission_rate": 0.0003,
+                    "min_commission": 5.0,
+                    "tax_rate": 0.001,
+                    "slippage_bps": 0.0001,
+                    "cost_multiplier": 1.0,
+                    "impact_cost_coefficient": 0.01
+                },
+                "execution_rules": {
+                    "execution_timing": "next_open",
+                    "execution_price": "next_open",
+                    "max_participation_rate": 0.10
+                }
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "cost_model": {
+                "cost_multiplier": 1.5,
+                "slippage_bps": 0.0002
+            },
+            "execution_rules": {
+                "max_participation_rate": 0.05
+            }
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("factor request");
+
+        let cost = req.cost_model.expect("cost model should be propagated");
+        assert_eq!(cost.commission_rate, Some(0.0003));
+        assert_eq!(cost.min_commission, Some(5.0));
+        assert_eq!(cost.tax_rate, Some(0.001));
+        assert_eq!(cost.slippage_bps, Some(0.0002));
+        assert_eq!(cost.cost_multiplier, Some(1.5));
+        assert_eq!(cost.impact_cost_coefficient, Some(0.01));
+        let rules = req
+            .execution_rules
+            .expect("execution rules should be propagated");
+        assert_eq!(rules.execution_timing.as_deref(), Some("next_open"));
+        assert_eq!(rules.execution_price.as_deref(), Some("next_open"));
+        assert_eq!(rules.max_participation_rate, Some(0.05));
     }
 
     #[test]
@@ -8290,6 +12635,159 @@ mod tests {
     }
 
     #[test]
+    fn phase7_layered_request_accepts_execution_robust_candidate_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(12),
+            search_profile: Some("phase7_dj".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_robust_candidate"
+        );
+        assert_eq!(bundle.plan.planned_trials, 12);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["top_n"] == 50
+                && trial.parameters["rebalance"] == "120"
+                && trial.parameters["max_position_pct"] == "0.12"
+                && trial.parameters["capacity_penalty_strength"] == "1.25"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["rebalance_hysteresis_pct"] == "0.01"
+                && trial.parameters["partial_rebalance_ratio"] == "0.75"
+        }));
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters.get("prediction_set_id").is_none()
+                && trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+                && trial.parameters["portfolio_method"] == "risk_budget"
+                && trial.parameters["candidate_risk_filter"] == "off"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_execution_low_turnover_alpha_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(10),
+            search_profile: Some("phase7_dn".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_low_turnover_alpha"
+        );
+        assert_eq!(bundle.plan.planned_trials, 10);
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial.parameters["candidate_risk_filter"]
+                    == "soft_low_volatility_low_correlation_v1"
+                && trial.parameters["rebalance"] == "180"
+                && trial.parameters["capacity_penalty_strength"] == "1.5"
+        }));
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters.get("prediction_set_id").is_none()
+                && trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+                && trial.parameters["portfolio_method"] == "risk_budget"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_execution_capacity_budget_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(12),
+            search_profile: Some("phase7_dq".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_capacity_budget"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["capacity_risk_budget"] == "capacity_participation_strict_v1"
+        }));
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+                && trial.parameters["portfolio_method"] == "risk_budget"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_execution_impact_budget_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(18),
+            search_profile: Some("phase7_dr".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_impact_budget"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["capacity_risk_budget"] == "capacity_participation_strict_v1"
+                && trial.parameters["execution_impact_budget"] == "impact_turnover_20pct_v1"
+        }));
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["combo_name"] == "phase7_financial_quality_v1"
+                && trial.parameters["portfolio_method"] == "risk_budget"
+        }));
+    }
+
+    #[test]
     fn phase7_layered_request_accepts_return_alpha_sharpe_bridge_profile() {
         let req = Phase7LayeredOptimizationRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
@@ -8515,6 +13013,157 @@ mod tests {
         assert_eq!(backtest_delta.daily_bar_symbol_misses, 2);
         assert_eq!(backtest_delta.trading_profile_symbol_hits, 30);
         assert_eq!(backtest_delta.trading_profile_symbol_misses, 2);
+    }
+
+    #[test]
+    fn elite_validation_plateau_scores_stable_parameter_neighbors() {
+        let candidate = report_trial(
+            "candidate",
+            1,
+            json!({"top_n": 20, "rebalance": "60", "max_pairwise_correlation": "0.70"}),
+            json!({
+                "annual_return_pct": 0.1505,
+                "excess_return_pct": 0.05,
+                "sharpe_ratio": 1.02,
+                "sortino_ratio": 1.733,
+                "calmar_ratio": 0.715,
+                "profit_factor": 1.20,
+                "max_drawdown_pct": 0.2105,
+                "max_drawdown_duration_days": 90,
+                "num_trades": 260
+            }),
+        );
+        let stable_neighbor = report_trial(
+            "stable",
+            2,
+            json!({"top_n": 21, "rebalance": "60", "max_pairwise_correlation": "0.70"}),
+            json!({
+                "annual_return_pct": 0.147,
+                "excess_return_pct": 0.04,
+                "sharpe_ratio": 0.96,
+                "sortino_ratio": 1.62,
+                "calmar_ratio": 0.69,
+                "profit_factor": 1.15,
+                "max_drawdown_pct": 0.225,
+                "max_drawdown_duration_days": 95,
+                "num_trades": 255
+            }),
+        );
+        let unstable_neighbor = report_trial(
+            "unstable",
+            3,
+            json!({"top_n": 20, "rebalance": "55", "max_pairwise_correlation": "0.70"}),
+            json!({
+                "annual_return_pct": 0.120,
+                "excess_return_pct": 0.01,
+                "sharpe_ratio": 0.75,
+                "sortino_ratio": 1.10,
+                "calmar_ratio": 0.50,
+                "profit_factor": 1.0,
+                "max_drawdown_pct": 0.31,
+                "max_drawdown_duration_days": 160,
+                "num_trades": 240
+            }),
+        );
+        let trials = vec![
+            candidate.clone(),
+            stable_neighbor.clone(),
+            unstable_neighbor.clone(),
+        ];
+
+        let plateau = build_parameter_plateau_analysis(&candidate, &trials);
+
+        assert_eq!(plateau["near_neighbor_count"], 2);
+        assert_eq!(plateau["stable_neighbor_count"], 1);
+        assert_eq!(plateau["single_axis"][0]["parameter"], "rebalance");
+        assert_eq!(plateau["single_axis"][1]["parameter"], "top_n");
+    }
+
+    #[test]
+    fn portfolio_correlation_contribution_scores_explicit_and_peer_controls() {
+        let candidate = report_trial(
+            "controlled",
+            1,
+            json!({
+                "portfolio_method": "risk_budget",
+                "max_pairwise_correlation": "0.70",
+                "correlation_lookback_days": 120,
+                "candidate_risk_filter": "low_volatility_low_correlation_v1",
+                "risk_contribution_control": "soft_single_name_20pct_v1"
+            }),
+            json!({
+                "annual_return_pct": 0.16,
+                "excess_return_pct": 0.05,
+                "sharpe_ratio": 1.05,
+                "sortino_ratio": 1.70,
+                "calmar_ratio": 0.75,
+                "profit_factor": 1.30,
+                "max_drawdown_pct": 0.22,
+                "num_trades": 250
+            }),
+        );
+        let uncontrolled = report_trial(
+            "uncontrolled",
+            2,
+            json!({"portfolio_method": "heuristic"}),
+            json!({
+                "annual_return_pct": 0.17,
+                "excess_return_pct": 0.06,
+                "sharpe_ratio": 0.75,
+                "sortino_ratio": 1.30,
+                "calmar_ratio": 0.45,
+                "profit_factor": 1.05,
+                "max_drawdown_pct": 0.38,
+                "num_trades": 260
+            }),
+        );
+        let trials = vec![candidate.clone(), uncontrolled];
+
+        let contribution = build_portfolio_correlation_contribution_score(&candidate, &trials);
+
+        assert!(
+            contribution["explicit_control_score"].as_f64().unwrap() > 0.85,
+            "{contribution}"
+        );
+        assert!(
+            contribution["contribution_score"].as_f64().unwrap() > 0.70,
+            "{contribution}"
+        );
+        assert_eq!(contribution["active_controls"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn elite_metric_enrichment_marks_sources_and_missing_fields() {
+        let mut metrics = json!({
+            "annual_return_pct": 0.16,
+            "excess_return_pct": 0.02,
+            "sharpe_ratio": 1.1,
+            "sortino_ratio": 1.7,
+            "max_drawdown_pct": 0.22,
+            "num_trades": 320
+        });
+        let mut sources = existing_metric_sources(&metrics);
+
+        insert_metric_if_missing(
+            &mut metrics,
+            &mut sources,
+            "calmar_ratio",
+            Some(json!(0.72)),
+            "backtest_result.calmar_ratio",
+        );
+
+        let missing = missing_elite_metrics(&metrics);
+        assert_eq!(
+            sources["annual_return_pct"],
+            json!("optimization_trial.metrics")
+        );
+        assert_eq!(
+            sources["calmar_ratio"],
+            json!("backtest_result.calmar_ratio")
+        );
+        assert!(!missing.contains(&"calmar_ratio"));
+        assert!(missing.contains(&"profit_factor"));
+        assert!(missing.contains(&"max_drawdown_duration_days"));
     }
 
     #[test]
@@ -9340,6 +13989,126 @@ mod tests {
                 ["min_calmar"],
             2.0
         );
+    }
+
+    #[test]
+    fn oos_train_selection_policy_is_separate_from_final_professional_gate() {
+        let train_policy = default_oos_train_selection_gate_policy();
+        let professional_policy = default_professional_robustness_policy();
+
+        assert_eq!(train_policy["candidate_tier"], "oos_train_selection");
+        assert_eq!(train_policy["min_annual_return"], 0.0);
+        assert_eq!(train_policy["min_excess_return"], 0.0);
+        assert_eq!(train_policy["min_sharpe"], 0.0);
+        assert_eq!(train_policy["min_walk_forward_windows"], 1);
+        assert!(train_policy.get("min_sortino").is_none());
+        assert!(train_policy.get("min_calmar").is_none());
+        assert!(
+            train_policy["min_sharpe"].as_f64().unwrap()
+                < professional_policy["min_sharpe"].as_f64().unwrap()
+        );
+        assert!(
+            train_policy["min_walk_forward_windows"].as_i64().unwrap()
+                < professional_policy["min_walk_forward_windows"]
+                    .as_i64()
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn oos_final_promotion_policy_keeps_strict_stitched_oos_gates() {
+        let policy = default_oos_final_promotion_gate_policy("walk_forward");
+
+        assert_eq!(policy["candidate_tier"], "oos_final_promotion");
+        assert_eq!(policy["min_stitched_oos_calmar"], 1.2);
+        assert_eq!(policy["min_positive_oos_window_ratio"], 0.60);
+        assert_eq!(policy["min_oos_window_count"], 3);
+        assert_eq!(policy["require_train_selection_approval"], true);
+        assert_eq!(policy["require_no_train_test_overlap"], true);
+    }
+
+    #[test]
+    fn oos_train_selection_policy_preserves_legacy_professional_override() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: None,
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: None,
+            train_cache_mode: None,
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: Some(json!({"preset": "professional"})),
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let policy = resolve_oos_train_selection_gate_policy(&req);
+
+        assert_eq!(policy["candidate_tier"], "professional_observation");
+        assert_eq!(policy["min_sharpe"], 1.0);
+        assert_eq!(policy["min_walk_forward_windows"], 4);
+    }
+
+    #[test]
+    fn oos_train_selection_policy_ignores_final_objective_constraint_violations_by_default() {
+        let evaluation = evaluate_robustness_gates(
+            Decimal::new(10, 1),
+            Some(Decimal::new(9, 1)),
+            &json!({
+                "num_trades": 40,
+                "annual_return_pct": "0.02",
+                "excess_return_pct": "0.01",
+                "sharpe_ratio": "0.20",
+                "max_drawdown_pct": "0.10"
+            }),
+            &json!([
+                {
+                    "constraint": "min_annual_return",
+                    "severity": "hard",
+                    "limit": "0.15",
+                    "actual": "0.02"
+                },
+                {
+                    "constraint": "min_sharpe",
+                    "severity": "hard",
+                    "limit": "1.0",
+                    "actual": "0.20"
+                }
+            ]),
+            Some(&default_oos_train_selection_gate_policy()),
+        );
+
+        assert_eq!(evaluation.status, "approved_candidate");
+        assert!(evaluation.gates.as_array().unwrap().iter().any(|gate| {
+            gate["gate"] == "no_hard_constraint_violations"
+                && gate["passed"] == true
+                && gate["enforced"] == false
+        }));
     }
 
     #[test]
