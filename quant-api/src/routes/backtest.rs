@@ -843,6 +843,10 @@ pub struct RunFactorBacktestReq {
     pub portfolio_volatility_lookback_days: Option<usize>,
     pub portfolio_volatility_min_exposure: Option<f64>,
     pub portfolio_volatility_max_exposure: Option<f64>,
+    pub portfolio_sharpe_reduce_start: Option<f64>,
+    pub portfolio_sharpe_reduce_full: Option<f64>,
+    pub portfolio_sharpe_lookback_days: Option<usize>,
+    pub portfolio_sharpe_min_exposure: Option<f64>,
     pub start_date: String,
     pub end_date: String,
     #[serde(default = "default_capital")]
@@ -1196,6 +1200,18 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
         req.portfolio_volatility_max_exposure,
         "portfolio_volatility_max_exposure",
     )?;
+    let sharpe_start = match req.portfolio_sharpe_reduce_start {
+        Some(value) => Some(decimal_from_f64(value, "portfolio_sharpe_reduce_start")?),
+        None => None,
+    };
+    let sharpe_full = match req.portfolio_sharpe_reduce_full {
+        Some(value) => Some(decimal_from_f64(value, "portfolio_sharpe_reduce_full")?),
+        None => None,
+    };
+    let sharpe_min_exposure = optional_decimal_pct(
+        req.portfolio_sharpe_min_exposure,
+        "portfolio_sharpe_min_exposure",
+    )?;
 
     let provided = start.is_some() || full.is_some() || min_exposure.is_some();
     let complete = start.is_some() && full.is_some() && min_exposure.is_some();
@@ -1254,6 +1270,33 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
             );
         }
     }
+    let sharpe_lookback_days = match req.portfolio_sharpe_lookback_days {
+        Some(days) if days < 2 => {
+            return Err("portfolio_sharpe_lookback_days must be at least 2".into());
+        }
+        Some(days) => Some(days),
+        None => None,
+    };
+    let sharpe_provided = sharpe_start.is_some()
+        || sharpe_full.is_some()
+        || sharpe_lookback_days.is_some()
+        || sharpe_min_exposure.is_some();
+    let sharpe_complete =
+        sharpe_start.is_some() && sharpe_full.is_some() && sharpe_min_exposure.is_some();
+    if sharpe_provided && !sharpe_complete {
+        return Err(
+            "portfolio sharpe risk control requires reduce_start, reduce_full, and min_exposure"
+                .into(),
+        );
+    }
+    if let (Some(start), Some(full)) = (sharpe_start, sharpe_full) {
+        if full >= start {
+            return Err(
+                "portfolio_sharpe_reduce_full must be less than portfolio_sharpe_reduce_start"
+                    .into(),
+            );
+        }
+    }
 
     Ok(RiskControlConfig {
         stop_loss_pct: optional_decimal_pct(req.stop_loss_pct, "stop_loss_pct")?,
@@ -1274,6 +1317,10 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
         portfolio_volatility_lookback_days: volatility_lookback_days,
         portfolio_volatility_min_exposure: volatility_min_exposure,
         portfolio_volatility_max_exposure: volatility_max_exposure,
+        portfolio_sharpe_reduce_start: sharpe_start,
+        portfolio_sharpe_reduce_full: sharpe_full,
+        portfolio_sharpe_lookback_days: sharpe_lookback_days,
+        portfolio_sharpe_min_exposure: sharpe_min_exposure,
         ..RiskControlConfig::default()
     })
 }
@@ -1370,6 +1417,15 @@ fn build_market_regime_policy(
                 benchmark,
             )
         }
+        "quality_all_regime_event_window_sleeve_05pct_v1" => {
+            MarketRegimePolicy::quality_all_regime_event_window_sleeve_05pct_v1(benchmark)
+        }
+        "quality_all_regime_event_window_sleeve_10pct_v1" => {
+            MarketRegimePolicy::quality_all_regime_event_window_sleeve_10pct_v1(benchmark)
+        }
+        "quality_all_regime_event_window_sleeve_15pct_v1" => {
+            MarketRegimePolicy::quality_all_regime_event_window_sleeve_15pct_v1(benchmark)
+        }
         "quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1" => {
             MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1(
                 benchmark,
@@ -1400,6 +1456,16 @@ fn build_market_regime_policy(
                 benchmark,
             )
         }
+        "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1(
+                benchmark,
+            )
+        }
+        "quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1" => {
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1(
+                benchmark,
+            )
+        }
         "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1" => {
             MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1(benchmark)
         }
@@ -1411,6 +1477,177 @@ fn build_market_regime_policy(
         }
         "quality_bear_position_guard_v2" => {
             MarketRegimePolicy::quality_bear_position_guard_v2(benchmark)
+        }
+        "quality_bear_position_guard_v3" => {
+            MarketRegimePolicy::quality_bear_position_guard_v3(benchmark)
+        }
+        "quality_event_window_position_guard_v1" => {
+            MarketRegimePolicy::quality_event_window_position_guard_v1(benchmark)
+        }
+        "quality_event_window_position_guard_v2" => {
+            MarketRegimePolicy::quality_event_window_position_guard_v2(benchmark)
+        }
+        "quality_event_window_position_guard_v3" => {
+            MarketRegimePolicy::quality_event_window_position_guard_v3(benchmark)
+        }
+        "quality_event_window_return_sharpe_router_v1" => {
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v1(benchmark)
+        }
+        "quality_event_window_return_sharpe_router_v2" => {
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v2(benchmark)
+        }
+        "quality_event_window_return_sharpe_router_v3" => {
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v3(benchmark)
+        }
+        "quality_event_window_return_sharpe_router_v4" => {
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v4(benchmark)
+        }
+        "quality_state_alpha_selector_v1" => {
+            MarketRegimePolicy::quality_state_alpha_selector_v1(benchmark)
+        }
+        "quality_state_alpha_selector_v2" => {
+            MarketRegimePolicy::quality_state_alpha_selector_v2(benchmark)
+        }
+        "quality_state_alpha_selector_v3" => {
+            MarketRegimePolicy::quality_state_alpha_selector_v3(benchmark)
+        }
+        "quality_state_alpha_overlay_selector_v1" => {
+            MarketRegimePolicy::quality_state_alpha_overlay_selector_v1(benchmark)
+        }
+        "quality_state_alpha_overlay_selector_v2" => {
+            MarketRegimePolicy::quality_state_alpha_overlay_selector_v2(benchmark)
+        }
+        "quality_state_alpha_overlay_selector_v3" => {
+            MarketRegimePolicy::quality_state_alpha_overlay_selector_v3(benchmark)
+        }
+        "quality_state_sharpe_bridge_router_v1" => {
+            MarketRegimePolicy::quality_state_sharpe_bridge_router_v1(benchmark)
+        }
+        "quality_state_sharpe_bridge_router_v2" => {
+            MarketRegimePolicy::quality_state_sharpe_bridge_router_v2(benchmark)
+        }
+        "quality_state_sharpe_bridge_router_v3" => {
+            MarketRegimePolicy::quality_state_sharpe_bridge_router_v3(benchmark)
+        }
+        "quality_frontier_regime_bridge_router_v1" => {
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v1(benchmark)
+        }
+        "quality_frontier_regime_bridge_router_v2" => {
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v2(benchmark)
+        }
+        "quality_frontier_regime_bridge_router_v3" => {
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v3(benchmark)
+        }
+        "quality_frontier_regime_bridge_router_v4" => {
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v4(benchmark)
+        }
+        "quality_frontier_regime_bridge_router_v5" => {
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v5(benchmark)
+        }
+        "quality_frontier_regime_bridge_router_v6" => {
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v6(benchmark)
+        }
+        "quality_frontier_regime_bridge_router_v7" => {
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v7(benchmark)
+        }
+        "quality_mixed_event_state_selector_v1" => {
+            MarketRegimePolicy::quality_mixed_event_state_selector_v1(benchmark)
+        }
+        "quality_mixed_event_state_selector_v2" => {
+            MarketRegimePolicy::quality_mixed_event_state_selector_v2(benchmark)
+        }
+        "quality_mixed_event_state_overlay_selector_v1" => {
+            MarketRegimePolicy::quality_mixed_event_state_overlay_selector_v1(benchmark)
+        }
+        "quality_mixed_event_state_overlay_selector_v2" => {
+            MarketRegimePolicy::quality_mixed_event_state_overlay_selector_v2(benchmark)
+        }
+        "quality_mixed_orthogonal_alpha_selector_v1" => {
+            MarketRegimePolicy::quality_mixed_orthogonal_alpha_selector_v1(benchmark)
+        }
+        "quality_mixed_orthogonal_alpha_selector_v2" => {
+            MarketRegimePolicy::quality_mixed_orthogonal_alpha_selector_v2(benchmark)
+        }
+        "quality_mixed_orthogonal_alpha_selector_v3" => {
+            MarketRegimePolicy::quality_mixed_orthogonal_alpha_selector_v3(benchmark)
+        }
+        "quality_mixed_orthogonal_risk_memory_router_v1" => {
+            MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v1(benchmark)
+        }
+        "quality_mixed_orthogonal_risk_memory_router_v2" => {
+            MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v2(benchmark)
+        }
+        "quality_mixed_orthogonal_risk_memory_router_v3" => {
+            MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v3(benchmark)
+        }
+        "quality_nonlinear_alpha_router_v1" => {
+            MarketRegimePolicy::quality_nonlinear_alpha_router_v1(benchmark)
+        }
+        "quality_nonlinear_alpha_router_v2" => {
+            MarketRegimePolicy::quality_nonlinear_alpha_router_v2(benchmark)
+        }
+        "quality_nonlinear_alpha_risk_memory_router_v1" => {
+            MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v1(benchmark)
+        }
+        "quality_nonlinear_alpha_risk_memory_router_v2" => {
+            MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v2(benchmark)
+        }
+        "quality_nonlinear_alpha_risk_memory_router_v3" => {
+            MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v3(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v1" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v1(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v2" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v2(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v3" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v3(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v4" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v4(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v5" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v5(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v6" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v6(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v7" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v7(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v8" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v8(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v9" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v9(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v10" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v10(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v11" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v11(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v12" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v12(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v13" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v13(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v14" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v14(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v15" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v15(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v16" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v16(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v17" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v17(benchmark)
+        }
+        "quality_mixed_state_risk_memory_router_v18" => {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v18(benchmark)
         }
         other => return Err(format!("unsupported market_regime policy: {}", other)),
     };
@@ -2562,6 +2799,40 @@ mod tests {
     }
 
     #[test]
+    fn market_regime_request_builds_event_quality_segment_policies() {
+        for (policy_name, combo_name) in [
+            (
+                "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1",
+                "phase7_event_surprise_v1",
+            ),
+            (
+                "quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1",
+                "phase7_event_earnings_v1",
+            ),
+        ] {
+            let req = MarketRegimeBacktestReq {
+                enabled: Some(true),
+                policy: Some(policy_name.to_string()),
+                benchmark: None,
+                lookback_days: None,
+                min_observations: None,
+            };
+
+            let policy = build_market_regime_policy(Some(&req), "000300.SH")
+                .expect("valid regime policy")
+                .expect("enabled policy");
+
+            let sleeve = policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.portfolio_sleeve.as_ref())
+                .expect("bear event quality sleeve");
+            assert_eq!(sleeve.combo_name, combo_name);
+            assert!((sleeve.weight - 0.15).abs() < 1e-9);
+        }
+    }
+
+    #[test]
     fn market_regime_request_builds_quality_bear_position_guard_policy() {
         let req = MarketRegimeBacktestReq {
             enabled: Some(true),
@@ -2639,6 +2910,19 @@ mod tests {
         assert_eq!(
             risk_control.portfolio_volatility_max_exposure,
             Some(Decimal::ONE)
+        );
+        assert_eq!(
+            risk_control.portfolio_sharpe_reduce_start,
+            Some(Decimal::new(60, 2))
+        );
+        assert_eq!(
+            risk_control.portfolio_sharpe_reduce_full,
+            Some(Decimal::ZERO)
+        );
+        assert_eq!(risk_control.portfolio_sharpe_lookback_days, Some(120));
+        assert_eq!(
+            risk_control.portfolio_sharpe_min_exposure,
+            Some(Decimal::new(55, 2))
         );
         assert_eq!(risk_control.stop_loss_pct, Some(Decimal::new(12, 2)));
         assert_eq!(risk_control.trailing_stop_pct, Some(Decimal::new(18, 2)));
@@ -2722,6 +3006,10 @@ mod tests {
             portfolio_volatility_lookback_days: Some(60),
             portfolio_volatility_min_exposure: Some(0.45),
             portfolio_volatility_max_exposure: Some(1.0),
+            portfolio_sharpe_reduce_start: Some(0.60),
+            portfolio_sharpe_reduce_full: Some(0.0),
+            portfolio_sharpe_lookback_days: Some(120),
+            portfolio_sharpe_min_exposure: Some(0.55),
         }
     }
 }

@@ -1683,9 +1683,7 @@ fn phase7_event_window_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
 fn phase7_event_window_alpha_backfill_specs_for_plan(
     plan: &Phase7EventWindowAlphaBackfillPlan,
 ) -> Vec<Phase7BackfillFactorSpec> {
-    phase7_event_window_alpha_backfill_specs_for_days(event_window_days_for_combo(
-        &plan.combo_name,
-    ))
+    phase7_event_window_alpha_backfill_specs_for_days(event_window_days_for_combo(&plan.combo_name))
 }
 
 fn event_window_days_for_combo(combo_name: &str) -> i32 {
@@ -1721,15 +1719,13 @@ fn phase7_event_window_alpha_backfill_specs_for_days(
         40 => "40d",
         _ => "20d",
     };
-    let forecast_change_code = Box::leak(
-        format!("event_window_forecast_change_{}_decay_std", suffix).into_boxed_str(),
-    );
+    let forecast_change_code =
+        Box::leak(format!("event_window_forecast_change_{}_decay_std", suffix).into_boxed_str());
     let forecast_profit_code = Box::leak(
         format!("event_window_forecast_profit_floor_{}_decay_std", suffix).into_boxed_str(),
     );
-    let express_roe_code = Box::leak(
-        format!("event_window_express_roe_{}_decay_std", suffix).into_boxed_str(),
-    );
+    let express_roe_code =
+        Box::leak(format!("event_window_express_roe_{}_decay_std", suffix).into_boxed_str());
     let disclosure_code = Box::leak(
         format!("event_window_disclosure_early_days_{}_decay_std", suffix).into_boxed_str(),
     );
@@ -7819,13 +7815,18 @@ mod tests {
             statement_timeout_ms: None,
         };
 
-        let short_plan = short_req.into_plan().expect("valid short event-window plan");
+        let short_plan = short_req
+            .into_plan()
+            .expect("valid short event-window plan");
         let long_plan = long_req.into_plan().expect("valid long event-window plan");
         let short_specs = phase7_event_window_alpha_backfill_specs_for_plan(&short_plan);
         let long_specs = phase7_event_window_alpha_backfill_specs_for_plan(&long_plan);
 
         assert_eq!(short_plan.combo_name, "phase7_event_window_earnings_10d_v1");
-        assert_eq!(short_plan.bundle_name, "phase7_event_window_earnings_10d_v1");
+        assert_eq!(
+            short_plan.bundle_name,
+            "phase7_event_window_earnings_10d_v1"
+        );
         assert_eq!(long_plan.combo_name, "phase7_event_window_earnings_40d_v1");
         assert_eq!(long_plan.bundle_name, "phase7_event_window_earnings_40d_v1");
         assert!(short_specs

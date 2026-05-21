@@ -161,6 +161,18 @@ pub struct RiskControlConfig {
     /// Maximum gross exposure multiplier after volatility targeting. Defaults to 100%, no leverage.
     #[serde(default)]
     pub portfolio_volatility_max_exposure: Option<Decimal>,
+    /// Rolling annualized Sharpe where target exposure starts scaling down.
+    #[serde(default)]
+    pub portfolio_sharpe_reduce_start: Option<Decimal>,
+    /// Rolling annualized Sharpe where target exposure reaches the configured floor.
+    #[serde(default)]
+    pub portfolio_sharpe_reduce_full: Option<Decimal>,
+    /// Number of recent daily returns used for rolling Sharpe control.
+    #[serde(default)]
+    pub portfolio_sharpe_lookback_days: Option<usize>,
+    /// Minimum gross exposure multiplier after rolling Sharpe control is fully active.
+    #[serde(default)]
+    pub portfolio_sharpe_min_exposure: Option<Decimal>,
 }
 
 impl Default for RiskControlConfig {
@@ -182,6 +194,10 @@ impl Default for RiskControlConfig {
             portfolio_volatility_lookback_days: None,
             portfolio_volatility_min_exposure: None,
             portfolio_volatility_max_exposure: None,
+            portfolio_sharpe_reduce_start: None,
+            portfolio_sharpe_reduce_full: None,
+            portfolio_sharpe_lookback_days: None,
+            portfolio_sharpe_min_exposure: None,
         }
     }
 }
@@ -829,29 +845,119 @@ impl BacktestEngine {
             .clamp(min_exposure, max_exposure)
     }
 
+    fn portfolio_sharpe_exposure_scale(&self, current_value: Decimal) -> Decimal {
+        let risk_control = &self.config.risk_control;
+        let (Some(start), Some(full), Some(min_exposure)) = (
+            risk_control.portfolio_sharpe_reduce_start,
+            risk_control.portfolio_sharpe_reduce_full,
+            risk_control.portfolio_sharpe_min_exposure,
+        ) else {
+            return Decimal::ONE;
+        };
+        if full >= start {
+            return Decimal::ONE;
+        }
+
+        let lookback_days = risk_control
+            .portfolio_sharpe_lookback_days
+            .unwrap_or(120)
+            .max(2);
+        let returns = self.portfolio_recent_returns(current_value, lookback_days);
+        if returns.len() < lookback_days {
+            return Decimal::ONE;
+        }
+
+        let min_exposure = min_exposure.clamp(Decimal::zero(), Decimal::ONE);
+        if min_exposure >= Decimal::ONE {
+            return Decimal::ONE;
+        }
+
+        let daily_returns: Vec<f64> = returns
+            .iter()
+            .filter_map(|value| value.to_f64())
+            .filter(|value| value.is_finite())
+            .collect();
+        if daily_returns.len() < lookback_days {
+            return Decimal::ONE;
+        }
+
+        let mean = daily_returns.iter().sum::<f64>() / daily_returns.len() as f64;
+        let variance = daily_returns
+            .iter()
+            .map(|value| {
+                let diff = value - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / (daily_returns.len() - 1) as f64;
+        let std_dev = variance.sqrt();
+        let rolling_sharpe = if std_dev <= f64::EPSILON {
+            if mean < 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            mean / std_dev * 252.0_f64.sqrt()
+        };
+        if !rolling_sharpe.is_finite() {
+            return if rolling_sharpe.is_sign_negative() {
+                min_exposure
+            } else {
+                Decimal::ONE
+            };
+        }
+
+        let Some(start) = start.to_f64() else {
+            return Decimal::ONE;
+        };
+        let Some(full) = full.to_f64() else {
+            return Decimal::ONE;
+        };
+        if rolling_sharpe >= start {
+            return Decimal::ONE;
+        }
+        if rolling_sharpe <= full {
+            return min_exposure;
+        }
+
+        let progress = (start - rolling_sharpe) / (start - full);
+        let raw_scale = 1.0 - (1.0 - min_exposure.to_f64().unwrap_or(0.0)) * progress;
+        Decimal::from_f64(raw_scale)
+            .unwrap_or(Decimal::ONE)
+            .clamp(min_exposure, Decimal::ONE)
+    }
+
     fn portfolio_risk_exposure_scale(
         &self,
         current_value: Decimal,
         peak_value: Decimal,
-    ) -> (Decimal, Decimal, Decimal) {
+    ) -> (Decimal, Decimal, Decimal, Decimal) {
         let drawdown_scale = self.portfolio_drawdown_exposure_scale(current_value, peak_value);
         let volatility_scale = self.portfolio_volatility_exposure_scale(current_value);
-        let exposure_scale = drawdown_scale.min(volatility_scale);
-        (drawdown_scale, volatility_scale, exposure_scale)
+        let sharpe_scale = self.portfolio_sharpe_exposure_scale(current_value);
+        let exposure_scale = drawdown_scale.min(volatility_scale).min(sharpe_scale);
+        (
+            drawdown_scale,
+            volatility_scale,
+            sharpe_scale,
+            exposure_scale,
+        )
     }
 
     fn execute_rebalance(&mut self, signal: &StrategySignal, market: &MarketDay) {
         let total_value = self.portfolio.total_value();
         let equity_peak = self.portfolio_equity_peak(total_value);
-        let (drawdown_scale, volatility_scale, exposure_scale) =
+        let (drawdown_scale, volatility_scale, sharpe_scale, exposure_scale) =
             self.portfolio_risk_exposure_scale(total_value, equity_peak);
         info!(
-            "rebalance: total_value={} targets={} close_symbols={} drawdown_scale={} volatility_scale={} exposure_scale={}",
+            "rebalance: total_value={} targets={} close_symbols={} drawdown_scale={} volatility_scale={} sharpe_scale={} exposure_scale={}",
             total_value,
             signal.target_weights.len(),
             market.close.len(),
             drawdown_scale,
             volatility_scale,
+            sharpe_scale,
             exposure_scale
         );
         let mut to_sell: Vec<(String, Decimal, Decimal)> = Vec::new();
@@ -907,6 +1013,8 @@ impl BacktestEngine {
                 target_quantity,
                 reason: Some(if exposure_scale >= Decimal::ONE {
                     "rebalance_signal".into()
+                } else if sharpe_scale < drawdown_scale.min(volatility_scale) {
+                    "rebalance_signal_portfolio_sharpe_scaled".into()
                 } else if volatility_scale < drawdown_scale {
                     "rebalance_signal_portfolio_volatility_scaled".into()
                 } else if drawdown_scale < Decimal::ONE {
@@ -1754,6 +1862,40 @@ mod tests {
     }
 
     #[test]
+    fn portfolio_sharpe_control_reduces_weak_rolling_return_quality() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_sharpe_reduce_start = Some(d("0.60"));
+        c.risk_control.portfolio_sharpe_reduce_full = Some(d("0.00"));
+        c.risk_control.portfolio_sharpe_lookback_days = Some(3);
+        c.risk_control.portfolio_sharpe_min_exposure = Some(d("0.40"));
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("99")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("98")));
+
+        assert_eq!(e.portfolio_sharpe_exposure_scale(d("97")), d("0.40"));
+    }
+
+    #[test]
+    fn portfolio_sharpe_control_waits_for_full_lookback() {
+        let mut c = BacktestConfig::default();
+        c.risk_control.portfolio_sharpe_reduce_start = Some(d("0.60"));
+        c.risk_control.portfolio_sharpe_reduce_full = Some(d("0.00"));
+        c.risk_control.portfolio_sharpe_lookback_days = Some(3);
+        c.risk_control.portfolio_sharpe_min_exposure = Some(d("0.40"));
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("99")));
+
+        assert_eq!(e.portfolio_sharpe_exposure_scale(d("98")), Decimal::ONE);
+    }
+
+    #[test]
     fn portfolio_volatility_control_respects_max_exposure_without_leverage() {
         let mut c = BacktestConfig::default();
         c.risk_control.portfolio_volatility_target_pct = Some(d("0.20"));
@@ -1780,6 +1922,10 @@ mod tests {
         c.risk_control.portfolio_volatility_target_pct = Some(d("0.10"));
         c.risk_control.portfolio_volatility_lookback_days = Some(3);
         c.risk_control.portfolio_volatility_min_exposure = Some(d("0.50"));
+        c.risk_control.portfolio_sharpe_reduce_start = Some(d("0.60"));
+        c.risk_control.portfolio_sharpe_reduce_full = Some(d("0.00"));
+        c.risk_control.portfolio_sharpe_lookback_days = Some(3);
+        c.risk_control.portfolio_sharpe_min_exposure = Some(d("0.30"));
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -1788,12 +1934,13 @@ mod tests {
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("88")));
 
-        let (drawdown_scale, volatility_scale, exposure_scale) =
+        let (drawdown_scale, volatility_scale, sharpe_scale, exposure_scale) =
             e.portfolio_risk_exposure_scale(d("90"), d("100"));
 
         assert_eq!(drawdown_scale, d("0.70"));
         assert_eq!(volatility_scale, d("0.50"));
-        assert_eq!(exposure_scale, d("0.50"));
+        assert_eq!(sharpe_scale, d("0.30"));
+        assert_eq!(exposure_scale, d("0.30"));
     }
 
     #[test]

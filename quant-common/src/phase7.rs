@@ -203,6 +203,43 @@ impl PortfolioVolatilityControlProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortfolioSharpeControlProfile {
+    pub profile_name: String,
+    pub reduce_start: Option<Decimal>,
+    pub reduce_full: Option<Decimal>,
+    pub lookback_days: Option<usize>,
+    pub min_exposure: Option<Decimal>,
+}
+
+impl PortfolioSharpeControlProfile {
+    pub fn off() -> Self {
+        Self {
+            profile_name: "off".to_string(),
+            reduce_start: None,
+            reduce_full: None,
+            lookback_days: None,
+            min_exposure: None,
+        }
+    }
+
+    pub fn reduce(
+        profile_name: impl Into<String>,
+        reduce_start: Decimal,
+        reduce_full: Decimal,
+        lookback_days: usize,
+        min_exposure: Decimal,
+    ) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            reduce_start: Some(reduce_start),
+            reduce_full: Some(reduce_full),
+            lookback_days: Some(lookback_days),
+            min_exposure: Some(min_exposure),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PositionRiskControlProfile {
     pub profile_name: String,
     pub stop_loss_pct: Option<Decimal>,
@@ -2112,6 +2149,51 @@ fn with_event_combo_gate_seed_active_in(
     seed
 }
 
+fn with_event_combo_gate_seed_active_in_with_boost(
+    seed: Value,
+    profile_name: &str,
+    combo_name: &str,
+    mode: &str,
+    boost_weight: &str,
+    score_direction: ScoreDirection,
+    active_regimes: &[&str],
+) -> Value {
+    let mut seed = with_event_combo_gate_seed_with_min_score(
+        seed,
+        profile_name,
+        combo_name,
+        mode,
+        "0",
+        boost_weight,
+        score_direction,
+    );
+    seed["event_gate_active_regimes"] = json!(active_regimes);
+    seed
+}
+
+fn with_event_combo_gate_seed_active_in_with_min_score_and_boost(
+    seed: Value,
+    profile_name: &str,
+    combo_name: &str,
+    mode: &str,
+    min_score: &str,
+    boost_weight: &str,
+    score_direction: ScoreDirection,
+    active_regimes: &[&str],
+) -> Value {
+    let mut seed = with_event_combo_gate_seed_with_min_score(
+        seed,
+        profile_name,
+        combo_name,
+        mode,
+        min_score,
+        boost_weight,
+        score_direction,
+    );
+    seed["event_gate_active_regimes"] = json!(active_regimes);
+    seed
+}
+
 fn with_market_regime_seed(mut seed: Value, market_regime: &str) -> Value {
     seed["market_regime"] = json!(market_regime);
     seed
@@ -2171,6 +2253,22 @@ fn with_volatility_profile_seed(
     seed
 }
 
+fn with_sharpe_profile_seed(
+    mut seed: Value,
+    profile_name: &str,
+    reduce_start: &str,
+    reduce_full: &str,
+    lookback_days: usize,
+    min_exposure: &str,
+) -> Value {
+    seed["portfolio_sharpe_control"] = json!(profile_name);
+    seed["portfolio_sharpe_reduce_start"] = json!(reduce_start);
+    seed["portfolio_sharpe_reduce_full"] = json!(reduce_full);
+    seed["portfolio_sharpe_lookback_days"] = json!(lookback_days);
+    seed["portfolio_sharpe_min_exposure"] = json!(min_exposure);
+    seed
+}
+
 fn with_candidate_risk_filter_seed(mut seed: Value, candidate_risk_filter: &str) -> Value {
     seed["candidate_risk_filter"] = json!(candidate_risk_filter);
     seed
@@ -2179,6 +2277,82 @@ fn with_candidate_risk_filter_seed(mut seed: Value, candidate_risk_filter: &str)
 fn with_risk_contribution_control_seed(mut seed: Value, risk_contribution_control: &str) -> Value {
     seed["risk_contribution_control"] = json!(risk_contribution_control);
     seed
+}
+
+fn with_prediction_confirmation_seed(
+    mut seed: Value,
+    prediction_set_id: &str,
+    blend_weight: &str,
+    min_percentile: Option<&str>,
+) -> Value {
+    seed["prediction_set_id"] = json!(prediction_set_id);
+    seed["prediction_blend_weight"] = json!(blend_weight);
+    if let Some(min_percentile) = min_percentile {
+        seed["prediction_min_percentile"] = json!(min_percentile);
+    } else if let Some(object) = seed.as_object_mut() {
+        object.remove("prediction_min_percentile");
+    }
+    seed
+}
+
+fn phase7_high_sharpe_boundary_base_seed() -> Option<Value> {
+    let base = json!({
+        "market_regime": "quality_mixed_state_risk_memory_router_v14",
+        "top_n": 20,
+        "rebalance": "60",
+        "score_direction": "ascending",
+        "skip_top_pct": "0.10",
+        "max_pairwise_correlation": "0.75",
+        "correlation_lookback_days": 60,
+        "kelly_fraction": "0",
+        "kelly_lookback_days": 60,
+        "max_position_pct": "0.15",
+        "max_gross_exposure": "1",
+        "portfolio_method": "risk_budget",
+        "risk_budget_lookback_days": 180,
+        "capacity_penalty_strength": "0.75",
+        "industry_max_weight_pct": Value::Null,
+        "style_risk_budget": "off",
+        "candidate_risk_filter": "off",
+        "risk_contribution_control": "soft_single_name_20pct_v1",
+        "rebalance_smoothing_profile": "off",
+        "rebalance_hysteresis_pct": "0",
+        "partial_rebalance_ratio": "1",
+        "score_candidate_pool_size": 500,
+        "universe_profile": "all",
+        "portfolio_drawdown_control": "recover252_08_22_45_30_70",
+        "portfolio_drawdown_reduce_start_pct": "0.08",
+        "portfolio_drawdown_reduce_full_pct": "0.22",
+        "portfolio_drawdown_min_exposure": "0.45",
+        "portfolio_drawdown_peak_lookback_days": 252,
+        "portfolio_drawdown_recovery_start_pct": "0.30",
+        "portfolio_drawdown_recovery_full_pct": "0.70",
+        "portfolio_drawdown_recovery_boost": "1",
+        "portfolio_sharpe_control": "off",
+        "position_risk_control": "stop_loss_075_cooldown_30",
+        "stop_loss_pct": "0.075",
+        "reentry_cooldown_days": 30,
+        "benchmark": "000300.SH",
+        "signal_source": "factor_combo",
+        "combo_name": "phase7_financial_quality_v1",
+        "version": "1.0.0",
+    });
+    Some(with_volatility_profile_seed(
+        with_event_combo_gate_seed_with_min_score(
+            base,
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            "0.45",
+            "0",
+            ScoreDirection::Descending,
+        ),
+        "vol120_14_46_100",
+        "0.14",
+        120,
+        "0.46",
+        "1",
+    ))
 }
 
 fn professional_anti_overfit_sharpe_seed_trials() -> Vec<Value> {
@@ -3206,6 +3380,7234 @@ fn professional_event_window_decay_seed_trials() -> Vec<Value> {
     seeds
 }
 
+fn professional_event_quality_segment_seed_trials() -> Vec<Value> {
+    let mut anchor_seeds = phase7_u2_exact_anchor_seed_trials();
+    let Some(vol22_anchor) = anchor_seeds.drain(..).next() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(vol22_anchor, "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let value40_anchor = with_event_combo_gate_seed_with_min_score(
+        vol18_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let sleeve_policies = [
+        "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1",
+    ];
+    let mut seeds = Vec::new();
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_portfolio_method_seed(
+            value40_anchor.clone(),
+            "risk_budget",
+            120,
+        )],
+    );
+    for policy in sleeve_policies {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_portfolio_method_seed(
+                with_market_regime_seed(value40_anchor.clone(), policy),
+                "risk_budget",
+                120,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_event_surprise_nonlinear_seed_trials() -> Vec<Value> {
+    let mut anchor_seeds = phase7_u2_exact_anchor_seed_trials();
+    let Some(vol22_anchor) = anchor_seeds.drain(..).next() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(vol22_anchor, "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let value40_anchor = with_event_combo_gate_seed_with_min_score(
+        vol18_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let stress_regimes = ["bear", "high_volatility"];
+    let mut seeds = Vec::new();
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_portfolio_method_seed(
+            value40_anchor.clone(),
+            "risk_budget",
+            120,
+        )],
+    );
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_portfolio_method_seed(
+            retarget_seed_combo(
+                value40_anchor.clone(),
+                "phase7_quality_event_surprise_confirm_v1",
+            ),
+            "risk_budget",
+            120,
+        )],
+    );
+
+    for (profile_name, mode, boost_weight) in [
+        (
+            "event_surprise_boost_pos_3pct_stress_only",
+            "boost_positive",
+            "0.03",
+        ),
+        (
+            "event_surprise_boost_pos_5pct_stress_only",
+            "boost_positive",
+            "0.05",
+        ),
+        (
+            "event_surprise_exclude_negative_stress_only",
+            "exclude_negative",
+            "0",
+        ),
+        (
+            "event_surprise_require_positive_stress_only",
+            "require_positive",
+            "0",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_event_combo_gate_seed_active_in_with_boost(
+                with_portfolio_method_seed(value40_anchor.clone(), "risk_budget", 120),
+                profile_name,
+                "phase7_event_surprise_v1",
+                mode,
+                boost_weight,
+                ScoreDirection::Descending,
+                &stress_regimes,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_event_strength_segment_seed_trials() -> Vec<Value> {
+    let mut anchor_seeds = phase7_u2_exact_anchor_seed_trials();
+    let Some(vol22_anchor) = anchor_seeds.drain(..).next() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(vol22_anchor, "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let value40_anchor = with_event_combo_gate_seed_with_min_score(
+        vol18_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let anchor = with_portfolio_method_seed(value40_anchor, "risk_budget", 120);
+    let mut seeds = Vec::new();
+
+    for (profile_name, combo_name, min_score) in [
+        (
+            "event_window_require_strong_p75",
+            "phase7_event_window_earnings_v1",
+            "0.38",
+        ),
+        (
+            "event_window_require_strong_p90",
+            "phase7_event_window_earnings_v1",
+            "0.66",
+        ),
+        (
+            "event_surprise_require_strong_p75",
+            "phase7_event_surprise_v1",
+            "0.35",
+        ),
+        (
+            "event_surprise_require_strong_p90",
+            "phase7_event_surprise_v1",
+            "0.43",
+        ),
+        (
+            "event_confirm_require_light_p50",
+            "phase7_event_earnings_v1",
+            "0.39",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_event_combo_gate_seed_with_min_score(
+                anchor.clone(),
+                profile_name,
+                combo_name,
+                "require_positive",
+                min_score,
+                "0",
+                ScoreDirection::Descending,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_event_strength_boost_seed_trials() -> Vec<Value> {
+    let mut anchor_seeds = phase7_u2_exact_anchor_seed_trials();
+    let Some(vol22_anchor) = anchor_seeds.drain(..).next() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(vol22_anchor, "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let value40_anchor = with_event_combo_gate_seed_with_min_score(
+        vol18_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let anchor = with_portfolio_method_seed(value40_anchor, "risk_budget", 120);
+    let mut seeds = Vec::new();
+
+    for (profile_name, combo_name, min_score, boost_weight) in [
+        (
+            "event_window_boost_strong_p75_3pct",
+            "phase7_event_window_earnings_v1",
+            "0.38",
+            "0.03",
+        ),
+        (
+            "event_window_boost_strong_p75_5pct",
+            "phase7_event_window_earnings_v1",
+            "0.38",
+            "0.05",
+        ),
+        (
+            "event_surprise_boost_strong_p75_3pct",
+            "phase7_event_surprise_v1",
+            "0.35",
+            "0.03",
+        ),
+        (
+            "event_surprise_boost_strong_p75_5pct",
+            "phase7_event_surprise_v1",
+            "0.35",
+            "0.05",
+        ),
+        (
+            "event_confirm_boost_light_p50_3pct",
+            "phase7_event_earnings_v1",
+            "0.39",
+            "0.03",
+        ),
+        (
+            "event_confirm_boost_light_p50_5pct",
+            "phase7_event_earnings_v1",
+            "0.39",
+            "0.05",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_event_combo_gate_seed_with_min_score(
+                anchor.clone(),
+                profile_name,
+                combo_name,
+                "boost_positive",
+                min_score,
+                boost_weight,
+                ScoreDirection::Descending,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn legacy_full_icir_v3_seed(
+    profile_name: &str,
+    start_date: &str,
+    end_date: &str,
+    portfolio_method: &str,
+    kelly_fraction: &str,
+) -> Value {
+    let mut seed = json!({
+        "legacy_revalidation_profile": profile_name,
+        "market_regime": "off",
+        "top_n": 30,
+        "rebalance": "20",
+        "score_direction": "descending",
+        "skip_top_pct": "0.05",
+        "max_pairwise_correlation": "0.75",
+        "correlation_lookback_days": 60,
+        "kelly_fraction": kelly_fraction,
+        "kelly_lookback_days": 60,
+        "max_position_pct": "0.08",
+        "max_gross_exposure": "1",
+        "portfolio_method": portfolio_method,
+        "risk_budget_lookback_days": 120,
+        "capacity_penalty_strength": "0",
+        "industry_max_weight_pct": Value::Null,
+        "style_risk_budget": "off",
+        "candidate_risk_filter": "off",
+        "risk_contribution_control": "off",
+        "rebalance_hysteresis_pct": "0",
+        "partial_rebalance_ratio": "1",
+        "score_candidate_pool_size": 0,
+        "universe_profile": "all",
+        "portfolio_drawdown_control": "off",
+        "portfolio_volatility_control": "off",
+        "benchmark": "000300.SH",
+        "signal_source": "factor_combo",
+        "combo_name": "full_icir_16f_v3",
+        "version": "1.0.0",
+        "start_date": start_date,
+        "end_date": end_date,
+    });
+    if portfolio_method == "risk_budget" {
+        seed["kelly_fraction"] = json!("0");
+        seed["portfolio_volatility_control"] = json!("vol120_18_55_100");
+        seed["portfolio_volatility_target_pct"] = json!("0.18");
+        seed["portfolio_volatility_lookback_days"] = json!(120);
+        seed["portfolio_volatility_min_exposure"] = json!("0.55");
+        seed["portfolio_volatility_max_exposure"] = json!("1");
+        seed["capacity_penalty_strength"] = json!("0.75");
+    }
+    seed
+}
+
+fn professional_legacy_alpha_revalidation_seed_trials() -> Vec<Value> {
+    vec![
+        legacy_full_icir_v3_seed(
+            "full_icir_v3_full_history_legacy_exact",
+            "20160201",
+            "20260511",
+            "heuristic",
+            "0.25",
+        ),
+        legacy_full_icir_v3_seed(
+            "full_icir_v3_full_history_risk_budget",
+            "20160201",
+            "20260511",
+            "risk_budget",
+            "0",
+        ),
+        legacy_full_icir_v3_seed(
+            "full_icir_v3_recent_window_diagnostic",
+            "20230512",
+            "20260511",
+            "heuristic",
+            "0.25",
+        ),
+    ]
+}
+
+fn phase7_current_event_window_15pct_anchor_seed() -> Option<Value> {
+    let mut anchor_seeds = phase7_u2_exact_anchor_seed_trials();
+    let vol22_anchor = anchor_seeds.drain(..).next()?;
+    let vol18_anchor =
+        with_volatility_profile_seed(vol22_anchor, "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let value40_anchor = with_event_combo_gate_seed_with_min_score(
+        vol18_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    Some(with_portfolio_method_seed(
+        with_market_regime_seed(
+            value40_anchor,
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+        ),
+        "risk_budget",
+        120,
+    ))
+}
+
+fn with_stop_loss_cooldown_seed(
+    mut seed: Value,
+    profile_name: &str,
+    stop_loss_pct: &str,
+    cooldown_days: u32,
+) -> Value {
+    seed["position_risk_control"] = json!(profile_name);
+    seed["stop_loss_pct"] = json!(stop_loss_pct);
+    seed["reentry_cooldown_days"] = json!(cooldown_days);
+    seed
+}
+
+fn with_rebalance_days_seed(mut seed: Value, rebalance_days: usize, profile_name: &str) -> Value {
+    seed["rebalance"] = json!(rebalance_days.to_string());
+    seed["rebalance_profile"] = json!(profile_name);
+    seed
+}
+
+fn with_skip_top_seed(mut seed: Value, skip_top_pct: &str, profile_name: &str) -> Value {
+    seed["skip_top_pct"] = json!(skip_top_pct);
+    seed["skip_top_profile"] = json!(profile_name);
+    seed
+}
+
+fn with_position_shape_seed(
+    mut seed: Value,
+    profile_name: &str,
+    max_position_pct: &str,
+    max_pairwise_correlation: &str,
+) -> Value {
+    seed["position_shape_profile"] = json!(profile_name);
+    seed["max_position_pct"] = json!(max_position_pct);
+    seed["max_pairwise_correlation"] = json!(max_pairwise_correlation);
+    seed
+}
+
+fn with_risk_budget_lookback_seed(
+    mut seed: Value,
+    profile_name: &str,
+    risk_budget_lookback_days: usize,
+) -> Value {
+    seed["risk_budget_shape_profile"] = json!(profile_name);
+    seed["risk_budget_lookback_days"] = json!(risk_budget_lookback_days);
+    seed
+}
+
+fn with_top_n_seed(mut seed: Value, top_n: usize, profile_name: &str) -> Value {
+    seed["top_n"] = json!(top_n);
+    seed["top_n_profile"] = json!(profile_name);
+    seed
+}
+
+fn with_event_sleeve_seed(mut seed: Value, market_regime: &str, sleeve_profile: &str) -> Value {
+    seed["event_sleeve_profile"] = json!(sleeve_profile);
+    seed["market_regime"] = json!(market_regime);
+    seed
+}
+
+fn phase7_current_event_window_15pct_risk_budget_180_anchor_seed() -> Option<Value> {
+    phase7_current_event_window_15pct_anchor_seed()
+        .map(|seed| with_risk_budget_lookback_seed(seed, "risk_budget_180", 180))
+}
+
+fn professional_current_anchor_risk_shape_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_event_window_15pct_anchor_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    append_unique_seeds(&mut seeds, vec![anchor.clone()]);
+    append_unique_seeds(
+        &mut seeds,
+        vec![
+            with_volatility_profile_seed(
+                anchor.clone(),
+                "vol120_20_60_100",
+                "0.20",
+                120,
+                "0.60",
+                "1",
+            ),
+            with_volatility_profile_seed(
+                anchor.clone(),
+                "vol120_16_50_100",
+                "0.16",
+                120,
+                "0.50",
+                "1",
+            ),
+            with_volatility_profile_seed(
+                anchor.clone(),
+                "vol252_16_50_100",
+                "0.16",
+                252,
+                "0.50",
+                "1",
+            ),
+            with_drawdown_profile_seed(
+                anchor.clone(),
+                "recover252_08_22_45_30_70",
+                "0.08",
+                "0.22",
+                "0.45",
+                252,
+                "0.30",
+                "0.70",
+                "1",
+            ),
+            with_drawdown_profile_seed(
+                anchor.clone(),
+                "recover126_08_22_45_30_70",
+                "0.08",
+                "0.22",
+                "0.45",
+                126,
+                "0.30",
+                "0.70",
+                "1",
+            ),
+            with_stop_loss_cooldown_seed(anchor.clone(), "stop_loss_070_cooldown_30", "0.07", 30),
+            with_stop_loss_cooldown_seed(anchor.clone(), "stop_loss_075_cooldown_45", "0.075", 45),
+            with_position_shape_seed(anchor.clone(), "maxpos12_corr65", "0.12", "0.65"),
+            with_risk_budget_lookback_seed(anchor, "risk_budget_180", 180),
+        ],
+    );
+    seeds
+}
+
+fn professional_current_anchor_position_frontier_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_event_window_15pct_risk_budget_180_anchor_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    append_unique_seeds(&mut seeds, vec![anchor.clone()]);
+
+    let vol16 =
+        with_volatility_profile_seed(anchor.clone(), "vol120_16_50_100", "0.16", 120, "0.50", "1");
+    let recover08 = with_drawdown_profile_seed(
+        anchor.clone(),
+        "recover252_08_22_45_30_70",
+        "0.08",
+        "0.22",
+        "0.45",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    let vol16_recover08 = with_drawdown_profile_seed(
+        vol16.clone(),
+        "recover252_08_22_45_30_70",
+        "0.08",
+        "0.22",
+        "0.45",
+        252,
+        "0.30",
+        "0.70",
+        "1",
+    );
+    append_unique_seeds(
+        &mut seeds,
+        vec![vol16.clone(), recover08.clone(), vol16_recover08.clone()],
+    );
+
+    for (profile_name, max_position_pct, max_pairwise_correlation) in [
+        ("maxpos14_corr70", "0.14", "0.70"),
+        ("maxpos13_corr70", "0.13", "0.70"),
+        ("maxpos14_corr65", "0.14", "0.65"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_position_shape_seed(
+                anchor.clone(),
+                profile_name,
+                max_position_pct,
+                max_pairwise_correlation,
+            )],
+        );
+    }
+    append_unique_seeds(
+        &mut seeds,
+        vec![
+            with_position_shape_seed(vol16, "vol16_maxpos14_corr70", "0.14", "0.70"),
+            with_position_shape_seed(recover08, "recover08_maxpos14_corr70", "0.14", "0.70"),
+            with_position_shape_seed(
+                vol16_recover08,
+                "vol16_recover08_maxpos14_corr70",
+                "0.14",
+                "0.70",
+            ),
+        ],
+    );
+
+    seeds
+}
+
+fn phase7_current_anchor_bg_trial4_seed() -> Option<Value> {
+    phase7_current_event_window_15pct_risk_budget_180_anchor_seed().map(|seed| {
+        let vol16 =
+            with_volatility_profile_seed(seed, "vol120_16_50_100", "0.16", 120, "0.50", "1");
+        with_drawdown_profile_seed(
+            vol16,
+            "recover252_08_22_45_30_70",
+            "0.08",
+            "0.22",
+            "0.45",
+            252,
+            "0.30",
+            "0.70",
+            "1",
+        )
+    })
+}
+
+fn phase7_current_anchor_high_sharpe_boundary_seed() -> Option<Value> {
+    phase7_current_event_window_15pct_risk_budget_180_anchor_seed()
+        .map(|seed| with_position_shape_seed(seed, "maxpos14_corr65", "0.14", "0.65"))
+}
+
+fn professional_current_anchor_weak_window_repair_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let stress_regimes = ["bear", "high_volatility"];
+    let mut seeds = Vec::new();
+    append_unique_seeds(&mut seeds, vec![anchor.clone()]);
+
+    for (profile_name, combo_name, mode, min_score, boost_weight) in [
+        (
+            "stress_event_window_boost_p75_3pct",
+            "phase7_event_window_earnings_v1",
+            "boost_positive",
+            "0.38",
+            "0.03",
+        ),
+        (
+            "stress_event_window_boost_p75_5pct",
+            "phase7_event_window_earnings_v1",
+            "boost_positive",
+            "0.38",
+            "0.05",
+        ),
+        (
+            "stress_event_window_exclude_negative_p40",
+            "phase7_event_window_earnings_v1",
+            "exclude_negative",
+            "0.40",
+            "0",
+        ),
+        (
+            "stress_valuation_boost_p40_3pct",
+            "phase7_valuation_v1",
+            "boost_positive",
+            "0.40",
+            "0.03",
+        ),
+        (
+            "stress_valuation_boost_p40_5pct",
+            "phase7_valuation_v1",
+            "boost_positive",
+            "0.40",
+            "0.05",
+        ),
+        (
+            "stress_valuation_exclude_p40",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            "0.40",
+            "0",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![
+                with_event_combo_gate_seed_active_in_with_min_score_and_boost(
+                    anchor.clone(),
+                    profile_name,
+                    combo_name,
+                    mode,
+                    min_score,
+                    boost_weight,
+                    ScoreDirection::Descending,
+                    &stress_regimes,
+                ),
+            ],
+        );
+    }
+
+    for market_regime in [
+        "quality_regime_alpha_portfolio_sleeve_value_10pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_value_15pct_v1",
+        "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1",
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_market_regime_seed(anchor.clone(), market_regime)],
+        );
+    }
+
+    seeds
+}
+
+fn professional_current_anchor_sharpe_return_bridge_seed_trials() -> Vec<Value> {
+    let Some(boundary) = phase7_current_anchor_high_sharpe_boundary_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    append_unique_seeds(&mut seeds, vec![boundary.clone()]);
+
+    let maxpos14_corr70 =
+        with_position_shape_seed(boundary.clone(), "maxpos14_corr70", "0.14", "0.70");
+    let maxpos15_corr70 =
+        with_position_shape_seed(boundary.clone(), "maxpos15_corr70", "0.15", "0.70");
+    append_unique_seeds(
+        &mut seeds,
+        vec![maxpos14_corr70.clone(), maxpos15_corr70.clone()],
+    );
+
+    for (base, base_name) in [
+        (boundary.clone(), "maxpos14_corr65"),
+        (maxpos14_corr70.clone(), "maxpos14_corr70"),
+        (maxpos15_corr70.clone(), "maxpos15_corr70"),
+    ] {
+        let max_position_pct = base["max_position_pct"].as_str().unwrap_or("0.14");
+        let max_pairwise_correlation = base["max_pairwise_correlation"].as_str().unwrap_or("0.65");
+        for (suffix, profile_name, target_pct, min_exposure) in [
+            ("vol20", "vol120_20_60_100", "0.20", "0.60"),
+            ("vol22", "vol120_22_65_100", "0.22", "0.65"),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_volatility_profile_seed(
+                    with_position_shape_seed(
+                        base.clone(),
+                        &format!("{base_name}_{suffix}"),
+                        max_position_pct,
+                        max_pairwise_correlation,
+                    ),
+                    profile_name,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                )],
+            );
+        }
+    }
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![
+            with_market_regime_seed(
+                with_volatility_profile_seed(
+                    with_position_shape_seed(
+                        boundary.clone(),
+                        "maxpos14_corr65_vol20_event125",
+                        "0.14",
+                        "0.65",
+                    ),
+                    "vol120_20_60_100",
+                    "0.20",
+                    120,
+                    "0.60",
+                    "1",
+                ),
+                "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1",
+            ),
+            with_market_regime_seed(
+                with_volatility_profile_seed(
+                    with_position_shape_seed(
+                        maxpos14_corr70,
+                        "maxpos14_corr70_vol20_event125",
+                        "0.14",
+                        "0.70",
+                    ),
+                    "vol120_20_60_100",
+                    "0.20",
+                    120,
+                    "0.60",
+                    "1",
+                ),
+                "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1",
+            ),
+            with_top_n_seed(maxpos15_corr70, 25, "top25_maxpos15_corr70"),
+        ],
+    );
+
+    seeds.into_iter().take(10).collect()
+}
+
+fn professional_high_sharpe_return_recovery_seed_trials() -> Vec<Value> {
+    let Some(boundary) = phase7_current_anchor_high_sharpe_boundary_seed() else {
+        return Vec::new();
+    };
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return vec![boundary];
+    };
+
+    let mut seeds = Vec::new();
+    append_unique_seeds(&mut seeds, vec![boundary.clone(), return_anchor]);
+
+    for (profile_name, target_pct, min_exposure) in [
+        ("vol120_18_55_100", "0.18", "0.55"),
+        ("vol120_19_58_100", "0.19", "0.58"),
+        ("vol120_20_60_100", "0.20", "0.60"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_volatility_profile_seed(
+                boundary.clone(),
+                profile_name,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            )],
+        );
+    }
+
+    for (market_regime, sleeve_profile) in [
+        (
+            "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1",
+            "event_window_125pct",
+        ),
+        (
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+            "event_window_15pct",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_event_sleeve_seed(
+                boundary.clone(),
+                market_regime,
+                sleeve_profile,
+            )],
+        );
+    }
+
+    for (profile_name, min_score) in [
+        ("valuation_exclude_bottom35", "0.35"),
+        ("valuation_exclude_bottom40", "0.40"),
+        ("valuation_exclude_bottom45", "0.45"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_event_combo_gate_seed_with_min_score(
+                boundary.clone(),
+                profile_name,
+                "phase7_valuation_v1",
+                "exclude_negative",
+                min_score,
+                "0",
+                ScoreDirection::Descending,
+            )],
+        );
+    }
+
+    let maxpos145_corr65 =
+        with_position_shape_seed(boundary.clone(), "maxpos145_corr65", "0.145", "0.65");
+    append_unique_seeds(&mut seeds, vec![maxpos145_corr65.clone()]);
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_volatility_profile_seed(
+            maxpos145_corr65,
+            "vol120_19_58_100",
+            "0.19",
+            120,
+            "0.58",
+            "1",
+        )],
+    );
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![
+            with_position_shape_seed(boundary.clone(), "maxpos15_corr65", "0.15", "0.65"),
+            with_position_shape_seed(boundary.clone(), "maxpos14_corr675", "0.14", "0.675"),
+            with_top_n_seed(boundary, 22, "top22_maxpos14_corr65"),
+        ],
+    );
+
+    seeds.into_iter().take(12).collect()
+}
+
+fn professional_risk_memory_bridge_seed_trials() -> Vec<Value> {
+    let Some(high_sharpe_boundary) = phase7_current_anchor_high_sharpe_boundary_seed() else {
+        return Vec::new();
+    };
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return vec![high_sharpe_boundary];
+    };
+
+    let mut seeds = Vec::new();
+    append_unique_seeds(
+        &mut seeds,
+        vec![return_anchor.clone(), high_sharpe_boundary.clone()],
+    );
+
+    for lookback_days in [120, 140, 150, 160, 170, 180] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_budget_lookback_seed(
+                high_sharpe_boundary.clone(),
+                &format!("risk_budget_{lookback_days}"),
+                lookback_days,
+            )],
+        );
+    }
+
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        high_sharpe_boundary.clone(),
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    for lookback_days in [140, 150, 160] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_budget_lookback_seed(
+                valuation45.clone(),
+                &format!("valuation45_rb{lookback_days}"),
+                lookback_days,
+            )],
+        );
+    }
+
+    for (position_profile, max_position_pct, correlation_profile, max_pairwise_correlation) in [
+        ("maxpos145", "0.145", "corr65", "0.65"),
+        ("maxpos15", "0.15", "corr65", "0.65"),
+        ("maxpos14", "0.14", "corr675", "0.675"),
+    ] {
+        for lookback_days in [140, 150, 160] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_risk_budget_lookback_seed(
+                    with_position_shape_seed(
+                        high_sharpe_boundary.clone(),
+                        &format!("{position_profile}_{correlation_profile}_rb{lookback_days}"),
+                        max_position_pct,
+                        max_pairwise_correlation,
+                    ),
+                    &format!("risk_budget_{lookback_days}"),
+                    lookback_days,
+                )],
+            );
+        }
+    }
+
+    seeds.into_iter().take(16).collect()
+}
+
+fn professional_state_return_sharpe_router_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let Some(high_sharpe_boundary) = phase7_current_anchor_high_sharpe_boundary_seed() else {
+        return vec![return_anchor];
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        high_sharpe_boundary.clone(),
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let boundary_vol18 = with_volatility_profile_seed(
+        high_sharpe_boundary.clone(),
+        "vol120_18_55_100",
+        "0.18",
+        120,
+        "0.55",
+        "1",
+    );
+    let mut seeds = Vec::new();
+
+    for (seed, regime, profile_name) in [
+        (
+            return_anchor.clone(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+            "return_anchor_event_window_15pct",
+        ),
+        (
+            return_anchor.clone(),
+            "quality_event_window_return_sharpe_router_v1",
+            "return_anchor_router_v1",
+        ),
+        (
+            return_anchor.clone(),
+            "quality_event_window_return_sharpe_router_v2",
+            "return_anchor_router_v2",
+        ),
+        (
+            boundary_vol18.clone(),
+            "quality_event_window_return_sharpe_router_v1",
+            "boundary_vol18_router_v1",
+        ),
+        (
+            boundary_vol18.clone(),
+            "quality_event_window_return_sharpe_router_v2",
+            "boundary_vol18_router_v2",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_event_sleeve_seed(seed, regime, profile_name)],
+        );
+    }
+
+    for lookback_days in [160, 180] {
+        for (regime, suffix) in [
+            ("quality_event_window_return_sharpe_router_v1", "router_v1"),
+            ("quality_event_window_return_sharpe_router_v2", "router_v2"),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_risk_budget_lookback_seed(
+                    with_event_sleeve_seed(
+                        valuation45.clone(),
+                        regime,
+                        &format!("valuation45_{suffix}"),
+                    ),
+                    &format!("valuation45_rb{lookback_days}_{suffix}"),
+                    lookback_days,
+                )],
+            );
+        }
+    }
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_top_n_seed(
+            with_event_sleeve_seed(
+                boundary_vol18,
+                "quality_event_window_return_sharpe_router_v2",
+                "boundary_top22_router_v2",
+            ),
+            22,
+            "top22_boundary_router_v2",
+        )],
+    );
+
+    seeds.into_iter().take(10).collect()
+}
+
+fn professional_state_return_sharpe_frontier_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation40 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom40",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.40",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        valuation40.clone(),
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, suffix, source_seed) in [
+        (
+            "quality_event_window_return_sharpe_router_v1",
+            "router_v1",
+            valuation40.clone(),
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v2",
+            "router_v2",
+            valuation40.clone(),
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v3",
+            "router_v3",
+            valuation40.clone(),
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v4",
+            "router_v4",
+            valuation40.clone(),
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v3",
+            "valuation45_router_v3",
+            valuation45.clone(),
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v4",
+            "valuation45_router_v4",
+            valuation45,
+        ),
+    ] {
+        for (vol_profile, target_pct, min_exposure) in [
+            ("vol120_16_50_100", "0.16", "0.50"),
+            ("vol120_15_48_100", "0.15", "0.48"),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_risk_budget_lookback_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            source_seed.clone(),
+                            regime,
+                            &format!("{suffix}_{vol_profile}"),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("bp_rb160_{suffix}"),
+                    160,
+                )],
+            );
+        }
+    }
+
+    for (lookback_days, regime, suffix) in [
+        (
+            150,
+            "quality_event_window_return_sharpe_router_v3",
+            "router_v3",
+        ),
+        (
+            170,
+            "quality_event_window_return_sharpe_router_v3",
+            "router_v3",
+        ),
+        (
+            180,
+            "quality_event_window_return_sharpe_router_v3",
+            "router_v3",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_budget_lookback_seed(
+                with_event_sleeve_seed(valuation40.clone(), regime, &format!("bp_{suffix}")),
+                &format!("bp_rb{lookback_days}_{suffix}"),
+                lookback_days,
+            )],
+        );
+    }
+
+    seeds.into_iter().take(12).collect()
+}
+
+fn professional_position_sharpe_return_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, regime_suffix) in [
+        ("quality_event_window_return_sharpe_router_v3", "router_v3"),
+        ("quality_event_window_return_sharpe_router_v4", "router_v4"),
+    ] {
+        for (position_profile, max_position_pct, correlation_profile, max_pairwise_correlation) in [
+            ("maxpos14", "0.14", "corr65", "0.65"),
+            ("maxpos145", "0.145", "corr65", "0.65"),
+            ("maxpos15", "0.15", "corr675", "0.675"),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_risk_budget_lookback_seed(
+                    with_position_shape_seed(
+                        with_volatility_profile_seed(
+                            with_event_sleeve_seed(
+                                valuation45.clone(),
+                                regime,
+                                &format!(
+                                    "{regime_suffix}_{position_profile}_{correlation_profile}"
+                                ),
+                            ),
+                            "vol120_16_50_100",
+                            "0.16",
+                            120,
+                            "0.50",
+                            "1",
+                        ),
+                        &format!("{position_profile}_{correlation_profile}_{regime_suffix}_rb160"),
+                        max_position_pct,
+                        max_pairwise_correlation,
+                    ),
+                    &format!("bp_rb160_{regime_suffix}_{position_profile}_{correlation_profile}"),
+                    160,
+                )],
+            );
+        }
+    }
+
+    for (lookback_days, position_profile, max_position_pct, max_pairwise_correlation) in [
+        (150, "maxpos14", "0.14", "0.65"),
+        (170, "maxpos14", "0.14", "0.65"),
+        (180, "maxpos145", "0.145", "0.65"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_event_sleeve_seed(
+                        valuation45.clone(),
+                        "quality_event_window_return_sharpe_router_v4",
+                        &format!("router_v4_rb{lookback_days}"),
+                    ),
+                    &format!("{position_profile}_corr65_rb{lookback_days}"),
+                    max_position_pct,
+                    max_pairwise_correlation,
+                ),
+                &format!("bp_rb{lookback_days}_router_v4"),
+                lookback_days,
+            )],
+        );
+    }
+
+    for (vol_profile, target_pct, min_exposure) in [
+        ("vol120_17_52_100", "0.17", "0.52"),
+        ("vol120_18_55_100", "0.18", "0.55"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            valuation45.clone(),
+                            "quality_event_window_return_sharpe_router_v4",
+                            &format!("router_v4_maxpos14_corr65_{vol_profile}"),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("maxpos14_corr65_router_v4_{vol_profile}"),
+                    "0.14",
+                    "0.65",
+                ),
+                &format!("bp_rb160_router_v4_{vol_profile}"),
+                160,
+            )],
+        );
+    }
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_risk_budget_lookback_seed(
+            with_position_shape_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        valuation45,
+                        "quality_event_window_return_sharpe_router_v3",
+                        "router_v3_maxpos14_corr65_vol17",
+                    ),
+                    "vol120_17_52_100",
+                    "0.17",
+                    120,
+                    "0.52",
+                    "1",
+                ),
+                "maxpos14_corr65_router_v3_vol17",
+                "0.14",
+                "0.65",
+            ),
+            "bp_rb160_router_v3_vol17",
+            160,
+        )],
+    );
+
+    seeds.into_iter().take(12).collect()
+}
+
+fn professional_moderate_position_sharpe_return_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, regime_suffix) in [
+        ("quality_event_window_return_sharpe_router_v3", "router_v3"),
+        ("quality_event_window_return_sharpe_router_v4", "router_v4"),
+    ] {
+        for (vol_profile, target_pct, min_exposure) in [
+            ("vol120_15_48_100", "0.15", "0.48"),
+            ("vol120_16_50_100", "0.16", "0.50"),
+        ] {
+            for (
+                position_profile,
+                max_position_pct,
+                correlation_profile,
+                max_pairwise_correlation,
+            ) in [
+                ("maxpos16", "0.16", "corr70", "0.70"),
+                ("maxpos16", "0.16", "corr725", "0.725"),
+                ("maxpos17", "0.17", "corr725", "0.725"),
+            ] {
+                append_unique_seeds(
+                    &mut seeds,
+                    vec![with_risk_budget_lookback_seed(
+                        with_position_shape_seed(
+                            with_volatility_profile_seed(
+                                with_event_sleeve_seed(
+                                    valuation45.clone(),
+                                    regime,
+                                    &format!(
+                                        "{regime_suffix}_{position_profile}_{correlation_profile}_{vol_profile}"
+                                    ),
+                                ),
+                                vol_profile,
+                                target_pct,
+                                120,
+                                min_exposure,
+                                "1",
+                            ),
+                            &format!(
+                                "{position_profile}_{correlation_profile}_{regime_suffix}_{vol_profile}"
+                            ),
+                            max_position_pct,
+                            max_pairwise_correlation,
+                        ),
+                        &format!("bp_rb160_{regime_suffix}_{position_profile}_{correlation_profile}_{vol_profile}"),
+                        160,
+                    )],
+                );
+            }
+        }
+    }
+
+    seeds.into_iter().take(12).collect()
+}
+
+fn professional_correlation_frontier_sharpe_return_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (
+        position_profile,
+        max_position_pct,
+        correlation_profile,
+        max_pairwise_correlation,
+        vol_profile,
+        target_pct,
+        min_exposure,
+    ) in [
+        (
+            "maxpos16",
+            "0.16",
+            "corr705",
+            "0.705",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr71",
+            "0.71",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr715",
+            "0.715",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr72",
+            "0.72",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr705",
+            "0.705",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr71",
+            "0.71",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr715",
+            "0.715",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr72",
+            "0.72",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr705",
+            "0.705",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr71",
+            "0.71",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr715",
+            "0.715",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr72",
+            "0.72",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            valuation45.clone(),
+                            "quality_event_window_return_sharpe_router_v4",
+                            &format!(
+                                "router_v4_{position_profile}_{correlation_profile}_{vol_profile}"
+                            ),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!(
+                        "{}_{}_router_v4_{}",
+                        position_profile, correlation_profile, vol_profile
+                    ),
+                    max_position_pct,
+                    max_pairwise_correlation,
+                ),
+                &format!(
+                    "bp_rb160_router_v4_{}_{}_{}",
+                    position_profile, correlation_profile, vol_profile
+                ),
+                160,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_correlation_threshold_sharpe_return_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (
+        position_profile,
+        max_position_pct,
+        correlation_profile,
+        max_pairwise_correlation,
+        vol_profile,
+        target_pct,
+        min_exposure,
+    ) in [
+        (
+            "maxpos16",
+            "0.16",
+            "corr706",
+            "0.706",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr707",
+            "0.707",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr708",
+            "0.708",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr709",
+            "0.709",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr706",
+            "0.706",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr707",
+            "0.707",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr708",
+            "0.708",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr709",
+            "0.709",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr706",
+            "0.706",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+        (
+            "maxpos16",
+            "0.16",
+            "corr707",
+            "0.707",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr708",
+            "0.708",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+        (
+            "maxpos165",
+            "0.165",
+            "corr709",
+            "0.709",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            valuation45.clone(),
+                            "quality_event_window_return_sharpe_router_v4",
+                            &format!(
+                                "router_v4_{position_profile}_{correlation_profile}_{vol_profile}"
+                            ),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!(
+                        "{}_{}_router_v4_{}",
+                        position_profile, correlation_profile, vol_profile
+                    ),
+                    max_position_pct,
+                    max_pairwise_correlation,
+                ),
+                &format!(
+                    "bp_rb160_router_v4_{}_{}_{}",
+                    position_profile, correlation_profile, vol_profile
+                ),
+                160,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_soft_risk_frontier_sharpe_return_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_event_window_return_sharpe_router_v4",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v4",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v3",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v3",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+    ] {
+        for (risk_contribution_control, candidate_risk_filter) in [
+            ("soft_single_name_20pct_v1", "off"),
+            ("soft_single_name_15pct_v1", "low_volatility_v1"),
+            (
+                "soft_single_name_20pct_v1",
+                "low_volatility_low_correlation_v1",
+            ),
+        ] {
+            let mut seed = with_risk_budget_lookback_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        valuation45.clone(),
+                        regime,
+                        &format!("{regime}_{vol_profile}_{risk_contribution_control}_{candidate_risk_filter}"),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("bp_rb160_{regime}_{vol_profile}"),
+                160,
+            );
+            seed["risk_contribution_control"] = json!(risk_contribution_control);
+            seed["candidate_risk_filter"] = json!(candidate_risk_filter);
+            append_unique_seeds(&mut seeds, vec![seed]);
+        }
+    }
+
+    seeds.into_iter().take(12).collect()
+}
+
+fn professional_regime_alpha_selector_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_event_window_return_sharpe_router_v4",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_selector_v2",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_selector_v3",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v4",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_state_alpha_selector_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_state_alpha_selector_v2",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_state_alpha_selector_v3",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}"),
+            160,
+        );
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn with_rebalance_smoothing_seed(
+    mut seed: Value,
+    profile_name: &str,
+    hysteresis_pct: &str,
+    partial_ratio: &str,
+) -> Value {
+    seed["rebalance_smoothing_profile"] = json!(profile_name);
+    seed["rebalance_hysteresis_pct"] = json!(hysteresis_pct);
+    seed["partial_rebalance_ratio"] = json!(partial_ratio);
+    seed
+}
+
+fn professional_regime_alpha_overlay_frontier_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure, smoothing_profile, hysteresis, partial) in [
+        (
+            "quality_state_alpha_selector_v3",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            "off",
+            "0",
+            "1",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            "off",
+            "0",
+            "1",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v2",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            "off",
+            "0",
+            "1",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v3",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            "off",
+            "0",
+            "1",
+        ),
+        (
+            "quality_state_alpha_selector_v3",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            "light_smooth",
+            "0.005",
+            "0.85",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            "light_smooth",
+            "0.005",
+            "0.85",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v2",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            "light_smooth",
+            "0.005",
+            "0.85",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v3",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            "light_smooth",
+            "0.005",
+            "0.85",
+        ),
+    ] {
+        let mut seed = with_rebalance_smoothing_seed(
+            with_risk_budget_lookback_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        valuation45.clone(),
+                        regime,
+                        &format!("{regime}_{vol_profile}_{smoothing_profile}"),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("bp_rb160_{regime}_{vol_profile}_{smoothing_profile}"),
+                160,
+            ),
+            smoothing_profile,
+            hysteresis,
+            partial,
+        );
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_mixed_state_event_alpha_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_event_state_overlay_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_event_state_selector_v2",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_event_state_overlay_selector_v2",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_event_window_return_sharpe_router_v4",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}_no_smooth"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_no_smooth"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_mixed_state_risk_memory_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_mixed_event_state_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v2",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v3",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v2",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}_mixed_risk_memory"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_mixed_risk_memory"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_mixed_state_risk_memory_frontier_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_mixed_state_risk_memory_router_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v4",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v5",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v6",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v4",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v5",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}_mixed_risk_frontier"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_mixed_risk_frontier"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_mixed_state_risk_memory_fine_frontier_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_mixed_state_risk_memory_router_v7",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v8",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v9",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v10",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v7",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v8",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v9",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v4",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}_mixed_risk_fine_frontier"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_mixed_risk_fine_frontier"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_mixed_state_exposure_frontier_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_mixed_state_risk_memory_router_v4",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v11",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v12",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v13",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v11",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v12",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}_mixed_exposure_frontier"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_mixed_exposure_frontier"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_mixed_state_orthogonal_alpha_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_mixed_orthogonal_alpha_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_alpha_selector_v2",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_alpha_selector_v3",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v2",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}_mixed_orthogonal_alpha"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_mixed_orthogonal_alpha"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_candidate_filter_alpha_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        risk_contribution_control,
+        candidate_risk_filter,
+        vol_profile,
+        target_pct,
+        min_exposure,
+    ) in [
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "soft_single_name_20pct_v1",
+            "low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v2",
+            "soft_single_name_20pct_v1",
+            "low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "soft_single_name_20pct_v1",
+            "low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_alpha_selector_v2",
+            "soft_single_name_20pct_v1",
+            "low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_alpha_selector_v1",
+            "soft_single_name_15pct_v1",
+            "low_volatility_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "soft_single_name_20pct_v1",
+            "off",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "soft_single_name_20pct_v1",
+            "low_volatility_low_correlation_v1",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "soft_single_name_20pct_v1",
+            "off",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!(
+                        "{regime}_{vol_profile}_{risk_contribution_control}_{candidate_risk_filter}_candidate_filter_alpha_bridge"
+                    ),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_candidate_filter_alpha_bridge"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["candidate_risk_filter"] = json!(candidate_risk_filter);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_soft_candidate_filter_alpha_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        risk_contribution_control,
+        candidate_risk_filter,
+        vol_profile,
+        target_pct,
+        min_exposure,
+    ) in [
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "soft_single_name_20pct_v1",
+            "soft_low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "soft_single_name_20pct_v1",
+            "soft_low_volatility_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_event_state_selector_v1",
+            "soft_single_name_20pct_v1",
+            "soft_low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_alpha_selector_v1",
+            "soft_single_name_20pct_v1",
+            "soft_low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_alpha_selector_v2",
+            "soft_single_name_20pct_v1",
+            "soft_low_volatility_low_correlation_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_alpha_selector_v3",
+            "soft_single_name_20pct_v1",
+            "soft_low_volatility_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "soft_single_name_20pct_v1",
+            "soft_low_volatility_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "soft_single_name_20pct_v1",
+            "off",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!(
+                        "{regime}_{vol_profile}_{risk_contribution_control}_{candidate_risk_filter}_soft_candidate_filter_alpha_bridge"
+                    ),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb160_{regime}_{vol_profile}_soft_candidate_filter_alpha_bridge"),
+            160,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["candidate_risk_filter"] = json!(candidate_risk_filter);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_sharpe_bridge_frontier_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let valuation45 = with_event_combo_gate_seed_with_min_score(
+        return_anchor,
+        "valuation_exclude_bottom45",
+        "phase7_valuation_v1",
+        "exclude_negative",
+        "0.45",
+        "0",
+        ScoreDirection::Descending,
+    );
+    let mut seeds = Vec::new();
+
+    for (regime, vol_profile, target_pct, min_exposure, risk_budget_lookback_days) in [
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v1",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v3",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            160,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v1",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    valuation45.clone(),
+                    regime,
+                    &format!("{regime}_{vol_profile}_sharpe_bridge_frontier"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!(
+                "bp_rb{risk_budget_lookback_days}_{regime}_{vol_profile}_sharpe_bridge_frontier"
+            ),
+            risk_budget_lookback_days,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_annual_sharpe_floor_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        regime_suffix,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        position_shape,
+        max_position_pct,
+        max_pairwise_correlation,
+        risk_contribution_control,
+    ) in [
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "overlay_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "bridge_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos16_corr75",
+            "0.16",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "risk_memory_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            160,
+            "maxpos16_corr75",
+            "0.16",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "bridge_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "bridge_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            160,
+            "maxpos16_corr75",
+            "0.16",
+            "0.75",
+            "off",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_position_shape_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            return_anchor.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                        &format!(
+                            "{regime_suffix}_{valuation_profile}_{vol_profile}_annual_sharpe_floor"
+                        ),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("{position_shape}_{regime_suffix}_{vol_profile}"),
+                max_position_pct,
+                max_pairwise_correlation,
+            ),
+            &format!(
+                "bp_rb{risk_budget_lookback_days}_{regime_suffix}_{valuation_profile}_{vol_profile}"
+            ),
+            risk_budget_lookback_days,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_risk_memory_relaxed_frontier_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+    ) in [
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v15",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v15",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v17",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v17",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v18",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v18",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    with_event_combo_gate_seed_with_min_score(
+                        return_anchor.clone(),
+                        valuation_profile,
+                        "phase7_valuation_v1",
+                        "exclude_negative",
+                        valuation_min_score,
+                        "0",
+                        ScoreDirection::Descending,
+                    ),
+                    regime,
+                    &format!("{regime}_{valuation_profile}_{vol_profile}_relaxed_frontier"),
+                ),
+                vol_profile,
+                target_pct,
+                120,
+                min_exposure,
+                "1",
+            ),
+            &format!("bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"),
+            risk_budget_lookback_days,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_sharpe_floor_auto_discovery_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        position_shape,
+        max_position_pct,
+        max_pairwise_correlation,
+    ) in [
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v18",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "maxpos15_corr75",
+            "0.15",
+            "0.75",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_position_shape_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            return_anchor.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                        &format!("{regime}_{valuation_profile}_{vol_profile}_sharpe_floor_auto"),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("{position_shape}_{regime}_{vol_profile}"),
+                max_position_pct,
+                max_pairwise_correlation,
+            ),
+            &format!("bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"),
+            risk_budget_lookback_days,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_nonlinear_alpha_auto_discovery_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_full,
+        sharpe_lookback,
+        sharpe_min_exposure,
+    ) in [
+        (
+            "quality_nonlinear_alpha_router_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "off",
+            "0",
+            "0",
+            0,
+            "0",
+        ),
+        (
+            "quality_nonlinear_alpha_router_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "off",
+            "0",
+            "0",
+            0,
+            "0",
+        ),
+        (
+            "quality_nonlinear_alpha_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "off",
+            "0",
+            "0",
+            0,
+            "0",
+        ),
+        (
+            "quality_nonlinear_alpha_router_v2",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "off",
+            "0",
+            "0",
+            0,
+            "0",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "roll_sharpe120_050_neg10_60",
+            "0.50",
+            "-0.10",
+            120,
+            "0.60",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+        ),
+        (
+            "quality_nonlinear_alpha_router_v1",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            180,
+            "roll_sharpe180_060_000_60",
+            "0.60",
+            "0.00",
+            180,
+            "0.60",
+        ),
+        (
+            "quality_nonlinear_alpha_router_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe120_060_000_55",
+            "0.60",
+            "0.00",
+            120,
+            "0.55",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v1",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "off",
+            "0",
+            "0",
+            0,
+            "0",
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_position_shape_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            return_anchor.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                        &format!(
+                            "{regime}_{valuation_profile}_{vol_profile}_{sharpe_profile}_nonlinear"
+                        ),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("maxpos15_corr75_{regime}_{vol_profile}"),
+                "0.15",
+                "0.75",
+            ),
+            &format!("bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"),
+            risk_budget_lookback_days,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        if sharpe_profile != "off" {
+            seed = with_sharpe_profile_seed(
+                seed,
+                sharpe_profile,
+                sharpe_start,
+                sharpe_full,
+                sharpe_lookback,
+                sharpe_min_exposure,
+            );
+        } else {
+            seed["portfolio_sharpe_control"] = json!("off");
+        }
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_nonlinear_sharpe_return_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        max_position_pct,
+        max_pairwise_correlation,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_full,
+        sharpe_lookback,
+        sharpe_min_exposure,
+    ) in [
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "0.15",
+            "0.75",
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "0.15",
+            "0.75",
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "0.15",
+            "0.75",
+            "roll_sharpe120_050_neg10_60",
+            "0.50",
+            "-0.10",
+            120,
+            "0.60",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "0.15",
+            "0.75",
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "0.15",
+            "0.75",
+            "roll_sharpe120_050_neg10_55",
+            "0.50",
+            "-0.10",
+            120,
+            "0.55",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "0.15",
+            "0.75",
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "0.15",
+            "0.75",
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            160,
+            "0.16",
+            "0.75",
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            180,
+            "0.16",
+            "0.75",
+            "roll_sharpe180_060_000_60",
+            "0.60",
+            "0.00",
+            180,
+            "0.60",
+        ),
+        (
+            "quality_nonlinear_alpha_router_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+            "0.15",
+            "0.75",
+            "roll_sharpe120_060_000_55",
+            "0.60",
+            "0.00",
+            120,
+            "0.55",
+        ),
+    ] {
+        let mut seed = with_risk_budget_lookback_seed(
+            with_position_shape_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            return_anchor.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                        &format!(
+                            "{regime}_{valuation_profile}_{vol_profile}_{sharpe_profile}_bridge"
+                        ),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("maxpos{max_position_pct}_corr{max_pairwise_correlation}_{regime}"),
+                max_position_pct,
+                max_pairwise_correlation,
+            ),
+            &format!("bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"),
+            risk_budget_lookback_days,
+        );
+        seed["rebalance_smoothing_profile"] = json!("off");
+        seed["rebalance_hysteresis_pct"] = json!("0");
+        seed["partial_rebalance_ratio"] = json!("1");
+        seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+        seed["candidate_risk_filter"] = json!("off");
+        seed = with_sharpe_profile_seed(
+            seed,
+            sharpe_profile,
+            sharpe_start,
+            sharpe_full,
+            sharpe_lookback,
+            sharpe_min_exposure,
+        );
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_prediction_confirmed_sharpe_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let wide_prediction_set = "pred-p7-wf-wide-qgvrel-v1-201602-202605";
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        blend_weight,
+        min_percentile,
+    ) in [
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "0.02",
+            None,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "0.05",
+            Some("0.20"),
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "0.05",
+            Some("0.20"),
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+            "0.05",
+            Some("0.20"),
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "0.02",
+            None,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "0.05",
+            Some("0.20"),
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "0.02",
+            None,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            160,
+            "0.08",
+            Some("0.30"),
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            180,
+            "0.05",
+            Some("0.20"),
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "0.02",
+            None,
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+            "0.05",
+            Some("0.20"),
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_17_52_100",
+            "0.17",
+            "0.52",
+            180,
+            "0.08",
+            Some("0.30"),
+        ),
+    ] {
+        let seed = with_prediction_confirmation_seed(
+            with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            with_event_combo_gate_seed_with_min_score(
+                                return_anchor.clone(),
+                                valuation_profile,
+                                "phase7_valuation_v1",
+                                "exclude_negative",
+                                valuation_min_score,
+                                "0",
+                                ScoreDirection::Descending,
+                            ),
+                            regime,
+                            &format!(
+                                "{regime}_{valuation_profile}_{vol_profile}_{blend_weight}_prediction_confirmed_bridge"
+                            ),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("maxpos15_corr75_{regime}_{vol_profile}"),
+                    "0.15",
+                    "0.75",
+                ),
+                &format!(
+                    "bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"
+                ),
+                risk_budget_lookback_days,
+            ),
+            wide_prediction_set,
+            blend_weight,
+            min_percentile,
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_contribution_control_seed(
+                with_candidate_risk_filter_seed(seed, "off"),
+                "soft_single_name_20pct_v1",
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_high_sharpe_boundary_return_bridge_seed_trials() -> Vec<Value> {
+    let Some(boundary) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        max_position_pct,
+        max_pairwise_correlation,
+    ) in [
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            170,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom35",
+            "0.35",
+            "vol120_155_49_100",
+            "0.155",
+            "0.49",
+            180,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            170,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_155_49_100",
+            "0.155",
+            "0.49",
+            170,
+            "0.16",
+            "0.75",
+        ),
+    ] {
+        let seed = with_risk_budget_lookback_seed(
+            with_position_shape_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            boundary.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                        &format!("{regime}_{valuation_profile}_{vol_profile}_boundary_return_bridge"),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("{regime}_{vol_profile}_maxpos{max_position_pct}_corr{max_pairwise_correlation}"),
+                max_position_pct,
+                max_pairwise_correlation,
+            ),
+            &format!("bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"),
+            risk_budget_lookback_days,
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_contribution_control_seed(
+                with_candidate_risk_filter_seed(seed, "off"),
+                "soft_single_name_20pct_v1",
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_high_sharpe_boundary_event_lift_seed_trials() -> Vec<Value> {
+    let Some(boundary) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (regime, valuation_profile, valuation_min_score, vol_profile, target_pct, min_exposure) in [
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+        ),
+        (
+            "quality_all_regime_event_window_sleeve_05pct_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+        ),
+        (
+            "quality_all_regime_event_window_sleeve_05pct_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+        ),
+        (
+            "quality_all_regime_event_window_sleeve_10pct_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+        ),
+        (
+            "quality_all_regime_event_window_sleeve_10pct_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+        ),
+        (
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+        ),
+        (
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+        ),
+    ] {
+        let seed = with_risk_budget_lookback_seed(
+            with_position_shape_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            boundary.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                        &format!(
+                            "{regime}_{valuation_profile}_{vol_profile}_high_sharpe_event_lift"
+                        ),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("{regime}_{vol_profile}_maxpos15_corr75"),
+                "0.15",
+                "0.75",
+            ),
+            &format!("bp_rb180_{regime}_{valuation_profile}_{vol_profile}"),
+            180,
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_risk_contribution_control_seed(
+                with_candidate_risk_filter_seed(seed, "off"),
+                "soft_single_name_20pct_v1",
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_high_sharpe_micro_frontier_seed_trials() -> Vec<Value> {
+    let Some(boundary) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_full,
+        sharpe_lookback,
+        sharpe_min_exposure,
+        candidate_risk_filter,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_low_volatility_v1",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            "soft_single_name_20pct_v1",
+            400,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_155_49_100",
+            "0.155",
+            "0.49",
+            180,
+            "roll_sharpe120_050_neg10_60",
+            "0.50",
+            "-0.10",
+            120,
+            "0.60",
+            "soft_low_volatility_v1",
+            "off",
+            800,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            170,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "soft_low_volatility_v1",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe120_050_neg10_60",
+            "0.50",
+            "-0.10",
+            120,
+            "0.60",
+            "off",
+            "soft_single_name_20pct_v1",
+            400,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_155_49_100",
+            "0.155",
+            "0.49",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_low_volatility_low_correlation_v1",
+            "off",
+            800,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            "off",
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_low_volatility_v1",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe120_050_neg10_60",
+            "0.50",
+            "-0.10",
+            120,
+            "0.60",
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            800,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "off",
+            "soft_single_name_20pct_v1",
+            400,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            170,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "off",
+            "off",
+            500,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe120_050_neg10_60",
+            "0.50",
+            "-0.10",
+            120,
+            "0.60",
+            "off",
+            "off",
+            650,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            170,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "soft_low_volatility_v1",
+            "off",
+            400,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_low_volatility_low_correlation_v1",
+            "off",
+            800,
+        ),
+    ] {
+        let mut seed = with_sharpe_profile_seed(
+            with_risk_budget_lookback_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            boundary.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                        &format!(
+                            "{regime}_{valuation_profile}_{vol_profile}_{sharpe_profile}_micro"
+                        ),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!(
+                    "bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"
+                ),
+                risk_budget_lookback_days,
+            ),
+            sharpe_profile,
+            sharpe_start,
+            sharpe_full,
+            sharpe_lookback,
+            sharpe_min_exposure,
+        );
+        seed["candidate_risk_filter"] = json!(candidate_risk_filter);
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_v14_sharpe_return_lift_seed_trials() -> Vec<Value> {
+    let Some(boundary) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_full,
+        sharpe_lookback,
+        sharpe_min_exposure,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_14_46_100",
+            "0.14",
+            "0.46",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_148_475_100",
+            "0.148",
+            "0.475",
+            180,
+            "roll_sharpe180_045_neg10_63",
+            "0.45",
+            "-0.10",
+            180,
+            "0.63",
+            "off",
+            650,
+        ),
+        (
+            "valuation_exclude_bottom43",
+            "0.43",
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            400,
+        ),
+        (
+            "valuation_exclude_bottom43",
+            "0.43",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_single_name_20pct_v1",
+            400,
+        ),
+        (
+            "valuation_exclude_bottom43",
+            "0.43",
+            "vol120_148_475_100",
+            "0.148",
+            "0.475",
+            180,
+            "roll_sharpe180_045_neg10_63",
+            "0.45",
+            "-0.10",
+            180,
+            "0.63",
+            "off",
+            650,
+        ),
+        (
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            400,
+        ),
+        (
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_045_neg10_63",
+            "0.45",
+            "-0.10",
+            180,
+            "0.63",
+            "off",
+            650,
+        ),
+        (
+            "valuation_exclude_bottom43",
+            "0.43",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            400,
+        ),
+        (
+            "valuation_exclude_bottom43",
+            "0.43",
+            "vol120_148_475_100",
+            "0.148",
+            "0.475",
+            170,
+            "roll_sharpe180_045_neg10_63",
+            "0.45",
+            "-0.10",
+            180,
+            "0.63",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+    ] {
+        let mut seed = with_sharpe_profile_seed(
+            with_risk_budget_lookback_seed(
+                with_volatility_profile_seed(
+                    with_event_sleeve_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            boundary.clone(),
+                            valuation_profile,
+                            "phase7_valuation_v1",
+                            "exclude_negative",
+                            valuation_min_score,
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        "quality_mixed_state_risk_memory_router_v14",
+                        &format!(
+                            "v14_{valuation_profile}_{vol_profile}_{sharpe_profile}_return_lift"
+                        ),
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("bp_rb{risk_budget_lookback_days}_v14_{valuation_profile}_{vol_profile}"),
+                risk_budget_lookback_days,
+            ),
+            sharpe_profile,
+            sharpe_start,
+            sharpe_full,
+            sharpe_lookback,
+            sharpe_min_exposure,
+        );
+        seed["candidate_risk_filter"] = json!("off");
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_v14_shape_lift_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let base = with_sharpe_profile_seed(
+        with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    with_event_combo_gate_seed_with_min_score(
+                        anchor,
+                        "valuation_exclude_bottom45",
+                        "phase7_valuation_v1",
+                        "exclude_negative",
+                        "0.45",
+                        "0",
+                        ScoreDirection::Descending,
+                    ),
+                    "quality_mixed_state_risk_memory_router_v14",
+                    "v14_shape_lift_anchor",
+                ),
+                "vol120_142_465_100",
+                "0.142",
+                120,
+                "0.465",
+                "1",
+            ),
+            "bp_rb170_v14_shape_lift",
+            170,
+        ),
+        "roll_sharpe180_050_neg10_65",
+        "0.50",
+        "-0.10",
+        180,
+        "0.65",
+    );
+    let base = with_candidate_risk_filter_seed(base, "off");
+
+    let mut seeds = Vec::new();
+    for (
+        top_n,
+        rebalance_days,
+        skip_top_pct,
+        risk_contribution_control,
+        drawdown_profile,
+        stop_loss_profile,
+        smoothing_profile,
+        score_candidate_pool_size,
+    ) in [
+        (
+            20,
+            60,
+            "0.10",
+            "off",
+            "recover252_08_22_45_30_70",
+            "stop_loss_075_cooldown_30",
+            "off",
+            500,
+        ),
+        (
+            18,
+            55,
+            "0.08",
+            "off",
+            "recover252_08_22_45_30_70",
+            "stop_loss_075_cooldown_30",
+            "off",
+            500,
+        ),
+        (
+            18,
+            50,
+            "0.08",
+            "off",
+            "recover252_08_22_45_30_70",
+            "stop_loss_070_cooldown_30",
+            "off",
+            500,
+        ),
+        (
+            20,
+            55,
+            "0.08",
+            "off",
+            "recover252_08_22_45_30_70",
+            "stop_loss_075_cooldown_30",
+            "hysteresis_1pct_partial_75",
+            500,
+        ),
+        (
+            22,
+            55,
+            "0.08",
+            "off",
+            "recover252_08_22_45_30_70",
+            "stop_loss_075_cooldown_30",
+            "off",
+            650,
+        ),
+        (
+            22,
+            50,
+            "0.08",
+            "off",
+            "recover252_08_23_45_30_70",
+            "stop_loss_070_cooldown_30",
+            "off",
+            650,
+        ),
+        (
+            20,
+            50,
+            "0.08",
+            "off",
+            "recover252_08_23_45_30_70",
+            "stop_loss_070_cooldown_30",
+            "off",
+            500,
+        ),
+        (
+            18,
+            60,
+            "0.08",
+            "off",
+            "recover252_08_23_45_30_70",
+            "stop_loss_075_cooldown_30",
+            "hysteresis_1pct_partial_75",
+            500,
+        ),
+        (
+            20,
+            55,
+            "0.10",
+            "off",
+            "recover252_08_23_45_30_70",
+            "stop_loss_070_cooldown_30",
+            "off",
+            500,
+        ),
+        (
+            22,
+            60,
+            "0.10",
+            "off",
+            "recover252_08_23_45_30_70",
+            "stop_loss_075_cooldown_30",
+            "off",
+            650,
+        ),
+        (
+            20,
+            55,
+            "0.08",
+            "soft_single_name_20pct_v1",
+            "recover252_08_22_45_30_70",
+            "stop_loss_075_cooldown_30",
+            "off",
+            500,
+        ),
+        (
+            18,
+            55,
+            "0.10",
+            "off",
+            "recover252_08_22_45_30_70",
+            "stop_loss_070_cooldown_30",
+            "hysteresis_1pct_partial_75",
+            500,
+        ),
+    ] {
+        let mut seed = with_skip_top_seed(
+            with_rebalance_days_seed(
+                with_top_n_seed(base.clone(), top_n, &format!("top{top_n}_shape_lift")),
+                rebalance_days,
+                &format!("rebalance{rebalance_days}_shape_lift"),
+            ),
+            skip_top_pct,
+            &format!("skip{}_shape_lift", skip_top_pct.replace('.', "")),
+        );
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        seed = match drawdown_profile {
+            "recover252_08_23_45_30_70" => with_drawdown_profile_seed(
+                seed,
+                "recover252_08_23_45_30_70",
+                "0.08",
+                "0.23",
+                "0.45",
+                252,
+                "0.30",
+                "0.70",
+                "1",
+            ),
+            _ => seed,
+        };
+        seed = match stop_loss_profile {
+            "stop_loss_070_cooldown_30" => {
+                with_stop_loss_cooldown_seed(seed, "stop_loss_070_cooldown_30", "0.07", 30)
+            }
+            _ => seed,
+        };
+        seed = match smoothing_profile {
+            "hysteresis_1pct_partial_75" => {
+                with_rebalance_smoothing_seed(seed, "hysteresis_1pct_partial_75", "0.01", "0.75")
+            }
+            _ => seed,
+        };
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_v14_ultra_micro_lift_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let base = with_sharpe_profile_seed(
+        with_risk_budget_lookback_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    with_event_combo_gate_seed_with_min_score(
+                        anchor,
+                        "valuation_exclude_bottom45",
+                        "phase7_valuation_v1",
+                        "exclude_negative",
+                        "0.45",
+                        "0",
+                        ScoreDirection::Descending,
+                    ),
+                    "quality_mixed_state_risk_memory_router_v14",
+                    "v14_ultra_micro_lift_anchor",
+                ),
+                "vol120_142_465_100",
+                "0.142",
+                120,
+                "0.465",
+                "1",
+            ),
+            "bp_rb170_v14_ultra_micro_lift",
+            170,
+        ),
+        "roll_sharpe180_050_neg10_65",
+        "0.50",
+        "-0.10",
+        180,
+        "0.65",
+    );
+    let base =
+        with_risk_contribution_control_seed(with_candidate_risk_filter_seed(base, "off"), "off");
+
+    let mut seeds = Vec::new();
+    for (
+        top_n,
+        rebalance_days,
+        skip_top_pct,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+    ) in [
+        (20, 60, "0.10", "vol120_142_465_100", "0.142", "0.465", 170),
+        (19, 60, "0.10", "vol120_142_465_100", "0.142", "0.465", 170),
+        (21, 60, "0.10", "vol120_142_465_100", "0.142", "0.465", 170),
+        (20, 58, "0.10", "vol120_142_465_100", "0.142", "0.465", 170),
+        (20, 62, "0.10", "vol120_142_465_100", "0.142", "0.465", 170),
+        (20, 60, "0.09", "vol120_142_465_100", "0.142", "0.465", 170),
+        (20, 60, "0.11", "vol120_142_465_100", "0.142", "0.465", 170),
+        (20, 60, "0.10", "vol120_141_462_100", "0.141", "0.462", 170),
+        (20, 60, "0.10", "vol120_143_467_100", "0.143", "0.467", 170),
+        (20, 60, "0.10", "vol120_144_47_100", "0.144", "0.47", 170),
+        (19, 58, "0.09", "vol120_142_465_100", "0.142", "0.465", 170),
+        (21, 62, "0.11", "vol120_142_465_100", "0.142", "0.465", 170),
+        (20, 58, "0.10", "vol120_143_467_100", "0.143", "0.467", 170),
+        (20, 62, "0.10", "vol120_143_467_100", "0.143", "0.467", 170),
+        (20, 60, "0.10", "vol120_142_465_100", "0.142", "0.465", 180),
+    ] {
+        let mut seed = with_skip_top_seed(
+            with_rebalance_days_seed(
+                with_top_n_seed(
+                    with_risk_budget_lookback_seed(
+                        with_volatility_profile_seed(
+                            base.clone(),
+                            vol_profile,
+                            target_pct,
+                            120,
+                            min_exposure,
+                            "1",
+                        ),
+                        &format!("bp_rb{risk_budget_lookback_days}_v14_ultra_micro_lift"),
+                        risk_budget_lookback_days,
+                    ),
+                    top_n,
+                    &format!("top{top_n}_v14_ultra_micro_lift"),
+                ),
+                rebalance_days,
+                &format!("rebalance{rebalance_days}_v14_ultra_micro_lift"),
+            ),
+            skip_top_pct,
+            &format!("skip{}_v14_ultra_micro_lift", skip_top_pct.replace('.', "")),
+        );
+        seed["score_candidate_pool_size"] = json!(500);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_v14_annual_floor_micro_lift_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let base =
+        with_risk_contribution_control_seed(with_candidate_risk_filter_seed(anchor, "off"), "off");
+
+    let mut seeds = Vec::new();
+    for (
+        regime,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_min_exposure,
+        risk_budget_lookback_days,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "0.65",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v15",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "0.65",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v15",
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "0.65",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v17",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "0.65",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v18",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v15",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v16",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            "roll_sharpe180_050_neg10_68",
+            "0.50",
+            "0.68",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v17",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            170,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v14",
+            "vol120_1405_461_100",
+            "0.1405",
+            "0.461",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+        ),
+        (
+            "quality_mixed_state_risk_memory_router_v15",
+            "vol120_1405_461_100",
+            "0.1405",
+            "0.461",
+            "roll_sharpe180_0475_neg10_66",
+            "0.475",
+            "0.66",
+            165,
+            650,
+        ),
+    ] {
+        let seed = with_market_regime_seed(
+            with_skip_top_seed(
+                with_rebalance_days_seed(
+                    with_top_n_seed(
+                        with_sharpe_profile_seed(
+                            with_risk_budget_lookback_seed(
+                                with_volatility_profile_seed(
+                                    base.clone(),
+                                    vol_profile,
+                                    target_pct,
+                                    120,
+                                    min_exposure,
+                                    "1",
+                                ),
+                                &format!("bp_rb{risk_budget_lookback_days}_{regime}_annual_floor"),
+                                risk_budget_lookback_days,
+                            ),
+                            sharpe_profile,
+                            sharpe_start,
+                            "-0.10",
+                            180,
+                            sharpe_min_exposure,
+                        ),
+                        20,
+                        "top20_v14_annual_floor",
+                    ),
+                    60,
+                    "rebalance60_v14_annual_floor",
+                ),
+                "0.10",
+                "skip010_v14_annual_floor",
+            ),
+            regime,
+        );
+        let mut seed = with_event_sleeve_seed(
+            seed,
+            regime,
+            &format!("{regime}_{vol_profile}_{sharpe_profile}_annual_floor_micro_lift"),
+        );
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_v14_near_miss_annual_bridge_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let base =
+        with_risk_contribution_control_seed(with_candidate_risk_filter_seed(anchor, "off"), "off");
+
+    let mut seeds = Vec::new();
+    for (
+        vol_profile,
+        target_pct,
+        min_exposure,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_min_exposure,
+        risk_budget_lookback_days,
+        score_candidate_pool_size,
+        max_position_pct,
+        max_pairwise_correlation,
+    ) in [
+        (
+            "vol120_1405_461_100",
+            "0.1405",
+            "0.461",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1408_4615_100",
+            "0.1408",
+            "0.4615",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1412_463_100",
+            "0.1412",
+            "0.463",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1412_463_100",
+            "0.1412",
+            "0.463",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1408_4615_100",
+            "0.1408",
+            "0.4615",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            160,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1412_463_100",
+            "0.1412",
+            "0.463",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            170,
+            500,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            650,
+            "0.15",
+            "0.75",
+        ),
+        (
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.145",
+            "0.75",
+        ),
+        (
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.145",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            160,
+            650,
+            "0.145",
+            "0.70",
+        ),
+    ] {
+        let seed = with_position_shape_seed(
+            with_sharpe_profile_seed(
+                with_risk_budget_lookback_seed(
+                    with_volatility_profile_seed(
+                        base.clone(),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("bp_rb{risk_budget_lookback_days}_v14_near_miss_annual_bridge"),
+                    risk_budget_lookback_days,
+                ),
+                sharpe_profile,
+                sharpe_start,
+                "-0.10",
+                180,
+                sharpe_min_exposure,
+            ),
+            &format!(
+                "maxpos{}_corr{}_v14_near_miss",
+                max_position_pct.replace('.', ""),
+                max_pairwise_correlation.replace('.', "")
+            ),
+            max_position_pct,
+            max_pairwise_correlation,
+        );
+        let mut seed = with_event_sleeve_seed(
+            seed,
+            "quality_mixed_state_risk_memory_router_v14",
+            &format!("{vol_profile}_{sharpe_profile}_v14_near_miss_annual_bridge"),
+        );
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_v14_corr70_annual_edge_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let base =
+        with_risk_contribution_control_seed(with_candidate_risk_filter_seed(anchor, "off"), "off");
+
+    let mut seeds = Vec::new();
+    for (
+        vol_profile,
+        target_pct,
+        min_exposure,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_min_exposure,
+        risk_budget_lookback_days,
+        score_candidate_pool_size,
+        max_position_pct,
+        max_pairwise_correlation,
+    ) in [
+        (
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1415_464_100",
+            "0.1415",
+            "0.464",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1418_4645_100",
+            "0.1418",
+            "0.4645",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1418_4645_100",
+            "0.1418",
+            "0.4645",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1422_4655_100",
+            "0.1422",
+            "0.4655",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1422_4655_100",
+            "0.1422",
+            "0.4655",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1425_466_100",
+            "0.1425",
+            "0.466",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1425_466_100",
+            "0.1425",
+            "0.466",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            "roll_sharpe180_050_neg10_66",
+            "0.50",
+            "0.66",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_68",
+            "0.50",
+            "0.68",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1425_466_100",
+            "0.1425",
+            "0.466",
+            "roll_sharpe180_050_neg10_68",
+            "0.50",
+            "0.68",
+            165,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            650,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1425_466_100",
+            "0.1425",
+            "0.466",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            650,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            168,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_1425_466_100",
+            "0.1425",
+            "0.466",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            168,
+            500,
+            "0.15",
+            "0.70",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.68",
+        ),
+        (
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            "roll_sharpe180_050_neg10_67",
+            "0.50",
+            "0.67",
+            165,
+            500,
+            "0.15",
+            "0.72",
+        ),
+    ] {
+        let seed = with_position_shape_seed(
+            with_sharpe_profile_seed(
+                with_risk_budget_lookback_seed(
+                    with_volatility_profile_seed(
+                        base.clone(),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("bp_rb{risk_budget_lookback_days}_v14_corr70_annual_edge"),
+                    risk_budget_lookback_days,
+                ),
+                sharpe_profile,
+                sharpe_start,
+                "-0.10",
+                180,
+                sharpe_min_exposure,
+            ),
+            &format!(
+                "maxpos{}_corr{}_v14_corr70_edge",
+                max_position_pct.replace('.', ""),
+                max_pairwise_correlation.replace('.', "")
+            ),
+            max_position_pct,
+            max_pairwise_correlation,
+        );
+        let mut seed = with_event_sleeve_seed(
+            seed,
+            "quality_mixed_state_risk_memory_router_v14",
+            &format!("{vol_profile}_{sharpe_profile}_v14_corr70_annual_edge"),
+        );
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_return_alpha_sharpe_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        sharpe_profile,
+        sharpe_start,
+        sharpe_full,
+        sharpe_lookback,
+        sharpe_min_exposure,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            160,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            170,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "off",
+            500,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+            "off",
+            500,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_state_sharpe_bridge_router_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            160,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_state_alpha_overlay_selector_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.50",
+            "-0.10",
+            180,
+            "0.65",
+            "off",
+            500,
+        ),
+    ] {
+        let mut seed = with_sharpe_profile_seed(
+            with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            with_event_combo_gate_seed_with_min_score(
+                                return_anchor.clone(),
+                                valuation_profile,
+                                "phase7_valuation_v1",
+                                "exclude_negative",
+                                valuation_min_score,
+                                "0",
+                                ScoreDirection::Descending,
+                            ),
+                            regime,
+                            &format!(
+                                "{regime}_{valuation_profile}_{vol_profile}_{sharpe_profile}_return_alpha_bridge"
+                            ),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("maxpos15_corr75_{regime}_{vol_profile}"),
+                    "0.15",
+                    "0.75",
+                ),
+                &format!(
+                    "bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}_{vol_profile}"
+                ),
+                risk_budget_lookback_days,
+            ),
+            sharpe_profile,
+            sharpe_start,
+            sharpe_full,
+            sharpe_lookback,
+            sharpe_min_exposure,
+        );
+        seed["candidate_risk_filter"] = json!("off");
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_regime_frontier_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        sharpe_profile,
+        sharpe_min_exposure,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "quality_frontier_regime_bridge_router_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v1",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v1",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            160,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "soft_single_name_20pct_v1",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v2",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_60",
+            "0.60",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v2",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_142_465_100",
+            "0.142",
+            "0.465",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v3",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            180,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v3",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.60",
+            "off",
+            650,
+        ),
+    ] {
+        let mut seed = with_sharpe_profile_seed(
+            with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            with_event_combo_gate_seed_with_min_score(
+                                return_anchor.clone(),
+                                valuation_profile,
+                                "phase7_valuation_v1",
+                                "exclude_negative",
+                                valuation_min_score,
+                                "0",
+                                ScoreDirection::Descending,
+                            ),
+                            regime,
+                            &format!(
+                                "{regime}_{valuation_profile}_{vol_profile}_{sharpe_profile}_frontier_bridge"
+                            ),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("maxpos15_corr75_{regime}_{vol_profile}"),
+                    "0.15",
+                    "0.75",
+                ),
+                &format!("bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}"),
+                risk_budget_lookback_days,
+            ),
+            sharpe_profile,
+            "0.50",
+            "-0.10",
+            180,
+            sharpe_min_exposure,
+        );
+        seed["candidate_risk_filter"] = json!("off");
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_regime_frontier_decomposition_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        valuation_profile,
+        valuation_min_score,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        sharpe_profile,
+        sharpe_min_exposure,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "quality_frontier_regime_bridge_router_v4",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v4",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v4",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v5",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v5",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v5",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.60",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "valuation_exclude_bottom40",
+            "0.40",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.60",
+            "soft_single_name_20pct_v1",
+            650,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_141_462_100",
+            "0.141",
+            "0.462",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_65",
+            "0.65",
+            "off",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "valuation_exclude_bottom45",
+            "0.45",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            180,
+            "roll_sharpe180_050_neg10_60",
+            "0.60",
+            "off",
+            650,
+        ),
+    ] {
+        let mut seed = with_sharpe_profile_seed(
+            with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            with_event_combo_gate_seed_with_min_score(
+                                return_anchor.clone(),
+                                valuation_profile,
+                                "phase7_valuation_v1",
+                                "exclude_negative",
+                                valuation_min_score,
+                                "0",
+                                ScoreDirection::Descending,
+                            ),
+                            regime,
+                            &format!(
+                                "{regime}_{valuation_profile}_{vol_profile}_{sharpe_profile}_frontier_decomp"
+                            ),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("maxpos15_corr75_{regime}_{vol_profile}"),
+                    "0.15",
+                    "0.75",
+                ),
+                &format!("bp_rb{risk_budget_lookback_days}_{regime}_{valuation_profile}"),
+                risk_budget_lookback_days,
+            ),
+            sharpe_profile,
+            "0.50",
+            "-0.10",
+            180,
+            sharpe_min_exposure,
+        );
+        seed["candidate_risk_filter"] = json!("off");
+        seed["risk_contribution_control"] = json!(risk_contribution_control);
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn professional_high_sharpe_return_micro_bridge_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        regime,
+        vol_profile,
+        target_pct,
+        min_exposure,
+        risk_budget_lookback_days,
+        sharpe_profile,
+        sharpe_min_exposure,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_68",
+            "0.68",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_68",
+            "0.68",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "vol120_147_475_100",
+            "0.147",
+            "0.475",
+            170,
+            "roll_sharpe180_050_neg10_70",
+            "0.70",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            170,
+            "roll_sharpe180_050_neg10_70",
+            "0.70",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "vol120_147_475_100",
+            "0.147",
+            "0.475",
+            180,
+            "roll_sharpe180_050_neg10_70",
+            "0.70",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v6",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_72",
+            "0.72",
+            650,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "vol120_143_467_100",
+            "0.143",
+            "0.467",
+            170,
+            "roll_sharpe180_050_neg10_68",
+            "0.68",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "vol120_145_47_100",
+            "0.145",
+            "0.47",
+            170,
+            "roll_sharpe180_050_neg10_68",
+            "0.68",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "vol120_147_475_100",
+            "0.147",
+            "0.475",
+            170,
+            "roll_sharpe180_050_neg10_70",
+            "0.70",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            170,
+            "roll_sharpe180_050_neg10_70",
+            "0.70",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "vol120_147_475_100",
+            "0.147",
+            "0.475",
+            180,
+            "roll_sharpe180_050_neg10_70",
+            "0.70",
+            500,
+        ),
+        (
+            "quality_frontier_regime_bridge_router_v7",
+            "vol120_15_48_100",
+            "0.15",
+            "0.48",
+            180,
+            "roll_sharpe180_050_neg10_72",
+            "0.72",
+            650,
+        ),
+    ] {
+        let mut seed = with_sharpe_profile_seed(
+            with_risk_budget_lookback_seed(
+                with_position_shape_seed(
+                    with_volatility_profile_seed(
+                        with_event_sleeve_seed(
+                            with_event_combo_gate_seed_with_min_score(
+                                return_anchor.clone(),
+                                "valuation_exclude_bottom45",
+                                "phase7_valuation_v1",
+                                "exclude_negative",
+                                "0.45",
+                                "0",
+                                ScoreDirection::Descending,
+                            ),
+                            regime,
+                            &format!(
+                                "{regime}_valuation45_{vol_profile}_{sharpe_profile}_micro_bridge"
+                            ),
+                        ),
+                        vol_profile,
+                        target_pct,
+                        120,
+                        min_exposure,
+                        "1",
+                    ),
+                    &format!("maxpos15_corr75_{regime}_{vol_profile}"),
+                    "0.15",
+                    "0.75",
+                ),
+                &format!("bp_rb{risk_budget_lookback_days}_{regime}_valuation45"),
+                risk_budget_lookback_days,
+            ),
+            sharpe_profile,
+            "0.50",
+            "-0.10",
+            180,
+            sharpe_min_exposure,
+        );
+        seed["candidate_risk_filter"] = json!("off");
+        seed["risk_contribution_control"] = json!("off");
+        seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn finalize_return_distribution_seed(seed: Value) -> Value {
+    with_risk_contribution_control_seed(
+        with_candidate_risk_filter_seed(seed, "off"),
+        "soft_single_name_20pct_v1",
+    )
+}
+
+fn professional_return_distribution_repair_seed_trials() -> Vec<Value> {
+    let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    let cl_anchor = with_risk_budget_lookback_seed(
+        with_position_shape_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    with_event_combo_gate_seed_with_min_score(
+                        return_anchor.clone(),
+                        "valuation_exclude_bottom45",
+                        "phase7_valuation_v1",
+                        "exclude_negative",
+                        "0.45",
+                        "0",
+                        ScoreDirection::Descending,
+                    ),
+                    "quality_mixed_orthogonal_risk_memory_router_v3",
+                    "cl_high_sharpe_residual_risk_memory",
+                ),
+                "vol120_15_48_100",
+                "0.15",
+                120,
+                "0.48",
+                "1",
+            ),
+            "maxpos15_corr75_cl_orthogonal",
+            "0.15",
+            "0.75",
+        ),
+        "bp_rb180_cl_orthogonal",
+        180,
+    );
+    let cm_anchor = with_risk_budget_lookback_seed(
+        with_position_shape_seed(
+            with_volatility_profile_seed(
+                with_event_sleeve_seed(
+                    with_event_combo_gate_seed_with_min_score(
+                        return_anchor.clone(),
+                        "valuation_exclude_bottom40",
+                        "phase7_valuation_v1",
+                        "exclude_negative",
+                        "0.40",
+                        "0",
+                        ScoreDirection::Descending,
+                    ),
+                    "quality_nonlinear_alpha_risk_memory_router_v3",
+                    "cm_return_sharpe_risk_memory",
+                ),
+                "vol120_15_48_100",
+                "0.15",
+                120,
+                "0.48",
+                "1",
+            ),
+            "maxpos15_corr75_cm_nonlinear",
+            "0.15",
+            "0.75",
+        ),
+        "bp_rb180_cm_nonlinear",
+        180,
+    );
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![
+            finalize_return_distribution_seed(cl_anchor.clone()),
+            finalize_return_distribution_seed(cm_anchor.clone()),
+        ],
+    );
+
+    for (base, router) in [
+        (
+            cm_anchor.clone(),
+            "quality_event_window_return_sharpe_router_v3",
+        ),
+        (
+            cl_anchor.clone(),
+            "quality_event_window_return_sharpe_router_v4",
+        ),
+    ] {
+        for (
+            profile_name,
+            combo_name,
+            mode,
+            min_score,
+            boost_weight,
+            sharpe_profile,
+            risk_budget_days,
+        ) in [
+            (
+                "event_window_10d_boost_p75_3pct",
+                "phase7_event_window_earnings_10d_v1",
+                "boost_positive",
+                "0.38",
+                "0.03",
+                "off",
+                180,
+            ),
+            (
+                "event_window_20d_boost_p75_3pct",
+                "phase7_event_window_earnings_v1",
+                "boost_positive",
+                "0.38",
+                "0.03",
+                "roll_sharpe180_050_neg10_60",
+                180,
+            ),
+            (
+                "event_window_40d_exclude_negative",
+                "phase7_event_window_earnings_40d_v1",
+                "exclude_negative",
+                "0.00",
+                "0",
+                "roll_sharpe120_050_neg10_60",
+                160,
+            ),
+            (
+                "event_window_40d_boost_p75_3pct",
+                "phase7_event_window_earnings_40d_v1",
+                "boost_positive",
+                "0.38",
+                "0.03",
+                "roll_sharpe180_050_neg10_60",
+                180,
+            ),
+        ] {
+            let mut seed = with_risk_budget_lookback_seed(
+                with_market_regime_seed(
+                    with_event_combo_gate_seed_with_min_score(
+                        base.clone(),
+                        profile_name,
+                        combo_name,
+                        mode,
+                        min_score,
+                        boost_weight,
+                        ScoreDirection::Descending,
+                    ),
+                    router,
+                ),
+                &format!("bp_rb{risk_budget_days}_{router}_{profile_name}"),
+                risk_budget_days,
+            );
+            if sharpe_profile == "roll_sharpe180_050_neg10_60" {
+                seed = with_sharpe_profile_seed(seed, sharpe_profile, "0.50", "-0.10", 180, "0.60");
+            } else if sharpe_profile == "roll_sharpe120_050_neg10_60" {
+                seed = with_sharpe_profile_seed(seed, sharpe_profile, "0.50", "-0.10", 120, "0.60");
+            } else {
+                seed["portfolio_sharpe_control"] = json!("off");
+            }
+            append_unique_seeds(&mut seeds, vec![finalize_return_distribution_seed(seed)]);
+        }
+    }
+
+    for (base, regime, vol_profile, target_pct, min_exposure, risk_budget_days) in [
+        (
+            cl_anchor.clone(),
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            180,
+        ),
+        (
+            cm_anchor.clone(),
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "vol120_16_50_100",
+            "0.16",
+            "0.50",
+            160,
+        ),
+    ] {
+        let residual_seed = with_sharpe_profile_seed(
+            with_risk_budget_lookback_seed(
+                with_volatility_profile_seed(
+                    with_market_regime_seed(
+                        with_event_combo_gate_seed_with_min_score(
+                            base,
+                            "residual_confirm_top40",
+                            "phase7_quality_residual_confirm_10pct_v1",
+                            "require_positive",
+                            "0.40",
+                            "0",
+                            ScoreDirection::Descending,
+                        ),
+                        regime,
+                    ),
+                    vol_profile,
+                    target_pct,
+                    120,
+                    min_exposure,
+                    "1",
+                ),
+                &format!("bp_rb{risk_budget_days}_{regime}_residual_confirm"),
+                risk_budget_days,
+            ),
+            "roll_sharpe180_050_neg10_60",
+            "0.50",
+            "-0.10",
+            180,
+            "0.60",
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![finalize_return_distribution_seed(residual_seed)],
+        );
+    }
+
+    seeds.into_iter().take(12).collect()
+}
+
 fn professional_volatility_sharpe_seed_trials() -> Vec<Value> {
     let anchor_seeds = phase7_u2_exact_anchor_seed_trials();
     let tighter_profiles = [
@@ -3277,6 +10679,204 @@ fn professional_regime_position_sharpe_seed_trials() -> Vec<Value> {
     seeds
 }
 
+fn professional_state_alpha_router_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(anchor.clone(), "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let seed_specs = [
+        (
+            anchor.clone(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+        ),
+        (
+            anchor.clone(),
+            "quality_regime_alpha_overlay_value_05pct_v1",
+        ),
+        (
+            anchor.clone(),
+            "quality_regime_alpha_overlay_blend_10pct_v1",
+        ),
+        (
+            anchor.clone(),
+            "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1",
+        ),
+        (
+            anchor,
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1",
+        ),
+        (
+            vol18_anchor.clone(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+        ),
+        (
+            vol18_anchor.clone(),
+            "quality_regime_alpha_overlay_blend_10pct_v1",
+        ),
+        (
+            vol18_anchor,
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1",
+        ),
+    ];
+    let mut seeds = Vec::new();
+
+    for (seed, policy) in seed_specs {
+        append_unique_seeds(&mut seeds, vec![with_market_regime_seed(seed, policy)]);
+    }
+
+    seeds
+}
+
+fn professional_state_position_risk_router_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(anchor.clone(), "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let mut seeds = Vec::new();
+
+    for seed in [anchor.clone(), vol18_anchor.clone()] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_market_regime_seed(
+                seed.clone(),
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+            )],
+        );
+        for market_regime in [
+            "quality_bear_position_guard_v3",
+            "quality_bear_position_guard_v1",
+            "quality_bear_position_guard_v2",
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_market_regime_seed(seed.clone(), market_regime)],
+            );
+        }
+    }
+
+    seeds
+}
+
+fn professional_event_position_risk_router_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(anchor.clone(), "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let mut seeds = Vec::new();
+
+    for seed in [anchor.clone(), vol18_anchor.clone()] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_market_regime_seed(
+                seed.clone(),
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+            )],
+        );
+        for market_regime in [
+            "quality_event_window_position_guard_v3",
+            "quality_event_window_position_guard_v1",
+            "quality_event_window_position_guard_v2",
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_market_regime_seed(seed.clone(), market_regime)],
+            );
+        }
+    }
+
+    seeds
+}
+
+fn professional_all_regime_event_sleeve_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let vol18_anchor =
+        with_volatility_profile_seed(anchor.clone(), "vol120_18_55_100", "0.18", 120, "0.55", "1");
+    let mut seeds = Vec::new();
+
+    for seed in [anchor.clone(), vol18_anchor.clone()] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_market_regime_seed(
+                seed.clone(),
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1",
+            )],
+        );
+        for market_regime in [
+            "quality_all_regime_event_window_sleeve_05pct_v1",
+            "quality_all_regime_event_window_sleeve_10pct_v1",
+            "quality_all_regime_event_window_sleeve_15pct_v1",
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_market_regime_seed(seed.clone(), market_regime)],
+            );
+        }
+    }
+
+    seeds
+}
+
+fn professional_portfolio_sharpe_control_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_current_anchor_bg_trial4_seed() else {
+        return Vec::new();
+    };
+    let Some(high_sharpe_boundary) = phase7_current_anchor_high_sharpe_boundary_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    append_unique_seeds(&mut seeds, vec![anchor.clone(), high_sharpe_boundary]);
+
+    for (profile_name, reduce_start, reduce_full, lookback_days, min_exposure) in [
+        ("roll_sharpe120_060_000_55", "0.60", "0.00", 120, "0.55"),
+        ("roll_sharpe120_050_neg10_60", "0.50", "-0.10", 120, "0.60"),
+        ("roll_sharpe180_060_000_55", "0.60", "0.00", 180, "0.55"),
+        ("roll_sharpe180_050_neg10_60", "0.50", "-0.10", 180, "0.60"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_sharpe_profile_seed(
+                anchor.clone(),
+                profile_name,
+                reduce_start,
+                reduce_full,
+                lookback_days,
+                min_exposure,
+            )],
+        );
+    }
+
+    let bridge = with_market_regime_seed(anchor, "quality_state_sharpe_bridge_router_v2");
+    append_unique_seeds(
+        &mut seeds,
+        vec![
+            with_sharpe_profile_seed(
+                bridge.clone(),
+                "bridge_roll_sharpe120_050_neg10_60",
+                "0.50",
+                "-0.10",
+                120,
+                "0.60",
+            ),
+            with_sharpe_profile_seed(
+                bridge,
+                "bridge_roll_sharpe180_050_neg10_60",
+                "0.50",
+                "-0.10",
+                180,
+                "0.60",
+            ),
+        ],
+    );
+
+    seeds
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreDirection {
@@ -3319,6 +10919,7 @@ pub struct LayeredSearchConfig {
     pub universe_profiles: Vec<String>,
     pub portfolio_drawdown_controls: Vec<PortfolioDrawdownControlProfile>,
     pub portfolio_volatility_controls: Vec<PortfolioVolatilityControlProfile>,
+    pub portfolio_sharpe_controls: Vec<PortfolioSharpeControlProfile>,
     pub position_risk_controls: Vec<PositionRiskControlProfile>,
     pub event_gate_profiles: Vec<EventGateProfile>,
     pub seed_trials: Vec<Value>,
@@ -3472,6 +11073,7 @@ impl LayeredSearchConfig {
                     Decimal::ONE,
                 ),
             ],
+            portfolio_sharpe_controls: vec![PortfolioSharpeControlProfile::off()],
             position_risk_controls: vec![PositionRiskControlProfile::off()],
             event_gate_profiles: vec![EventGateProfile::off()],
             seed_trials: Vec::new(),
@@ -4408,6 +12010,3045 @@ impl LayeredSearchConfig {
         config
     }
 
+    pub fn professional_event_quality_segment_default() -> Self {
+        let mut config = Self::professional_event_window_decay_default();
+        config.market_regime_policies = vec![
+            "quality_bear_window_guard_v2".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1".to_string(),
+        ];
+        config.seed_trials = professional_event_quality_segment_seed_trials();
+        config
+    }
+
+    pub fn professional_event_surprise_nonlinear_default() -> Self {
+        let mut config = Self::professional_event_window_decay_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_surprise_confirm_v1", "1.0.0"),
+        ];
+        config.market_regime_policies = vec!["quality_bear_window_guard_v2".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::off(),
+            EventGateProfile::event_surprise(
+                "event_surprise_boost_pos_3pct_stress_only",
+                "boost_positive",
+                Decimal::ZERO,
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_surprise(
+                "event_surprise_boost_pos_5pct_stress_only",
+                "boost_positive",
+                Decimal::ZERO,
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_surprise(
+                "event_surprise_exclude_negative_stress_only",
+                "exclude_negative",
+                Decimal::ZERO,
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_surprise(
+                "event_surprise_require_positive_stress_only",
+                "require_positive",
+                Decimal::ZERO,
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+        ];
+        config.seed_trials = professional_event_surprise_nonlinear_seed_trials();
+        config
+    }
+
+    pub fn professional_event_strength_segment_default() -> Self {
+        let mut config = Self::professional_event_surprise_nonlinear_default();
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.market_regime_policies = vec!["quality_bear_window_guard_v2".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::off(),
+            EventGateProfile::event_window(
+                "event_window_require_strong_p75",
+                "require_positive",
+                Decimal::new(38, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_window(
+                "event_window_require_strong_p90",
+                "require_positive",
+                Decimal::new(66, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_surprise(
+                "event_surprise_require_strong_p75",
+                "require_positive",
+                Decimal::new(35, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_surprise(
+                "event_surprise_require_strong_p90",
+                "require_positive",
+                Decimal::new(43, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_confirm_require_light_p50",
+                "phase7_event_earnings_v1",
+                "require_positive",
+                Decimal::new(39, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_event_strength_segment_seed_trials();
+        config
+    }
+
+    pub fn professional_event_strength_boost_default() -> Self {
+        let mut config = Self::professional_event_strength_segment_default();
+        config.event_gate_profiles = vec![
+            EventGateProfile::off(),
+            EventGateProfile::event_window(
+                "event_window_boost_strong_p75_3pct",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_window(
+                "event_window_boost_strong_p75_5pct",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_surprise(
+                "event_surprise_boost_strong_p75_3pct",
+                "boost_positive",
+                Decimal::new(35, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_surprise(
+                "event_surprise_boost_strong_p75_5pct",
+                "boost_positive",
+                Decimal::new(35, 2),
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_confirm_boost_light_p50_3pct",
+                "phase7_event_earnings_v1",
+                "boost_positive",
+                Decimal::new(39, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_confirm_boost_light_p50_5pct",
+                "phase7_event_earnings_v1",
+                "boost_positive",
+                Decimal::new(39, 2),
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_event_strength_boost_seed_trials();
+        config
+    }
+
+    pub fn professional_legacy_alpha_revalidation_default() -> Self {
+        let mut config = Self::professional_event_window_sleeve_upper_bound_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("full_icir_16f_v3", "1.0.0"),
+        ];
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "off".to_string(),
+        ];
+        config.top_n = vec![20, 30];
+        config.rebalance_days = vec![20, 60];
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.skip_top_pct = vec![Decimal::new(5, 2), Decimal::new(10, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.kelly_fraction = vec![Decimal::ZERO, Decimal::new(25, 2)];
+        config.max_position_pct = vec![Decimal::new(8, 2), Decimal::new(15, 2)];
+        config.max_gross_exposure = vec![Decimal::ONE];
+        config.portfolio_methods = vec!["heuristic".to_string(), "risk_budget".to_string()];
+        config.risk_budget_lookback_days = vec![120];
+        config.capacity_penalty_strength = vec![Decimal::ZERO, Decimal::new(75, 2)];
+        config.industry_max_weight_pct = vec![None];
+        config.style_risk_budget_profiles = vec!["off".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::ZERO];
+        config.partial_rebalance_ratio = vec![Decimal::ONE];
+        config.score_candidate_pool_sizes = vec![0, 500];
+        config.universe_profiles = vec!["all".to_string()];
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::off(),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_24_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(24, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::off(),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.position_risk_controls = vec![
+            PositionRiskControlProfile::off(),
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_075_cooldown_30",
+                Decimal::new(75, 3),
+                30,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::off()];
+        config.seed_trials = professional_event_window_sleeve_upper_bound_seed_trials();
+        append_unique_seeds(
+            &mut config.seed_trials,
+            professional_legacy_alpha_revalidation_seed_trials(),
+        );
+        config
+    }
+
+    pub fn professional_current_anchor_risk_shape_default() -> Self {
+        let mut config = Self::professional_event_window_sleeve_upper_bound_default();
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.market_regime_policies =
+            vec!["quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string()];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(75, 2)];
+        config.kelly_fraction = vec![Decimal::ZERO];
+        config.max_position_pct = vec![Decimal::new(12, 2), Decimal::new(15, 2)];
+        config.max_gross_exposure = vec![Decimal::ONE];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.risk_budget_lookback_days = vec![120, 180];
+        config.capacity_penalty_strength = vec![Decimal::new(75, 2)];
+        config.industry_max_weight_pct = vec![None];
+        config.style_risk_budget_profiles = vec!["off".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::ZERO];
+        config.partial_rebalance_ratio = vec![Decimal::ONE];
+        config.score_candidate_pool_sizes = vec![500];
+        config.universe_profiles = vec!["all".to_string()];
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_24_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(24, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_08_22_45_30_70",
+                Decimal::new(8, 2),
+                Decimal::new(22, 2),
+                Decimal::new(45, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover126_08_22_45_30_70",
+                Decimal::new(8, 2),
+                Decimal::new(22, 2),
+                Decimal::new(45, 2),
+                Some(126),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_20_60_100",
+                Decimal::new(20, 2),
+                120,
+                Decimal::new(60, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol252_16_50_100",
+                Decimal::new(16, 2),
+                252,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.position_risk_controls = vec![
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_075_cooldown_30",
+                Decimal::new(75, 3),
+                30,
+            ),
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_070_cooldown_30",
+                Decimal::new(7, 2),
+                30,
+            ),
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_075_cooldown_45",
+                Decimal::new(75, 3),
+                45,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom40",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(40, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.seed_trials = professional_current_anchor_risk_shape_seed_trials();
+        config
+    }
+
+    pub fn professional_current_anchor_position_frontier_default() -> Self {
+        let mut config = Self::professional_current_anchor_risk_shape_default();
+        config.max_pairwise_correlation = vec![
+            Decimal::new(65, 2),
+            Decimal::new(70, 2),
+            Decimal::new(75, 2),
+        ];
+        config.max_position_pct = vec![
+            Decimal::new(12, 2),
+            Decimal::new(13, 2),
+            Decimal::new(14, 2),
+            Decimal::new(15, 2),
+        ];
+        config.risk_budget_lookback_days = vec![180];
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_24_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(24, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_08_22_45_30_70",
+                Decimal::new(8, 2),
+                Decimal::new(22, 2),
+                Decimal::new(45, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.position_risk_controls = vec![PositionRiskControlProfile::stop_loss_with_cooldown(
+            "stop_loss_075_cooldown_30",
+            Decimal::new(75, 3),
+            30,
+        )];
+        config.seed_trials = professional_current_anchor_position_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_current_anchor_weak_window_repair_default() -> Self {
+        let mut config = Self::professional_current_anchor_position_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_value_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1".to_string(),
+        ];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_budget_lookback_days = vec![180];
+        config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::recover(
+            "recover252_08_22_45_30_70",
+            Decimal::new(8, 2),
+            Decimal::new(22, 2),
+            Decimal::new(45, 2),
+            Some(252),
+            Decimal::new(30, 2),
+            Decimal::new(70, 2),
+            Decimal::ONE,
+        )];
+        config.portfolio_volatility_controls = vec![PortfolioVolatilityControlProfile::target(
+            "vol120_16_50_100",
+            Decimal::new(16, 2),
+            120,
+            Decimal::new(50, 2),
+            Decimal::ONE,
+        )];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_window(
+                "stress_event_window_boost_p75_3pct",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_window(
+                "stress_event_window_boost_p75_5pct",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_window(
+                "stress_event_window_exclude_negative_p40",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_combo(
+                "stress_valuation_boost_p40_3pct",
+                "phase7_valuation_v1",
+                "boost_positive",
+                Decimal::new(40, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_combo(
+                "stress_valuation_boost_p40_5pct",
+                "phase7_valuation_v1",
+                "boost_positive",
+                Decimal::new(40, 2),
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+            EventGateProfile::event_combo(
+                "stress_valuation_exclude_p40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            )
+            .active_in(&["bear", "high_volatility"]),
+        ];
+        config.seed_trials = professional_current_anchor_weak_window_repair_seed_trials();
+        config
+    }
+
+    pub fn professional_current_anchor_sharpe_return_bridge_default() -> Self {
+        let mut config = Self::professional_current_anchor_position_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1".to_string(),
+        ];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(70, 2)];
+        config.max_position_pct = vec![Decimal::new(14, 2), Decimal::new(15, 2)];
+        config.top_n = vec![20, 25];
+        config.risk_budget_lookback_days = vec![180];
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_24_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(24, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_08_22_45_30_70",
+                Decimal::new(8, 2),
+                Decimal::new(22, 2),
+                Decimal::new(45, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_20_60_100",
+                Decimal::new(20, 2),
+                120,
+                Decimal::new(60, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_22_65_100",
+                Decimal::new(22, 2),
+                120,
+                Decimal::new(65, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom40",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(40, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.seed_trials = professional_current_anchor_sharpe_return_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_high_sharpe_return_recovery_default() -> Self {
+        let mut config = Self::professional_current_anchor_sharpe_return_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+        ];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(65, 2),
+            Decimal::new(675, 3),
+            Decimal::new(70, 2),
+        ];
+        config.max_position_pct = vec![
+            Decimal::new(14, 2),
+            Decimal::new(145, 3),
+            Decimal::new(15, 2),
+        ];
+        config.top_n = vec![20, 22, 25];
+        config.risk_budget_lookback_days = vec![180];
+        config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::recover(
+            "recover252_10_24_50_30_70",
+            Decimal::new(10, 2),
+            Decimal::new(24, 2),
+            Decimal::new(50, 2),
+            Some(252),
+            Decimal::new(30, 2),
+            Decimal::new(70, 2),
+            Decimal::ONE,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_19_58_100",
+                Decimal::new(19, 2),
+                120,
+                Decimal::new(58, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_20_60_100",
+                Decimal::new(20, 2),
+                120,
+                Decimal::new(60, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom35",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(35, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_high_sharpe_return_recovery_seed_trials();
+        config
+    }
+
+    pub fn professional_risk_memory_bridge_default() -> Self {
+        let mut config = Self::professional_high_sharpe_return_recovery_default();
+        config.risk_budget_lookback_days = vec![120, 140, 150, 160, 170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(675, 3)];
+        config.max_position_pct = vec![
+            Decimal::new(14, 2),
+            Decimal::new(145, 3),
+            Decimal::new(15, 2),
+        ];
+        config.top_n = vec![20];
+        config.portfolio_volatility_controls = vec![PortfolioVolatilityControlProfile::target(
+            "vol120_18_55_100",
+            Decimal::new(18, 2),
+            120,
+            Decimal::new(55, 2),
+            Decimal::ONE,
+        )];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_risk_memory_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_state_return_sharpe_router_default() -> Self {
+        let mut config = Self::professional_risk_memory_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_event_window_return_sharpe_router_v1".to_string(),
+            "quality_event_window_return_sharpe_router_v2".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(14, 2), Decimal::new(15, 2)];
+        config.top_n = vec![20, 22];
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_08_22_45_30_70",
+                Decimal::new(8, 2),
+                Decimal::new(22, 2),
+                Decimal::new(45, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+            PortfolioDrawdownControlProfile::recover(
+                "recover252_10_24_50_30_70",
+                Decimal::new(10, 2),
+                Decimal::new(24, 2),
+                Decimal::new(50, 2),
+                Some(252),
+                Decimal::new(30, 2),
+                Decimal::new(70, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_state_return_sharpe_router_seed_trials();
+        config
+    }
+
+    pub fn professional_state_return_sharpe_frontier_default() -> Self {
+        let mut config = Self::professional_state_return_sharpe_router_default();
+        config.market_regime_policies = vec![
+            "quality_event_window_return_sharpe_router_v1".to_string(),
+            "quality_event_window_return_sharpe_router_v2".to_string(),
+            "quality_event_window_return_sharpe_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![150, 160, 170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![
+            Decimal::new(14, 2),
+            Decimal::new(15, 2),
+            Decimal::new(16, 2),
+        ];
+        config.top_n = vec![20];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_state_return_sharpe_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_position_sharpe_return_bridge_default() -> Self {
+        let mut config = Self::professional_state_return_sharpe_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_event_window_return_sharpe_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![150, 160, 170, 180];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(65, 2),
+            Decimal::new(675, 3),
+            Decimal::new(70, 2),
+        ];
+        config.max_position_pct = vec![
+            Decimal::new(14, 2),
+            Decimal::new(145, 3),
+            Decimal::new(15, 2),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.seed_trials = professional_position_sharpe_return_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_moderate_position_sharpe_return_bridge_default() -> Self {
+        let mut config = Self::professional_position_sharpe_return_bridge_default();
+        config.max_pairwise_correlation = vec![
+            Decimal::new(70, 2),
+            Decimal::new(725, 3),
+            Decimal::new(75, 2),
+        ];
+        config.max_position_pct = vec![
+            Decimal::new(16, 2),
+            Decimal::new(17, 2),
+            Decimal::new(18, 2),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.seed_trials = professional_moderate_position_sharpe_return_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_correlation_frontier_sharpe_return_default() -> Self {
+        let mut config = Self::professional_moderate_position_sharpe_return_bridge_default();
+        config.market_regime_policies =
+            vec!["quality_event_window_return_sharpe_router_v4".to_string()];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(705, 3),
+            Decimal::new(71, 2),
+            Decimal::new(715, 3),
+            Decimal::new(72, 2),
+        ];
+        config.max_position_pct = vec![Decimal::new(16, 2), Decimal::new(165, 3)];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.seed_trials = professional_correlation_frontier_sharpe_return_seed_trials();
+        config
+    }
+
+    pub fn professional_correlation_threshold_sharpe_return_default() -> Self {
+        let mut config = Self::professional_correlation_frontier_sharpe_return_default();
+        config.max_pairwise_correlation = vec![
+            Decimal::new(706, 3),
+            Decimal::new(707, 3),
+            Decimal::new(708, 3),
+            Decimal::new(709, 3),
+        ];
+        config.seed_trials = professional_correlation_threshold_sharpe_return_seed_trials();
+        config
+    }
+
+    pub fn professional_soft_risk_frontier_sharpe_return_default() -> Self {
+        let mut config = Self::professional_state_return_sharpe_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_event_window_return_sharpe_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![160];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2), Decimal::new(16, 2)];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.risk_contribution_control_profiles = vec![
+            "off".to_string(),
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.candidate_risk_filter_profiles = vec![
+            "off".to_string(),
+            "low_volatility_v1".to_string(),
+            "low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.seed_trials = professional_soft_risk_frontier_sharpe_return_seed_trials();
+        config
+    }
+
+    pub fn professional_regime_alpha_selector_default() -> Self {
+        let mut config = Self::professional_soft_risk_frontier_sharpe_return_default();
+        config.market_regime_policies = vec![
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+            "quality_state_alpha_selector_v1".to_string(),
+            "quality_state_alpha_selector_v2".to_string(),
+            "quality_state_alpha_selector_v3".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![160];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_regime_alpha_selector_seed_trials();
+        config
+    }
+
+    pub fn professional_regime_alpha_overlay_frontier_default() -> Self {
+        let mut config = Self::professional_regime_alpha_selector_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_selector_v3".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_state_alpha_overlay_selector_v2".to_string(),
+            "quality_state_alpha_overlay_selector_v3".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![160];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.rebalance_hysteresis_pct = vec![Decimal::ZERO, Decimal::new(5, 3)];
+        config.partial_rebalance_ratio = vec![Decimal::ONE, Decimal::new(85, 2)];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_regime_alpha_overlay_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_mixed_state_event_alpha_default() -> Self {
+        let mut config = Self::professional_regime_alpha_overlay_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_event_state_selector_v1".to_string(),
+            "quality_mixed_event_state_selector_v2".to_string(),
+            "quality_mixed_event_state_overlay_selector_v1".to_string(),
+            "quality_mixed_event_state_overlay_selector_v2".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![160];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.rebalance_hysteresis_pct = vec![Decimal::ZERO];
+        config.partial_rebalance_ratio = vec![Decimal::ONE];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_mixed_state_event_alpha_seed_trials();
+        config
+    }
+
+    pub fn professional_mixed_state_risk_memory_default() -> Self {
+        let mut config = Self::professional_mixed_state_event_alpha_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_event_state_selector_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v2".to_string(),
+            "quality_mixed_state_risk_memory_router_v3".to_string(),
+        ];
+        config.seed_trials = professional_mixed_state_risk_memory_seed_trials();
+        config
+    }
+
+    pub fn professional_mixed_state_risk_memory_frontier_default() -> Self {
+        let mut config = Self::professional_mixed_state_risk_memory_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_event_state_selector_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v4".to_string(),
+            "quality_mixed_state_risk_memory_router_v5".to_string(),
+            "quality_mixed_state_risk_memory_router_v6".to_string(),
+        ];
+        config.seed_trials = professional_mixed_state_risk_memory_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_mixed_state_risk_memory_fine_frontier_default() -> Self {
+        let mut config = Self::professional_mixed_state_risk_memory_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_state_risk_memory_router_v4".to_string(),
+            "quality_mixed_state_risk_memory_router_v7".to_string(),
+            "quality_mixed_state_risk_memory_router_v8".to_string(),
+            "quality_mixed_state_risk_memory_router_v9".to_string(),
+            "quality_mixed_state_risk_memory_router_v10".to_string(),
+        ];
+        config.seed_trials = professional_mixed_state_risk_memory_fine_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_mixed_state_exposure_frontier_default() -> Self {
+        let mut config = Self::professional_mixed_state_risk_memory_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_event_state_selector_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v4".to_string(),
+            "quality_mixed_state_risk_memory_router_v11".to_string(),
+            "quality_mixed_state_risk_memory_router_v12".to_string(),
+            "quality_mixed_state_risk_memory_router_v13".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.seed_trials = professional_mixed_state_exposure_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_mixed_state_orthogonal_alpha_default() -> Self {
+        let mut config = Self::professional_mixed_state_exposure_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_orthogonal_alpha_selector_v1".to_string(),
+            "quality_mixed_orthogonal_alpha_selector_v2".to_string(),
+            "quality_mixed_orthogonal_alpha_selector_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v1".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v2".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_event_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_defensive_rel_v1", "1.0.0"),
+        ];
+        config.seed_trials = professional_mixed_state_orthogonal_alpha_seed_trials();
+        config
+    }
+
+    pub fn professional_candidate_filter_alpha_bridge_default() -> Self {
+        let mut config = Self::professional_mixed_state_orthogonal_alpha_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_state_alpha_overlay_selector_v2".to_string(),
+            "quality_mixed_event_state_selector_v1".to_string(),
+            "quality_mixed_orthogonal_alpha_selector_v1".to_string(),
+            "quality_mixed_orthogonal_alpha_selector_v2".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+        ];
+        config.candidate_risk_filter_profiles = vec![
+            "off".to_string(),
+            "low_volatility_v1".to_string(),
+            "low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.seed_trials = professional_candidate_filter_alpha_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_soft_candidate_filter_alpha_bridge_default() -> Self {
+        let mut config = Self::professional_candidate_filter_alpha_bridge_default();
+        config.candidate_risk_filter_profiles = vec![
+            "off".to_string(),
+            "soft_low_volatility_v1".to_string(),
+            "soft_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.seed_trials = professional_soft_candidate_filter_alpha_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_sharpe_bridge_frontier_default() -> Self {
+        let mut config = Self::professional_soft_candidate_filter_alpha_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_state_sharpe_bridge_router_v1".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+            "quality_state_sharpe_bridge_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.seed_trials = professional_sharpe_bridge_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_annual_sharpe_floor_bridge_default() -> Self {
+        let mut config = Self::professional_sharpe_bridge_frontier_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom35",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(35, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2), Decimal::new(16, 2)];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_annual_sharpe_floor_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_risk_memory_relaxed_frontier_default() -> Self {
+        let mut config = Self::professional_annual_sharpe_floor_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_mixed_state_risk_memory_router_v15".to_string(),
+            "quality_mixed_state_risk_memory_router_v16".to_string(),
+            "quality_mixed_state_risk_memory_router_v17".to_string(),
+            "quality_mixed_state_risk_memory_router_v18".to_string(),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom35",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(35, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.seed_trials = professional_risk_memory_relaxed_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_sharpe_floor_auto_discovery_default() -> Self {
+        let mut config = Self::professional_annual_sharpe_floor_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v16".to_string(),
+            "quality_mixed_state_risk_memory_router_v18".to_string(),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom35",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(35, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_sharpe_floor_auto_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_nonlinear_alpha_auto_discovery_default() -> Self {
+        let mut config = Self::professional_sharpe_floor_auto_discovery_default();
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_router_v1".to_string(),
+            "quality_nonlinear_alpha_router_v2".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v1".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::off(),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                120,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_060_000_55",
+                Decimal::new(60, 2),
+                Decimal::ZERO,
+                120,
+                Decimal::new(55, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_060_000_60",
+                Decimal::new(60, 2),
+                Decimal::ZERO,
+                180,
+                Decimal::new(60, 2),
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom35",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(35, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_nonlinear_alpha_auto_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_nonlinear_sharpe_return_bridge_default() -> Self {
+        let mut config = Self::professional_nonlinear_alpha_auto_discovery_default();
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v2".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+            "quality_nonlinear_alpha_router_v2".to_string(),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_050_neg10_55",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                120,
+                Decimal::new(55, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                120,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_060_000_55",
+                Decimal::new(60, 2),
+                Decimal::ZERO,
+                120,
+                Decimal::new(55, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_060_000_60",
+                Decimal::new(60, 2),
+                Decimal::ZERO,
+                180,
+                Decimal::new(60, 2),
+            ),
+        ];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2), Decimal::new(16, 2)];
+        config.seed_trials = professional_nonlinear_sharpe_return_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_confirmed_sharpe_bridge_default() -> Self {
+        let mut config = Self::professional_nonlinear_sharpe_return_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_17_52_100",
+                Decimal::new(17, 2),
+                120,
+                Decimal::new(52, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![PortfolioSharpeControlProfile::off()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom35",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(35, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_prediction_confirmed_sharpe_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_high_sharpe_boundary_return_bridge_default() -> Self {
+        let mut config = Self::professional_prediction_confirmed_sharpe_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_155_49_100",
+                Decimal::new(155, 3),
+                120,
+                Decimal::new(49, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2), Decimal::new(16, 2)];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.portfolio_sharpe_controls = vec![PortfolioSharpeControlProfile::off()];
+        config.seed_trials = professional_high_sharpe_boundary_return_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_high_sharpe_boundary_event_lift_default() -> Self {
+        let mut config = Self::professional_high_sharpe_boundary_return_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_all_regime_event_window_sleeve_05pct_v1".to_string(),
+            "quality_all_regime_event_window_sleeve_10pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1".to_string(),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.portfolio_sharpe_controls = vec![PortfolioSharpeControlProfile::off()];
+        config.seed_trials = professional_high_sharpe_boundary_event_lift_seed_trials();
+        config
+    }
+
+    pub fn professional_high_sharpe_micro_frontier_default() -> Self {
+        let mut config = Self::professional_high_sharpe_boundary_return_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_155_49_100",
+                Decimal::new(155, 3),
+                120,
+                Decimal::new(49, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                120,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec![
+            "off".to_string(),
+            "soft_low_volatility_v1".to_string(),
+            "soft_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.score_candidate_pool_sizes = vec![400, 500, 650, 800];
+        config.seed_trials = professional_high_sharpe_micro_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_v14_sharpe_return_lift_default() -> Self {
+        let mut config = Self::professional_high_sharpe_micro_frontier_default();
+        config.market_regime_policies =
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom43",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(43, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_14_46_100",
+                Decimal::new(14, 2),
+                120,
+                Decimal::new(46, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_142_465_100",
+                Decimal::new(142, 3),
+                120,
+                Decimal::new(465, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_148_475_100",
+                Decimal::new(148, 3),
+                120,
+                Decimal::new(475, 3),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_045_neg10_63",
+                Decimal::new(45, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(63, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![400, 500, 650];
+        config.seed_trials = professional_v14_sharpe_return_lift_seed_trials();
+        config
+    }
+
+    pub fn professional_v14_shape_lift_default() -> Self {
+        let mut config = Self::professional_v14_sharpe_return_lift_default();
+        config.market_regime_policies =
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![18, 20, 22];
+        config.rebalance_days = vec![50, 55, 60];
+        config.skip_top_pct = vec![Decimal::new(8, 2), Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.portfolio_volatility_controls = vec![PortfolioVolatilityControlProfile::target(
+            "vol120_142_465_100",
+            Decimal::new(142, 3),
+            120,
+            Decimal::new(465, 3),
+            Decimal::ONE,
+        )];
+        config.portfolio_sharpe_controls = vec![PortfolioSharpeControlProfile::reduce(
+            "roll_sharpe180_050_neg10_65",
+            Decimal::new(50, 2),
+            Decimal::new(-10, 2),
+            180,
+            Decimal::new(65, 2),
+        )];
+        config.risk_budget_lookback_days = vec![170];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_v14_shape_lift_seed_trials();
+        config
+    }
+
+    pub fn professional_v14_ultra_micro_lift_default() -> Self {
+        let mut config = Self::professional_v14_shape_lift_default();
+        config.market_regime_policies =
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![19, 20, 21];
+        config.rebalance_days = vec![58, 60, 62];
+        config.skip_top_pct = vec![Decimal::new(9, 2), Decimal::new(10, 2), Decimal::new(11, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_141_462_100",
+                Decimal::new(141, 3),
+                120,
+                Decimal::new(462, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_142_465_100",
+                Decimal::new(142, 3),
+                120,
+                Decimal::new(465, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_143_467_100",
+                Decimal::new(143, 3),
+                120,
+                Decimal::new(467, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_144_47_100",
+                Decimal::new(144, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![PortfolioSharpeControlProfile::reduce(
+            "roll_sharpe180_050_neg10_65",
+            Decimal::new(50, 2),
+            Decimal::new(-10, 2),
+            180,
+            Decimal::new(65, 2),
+        )];
+        config.risk_budget_lookback_days = vec![170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.score_candidate_pool_sizes = vec![500];
+        config.seed_trials = professional_v14_ultra_micro_lift_seed_trials();
+        config
+    }
+
+    pub fn professional_v14_annual_floor_micro_lift_default() -> Self {
+        let mut config = Self::professional_v14_ultra_micro_lift_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_mixed_state_risk_memory_router_v15".to_string(),
+            "quality_mixed_state_risk_memory_router_v16".to_string(),
+            "quality_mixed_state_risk_memory_router_v17".to_string(),
+            "quality_mixed_state_risk_memory_router_v18".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1405_461_100",
+                Decimal::new(1405, 4),
+                120,
+                Decimal::new(461, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_141_462_100",
+                Decimal::new(141, 3),
+                120,
+                Decimal::new(462, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_142_465_100",
+                Decimal::new(142, 3),
+                120,
+                Decimal::new(465, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_143_467_100",
+                Decimal::new(143, 3),
+                120,
+                Decimal::new(467, 3),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_0475_neg10_66",
+                Decimal::new(475, 3),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(66, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_66",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(66, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_68",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(68, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![165, 170];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_v14_annual_floor_micro_lift_seed_trials();
+        config
+    }
+
+    pub fn professional_v14_near_miss_annual_bridge_default() -> Self {
+        let mut config = Self::professional_v14_annual_floor_micro_lift_default();
+        config.market_regime_policies =
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1405_461_100",
+                Decimal::new(1405, 4),
+                120,
+                Decimal::new(461, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1408_4615_100",
+                Decimal::new(1408, 4),
+                120,
+                Decimal::new(4615, 4),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_141_462_100",
+                Decimal::new(141, 3),
+                120,
+                Decimal::new(462, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1412_463_100",
+                Decimal::new(1412, 4),
+                120,
+                Decimal::new(463, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1415_464_100",
+                Decimal::new(1415, 4),
+                120,
+                Decimal::new(464, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_142_465_100",
+                Decimal::new(142, 3),
+                120,
+                Decimal::new(465, 3),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_66",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(66, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_67",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(67, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 165, 170];
+        config.max_pairwise_correlation = vec![Decimal::new(70, 2), Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(145, 3), Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_v14_near_miss_annual_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_v14_corr70_annual_edge_default() -> Self {
+        let mut config = Self::professional_v14_near_miss_annual_bridge_default();
+        config.market_regime_policies =
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1415_464_100",
+                Decimal::new(1415, 4),
+                120,
+                Decimal::new(464, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1418_4645_100",
+                Decimal::new(1418, 4),
+                120,
+                Decimal::new(4645, 4),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_142_465_100",
+                Decimal::new(142, 3),
+                120,
+                Decimal::new(465, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1422_4655_100",
+                Decimal::new(1422, 4),
+                120,
+                Decimal::new(4655, 4),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_1425_466_100",
+                Decimal::new(1425, 4),
+                120,
+                Decimal::new(466, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_143_467_100",
+                Decimal::new(143, 3),
+                120,
+                Decimal::new(467, 3),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_66",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(66, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_67",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(67, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_68",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(68, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![165, 168];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(68, 2),
+            Decimal::new(70, 2),
+            Decimal::new(72, 2),
+        ];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_v14_corr70_annual_edge_seed_trials();
+        config
+    }
+
+    pub fn professional_return_alpha_sharpe_bridge_default() -> Self {
+        let mut config = Self::professional_v14_ultra_micro_lift_default();
+        config.market_regime_policies = vec![
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_141_462_100",
+                Decimal::new(141, 3),
+                120,
+                Decimal::new(462, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_143_467_100",
+                Decimal::new(143, 3),
+                120,
+                Decimal::new(467, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_return_alpha_sharpe_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_regime_frontier_bridge_default() -> Self {
+        let mut config = Self::professional_return_alpha_sharpe_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_frontier_regime_bridge_router_v1".to_string(),
+            "quality_frontier_regime_bridge_router_v2".to_string(),
+            "quality_frontier_regime_bridge_router_v3".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_141_462_100",
+                Decimal::new(141, 3),
+                120,
+                Decimal::new(462, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_142_465_100",
+                Decimal::new(142, 3),
+                120,
+                Decimal::new(465, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_143_467_100",
+                Decimal::new(143, 3),
+                120,
+                Decimal::new(467, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_regime_frontier_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_regime_frontier_decomposition_default() -> Self {
+        let mut config = Self::professional_regime_frontier_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_frontier_regime_bridge_router_v4".to_string(),
+            "quality_frontier_regime_bridge_router_v5".to_string(),
+            "quality_frontier_regime_bridge_router_v6".to_string(),
+            "quality_frontier_regime_bridge_router_v7".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_141_462_100",
+                Decimal::new(141, 3),
+                120,
+                Decimal::new(462, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_143_467_100",
+                Decimal::new(143, 3),
+                120,
+                Decimal::new(467, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_65",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(65, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles =
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_regime_frontier_decomposition_seed_trials();
+        config
+    }
+
+    pub fn professional_high_sharpe_return_micro_bridge_default() -> Self {
+        let mut config = Self::professional_regime_frontier_decomposition_default();
+        config.market_regime_policies = vec![
+            "quality_frontier_regime_bridge_router_v6".to_string(),
+            "quality_frontier_regime_bridge_router_v7".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![60];
+        config.skip_top_pct = vec![Decimal::new(10, 2)];
+        config.portfolio_methods = vec!["risk_budget".to_string()];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom45",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(45, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_143_467_100",
+                Decimal::new(143, 3),
+                120,
+                Decimal::new(467, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_145_47_100",
+                Decimal::new(145, 3),
+                120,
+                Decimal::new(47, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_147_475_100",
+                Decimal::new(147, 3),
+                120,
+                Decimal::new(475, 3),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_68",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(68, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_70",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(70, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_72",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(72, 2),
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![170, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.score_candidate_pool_sizes = vec![500, 650];
+        config.seed_trials = professional_high_sharpe_return_micro_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_return_distribution_repair_default() -> Self {
+        let mut config = Self::professional_high_sharpe_boundary_return_bridge_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.prediction_set_ids = Vec::new();
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::off(),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                120,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(60, 2),
+            ),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_window_10d_boost_p75_3pct",
+                "phase7_event_window_earnings_10d_v1",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_window_20d_boost_p75_3pct",
+                "phase7_event_window_earnings_v1",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_window_40d_exclude_negative",
+                "phase7_event_window_earnings_40d_v1",
+                "exclude_negative",
+                Decimal::ZERO,
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "residual_confirm_top40",
+                "phase7_quality_residual_confirm_10pct_v1",
+                "require_positive",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_return_distribution_repair_seed_trials();
+        config
+    }
+
+    pub fn professional_state_alpha_router_default() -> Self {
+        let mut config = Self::professional_current_anchor_weak_window_repair_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_regime_alpha_overlay_value_05pct_v1".to_string(),
+            "quality_regime_alpha_overlay_blend_10pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1".to_string(),
+            "quality_regime_alpha_portfolio_sleeve_value_10pct_v1".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![180];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom40",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(40, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.seed_trials = professional_state_alpha_router_seed_trials();
+        config
+    }
+
+    pub fn professional_state_position_risk_router_default() -> Self {
+        let mut config = Self::professional_state_alpha_router_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_bear_position_guard_v3".to_string(),
+            "quality_bear_position_guard_v1".to_string(),
+            "quality_bear_position_guard_v2".to_string(),
+        ];
+        config.risk_budget_lookback_days = vec![180];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::recover(
+            "recover252_08_22_45_30_70",
+            Decimal::new(8, 2),
+            Decimal::new(22, 2),
+            Decimal::new(45, 2),
+            Some(252),
+            Decimal::new(30, 2),
+            Decimal::new(70, 2),
+            Decimal::ONE,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_55_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(55, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::event_combo(
+            "valuation_exclude_bottom40",
+            "phase7_valuation_v1",
+            "exclude_negative",
+            Decimal::new(40, 2),
+            Decimal::ZERO,
+            ScoreDirection::Descending,
+        )];
+        config.seed_trials = professional_state_position_risk_router_seed_trials();
+        config
+    }
+
+    pub fn professional_event_position_risk_router_default() -> Self {
+        let mut config = Self::professional_state_position_risk_router_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_event_window_position_guard_v3".to_string(),
+            "quality_event_window_position_guard_v1".to_string(),
+            "quality_event_window_position_guard_v2".to_string(),
+        ];
+        config.seed_trials = professional_event_position_risk_router_seed_trials();
+        config
+    }
+
+    pub fn professional_all_regime_event_sleeve_default() -> Self {
+        let mut config = Self::professional_event_position_risk_router_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_all_regime_event_window_sleeve_05pct_v1".to_string(),
+            "quality_all_regime_event_window_sleeve_10pct_v1".to_string(),
+            "quality_all_regime_event_window_sleeve_15pct_v1".to_string(),
+        ];
+        config.seed_trials = professional_all_regime_event_sleeve_seed_trials();
+        config
+    }
+
+    pub fn professional_portfolio_sharpe_control_default() -> Self {
+        let mut config = Self::professional_all_regime_event_sleeve_default();
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_state_sharpe_bridge_router_v2".to_string(),
+        ];
+        config.portfolio_sharpe_controls = vec![
+            PortfolioSharpeControlProfile::off(),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_060_000_55",
+                Decimal::new(60, 2),
+                Decimal::ZERO,
+                120,
+                Decimal::new(55, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe120_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                120,
+                Decimal::new(60, 2),
+            ),
+            PortfolioSharpeControlProfile::reduce(
+                "roll_sharpe180_050_neg10_60",
+                Decimal::new(50, 2),
+                Decimal::new(-10, 2),
+                180,
+                Decimal::new(60, 2),
+            ),
+        ];
+        config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::recover(
+            "recover252_08_22_45_30_70",
+            Decimal::new(8, 2),
+            Decimal::new(22, 2),
+            Decimal::new(45, 2),
+            Some(252),
+            Decimal::new(30, 2),
+            Decimal::new(70, 2),
+            Decimal::ONE,
+        )];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![180];
+        config.max_position_pct = vec![Decimal::new(15, 2), Decimal::new(14, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2), Decimal::new(70, 2)];
+        config.seed_trials = professional_portfolio_sharpe_control_seed_trials();
+        config
+    }
+
     pub fn professional_volatility_sharpe_default() -> Self {
         let mut config = Self::professional_anti_overfit_sharpe_default();
         config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
@@ -4695,6 +15336,7 @@ impl LayeredSearchConfig {
             self.universe_profiles.len(),
             self.portfolio_drawdown_controls.len(),
             self.portfolio_volatility_controls.len(),
+            self.portfolio_sharpe_controls.len(),
             self.position_risk_controls.len(),
             self.event_gate_profiles.len(),
         ]
@@ -4808,6 +15450,8 @@ pub fn build_layered_search_plan(
             &config.portfolio_drawdown_controls[indices.portfolio_drawdown_control];
         let portfolio_volatility_control =
             &config.portfolio_volatility_controls[indices.portfolio_volatility_control];
+        let portfolio_sharpe_control =
+            &config.portfolio_sharpe_controls[indices.portfolio_sharpe_control];
         let position_risk_control = &config.position_risk_controls[indices.position_risk_control];
         let event_gate_profile = &config.event_gate_profiles[indices.event_gate_profile];
 
@@ -4837,6 +15481,7 @@ pub fn build_layered_search_plan(
             "universe_profile": universe_profile,
             "portfolio_drawdown_control": portfolio_drawdown_control.profile_name,
             "portfolio_volatility_control": portfolio_volatility_control.profile_name,
+            "portfolio_sharpe_control": portfolio_sharpe_control.profile_name,
             "position_risk_control": position_risk_control.profile_name,
             "event_gate_profile": event_gate_profile.profile_name,
             "benchmark": config.benchmark,
@@ -4883,6 +15528,19 @@ pub fn build_layered_search_plan(
         if let Some(max_exposure) = portfolio_volatility_control.max_exposure {
             parameters["portfolio_volatility_max_exposure"] =
                 serde_json::json!(decimal_string(max_exposure));
+        }
+        if let (Some(start), Some(full), Some(min_exposure)) = (
+            portfolio_sharpe_control.reduce_start,
+            portfolio_sharpe_control.reduce_full,
+            portfolio_sharpe_control.min_exposure,
+        ) {
+            parameters["portfolio_sharpe_reduce_start"] = serde_json::json!(decimal_string(start));
+            parameters["portfolio_sharpe_reduce_full"] = serde_json::json!(decimal_string(full));
+            parameters["portfolio_sharpe_min_exposure"] =
+                serde_json::json!(decimal_string(min_exposure));
+        }
+        if let Some(lookback_days) = portfolio_sharpe_control.lookback_days {
+            parameters["portfolio_sharpe_lookback_days"] = serde_json::json!(lookback_days);
         }
         if let Some(stop_loss_pct) = position_risk_control.stop_loss_pct {
             parameters["stop_loss_pct"] = serde_json::json!(decimal_string(stop_loss_pct));
@@ -4981,6 +15639,7 @@ struct LayeredTrialIndices {
     universe_profile: usize,
     portfolio_drawdown_control: usize,
     portfolio_volatility_control: usize,
+    portfolio_sharpe_control: usize,
     position_risk_control: usize,
     event_gate_profile: usize,
 }
@@ -5010,6 +15669,8 @@ impl LayeredTrialIndices {
             take_axis_index(&mut index, config.portfolio_drawdown_controls.len())?;
         let portfolio_volatility_control =
             take_axis_index(&mut index, config.portfolio_volatility_controls.len())?;
+        let portfolio_sharpe_control =
+            take_axis_index(&mut index, config.portfolio_sharpe_controls.len())?;
         let position_risk_control =
             take_axis_index(&mut index, config.position_risk_controls.len())?;
         let event_gate_profile = take_axis_index(&mut index, config.event_gate_profiles.len())?;
@@ -5051,6 +15712,7 @@ impl LayeredTrialIndices {
             universe_profile,
             portfolio_drawdown_control,
             portfolio_volatility_control,
+            portfolio_sharpe_control,
             position_risk_control,
             event_gate_profile,
         })
@@ -5447,6 +16109,7 @@ mod tests {
                     Decimal::ONE,
                 ),
             ],
+            portfolio_sharpe_controls: vec![PortfolioSharpeControlProfile::off()],
             position_risk_controls: vec![PositionRiskControlProfile::off()],
             event_gate_profiles: vec![EventGateProfile::off()],
             seed_trials: Vec::new(),
@@ -6846,6 +17509,2803 @@ mod tests {
                 && trial["portfolio_method"] == "risk_budget"
                 && trial["risk_budget_lookback_days"] == 120
         }));
+    }
+
+    #[test]
+    fn professional_event_surprise_nonlinear_profile_keeps_search_narrow_and_stress_conditioned() {
+        let config = LayeredSearchConfig::professional_event_surprise_nonlinear_default();
+
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            combo_names,
+            std::collections::BTreeSet::from([
+                "phase7_financial_quality_v1",
+                "phase7_quality_event_surprise_confirm_v1"
+            ])
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_bear_window_guard_v2".to_string()]
+        );
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![120]);
+        assert_eq!(config.event_gate_profiles.len(), 5);
+        assert!(config.event_gate_profiles.iter().all(|profile| {
+            profile.combo_name.as_deref() != Some("phase7_event_window_earnings_v1")
+                && (profile.profile_name == "off"
+                    || profile.active_regimes.as_slice() == ["bear", "high_volatility"])
+        }));
+        assert!(config.event_gate_profiles.iter().any(|profile| {
+            profile.profile_name == "event_surprise_boost_pos_5pct_stress_only"
+                && profile.combo_name.as_deref() == Some("phase7_event_surprise_v1")
+                && profile.mode.as_deref() == Some("boost_positive")
+                && profile.boost_weight == Some(Decimal::new(5, 2))
+        }));
+        assert!(config.event_gate_profiles.iter().any(|profile| {
+            profile.profile_name == "event_surprise_exclude_negative_stress_only"
+                && profile.combo_name.as_deref() == Some("phase7_event_surprise_v1")
+                && profile.mode.as_deref() == Some("exclude_negative")
+        }));
+        assert_eq!(config.seed_trials.len(), 6);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 120
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+                && trial["event_gate_combo_name"] != "phase7_event_window_earnings_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_surprise_confirm_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_surprise_require_positive_stress_only"
+                && trial["event_gate_active_regimes"] == json!(["bear", "high_volatility"])
+        }));
+    }
+
+    #[test]
+    fn professional_event_quality_segment_profile_keeps_ax_anchor_and_compares_event_quality() {
+        let config = LayeredSearchConfig::professional_event_quality_segment_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_bear_window_guard_v2".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![120]);
+        assert_eq!(config.seed_trials.len(), 4);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 120
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_event_strength_segment_profile_uses_min_score_without_widening_grid() {
+        let config = LayeredSearchConfig::professional_event_strength_segment_default();
+
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![120]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_bear_window_guard_v2".to_string()]
+        );
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config
+                .event_gate_profiles
+                .iter()
+                .map(|profile| profile.profile_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "off",
+                "event_window_require_strong_p75",
+                "event_window_require_strong_p90",
+                "event_surprise_require_strong_p75",
+                "event_surprise_require_strong_p90",
+                "event_confirm_require_light_p50",
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 5);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 120
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+                && trial["event_gate_mode"] == "require_positive"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_window_require_strong_p75"
+                && trial["event_gate_combo_name"] == "phase7_event_window_earnings_v1"
+                && trial["event_gate_min_score"] == "0.38"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_window_require_strong_p90"
+                && trial["event_gate_combo_name"] == "phase7_event_window_earnings_v1"
+                && trial["event_gate_min_score"] == "0.66"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_surprise_require_strong_p75"
+                && trial["event_gate_combo_name"] == "phase7_event_surprise_v1"
+                && trial["event_gate_min_score"] == "0.35"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_confirm_require_light_p50"
+                && trial["event_gate_combo_name"] == "phase7_event_earnings_v1"
+                && trial["event_gate_min_score"] == "0.39"
+        }));
+    }
+
+    #[test]
+    fn professional_event_strength_boost_profile_segments_without_hard_filtering() {
+        let config = LayeredSearchConfig::professional_event_strength_boost_default();
+
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![120]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_bear_window_guard_v2".to_string()]
+        );
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.seed_trials.len(), 6);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+                && trial["event_gate_mode"] == "boost_positive"
+                && trial["event_gate_boost_weight"] != "0"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_window_boost_strong_p75_3pct"
+                && trial["event_gate_combo_name"] == "phase7_event_window_earnings_v1"
+                && trial["event_gate_min_score"] == "0.38"
+                && trial["event_gate_boost_weight"] == "0.03"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_window_boost_strong_p75_5pct"
+                && trial["event_gate_combo_name"] == "phase7_event_window_earnings_v1"
+                && trial["event_gate_min_score"] == "0.38"
+                && trial["event_gate_boost_weight"] == "0.05"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_surprise_boost_strong_p75_3pct"
+                && trial["event_gate_combo_name"] == "phase7_event_surprise_v1"
+                && trial["event_gate_min_score"] == "0.35"
+                && trial["event_gate_boost_weight"] == "0.03"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "event_confirm_boost_light_p50_3pct"
+                && trial["event_gate_combo_name"] == "phase7_event_earnings_v1"
+                && trial["event_gate_min_score"] == "0.39"
+                && trial["event_gate_boost_weight"] == "0.03"
+        }));
+    }
+
+    #[test]
+    fn professional_legacy_alpha_revalidation_profile_keeps_current_anchor_and_retests_legacy() {
+        let config = LayeredSearchConfig::professional_legacy_alpha_revalidation_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![
+                ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+                ComboVersion::new("full_icir_16f_v3", "1.0.0"),
+            ]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "off".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+                && trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["legacy_revalidation_profile"] == "full_icir_v3_full_history_legacy_exact"
+                && trial["combo_name"] == "full_icir_16f_v3"
+                && trial["start_date"] == "20160201"
+                && trial["end_date"] == "20260511"
+                && trial["portfolio_method"] == "heuristic"
+                && trial["kelly_fraction"] == "0.25"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["legacy_revalidation_profile"] == "full_icir_v3_full_history_risk_budget"
+                && trial["combo_name"] == "full_icir_16f_v3"
+                && trial["start_date"] == "20160201"
+                && trial["end_date"] == "20260511"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["legacy_revalidation_profile"] == "full_icir_v3_recent_window_diagnostic"
+                && trial["start_date"] == "20230512"
+                && trial["end_date"] == "20260511"
+        }));
+    }
+
+    #[test]
+    fn professional_current_anchor_risk_shape_profile_keeps_ax_anchor_and_sweeps_risk_shape() {
+        let config = LayeredSearchConfig::professional_current_anchor_risk_shape_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string()]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![120, 180]);
+        assert_eq!(config.seed_trials.len(), 10);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"]
+                    == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["event_gate_combo_name"] == "phase7_valuation_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["stop_loss_pct"].is_string()
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_20_60_100"
+                && trial["portfolio_volatility_target_pct"] == "0.20"
+                && trial["portfolio_volatility_min_exposure"] == "0.60"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_16_50_100"
+                && trial["portfolio_volatility_target_pct"] == "0.16"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_drawdown_control"] == "recover126_08_22_45_30_70"
+                && trial["portfolio_drawdown_peak_lookback_days"] == 126
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_risk_control"] == "stop_loss_075_cooldown_45"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 45
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos12_corr65"
+                && trial["max_position_pct"] == "0.12"
+                && trial["max_pairwise_correlation"] == "0.65"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["risk_budget_shape_profile"] == "risk_budget_180"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+    }
+
+    #[test]
+    fn professional_current_anchor_position_frontier_profile_interpolates_position_risk() {
+        let config = LayeredSearchConfig::professional_current_anchor_position_frontier_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string()]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![
+                Decimal::new(12, 2),
+                Decimal::new(13, 2),
+                Decimal::new(14, 2),
+                Decimal::new(15, 2),
+            ]
+        );
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![
+                Decimal::new(65, 2),
+                Decimal::new(70, 2),
+                Decimal::new(75, 2),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 10);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["market_regime"]
+                    == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 180
+                && trial["stop_loss_pct"] == "0.075"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["risk_budget_shape_profile"] == "risk_budget_180"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+                && trial["portfolio_drawdown_control"] == "recover252_10_24_50_30_70"
+                && trial["max_position_pct"] == "0.15"
+                && trial["max_pairwise_correlation"] == "0.75"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos14_corr70"
+                && trial["max_position_pct"] == "0.14"
+                && trial["max_pairwise_correlation"] == "0.70"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "vol16_recover08_maxpos14_corr70"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+        }));
+    }
+
+    #[test]
+    fn professional_current_anchor_weak_window_repair_profile_keeps_bg_anchor_and_uses_stress_only_repairs(
+    ) {
+        let config = LayeredSearchConfig::professional_current_anchor_weak_window_repair_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_value_10pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_value_15pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(config.seed_trials.len(), 10);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 180
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["market_regime"]
+                    == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "stress_event_window_boost_p75_3pct"
+                && trial["event_gate_combo_name"] == "phase7_event_window_earnings_v1"
+                && trial["event_gate_mode"] == "boost_positive"
+                && trial["event_gate_min_score"] == "0.38"
+                && trial["event_gate_boost_weight"] == "0.03"
+                && trial["event_gate_active_regimes"] == json!(["bear", "high_volatility"])
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "stress_valuation_boost_p40_5pct"
+                && trial["event_gate_combo_name"] == "phase7_valuation_v1"
+                && trial["event_gate_mode"] == "boost_positive"
+                && trial["event_gate_min_score"] == "0.40"
+                && trial["event_gate_boost_weight"] == "0.05"
+                && trial["event_gate_active_regimes"] == json!(["bear", "high_volatility"])
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "stress_valuation_exclude_p40"
+                && trial["event_gate_mode"] == "exclude_negative"
+                && trial["event_gate_active_regimes"] == json!(["bear", "high_volatility"])
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_value_15pct_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+        }));
+    }
+
+    #[test]
+    fn professional_current_anchor_sharpe_return_bridge_profile_starts_from_high_sharpe_boundary() {
+        let config =
+            LayeredSearchConfig::professional_current_anchor_sharpe_return_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![Decimal::new(65, 2), Decimal::new(70, 2)]
+        );
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(14, 2), Decimal::new(15, 2)]
+        );
+        assert_eq!(config.seed_trials.len(), 10);
+        assert_eq!(
+            config.seed_trials[0]["position_shape_profile"],
+            "maxpos14_corr65"
+        );
+        assert_eq!(config.seed_trials[0]["max_position_pct"], "0.14");
+        assert_eq!(config.seed_trials[0]["max_pairwise_correlation"], "0.65");
+        assert_eq!(
+            config.seed_trials[0]["portfolio_volatility_control"],
+            "vol120_18_55_100"
+        );
+        assert_eq!(
+            config.seed_trials[0]["portfolio_drawdown_control"],
+            "recover252_10_24_50_30_70"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos14_corr65_vol20"
+                && trial["portfolio_volatility_control"] == "vol120_20_60_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos14_corr65_vol22"
+                && trial["portfolio_volatility_control"] == "vol120_22_65_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos15_corr70_vol20"
+                && trial["max_position_pct"] == "0.15"
+                && trial["max_pairwise_correlation"] == "0.70"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1"
+                && trial["position_shape_profile"] == "maxpos14_corr65_vol20_event125"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_high_sharpe_return_recovery_profile_bridges_boundary_without_wide_grid() {
+        let config = LayeredSearchConfig::professional_high_sharpe_return_recovery_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![
+                Decimal::new(65, 2),
+                Decimal::new(675, 3),
+                Decimal::new(70, 2)
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert_eq!(
+            config.seed_trials[0]["position_shape_profile"],
+            "maxpos14_corr65"
+        );
+        assert_eq!(
+            config.seed_trials[1]["portfolio_drawdown_control"],
+            "recover252_08_22_45_30_70"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_19_58_100"
+                && trial["position_shape_profile"] == "maxpos14_corr65"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1"
+                && trial["event_sleeve_profile"] == "event_window_125pct"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom35"
+                && trial["event_gate_min_score"] == "0.35"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos145_corr65"
+                && trial["max_position_pct"] == "0.145"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_risk_memory_bridge_profile_searches_middle_lookbacks() {
+        let config = LayeredSearchConfig::professional_risk_memory_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(
+            config.risk_budget_lookback_days,
+            vec![120, 140, 150, 160, 170, 180]
+        );
+        assert_eq!(
+            config.portfolio_volatility_controls[0].profile_name,
+            "vol120_18_55_100"
+        );
+        assert_eq!(config.seed_trials.len(), 16);
+        assert_eq!(
+            config.seed_trials[0]["portfolio_drawdown_control"],
+            "recover252_08_22_45_30_70"
+        );
+        assert_eq!(
+            config.seed_trials[1]["position_shape_profile"],
+            "maxpos14_corr65"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["risk_budget_shape_profile"] == "risk_budget_140"
+                && trial["risk_budget_lookback_days"] == 140
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos145_corr65_rb150"
+                && trial["risk_budget_lookback_days"] == 150
+                && trial["max_position_pct"] == "0.145"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["risk_budget_shape_profile"] == "valuation45_rb150"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_state_return_sharpe_router_profile_bridges_return_and_boundary() {
+        let config = LayeredSearchConfig::professional_state_return_sharpe_router_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![160, 180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_event_window_return_sharpe_router_v1".to_string(),
+                "quality_event_window_return_sharpe_router_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 10);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v1"
+                && trial["position_shape_profile"] == "maxpos14_corr65"
+                && trial["max_position_pct"] == "0.14"
+                && trial["max_pairwise_correlation"] == "0.65"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v2"
+                && trial["risk_budget_lookback_days"] == 160
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_state_return_sharpe_frontier_profile_sweeps_bp_neighborhood() {
+        let config = LayeredSearchConfig::professional_state_return_sharpe_frontier_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![150, 160, 170, 180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_event_window_return_sharpe_router_v1".to_string(),
+                "quality_event_window_return_sharpe_router_v2".to_string(),
+                "quality_event_window_return_sharpe_router_v3".to_string(),
+                "quality_event_window_return_sharpe_router_v4".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v3"
+                && trial["risk_budget_shape_profile"] == "bp_rb160_router_v3"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["market_regime"] == "quality_event_window_return_sharpe_router_v3"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_position_sharpe_return_bridge_profile_blends_bq_and_boundary_shapes() {
+        let config = LayeredSearchConfig::professional_position_sharpe_return_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![150, 160, 170, 180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_event_window_return_sharpe_router_v3".to_string(),
+                "quality_event_window_return_sharpe_router_v4".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![
+                Decimal::new(65, 2),
+                Decimal::new(675, 3),
+                Decimal::new(70, 2),
+            ]
+        );
+        assert_eq!(
+            config.max_position_pct,
+            vec![
+                Decimal::new(14, 2),
+                Decimal::new(145, 3),
+                Decimal::new(15, 2),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["position_shape_profile"] == "maxpos14_corr65_router_v4_rb160"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v3"
+                && trial["position_shape_profile"] == "maxpos145_corr65_router_v3_rb160"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["risk_budget_shape_profile"] == "bp_rb170_router_v4"
+                && trial["max_pairwise_correlation"] == "0.65"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_moderate_position_sharpe_return_bridge_profile_keeps_return_room() {
+        let config =
+            LayeredSearchConfig::professional_moderate_position_sharpe_return_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![
+                Decimal::new(70, 2),
+                Decimal::new(725, 3),
+                Decimal::new(75, 2),
+            ]
+        );
+        assert_eq!(
+            config.max_position_pct,
+            vec![
+                Decimal::new(16, 2),
+                Decimal::new(17, 2),
+                Decimal::new(18, 2),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["position_shape_profile"] == "maxpos16_corr70_router_v4_vol120_16_50_100"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v3"
+                && trial["position_shape_profile"] == "maxpos17_corr725_router_v3_vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_correlation_frontier_sharpe_return_profile_sweeps_narrow_corr_band() {
+        let config = LayeredSearchConfig::professional_correlation_frontier_sharpe_return_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_event_window_return_sharpe_router_v4".to_string()]
+        );
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![
+                Decimal::new(705, 3),
+                Decimal::new(71, 2),
+                Decimal::new(715, 3),
+                Decimal::new(72, 2),
+            ]
+        );
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(16, 2), Decimal::new(165, 3)]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos16_corr705_router_v4_vol120_16_50_100"
+                && trial["max_pairwise_correlation"] == "0.705"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos165_corr72_router_v4_vol120_17_52_100"
+                && trial["max_position_pct"] == "0.165"
+                && trial["max_pairwise_correlation"] == "0.72"
+        }));
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_correlation_threshold_sharpe_return_profile_sweeps_jump_boundary() {
+        let config =
+            LayeredSearchConfig::professional_correlation_threshold_sharpe_return_default();
+
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![
+                Decimal::new(706, 3),
+                Decimal::new(707, 3),
+                Decimal::new(708, 3),
+                Decimal::new(709, 3),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos16_corr706_router_v4_vol120_16_50_100"
+                && trial["max_pairwise_correlation"] == "0.706"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["position_shape_profile"] == "maxpos165_corr709_router_v4_vol120_17_52_100"
+                && trial["max_pairwise_correlation"] == "0.709"
+        }));
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_soft_risk_frontier_sharpe_return_profile_adds_soft_risk_controls() {
+        let config = LayeredSearchConfig::professional_soft_risk_frontier_sharpe_return_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_event_window_return_sharpe_router_v3".to_string(),
+                "quality_event_window_return_sharpe_router_v4".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec![
+                "off".to_string(),
+                "soft_single_name_20pct_v1".to_string(),
+                "soft_single_name_15pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec![
+                "off".to_string(),
+                "low_volatility_v1".to_string(),
+                "low_volatility_low_correlation_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["risk_contribution_control"] == "soft_single_name_20pct_v1"
+                && trial["candidate_risk_filter"] == "off"
+                && trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["risk_contribution_control"] == "soft_single_name_15pct_v1"
+                && trial["candidate_risk_filter"] == "low_volatility_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["candidate_risk_filter"] == "low_volatility_low_correlation_v1"
+                && trial["market_regime"] == "quality_event_window_return_sharpe_router_v3"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_regime_alpha_selector_profile_changes_alpha_mix_not_dates() {
+        let config = LayeredSearchConfig::professional_regime_alpha_selector_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![160]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_event_window_return_sharpe_router_v4".to_string(),
+                "quality_state_alpha_selector_v1".to_string(),
+                "quality_state_alpha_selector_v2".to_string(),
+                "quality_state_alpha_selector_v3".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert_eq!(
+            config.seed_trials[0]["market_regime"],
+            "quality_event_window_return_sharpe_router_v4"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_selector_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["risk_contribution_control"] == "soft_single_name_20pct_v1"
+                && trial["candidate_risk_filter"] == "off"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_selector_v2"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_selector_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_regime_alpha_overlay_frontier_profile_adds_selector_overlay_and_smoothing() {
+        let config = LayeredSearchConfig::professional_regime_alpha_overlay_frontier_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_state_alpha_selector_v3".to_string(),
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_state_alpha_overlay_selector_v2".to_string(),
+                "quality_state_alpha_overlay_selector_v3".to_string(),
+            ]
+        );
+        assert_eq!(config.risk_budget_lookback_days, vec![160]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.rebalance_hysteresis_pct,
+            vec![Decimal::ZERO, Decimal::new(5, 3)]
+        );
+        assert_eq!(
+            config.partial_rebalance_ratio,
+            vec![Decimal::ONE, Decimal::new(85, 2)]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["rebalance_hysteresis_pct"] == "0"
+                && trial["partial_rebalance_ratio"] == "1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v3"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+                && trial["rebalance_hysteresis_pct"] == "0.005"
+                && trial["partial_rebalance_ratio"] == "0.85"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_mixed_state_event_alpha_profile_routes_mixed_state_without_date_fitting() {
+        let config = LayeredSearchConfig::professional_mixed_state_event_alpha_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_mixed_event_state_selector_v1".to_string(),
+                "quality_mixed_event_state_selector_v2".to_string(),
+                "quality_mixed_event_state_overlay_selector_v1".to_string(),
+                "quality_mixed_event_state_overlay_selector_v2".to_string(),
+                "quality_event_window_return_sharpe_router_v4".to_string(),
+            ]
+        );
+        assert_eq!(config.risk_budget_lookback_days, vec![160]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(config.rebalance_hysteresis_pct, vec![Decimal::ZERO]);
+        assert_eq!(config.partial_rebalance_ratio, vec![Decimal::ONE]);
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_event_state_overlay_selector_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["rebalance_hysteresis_pct"] == "0"
+                && trial["partial_rebalance_ratio"] == "1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_event_state_overlay_selector_v2"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_mixed_state_risk_memory_profile_tightens_mixed_state_only() {
+        let config = LayeredSearchConfig::professional_mixed_state_risk_memory_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_mixed_event_state_selector_v1".to_string(),
+                "quality_mixed_state_risk_memory_router_v1".to_string(),
+                "quality_mixed_state_risk_memory_router_v2".to_string(),
+                "quality_mixed_state_risk_memory_router_v3".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["risk_budget_lookback_days"] == 160
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v2"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_mixed_state_risk_memory_frontier_profile_bridges_return_and_sharpe() {
+        let config = LayeredSearchConfig::professional_mixed_state_risk_memory_frontier_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_mixed_event_state_selector_v1".to_string(),
+                "quality_mixed_state_risk_memory_router_v1".to_string(),
+                "quality_mixed_state_risk_memory_router_v4".to_string(),
+                "quality_mixed_state_risk_memory_router_v5".to_string(),
+                "quality_mixed_state_risk_memory_router_v6".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v4"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v5"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_mixed_state_risk_memory_fine_frontier_profile_scans_near_boundary() {
+        let config =
+            LayeredSearchConfig::professional_mixed_state_risk_memory_fine_frontier_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_state_risk_memory_router_v4".to_string(),
+                "quality_mixed_state_risk_memory_router_v7".to_string(),
+                "quality_mixed_state_risk_memory_router_v8".to_string(),
+                "quality_mixed_state_risk_memory_router_v9".to_string(),
+                "quality_mixed_state_risk_memory_router_v10".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v7"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v9"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v4"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_mixed_state_exposure_frontier_profile_isolates_exposure_axis() {
+        let config = LayeredSearchConfig::professional_mixed_state_exposure_frontier_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_event_state_selector_v1".to_string(),
+                "quality_mixed_state_risk_memory_router_v4".to_string(),
+                "quality_mixed_state_risk_memory_router_v11".to_string(),
+                "quality_mixed_state_risk_memory_router_v12".to_string(),
+                "quality_mixed_state_risk_memory_router_v13".to_string(),
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v11"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_event_state_selector_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_mixed_state_orthogonal_alpha_profile_changes_mixed_alpha_source() {
+        let config = LayeredSearchConfig::professional_mixed_state_orthogonal_alpha_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_orthogonal_alpha_selector_v1".to_string(),
+                "quality_mixed_orthogonal_alpha_selector_v2".to_string(),
+                "quality_mixed_orthogonal_alpha_selector_v3".to_string(),
+                "quality_mixed_orthogonal_risk_memory_router_v1".to_string(),
+                "quality_mixed_orthogonal_risk_memory_router_v2".to_string(),
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+            ]
+        );
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(combo_names.contains("phase7_financial_quality_v1"));
+        assert!(combo_names.contains("phase7_quality_residual_confirm_10pct_v1"));
+        assert!(combo_names.contains("phase7_quality_value_recovery_event_confirm_v1"));
+        assert!(combo_names.contains("phase7_blend_defensive_rel_v1"));
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_alpha_selector_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v2"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_candidate_filter_alpha_bridge_profile_crosses_filter_and_alpha_axes() {
+        let config = LayeredSearchConfig::professional_candidate_filter_alpha_bridge_default();
+
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec![
+                "off".to_string(),
+                "low_volatility_v1".to_string(),
+                "low_volatility_low_correlation_v1".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec![
+                "soft_single_name_20pct_v1".to_string(),
+                "soft_single_name_15pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["candidate_risk_filter"] == "low_volatility_low_correlation_v1"
+                && trial["risk_contribution_control"] == "soft_single_name_20pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_alpha_selector_v1"
+                && trial["candidate_risk_filter"] == "low_volatility_v1"
+                && trial["risk_contribution_control"] == "soft_single_name_15pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["candidate_risk_filter"] == "off"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_soft_candidate_filter_alpha_bridge_profile_relaxes_hard_filter() {
+        let config = LayeredSearchConfig::professional_soft_candidate_filter_alpha_bridge_default();
+
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec![
+                "off".to_string(),
+                "soft_low_volatility_v1".to_string(),
+                "soft_low_volatility_low_correlation_v1".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["candidate_risk_filter"] == "soft_low_volatility_low_correlation_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_alpha_selector_v3"
+                && trial["candidate_risk_filter"] == "soft_low_volatility_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["candidate_risk_filter"] == "off"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_sharpe_bridge_frontier_profile_centers_bx_anchor_without_filtering() {
+        let config = LayeredSearchConfig::professional_sharpe_bridge_frontier_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_state_sharpe_bridge_router_v1".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+                "quality_state_sharpe_bridge_router_v3".to_string(),
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["candidate_risk_filter"] == "off"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_sharpe_bridge_router_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_sharpe_bridge_router_v3"
+                && trial["portfolio_volatility_control"] == "vol120_14_46_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_annual_sharpe_floor_bridge_profile_bridges_risk_memory_without_date_fitting() {
+        let config = LayeredSearchConfig::professional_annual_sharpe_floor_bridge_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom35"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_sharpe_bridge_router_v2"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_17_52_100"
+                && trial["risk_contribution_control"] == "off"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_risk_memory_relaxed_frontier_profile_tests_internal_mixed_risk_boundary() {
+        let config = LayeredSearchConfig::professional_risk_memory_relaxed_frontier_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+                "quality_mixed_state_risk_memory_router_v15".to_string(),
+                "quality_mixed_state_risk_memory_router_v16".to_string(),
+                "quality_mixed_state_risk_memory_router_v17".to_string(),
+                "quality_mixed_state_risk_memory_router_v18".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 10);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_14_46_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v16"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v18"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom35"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_sharpe_floor_auto_discovery_profile_bridges_sharpe_boundary_and_annual_floor() {
+        let config = LayeredSearchConfig::professional_sharpe_floor_auto_discovery_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_mixed_state_risk_memory_router_v16".to_string(),
+                "quality_mixed_state_risk_memory_router_v18".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_14_46_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_sharpe_bridge_router_v2"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_prediction_confirmed_sharpe_bridge_profile_adds_weak_ml_confirmation_without_date_fitting(
+    ) {
+        let config = LayeredSearchConfig::professional_prediction_confirmed_sharpe_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "CN uses prediction as a weak blend/filter over factor_combo seeds, not standalone model_prediction"
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["prediction_set_id"] == "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+                && trial["prediction_blend_weight"] == "0.02"
+                && trial.get("prediction_min_percentile").is_none()
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["portfolio_volatility_control"] == "vol120_14_46_100"
+                && trial["prediction_blend_weight"] == "0.05"
+                && trial["prediction_min_percentile"] == "0.20"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_sharpe_bridge_router_v2"
+                && trial["portfolio_volatility_control"] == "vol120_17_52_100"
+                && trial["prediction_blend_weight"] == "0.08"
+                && trial["prediction_min_percentile"] == "0.30"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_high_sharpe_boundary_return_bridge_profile_targets_real_boundary_without_prediction(
+    ) {
+        let config = LayeredSearchConfig::professional_high_sharpe_boundary_return_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(
+            config.portfolio_volatility_controls,
+            vec![
+                PortfolioVolatilityControlProfile::target(
+                    "vol120_14_46_100",
+                    Decimal::new(14, 2),
+                    120,
+                    Decimal::new(46, 2),
+                    Decimal::ONE,
+                ),
+                PortfolioVolatilityControlProfile::target(
+                    "vol120_145_47_100",
+                    Decimal::new(145, 3),
+                    120,
+                    Decimal::new(47, 2),
+                    Decimal::ONE,
+                ),
+                PortfolioVolatilityControlProfile::target(
+                    "vol120_15_48_100",
+                    Decimal::new(15, 2),
+                    120,
+                    Decimal::new(48, 2),
+                    Decimal::ONE,
+                ),
+                PortfolioVolatilityControlProfile::target(
+                    "vol120_155_49_100",
+                    Decimal::new(155, 3),
+                    120,
+                    Decimal::new(49, 2),
+                    Decimal::ONE,
+                ),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_14_46_100"
+                && trial["risk_budget_lookback_days"] == 180
+                && trial["max_position_pct"] == "0.15"
+                && trial["max_pairwise_correlation"] == "0.75"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_145_47_100"
+                && trial["risk_budget_lookback_days"] == 170
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert!(seed.get("prediction_set_id").is_none());
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert_eq!(
+                seed["risk_contribution_control"],
+                "soft_single_name_20pct_v1"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_high_sharpe_boundary_event_lift_profile_adds_small_sleeves_without_date_fitting(
+    ) {
+        let config = LayeredSearchConfig::professional_high_sharpe_boundary_event_lift_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+                "quality_all_regime_event_window_sleeve_05pct_v1".to_string(),
+                "quality_all_regime_event_window_sleeve_10pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_value_10pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().all(|trial| {
+            let regime = trial["market_regime"].as_str().unwrap_or_default();
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && matches!(
+                    regime,
+                    "quality_mixed_state_risk_memory_router_v14"
+                        | "quality_all_regime_event_window_sleeve_05pct_v1"
+                        | "quality_all_regime_event_window_sleeve_10pct_v1"
+                        | "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
+                )
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_all_regime_event_window_sleeve_05pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_145_47_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_all_regime_event_window_sleeve_10pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_14_46_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_high_sharpe_micro_frontier_profile_searches_near_cl_cm_v14_without_overfit_stacking(
+    ) {
+        let config = LayeredSearchConfig::professional_high_sharpe_micro_frontier_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![170, 180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(config.score_candidate_pool_sizes, vec![400, 500, 650, 800]);
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec![
+                "off".to_string(),
+                "soft_low_volatility_v1".to_string(),
+                "soft_low_volatility_low_correlation_v1".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 16);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_65"
+                && trial["candidate_risk_filter"] == "soft_low_volatility_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_60"
+                && trial["candidate_risk_filter"] == "soft_low_volatility_low_correlation_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_14_46_100"
+                && trial["risk_contribution_control"] == "off"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert!(seed.get("prediction_set_id").is_none());
+            let regime = seed["market_regime"].as_str().unwrap_or_default();
+            assert!(
+                regime == "quality_mixed_orthogonal_risk_memory_router_v3"
+                    || regime == "quality_nonlinear_alpha_risk_memory_router_v3"
+                    || regime == "quality_mixed_state_risk_memory_router_v14"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_v14_sharpe_return_lift_profile_keeps_sharpe_anchor_and_only_lifts_return_gently(
+    ) {
+        let config = LayeredSearchConfig::professional_v14_sharpe_return_lift_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![170, 180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.score_candidate_pool_sizes, vec![400, 500, 650]);
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_142_465_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_65"
+                && trial["risk_contribution_control"] == "off"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom43"
+                && trial["portfolio_volatility_control"] == "vol120_145_47_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_65"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_148_475_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_045_neg10_63"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(
+                seed["market_regime"],
+                "quality_mixed_state_risk_memory_router_v14"
+            );
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_v14_shape_lift_profile_varies_position_shape_without_alpha_or_date_overfit() {
+        let config = LayeredSearchConfig::professional_v14_shape_lift_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.top_n, vec![18, 20, 22]);
+        assert_eq!(config.rebalance_days, vec![50, 55, 60]);
+        assert_eq!(
+            config.skip_top_pct,
+            vec![Decimal::new(8, 2), Decimal::new(10, 2)]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 18
+                && trial["rebalance"] == "55"
+                && trial["skip_top_pct"] == "0.08"
+                && trial["portfolio_volatility_control"] == "vol120_142_465_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 22
+                && trial["rebalance"] == "50"
+                && trial["portfolio_drawdown_control"] == "recover252_08_23_45_30_70"
+                && trial["stop_loss_pct"] == "0.07"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 20
+                && trial["rebalance"] == "55"
+                && trial["rebalance_smoothing_profile"] == "hysteresis_1pct_partial_75"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(
+                seed["market_regime"],
+                "quality_mixed_state_risk_memory_router_v14"
+            );
+            assert_eq!(seed["event_gate_profile"], "valuation_exclude_bottom45");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_v14_ultra_micro_lift_profile_only_perturbs_the_high_sharpe_anchor() {
+        let config = LayeredSearchConfig::professional_v14_ultra_micro_lift_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.top_n, vec![19, 20, 21]);
+        assert_eq!(config.rebalance_days, vec![58, 60, 62]);
+        assert_eq!(
+            config.skip_top_pct,
+            vec![Decimal::new(9, 2), Decimal::new(10, 2), Decimal::new(11, 2)]
+        );
+        assert_eq!(config.risk_budget_lookback_days, vec![170, 180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(config.score_candidate_pool_sizes, vec![500]);
+        assert_eq!(config.seed_trials.len(), 15);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 20
+                && trial["rebalance"] == "60"
+                && trial["skip_top_pct"] == "0.10"
+                && trial["portfolio_volatility_control"] == "vol120_142_465_100"
+                && trial["risk_budget_lookback_days"] == 170
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 19
+                && trial["rebalance"] == "60"
+                && trial["skip_top_pct"] == "0.10"
+                && trial["portfolio_volatility_control"] == "vol120_142_465_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 20 && trial["rebalance"] == "58" && trial["skip_top_pct"] == "0.10"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["top_n"] == 20 && trial["rebalance"] == "60" && trial["skip_top_pct"] == "0.09"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_143_467_100"
+                && trial["risk_budget_lookback_days"] == 170
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(
+                seed["market_regime"],
+                "quality_mixed_state_risk_memory_router_v14"
+            );
+            assert_eq!(seed["event_gate_profile"], "valuation_exclude_bottom45");
+            assert_eq!(
+                seed["portfolio_sharpe_control"],
+                "roll_sharpe180_050_neg10_65"
+            );
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert_eq!(seed["risk_contribution_control"], "off");
+            assert_eq!(seed["score_candidate_pool_size"], 500);
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_return_alpha_sharpe_bridge_profile_combines_return_alpha_with_sharpe_controls()
+    {
+        let config = LayeredSearchConfig::professional_return_alpha_sharpe_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_state_alpha_overlay_selector_v1".to_string(),
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![160, 170, 180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.score_candidate_pool_sizes, vec![500, 650]);
+        assert_eq!(config.seed_trials.len(), 16);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_145_47_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_65"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_60"
+                && trial["risk_contribution_control"] == "soft_single_name_20pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["portfolio_volatility_control"] == "vol120_141_462_100"
+                && trial["risk_budget_lookback_days"] == 170
+                && trial["risk_contribution_control"] == "off"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_regime_frontier_bridge_profile_connects_high_sharpe_and_return_frontiers() {
+        let config = LayeredSearchConfig::professional_regime_frontier_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_frontier_regime_bridge_router_v1".to_string(),
+                "quality_frontier_regime_bridge_router_v2".to_string(),
+                "quality_frontier_regime_bridge_router_v3".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![160, 170, 180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string(), "soft_single_name_20pct_v1".to_string()]
+        );
+        assert_eq!(config.score_candidate_pool_sizes, vec![500, 650]);
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_145_47_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_65"
+                && trial["risk_budget_lookback_days"] == 170
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v2"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["risk_contribution_control"] == "soft_single_name_20pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v3"
+                && trial["portfolio_volatility_control"] == "vol120_141_462_100"
+                && trial["score_candidate_pool_size"] == 500
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_regime_frontier_decomposition_profile_splits_risk_axes_without_overfit() {
+        let config = LayeredSearchConfig::professional_regime_frontier_decomposition_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_frontier_regime_bridge_router_v4".to_string(),
+                "quality_frontier_regime_bridge_router_v5".to_string(),
+                "quality_frontier_regime_bridge_router_v6".to_string(),
+                "quality_frontier_regime_bridge_router_v7".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![160, 170, 180]);
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v4"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_141_462_100"
+                && trial["risk_budget_lookback_days"] == 170
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v5"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_141_462_100"
+                && trial["risk_contribution_control"] == "off"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v6"
+                && trial["portfolio_volatility_control"] == "vol120_143_467_100"
+                && trial["score_candidate_pool_size"] == 500
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v7"
+                && trial["portfolio_volatility_control"] == "vol120_145_47_100"
+                && trial["score_candidate_pool_size"] == 650
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_high_sharpe_return_micro_bridge_profile_relaxes_only_exposure_and_vol() {
+        let config = LayeredSearchConfig::professional_high_sharpe_return_micro_bridge_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_frontier_regime_bridge_router_v6".to_string(),
+                "quality_frontier_regime_bridge_router_v7".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![170, 180]);
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v6"
+                && trial["portfolio_volatility_control"] == "vol120_147_475_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_70"
+                && trial["portfolio_sharpe_min_exposure"] == "0.70"
+                && trial["risk_budget_lookback_days"] == 170
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_frontier_regime_bridge_router_v7"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_72"
+                && trial["score_candidate_pool_size"] == 650
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(seed["event_gate_profile"], "valuation_exclude_bottom45");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert_eq!(seed["risk_contribution_control"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_v14_annual_floor_micro_lift_profile_bridges_only_the_high_sharpe_edge() {
+        let config = LayeredSearchConfig::professional_v14_annual_floor_micro_lift_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_state_risk_memory_router_v14".to_string(),
+                "quality_mixed_state_risk_memory_router_v15".to_string(),
+                "quality_mixed_state_risk_memory_router_v16".to_string(),
+                "quality_mixed_state_risk_memory_router_v17".to_string(),
+                "quality_mixed_state_risk_memory_router_v18".to_string(),
+            ]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.top_n, vec![20]);
+        assert_eq!(config.rebalance_days, vec![60]);
+        assert_eq!(config.skip_top_pct, vec![Decimal::new(10, 2)]);
+        assert_eq!(config.risk_budget_lookback_days, vec![165, 170]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v15"
+                && trial["portfolio_volatility_control"] == "vol120_1405_461_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_0475_neg10_66"
+                && trial["risk_budget_lookback_days"] == 165
+                && trial["score_candidate_pool_size"] == 650
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v16"
+                && trial["portfolio_volatility_control"] == "vol120_143_467_100"
+                && trial["portfolio_sharpe_min_exposure"] == "0.68"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(seed["event_gate_profile"], "valuation_exclude_bottom45");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert_eq!(seed["risk_contribution_control"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_v14_near_miss_annual_bridge_profile_only_lifts_the_v14_near_miss() {
+        let config = LayeredSearchConfig::professional_v14_near_miss_annual_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.top_n, vec![20]);
+        assert_eq!(config.rebalance_days, vec![60]);
+        assert_eq!(config.skip_top_pct, vec![Decimal::new(10, 2)]);
+        assert_eq!(config.risk_budget_lookback_days, vec![160, 165, 170]);
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 16);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_state_risk_memory_router_v14"
+                && trial["portfolio_volatility_control"] == "vol120_1405_461_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_66"
+                && trial["risk_budget_lookback_days"] == 165
+                && trial["score_candidate_pool_size"] == 500
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_1415_464_100"
+                && trial["portfolio_sharpe_min_exposure"] == "0.67"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_142_465_100"
+                && trial["max_position_pct"] == "0.145"
+                && trial["max_pairwise_correlation"] == "0.70"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(
+                seed["market_regime"],
+                "quality_mixed_state_risk_memory_router_v14"
+            );
+            assert_eq!(seed["event_gate_profile"], "valuation_exclude_bottom45");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["top_n"], 20);
+            assert_eq!(seed["rebalance"], "60");
+            assert_eq!(seed["skip_top_pct"], "0.10");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert_eq!(seed["risk_contribution_control"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_v14_corr70_annual_edge_profile_extends_only_the_corr70_near_miss() {
+        let config = LayeredSearchConfig::professional_v14_corr70_annual_edge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(
+            config.market_regime_policies,
+            vec!["quality_mixed_state_risk_memory_router_v14".to_string()]
+        );
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.top_n, vec![20]);
+        assert_eq!(config.rebalance_days, vec![60]);
+        assert_eq!(config.skip_top_pct, vec![Decimal::new(10, 2)]);
+        assert_eq!(config.risk_budget_lookback_days, vec![165, 168]);
+        assert_eq!(
+            config.max_pairwise_correlation,
+            vec![
+                Decimal::new(68, 2),
+                Decimal::new(70, 2),
+                Decimal::new(72, 2)
+            ]
+        );
+        assert_eq!(
+            config.risk_contribution_control_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(config.seed_trials.len(), 20);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_1415_464_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_66"
+                && trial["risk_budget_lookback_days"] == 165
+                && trial["max_pairwise_correlation"] == "0.70"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_142_465_100"
+                && trial["portfolio_sharpe_min_exposure"] == "0.68"
+                && trial["max_pairwise_correlation"] == "0.70"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_142_465_100"
+                && trial["risk_budget_lookback_days"] == 168
+                && trial["max_pairwise_correlation"] == "0.70"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_volatility_control"] == "vol120_142_465_100"
+                && trial["max_pairwise_correlation"] == "0.68"
+        }));
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(
+                seed["market_regime"],
+                "quality_mixed_state_risk_memory_router_v14"
+            );
+            assert_eq!(seed["event_gate_profile"], "valuation_exclude_bottom45");
+            assert_eq!(seed["portfolio_method"], "risk_budget");
+            assert_eq!(seed["top_n"], 20);
+            assert_eq!(seed["rebalance"], "60");
+            assert_eq!(seed["skip_top_pct"], "0.10");
+            assert_eq!(seed["max_position_pct"], "0.15");
+            assert_eq!(seed["candidate_risk_filter"], "off");
+            assert_eq!(seed["risk_contribution_control"], "off");
+            assert!(seed.get("prediction_set_id").is_none());
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(!serialized.contains("event_window"));
+            assert!(!serialized.contains("prediction"));
+        }
+    }
+
+    #[test]
+    fn professional_return_distribution_repair_profile_combines_event_decay_and_orthogonal_alpha_without_date_fitting(
+    ) {
+        let config = LayeredSearchConfig::professional_return_distribution_repair_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![160, 180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+                "quality_event_window_return_sharpe_router_v3".to_string(),
+                "quality_event_window_return_sharpe_router_v4".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial.get("prediction_set_id").is_none()
+                && trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_contribution_control"] == "soft_single_name_20pct_v1"
+                && trial["candidate_risk_filter"] == "off"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["risk_budget_lookback_days"] == 180
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v3"
+                && trial["event_gate_profile"] == "event_window_10d_boost_p75_3pct"
+                && trial["event_gate_combo_name"] == "phase7_event_window_earnings_10d_v1"
+                && trial["event_gate_mode"] == "boost_positive"
+                && trial["event_gate_min_score"] == "0.38"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_return_sharpe_router_v4"
+                && trial["event_gate_profile"] == "event_window_40d_exclude_negative"
+                && trial["event_gate_combo_name"] == "phase7_event_window_earnings_40d_v1"
+                && trial["event_gate_mode"] == "exclude_negative"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["event_gate_profile"] == "residual_confirm_top40"
+                && trial["event_gate_combo_name"] == "phase7_quality_residual_confirm_10pct_v1"
+                && trial["event_gate_min_score"] == "0.40"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_60"
+                && trial["portfolio_sharpe_lookback_days"] == 180
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_state_alpha_router_profile_keeps_current_anchor_and_routes_second_alpha() {
+        let config = LayeredSearchConfig::professional_state_alpha_router_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_regime_alpha_overlay_value_05pct_v1".to_string(),
+                "quality_regime_alpha_overlay_blend_10pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1".to_string(),
+                "quality_regime_alpha_portfolio_sleeve_value_10pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 180
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert_eq!(
+            config.seed_trials[0]["market_regime"],
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_overlay_value_05pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_overlay_blend_10pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_value_10pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+    }
+
+    #[test]
+    fn professional_state_position_risk_router_profile_keeps_anchor_and_sweeps_position_regime() {
+        let config = LayeredSearchConfig::professional_state_position_risk_router_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(config.max_position_pct, vec![Decimal::new(15, 2)]);
+        assert_eq!(config.max_pairwise_correlation, vec![Decimal::new(75, 2)]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_bear_position_guard_v3".to_string(),
+                "quality_bear_position_guard_v1".to_string(),
+                "quality_bear_position_guard_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 180
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert_eq!(
+            config.seed_trials[0]["market_regime"],
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_bear_position_guard_v3"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_bear_position_guard_v1"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_bear_position_guard_v2"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_event_position_risk_router_profile_keeps_event_sleeve_and_position_guard() {
+        let config = LayeredSearchConfig::professional_event_position_risk_router_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_event_window_position_guard_v3".to_string(),
+                "quality_event_window_position_guard_v1".to_string(),
+                "quality_event_window_position_guard_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 180
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_position_guard_v3"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_event_window_position_guard_v2"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_all_regime_event_sleeve_profile_mixes_event_flow_across_states() {
+        let config = LayeredSearchConfig::professional_all_regime_event_sleeve_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(config.risk_budget_lookback_days, vec![180]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_all_regime_event_window_sleeve_05pct_v1".to_string(),
+                "quality_all_regime_event_window_sleeve_10pct_v1".to_string(),
+                "quality_all_regime_event_window_sleeve_15pct_v1".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_v1"
+                && trial["portfolio_method"] == "risk_budget"
+                && trial["risk_budget_lookback_days"] == 180
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_drawdown_control"] == "recover252_08_22_45_30_70"
+                && trial["stop_loss_pct"] == "0.075"
+                && trial["reentry_cooldown_days"] == 30
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_all_regime_event_window_sleeve_05pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_all_regime_event_window_sleeve_15pct_v1"
+                && trial["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+    }
+
+    #[test]
+    fn professional_portfolio_sharpe_control_profile_adds_self_risk_axis_without_date_fitting() {
+        let config = LayeredSearchConfig::professional_portfolio_sharpe_control_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 8);
+        assert!(config
+            .portfolio_sharpe_controls
+            .iter()
+            .any(
+                |profile| profile.profile_name == "roll_sharpe120_060_000_55"
+                    && profile.reduce_start == Some(Decimal::new(60, 2))
+                    && profile.reduce_full == Some(Decimal::ZERO)
+                    && profile.min_exposure == Some(Decimal::new(55, 2))
+            ));
+        let sharpe_seed = config
+            .seed_trials
+            .iter()
+            .find(|trial| trial["portfolio_sharpe_control"] == "roll_sharpe120_060_000_55")
+            .expect("rolling Sharpe seed");
+        assert_eq!(sharpe_seed["portfolio_sharpe_reduce_start"], "0.60");
+        assert_eq!(sharpe_seed["portfolio_sharpe_reduce_full"], "0.00");
+        assert_eq!(sharpe_seed["portfolio_sharpe_lookback_days"], 120);
+        assert_eq!(sharpe_seed["portfolio_sharpe_min_exposure"], "0.55");
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_sharpe_bridge_router_v2"
+                && trial["portfolio_sharpe_control"] == "bridge_roll_sharpe180_050_neg10_60"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_nonlinear_alpha_auto_discovery_profile_combines_new_alpha_and_rolling_sharpe() {
+        let config = LayeredSearchConfig::professional_nonlinear_alpha_auto_discovery_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")]
+        );
+        assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
+        assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_nonlinear_alpha_router_v1".to_string(),
+                "quality_nonlinear_alpha_router_v2".to_string(),
+                "quality_nonlinear_alpha_risk_memory_router_v1".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 12);
+        assert!(config
+            .portfolio_sharpe_controls
+            .iter()
+            .any(
+                |profile| profile.profile_name == "roll_sharpe180_050_neg10_65"
+                    && profile.reduce_start == Some(Decimal::new(50, 2))
+                    && profile.reduce_full == Some(Decimal::new(-10, 2))
+                    && profile.min_exposure == Some(Decimal::new(65, 2))
+            ));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_router_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_sharpe_control"] == "off"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v1"
+                && trial["portfolio_volatility_control"] == "vol120_15_48_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_65"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_nonlinear_sharpe_return_bridge_profile_targets_cl_boundary() {
+        let config = LayeredSearchConfig::professional_nonlinear_sharpe_return_bridge_default();
+
+        assert_eq!(
+            config.market_regime_policies,
+            vec![
+                "quality_nonlinear_alpha_risk_memory_router_v2".to_string(),
+                "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+                "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+                "quality_state_sharpe_bridge_router_v2".to_string(),
+                "quality_nonlinear_alpha_router_v2".to_string(),
+            ]
+        );
+        assert_eq!(config.seed_trials.len(), 10);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v2"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["portfolio_volatility_control"] == "vol120_16_50_100"
+                && trial["portfolio_sharpe_control"] == "roll_sharpe180_050_neg10_60"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_sharpe_bridge_router_v2"
+                && trial["portfolio_volatility_control"] == "vol120_17_52_100"
+                && trial["max_position_pct"] == "0.16"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
     }
 
     #[test]

@@ -220,6 +220,7 @@ struct PredictionScoreRow {
 }
 
 type FactorScoresByDate = HashMap<NaiveDate, Vec<(String, f64)>>;
+type PredictionScoresByDate = HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>;
 type SymbolReturnHistory = HashMap<String, Vec<(NaiveDate, f64)>>;
 type AverageAmounts = HashMap<String, f64>;
 type IndustryMap = HashMap<String, String>;
@@ -271,6 +272,11 @@ pub(crate) enum SignalDataCacheKey {
     },
     AverageAmountSymbol {
         symbol: String,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    },
+    PredictionScores {
+        prediction_set_id: String,
         start_date: NaiveDate,
         end_date: NaiveDate,
     },
@@ -337,6 +343,18 @@ impl SignalDataCacheKey {
         }
     }
 
+    fn prediction_scores(
+        prediction_set_id: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Self {
+        Self::PredictionScores {
+            prediction_set_id: prediction_set_id.to_string(),
+            start_date,
+            end_date,
+        }
+    }
+
     fn industry_classifications(symbols: &[String]) -> Self {
         Self::IndustryClassifications {
             symbols: normalized_symbol_key(symbols),
@@ -375,6 +393,8 @@ pub struct SignalDataCacheStats {
     pub return_history_misses: usize,
     pub average_amount_hits: usize,
     pub average_amount_misses: usize,
+    pub prediction_score_hits: usize,
+    pub prediction_score_misses: usize,
     pub industry_classification_hits: usize,
     pub industry_classification_misses: usize,
     pub benchmark_return_hits: usize,
@@ -387,6 +407,7 @@ pub struct SignalDataCache {
     trading_days: HashMap<SignalDataCacheKey, Arc<Vec<NaiveDate>>>,
     return_history: HashMap<SignalDataCacheKey, Arc<SymbolReturnHistory>>,
     average_amounts: HashMap<SignalDataCacheKey, Arc<AverageAmounts>>,
+    prediction_scores: HashMap<SignalDataCacheKey, Arc<PredictionScoresByDate>>,
     industry_classifications: HashMap<SignalDataCacheKey, Arc<IndustryMap>>,
     benchmark_returns: HashMap<SignalDataCacheKey, Arc<BenchmarkReturns>>,
     stats: SignalDataCacheStats,
@@ -406,11 +427,30 @@ impl SignalDataCache {
                 self.stats.combo_score_hits += 1;
                 Some(Arc::clone(value))
             }
-            None => {
-                self.stats.combo_score_misses += 1;
-                None
-            }
+            None => self.cached_combo_scores_from_larger_candidate_pool(key),
         }
+    }
+
+    fn cached_combo_scores_from_larger_candidate_pool(
+        &mut self,
+        key: &SignalDataCacheKey,
+    ) -> Option<Arc<FactorScoresByDate>> {
+        let Some((requested_size, source_scores)) =
+            self.combo_scores
+                .iter()
+                .find_map(|(candidate_key, scores)| {
+                    reusable_combo_candidate_pool_size(candidate_key, key)
+                        .map(|requested_size| (requested_size, Arc::clone(scores)))
+                })
+        else {
+            self.stats.combo_score_misses += 1;
+            return None;
+        };
+
+        let pruned = prune_factor_scores_by_date(source_scores.as_ref(), requested_size);
+        let pruned = self.insert_combo_scores(key.clone(), pruned);
+        self.stats.combo_score_hits += 1;
+        Some(pruned)
     }
 
     fn insert_combo_scores(
@@ -551,6 +591,32 @@ impl SignalDataCache {
         result
     }
 
+    fn cached_prediction_scores(
+        &mut self,
+        key: &SignalDataCacheKey,
+    ) -> Option<Arc<PredictionScoresByDate>> {
+        match self.prediction_scores.get(key) {
+            Some(value) => {
+                self.stats.prediction_score_hits += 1;
+                Some(Arc::clone(value))
+            }
+            None => {
+                self.stats.prediction_score_misses += 1;
+                None
+            }
+        }
+    }
+
+    fn insert_prediction_scores(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: PredictionScoresByDate,
+    ) -> Arc<PredictionScoresByDate> {
+        let value = Arc::new(value);
+        self.prediction_scores.insert(key, Arc::clone(&value));
+        value
+    }
+
     fn cached_industry_classifications(
         &mut self,
         key: &SignalDataCacheKey,
@@ -608,6 +674,75 @@ impl SignalDataCache {
     fn store_combo_scores_for_test(&mut self, key: SignalDataCacheKey, value: FactorScoresByDate) {
         self.combo_scores.insert(key, Arc::new(value));
     }
+
+    #[cfg(test)]
+    fn store_prediction_scores_for_test(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: PredictionScoresByDate,
+    ) {
+        self.prediction_scores.insert(key, Arc::new(value));
+    }
+}
+
+fn reusable_combo_candidate_pool_size(
+    candidate: &SignalDataCacheKey,
+    requested: &SignalDataCacheKey,
+) -> Option<usize> {
+    let (
+        SignalDataCacheKey::ComboScores {
+            combo_name: candidate_combo_name,
+            version: candidate_version,
+            start_date: candidate_start_date,
+            end_date: candidate_end_date,
+            score_direction: candidate_score_direction,
+            score_candidate_pool_size: Some(candidate_pool_size),
+            universe_profile: candidate_universe_profile,
+        },
+        SignalDataCacheKey::ComboScores {
+            combo_name: requested_combo_name,
+            version: requested_version,
+            start_date: requested_start_date,
+            end_date: requested_end_date,
+            score_direction: requested_score_direction,
+            score_candidate_pool_size: Some(requested_pool_size),
+            universe_profile: requested_universe_profile,
+        },
+    ) = (candidate, requested)
+    else {
+        return None;
+    };
+
+    if candidate_combo_name == requested_combo_name
+        && candidate_version == requested_version
+        && candidate_start_date == requested_start_date
+        && candidate_end_date == requested_end_date
+        && candidate_score_direction == requested_score_direction
+        && candidate_universe_profile == requested_universe_profile
+        && candidate_pool_size >= requested_pool_size
+    {
+        Some(*requested_pool_size)
+    } else {
+        None
+    }
+}
+
+fn prune_factor_scores_by_date(
+    scores_by_date: &FactorScoresByDate,
+    requested_size: usize,
+) -> FactorScoresByDate {
+    scores_by_date
+        .iter()
+        .map(|(date, rows)| {
+            (
+                *date,
+                rows.iter()
+                    .take(requested_size)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
 }
 
 impl Default for SignalConfig {
@@ -724,6 +859,8 @@ pub enum CandidateRiskFilterProfile {
     Off,
     LowVolatilityV1,
     LowVolatilityLowCorrelationV1,
+    SoftLowVolatilityV1,
+    SoftLowVolatilityLowCorrelationV1,
 }
 
 impl CandidateRiskFilterProfile {
@@ -733,6 +870,10 @@ impl CandidateRiskFilterProfile {
             "low_volatility_v1" | "low-volatility-v1" => Ok(Self::LowVolatilityV1),
             "low_volatility_low_correlation_v1" | "low-volatility-low-correlation-v1" => {
                 Ok(Self::LowVolatilityLowCorrelationV1)
+            }
+            "soft_low_volatility_v1" | "soft-low-volatility-v1" => Ok(Self::SoftLowVolatilityV1),
+            "soft_low_volatility_low_correlation_v1" | "soft-low-volatility-low-correlation-v1" => {
+                Ok(Self::SoftLowVolatilityLowCorrelationV1)
             }
             other => Err(format!("unsupported candidate_risk_filter: {}", other)),
         }
@@ -749,6 +890,16 @@ impl CandidateRiskFilterProfile {
             Self::LowVolatilityLowCorrelationV1 => Some(CandidateRiskFilterParams {
                 max_volatility_quantile: 0.70,
                 max_average_abs_correlation: Some(0.55),
+                correlation_reference_limit: 120,
+            }),
+            Self::SoftLowVolatilityV1 => Some(CandidateRiskFilterParams {
+                max_volatility_quantile: 0.85,
+                max_average_abs_correlation: None,
+                correlation_reference_limit: 0,
+            }),
+            Self::SoftLowVolatilityLowCorrelationV1 => Some(CandidateRiskFilterParams {
+                max_volatility_quantile: 0.85,
+                max_average_abs_correlation: Some(0.70),
                 correlation_reference_limit: 120,
             }),
         }
@@ -844,6 +995,7 @@ pub struct RegimeSignalRule {
     pub max_gross_exposure: Option<f64>,
     pub score_direction: Option<ScoreDirection>,
     pub skip_top_pct: Option<f64>,
+    pub max_pairwise_correlation: Option<f64>,
     pub max_position_pct: Option<Decimal>,
     pub score_overlay: Option<FactorScoreOverlayConfig>,
     pub portfolio_sleeve: Option<FactorPortfolioSleeveConfig>,
@@ -873,6 +1025,9 @@ impl RegimeSignalRule {
         if let Some(skip_top_pct) = self.skip_top_pct {
             config.skip_top_pct = skip_top_pct.clamp(0.0, 0.95);
         }
+        if let Some(max_pairwise_correlation) = self.max_pairwise_correlation {
+            config.max_pairwise_correlation = Some(max_pairwise_correlation.clamp(0.0, 1.0));
+        }
         if let Some(max_position_pct) = self.max_position_pct {
             config.max_position_pct = max_position_pct.clamp(Decimal::ZERO, Decimal::ONE);
         }
@@ -899,6 +1054,57 @@ pub struct MarketRegimePolicy {
     pub sideways_volatility_threshold: f64,
     pub sideways_abs_return_threshold: f64,
     pub rules: HashMap<MarketRegime, RegimeSignalRule>,
+}
+
+type StateAlphaSleeveSpec = (&'static str, f64, ScoreDirection);
+
+struct StateAlphaSelectorSpec {
+    bull_sleeve: StateAlphaSleeveSpec,
+    bear_sleeve: StateAlphaSleeveSpec,
+    high_volatility_sleeve: StateAlphaSleeveSpec,
+    sideways_sleeve: StateAlphaSleeveSpec,
+    mixed_sleeve: StateAlphaSleeveSpec,
+    bear_exposure: f64,
+    high_volatility_exposure: f64,
+    bear_max_position_pct: Decimal,
+    high_volatility_max_position_pct: Decimal,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_state_alpha_rule(
+    policy: &mut MarketRegimePolicy,
+    regime: MarketRegime,
+    top_n: Option<usize>,
+    rebalance_freq_days: Option<usize>,
+    max_gross_exposure: Option<f64>,
+    max_pairwise_correlation: Option<f64>,
+    max_position_pct: Option<Decimal>,
+    sleeve: StateAlphaSleeveSpec,
+) {
+    let Some(rule) = policy.rules.get_mut(&regime) else {
+        return;
+    };
+    if let Some(top_n) = top_n {
+        rule.top_n = Some(top_n);
+    }
+    if let Some(rebalance_freq_days) = rebalance_freq_days {
+        rule.rebalance_freq_days = Some(rebalance_freq_days);
+    }
+    if let Some(max_gross_exposure) = max_gross_exposure {
+        rule.max_gross_exposure = Some(max_gross_exposure);
+    }
+    if let Some(max_pairwise_correlation) = max_pairwise_correlation {
+        rule.max_pairwise_correlation = Some(max_pairwise_correlation);
+    }
+    if let Some(max_position_pct) = max_position_pct {
+        rule.max_position_pct = Some(max_position_pct);
+    }
+    rule.portfolio_sleeve = Some(FactorPortfolioSleeveConfig {
+        combo_name: sleeve.0.to_string(),
+        version: "1.0.0".to_string(),
+        weight: sleeve.1.clamp(0.0, 1.0),
+        score_direction: sleeve.2,
+    });
 }
 
 impl MarketRegimePolicy {
@@ -1555,6 +1761,37 @@ impl MarketRegimePolicy {
         )
     }
 
+    pub fn quality_all_regime_event_window_sleeve_05pct_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_event_window_sleeve_all_regimes(benchmark, 0.05)
+    }
+
+    pub fn quality_all_regime_event_window_sleeve_10pct_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_event_window_sleeve_all_regimes(benchmark, 0.10)
+    }
+
+    pub fn quality_all_regime_event_window_sleeve_15pct_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_event_window_sleeve_all_regimes(benchmark, 0.15)
+    }
+
+    fn quality_event_window_sleeve_all_regimes(
+        benchmark: impl Into<String>,
+        sleeve_weight: f64,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve_for_regimes(
+            benchmark,
+            "phase7_event_window_earnings_v1",
+            sleeve_weight,
+            ScoreDirection::Descending,
+            [
+                MarketRegime::Bull,
+                MarketRegime::Bear,
+                MarketRegime::HighVolatility,
+                MarketRegime::Sideways,
+                MarketRegime::Mixed,
+            ],
+        )
+    }
+
     pub fn quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1(
         benchmark: impl Into<String>,
     ) -> Self {
@@ -1619,6 +1856,28 @@ impl MarketRegimePolicy {
             benchmark,
             "phase7_event_surprise_v1",
             0.10,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_surprise_v1",
+            0.15,
+            ScoreDirection::Descending,
+        )
+    }
+
+    pub fn quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1(
+        benchmark: impl Into<String>,
+    ) -> Self {
+        Self::quality_regime_alpha_portfolio_sleeve(
+            benchmark,
+            "phase7_event_earnings_v1",
+            0.15,
             ScoreDirection::Descending,
         )
     }
@@ -1910,6 +2169,1164 @@ impl MarketRegimePolicy {
         }
     }
 
+    /// Mild position-aware guard for the current Phase 7 anchor. It uses the
+    /// same generic bear/high-volatility triggers as v1/v2, but cuts less
+    /// aggressively so the 15%+ return target has a better chance to survive.
+    pub fn quality_bear_position_guard_v3(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                top_n: Some(25),
+                rebalance_freq_days: Some(80),
+                max_gross_exposure: Some(0.82),
+                skip_top_pct: Some(0.05),
+                max_position_pct: Some(Decimal::new(11, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                top_n: Some(25),
+                rebalance_freq_days: Some(40),
+                max_gross_exposure: Some(0.66),
+                skip_top_pct: Some(0.05),
+                max_position_pct: Some(Decimal::new(9, 2)),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                max_gross_exposure: Some(1.0),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 126,
+            min_observations: 20,
+            high_volatility_threshold: 0.28,
+            bear_return_threshold: -0.03,
+            bear_drawdown_threshold: 0.14,
+            bull_return_threshold: 0.10,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
+
+    pub fn quality_event_window_position_guard_v1(benchmark: impl Into<String>) -> Self {
+        Self::with_event_window_position_sleeve(Self::quality_bear_position_guard_v1(benchmark))
+    }
+
+    pub fn quality_event_window_position_guard_v2(benchmark: impl Into<String>) -> Self {
+        Self::with_event_window_position_sleeve(Self::quality_bear_position_guard_v2(benchmark))
+    }
+
+    pub fn quality_event_window_position_guard_v3(benchmark: impl Into<String>) -> Self {
+        Self::with_event_window_position_sleeve(Self::quality_bear_position_guard_v3(benchmark))
+    }
+
+    fn with_event_window_position_sleeve(mut policy: Self) -> Self {
+        let sleeve = FactorPortfolioSleeveConfig {
+            combo_name: "phase7_event_window_earnings_v1".to_string(),
+            version: "1.0.0".to_string(),
+            weight: 0.15,
+            score_direction: ScoreDirection::Descending,
+        };
+        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+            if let Some(rule) = policy.rules.get_mut(&regime) {
+                rule.portfolio_sleeve = Some(sleeve.clone());
+            }
+        }
+        policy
+    }
+
+    pub fn quality_event_window_return_sharpe_router_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_event_window_return_sharpe_router(
+            benchmark,
+            0.72,
+            0.58,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+        )
+    }
+
+    pub fn quality_event_window_return_sharpe_router_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_event_window_return_sharpe_router(
+            benchmark,
+            0.78,
+            0.64,
+            Decimal::new(11, 2),
+            Decimal::new(9, 2),
+        )
+    }
+
+    pub fn quality_event_window_return_sharpe_router_v3(benchmark: impl Into<String>) -> Self {
+        Self::quality_event_window_return_sharpe_router(
+            benchmark,
+            0.75,
+            0.62,
+            Decimal::new(10, 2),
+            Decimal::new(9, 2),
+        )
+    }
+
+    pub fn quality_event_window_return_sharpe_router_v4(benchmark: impl Into<String>) -> Self {
+        Self::quality_event_window_return_sharpe_router(
+            benchmark,
+            0.68,
+            0.54,
+            Decimal::new(9, 2),
+            Decimal::new(7, 2),
+        )
+    }
+
+    pub fn quality_state_alpha_selector_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector(
+            benchmark,
+            StateAlphaSelectorSpec {
+                bull_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                bear_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.15,
+                    ScoreDirection::Descending,
+                ),
+                high_volatility_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.15,
+                    ScoreDirection::Descending,
+                ),
+                sideways_sleeve: (
+                    "phase7_price_volume_expanded_v1",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                mixed_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                bear_exposure: 0.68,
+                high_volatility_exposure: 0.54,
+                bear_max_position_pct: Decimal::new(9, 2),
+                high_volatility_max_position_pct: Decimal::new(7, 2),
+            },
+        )
+    }
+
+    pub fn quality_state_alpha_selector_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector(
+            benchmark,
+            StateAlphaSelectorSpec {
+                bull_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.10,
+                    ScoreDirection::Descending,
+                ),
+                bear_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.125,
+                    ScoreDirection::Descending,
+                ),
+                high_volatility_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.125,
+                    ScoreDirection::Descending,
+                ),
+                sideways_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                mixed_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                bear_exposure: 0.75,
+                high_volatility_exposure: 0.62,
+                bear_max_position_pct: Decimal::new(10, 2),
+                high_volatility_max_position_pct: Decimal::new(9, 2),
+            },
+        )
+    }
+
+    pub fn quality_state_alpha_selector_v3(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector(
+            benchmark,
+            StateAlphaSelectorSpec {
+                bull_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                bear_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.15,
+                    ScoreDirection::Descending,
+                ),
+                high_volatility_sleeve: (
+                    "phase7_price_volume_expanded_v1",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                sideways_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                mixed_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.10,
+                    ScoreDirection::Descending,
+                ),
+                bear_exposure: 0.72,
+                high_volatility_exposure: 0.58,
+                bear_max_position_pct: Decimal::new(10, 2),
+                high_volatility_max_position_pct: Decimal::new(8, 2),
+            },
+        )
+    }
+
+    pub fn quality_mixed_event_state_selector_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector(
+            benchmark,
+            StateAlphaSelectorSpec {
+                bull_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                bear_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.15,
+                    ScoreDirection::Descending,
+                ),
+                high_volatility_sleeve: (
+                    "phase7_price_volume_expanded_v1",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                sideways_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                mixed_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.10,
+                    ScoreDirection::Descending,
+                ),
+                bear_exposure: 0.72,
+                high_volatility_exposure: 0.58,
+                bear_max_position_pct: Decimal::new(10, 2),
+                high_volatility_max_position_pct: Decimal::new(8, 2),
+            },
+        )
+    }
+
+    pub fn quality_mixed_event_state_selector_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector(
+            benchmark,
+            StateAlphaSelectorSpec {
+                bull_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                bear_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.15,
+                    ScoreDirection::Descending,
+                ),
+                high_volatility_sleeve: (
+                    "phase7_price_volume_expanded_v1",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                sideways_sleeve: (
+                    "phase7_price_volume_expanded_v1",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                mixed_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.15,
+                    ScoreDirection::Descending,
+                ),
+                bear_exposure: 0.68,
+                high_volatility_exposure: 0.54,
+                bear_max_position_pct: Decimal::new(9, 2),
+                high_volatility_max_position_pct: Decimal::new(7, 2),
+            },
+        )
+    }
+
+    pub fn quality_mixed_event_state_overlay_selector_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            [
+                (
+                    MarketRegime::Bear,
+                    "phase7_valuation_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                (
+                    MarketRegime::Mixed,
+                    "phase7_valuation_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+            ],
+        )
+    }
+
+    pub fn quality_mixed_event_state_overlay_selector_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_mixed_event_state_selector_v2(benchmark),
+            [
+                (
+                    MarketRegime::Bear,
+                    "phase7_valuation_v1",
+                    0.03,
+                    ScoreDirection::Descending,
+                ),
+                (
+                    MarketRegime::Mixed,
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.03,
+                    ScoreDirection::Descending,
+                ),
+                (
+                    MarketRegime::HighVolatility,
+                    "phase7_price_volume_expanded_v1",
+                    0.03,
+                    ScoreDirection::Ascending,
+                ),
+            ],
+        )
+    }
+
+    pub fn quality_mixed_orthogonal_alpha_selector_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_state_alpha_selector(
+                benchmark,
+                StateAlphaSelectorSpec {
+                    bull_sleeve: (
+                        "phase7_quality_value_recovery_confirm_v1",
+                        0.05,
+                        ScoreDirection::Descending,
+                    ),
+                    bear_sleeve: (
+                        "phase7_event_window_earnings_v1",
+                        0.15,
+                        ScoreDirection::Descending,
+                    ),
+                    high_volatility_sleeve: (
+                        "phase7_price_volume_expanded_v1",
+                        0.10,
+                        ScoreDirection::Ascending,
+                    ),
+                    sideways_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                    mixed_sleeve: (
+                        "phase7_quality_residual_confirm_10pct_v1",
+                        0.10,
+                        ScoreDirection::Ascending,
+                    ),
+                    bear_exposure: 0.72,
+                    high_volatility_exposure: 0.58,
+                    bear_max_position_pct: Decimal::new(10, 2),
+                    high_volatility_max_position_pct: Decimal::new(8, 2),
+                },
+            ),
+            [(
+                MarketRegime::Mixed,
+                "phase7_valuation_v1",
+                0.03,
+                ScoreDirection::Descending,
+            )],
+        )
+    }
+
+    pub fn quality_mixed_orthogonal_alpha_selector_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_state_alpha_selector(
+                benchmark,
+                StateAlphaSelectorSpec {
+                    bull_sleeve: (
+                        "phase7_quality_value_recovery_event_confirm_v1",
+                        0.05,
+                        ScoreDirection::Descending,
+                    ),
+                    bear_sleeve: (
+                        "phase7_event_window_earnings_v1",
+                        0.15,
+                        ScoreDirection::Descending,
+                    ),
+                    high_volatility_sleeve: (
+                        "phase7_price_volume_expanded_v1",
+                        0.10,
+                        ScoreDirection::Ascending,
+                    ),
+                    sideways_sleeve: (
+                        "phase7_price_volume_expanded_v1",
+                        0.10,
+                        ScoreDirection::Ascending,
+                    ),
+                    mixed_sleeve: (
+                        "phase7_quality_value_recovery_event_confirm_v1",
+                        0.10,
+                        ScoreDirection::Descending,
+                    ),
+                    bear_exposure: 0.72,
+                    high_volatility_exposure: 0.58,
+                    bear_max_position_pct: Decimal::new(10, 2),
+                    high_volatility_max_position_pct: Decimal::new(8, 2),
+                },
+            ),
+            [(
+                MarketRegime::Mixed,
+                "phase7_quality_residual_confirm_10pct_v1",
+                0.03,
+                ScoreDirection::Ascending,
+            )],
+        )
+    }
+
+    pub fn quality_mixed_orthogonal_alpha_selector_v3(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector(
+            benchmark,
+            StateAlphaSelectorSpec {
+                bull_sleeve: (
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                bear_sleeve: (
+                    "phase7_event_window_earnings_v1",
+                    0.15,
+                    ScoreDirection::Descending,
+                ),
+                high_volatility_sleeve: (
+                    "phase7_price_volume_expanded_v1",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                sideways_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                mixed_sleeve: (
+                    "phase7_blend_defensive_rel_v1",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                bear_exposure: 0.72,
+                high_volatility_exposure: 0.58,
+                bear_max_position_pct: Decimal::new(10, 2),
+                high_volatility_max_position_pct: Decimal::new(8, 2),
+            },
+        )
+    }
+
+    pub fn quality_nonlinear_alpha_router_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_state_alpha_selector(
+                benchmark,
+                StateAlphaSelectorSpec {
+                    bull_sleeve: (
+                        "phase7_quality_value_recovery_event_confirm_v1",
+                        0.05,
+                        ScoreDirection::Descending,
+                    ),
+                    bear_sleeve: (
+                        "phase7_event_window_earnings_v1",
+                        0.15,
+                        ScoreDirection::Descending,
+                    ),
+                    high_volatility_sleeve: (
+                        "phase7_price_volume_expanded_v1",
+                        0.10,
+                        ScoreDirection::Ascending,
+                    ),
+                    sideways_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                    mixed_sleeve: (
+                        "phase7_quality_residual_confirm_10pct_v1",
+                        0.10,
+                        ScoreDirection::Ascending,
+                    ),
+                    bear_exposure: 0.74,
+                    high_volatility_exposure: 0.60,
+                    bear_max_position_pct: Decimal::new(10, 2),
+                    high_volatility_max_position_pct: Decimal::new(8, 2),
+                },
+            ),
+            [
+                (
+                    MarketRegime::Bear,
+                    "phase7_valuation_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                (
+                    MarketRegime::Mixed,
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.04,
+                    ScoreDirection::Descending,
+                ),
+            ],
+        )
+        .with_nonlinear_mixed_risk(0.98, Decimal::new(14, 2), 0.72)
+    }
+
+    pub fn quality_nonlinear_alpha_router_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_state_alpha_selector(
+                benchmark,
+                StateAlphaSelectorSpec {
+                    bull_sleeve: (
+                        "phase7_quality_value_recovery_confirm_v1",
+                        0.05,
+                        ScoreDirection::Descending,
+                    ),
+                    bear_sleeve: (
+                        "phase7_event_window_earnings_v1",
+                        0.125,
+                        ScoreDirection::Descending,
+                    ),
+                    high_volatility_sleeve: (
+                        "phase7_price_volume_expanded_v1",
+                        0.10,
+                        ScoreDirection::Ascending,
+                    ),
+                    sideways_sleeve: ("phase7_valuation_v1", 0.10, ScoreDirection::Descending),
+                    mixed_sleeve: (
+                        "phase7_quality_value_recovery_event_confirm_v1",
+                        0.075,
+                        ScoreDirection::Descending,
+                    ),
+                    bear_exposure: 0.78,
+                    high_volatility_exposure: 0.62,
+                    bear_max_position_pct: Decimal::new(11, 2),
+                    high_volatility_max_position_pct: Decimal::new(8, 2),
+                },
+            ),
+            [
+                (
+                    MarketRegime::Mixed,
+                    "phase7_quality_residual_confirm_10pct_v1",
+                    0.03,
+                    ScoreDirection::Ascending,
+                ),
+                (
+                    MarketRegime::HighVolatility,
+                    "phase7_event_window_earnings_v1",
+                    0.03,
+                    ScoreDirection::Descending,
+                ),
+            ],
+        )
+        .with_nonlinear_mixed_risk(1.0, Decimal::new(15, 2), 0.75)
+    }
+
+    pub fn quality_nonlinear_alpha_risk_memory_router_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_nonlinear_alpha_router_v1(benchmark).with_nonlinear_mixed_risk(
+            0.94,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_nonlinear_alpha_risk_memory_router_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_nonlinear_alpha_router_v1(benchmark).with_nonlinear_mixed_risk(
+            0.97,
+            Decimal::new(14, 2),
+            0.72,
+        )
+    }
+
+    pub fn quality_nonlinear_alpha_risk_memory_router_v3(benchmark: impl Into<String>) -> Self {
+        Self::quality_nonlinear_alpha_router_v2(benchmark).with_nonlinear_mixed_risk(
+            0.98,
+            Decimal::new(14, 2),
+            0.75,
+        )
+    }
+
+    fn with_nonlinear_mixed_risk(
+        mut self,
+        mixed_exposure: f64,
+        mixed_max_position_pct: Decimal,
+        mixed_max_pairwise_correlation: f64,
+    ) -> Self {
+        if let Some(rule) = self.rules.get_mut(&MarketRegime::Mixed) {
+            rule.top_n = Some(20);
+            rule.rebalance_freq_days = Some(60);
+            rule.max_gross_exposure = Some(mixed_exposure);
+            rule.max_position_pct = Some(mixed_max_position_pct);
+            rule.max_pairwise_correlation = Some(mixed_max_pairwise_correlation);
+        }
+        self
+    }
+
+    pub fn quality_mixed_orthogonal_risk_memory_router_v1(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_orthogonal_alpha_selector_v1(benchmark),
+            0.90,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_orthogonal_risk_memory_router_v2(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_orthogonal_alpha_selector_v2(benchmark),
+            0.90,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_orthogonal_risk_memory_router_v3(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_orthogonal_alpha_selector_v3(benchmark),
+            0.92,
+            Decimal::new(13, 2),
+            0.72,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v1(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.85,
+            Decimal::new(12, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v2(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.75,
+            Decimal::new(10, 2),
+            0.65,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v3(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_overlay_selector_v1(benchmark),
+            0.82,
+            Decimal::new(11, 2),
+            0.65,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v4(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.90,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v5(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.95,
+            Decimal::new(14, 2),
+            0.75,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v6(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_overlay_selector_v1(benchmark),
+            0.90,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v7(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.92,
+            Decimal::new(13, 2),
+            0.72,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v8(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.93,
+            Decimal::new(13, 2),
+            0.73,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v9(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.94,
+            Decimal::new(14, 2),
+            0.74,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v10(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.95,
+            Decimal::new(13, 2),
+            0.72,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v11(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.94,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v12(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.96,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v13(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.98,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v14(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            1.00,
+            Decimal::new(13, 2),
+            0.70,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v15(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            1.00,
+            Decimal::new(14, 2),
+            0.72,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v16(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            1.00,
+            Decimal::new(15, 2),
+            0.75,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v17(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.98,
+            Decimal::new(14, 2),
+            0.72,
+        )
+    }
+
+    pub fn quality_mixed_state_risk_memory_router_v18(benchmark: impl Into<String>) -> Self {
+        Self::with_mixed_state_risk_memory(
+            Self::quality_mixed_event_state_selector_v1(benchmark),
+            0.98,
+            Decimal::new(15, 2),
+            0.75,
+        )
+    }
+
+    fn with_mixed_state_risk_memory(
+        mut policy: Self,
+        mixed_exposure: f64,
+        mixed_max_position_pct: Decimal,
+        mixed_max_pairwise_correlation: f64,
+    ) -> Self {
+        if let Some(rule) = policy.rules.get_mut(&MarketRegime::Mixed) {
+            rule.top_n = Some(20);
+            rule.rebalance_freq_days = Some(60);
+            rule.max_gross_exposure = Some(mixed_exposure);
+            rule.max_position_pct = Some(mixed_max_position_pct);
+            rule.max_pairwise_correlation = Some(mixed_max_pairwise_correlation);
+        }
+        policy
+    }
+
+    pub fn quality_state_alpha_overlay_selector_v1(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_state_alpha_selector_v3(benchmark),
+            [
+                (
+                    MarketRegime::Bear,
+                    "phase7_valuation_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                (
+                    MarketRegime::HighVolatility,
+                    "phase7_price_volume_expanded_v1",
+                    0.05,
+                    ScoreDirection::Ascending,
+                ),
+            ],
+        )
+    }
+
+    pub fn quality_state_alpha_overlay_selector_v2(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_state_alpha_selector_v2(benchmark),
+            [
+                (
+                    MarketRegime::Bear,
+                    "phase7_quality_value_recovery_confirm_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+                (
+                    MarketRegime::Mixed,
+                    "phase7_valuation_v1",
+                    0.05,
+                    ScoreDirection::Descending,
+                ),
+            ],
+        )
+    }
+
+    pub fn quality_state_alpha_overlay_selector_v3(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector_with_overlay(
+            Self::quality_state_alpha_selector_v3(benchmark),
+            [
+                (
+                    MarketRegime::Bear,
+                    "phase7_valuation_v1",
+                    0.03,
+                    ScoreDirection::Descending,
+                ),
+                (
+                    MarketRegime::HighVolatility,
+                    "phase7_price_volume_expanded_v1",
+                    0.03,
+                    ScoreDirection::Ascending,
+                ),
+            ],
+        )
+    }
+
+    pub fn quality_state_sharpe_bridge_router_v1(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.70,
+            0.56,
+            0.96,
+            Decimal::new(9, 2),
+            Decimal::new(7, 2),
+            Decimal::new(13, 2),
+            0.65,
+            0.65,
+            0.70,
+        )
+    }
+
+    pub fn quality_state_sharpe_bridge_router_v2(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.74,
+            0.60,
+            0.98,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+            Decimal::new(14, 2),
+            0.65,
+            0.65,
+            0.72,
+        )
+    }
+
+    pub fn quality_state_sharpe_bridge_router_v3(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.66,
+            0.52,
+            0.92,
+            Decimal::new(8, 2),
+            Decimal::new(7, 2),
+            Decimal::new(12, 2),
+            0.62,
+            0.62,
+            0.68,
+        )
+    }
+
+    pub fn quality_frontier_regime_bridge_router_v1(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.74,
+            0.60,
+            1.00,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+            Decimal::new(13, 2),
+            0.65,
+            0.65,
+            0.70,
+        )
+    }
+
+    pub fn quality_frontier_regime_bridge_router_v2(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.76,
+            0.62,
+            1.00,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+            Decimal::new(14, 2),
+            0.65,
+            0.65,
+            0.72,
+        )
+    }
+
+    pub fn quality_frontier_regime_bridge_router_v3(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.70,
+            0.56,
+            0.96,
+            Decimal::new(9, 2),
+            Decimal::new(7, 2),
+            Decimal::new(13, 2),
+            0.62,
+            0.62,
+            0.70,
+        )
+    }
+
+    pub fn quality_frontier_regime_bridge_router_v4(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.76,
+            0.62,
+            1.00,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+            Decimal::new(13, 2),
+            0.65,
+            0.65,
+            0.70,
+        )
+    }
+
+    pub fn quality_frontier_regime_bridge_router_v5(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.74,
+            0.60,
+            1.00,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+            Decimal::new(14, 2),
+            0.65,
+            0.65,
+            0.72,
+        )
+    }
+
+    pub fn quality_frontier_regime_bridge_router_v6(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.76,
+            0.62,
+            1.00,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+            Decimal::new(14, 2),
+            0.65,
+            0.65,
+            0.70,
+        )
+    }
+
+    pub fn quality_frontier_regime_bridge_router_v7(benchmark: impl Into<String>) -> Self {
+        Self::with_state_sharpe_bridge_risk(
+            Self::quality_state_alpha_overlay_selector_v1(benchmark),
+            0.76,
+            0.62,
+            1.00,
+            Decimal::new(10, 2),
+            Decimal::new(8, 2),
+            Decimal::new(13, 2),
+            0.65,
+            0.65,
+            0.72,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_state_sharpe_bridge_risk(
+        mut policy: Self,
+        bear_exposure: f64,
+        high_volatility_exposure: f64,
+        mixed_exposure: f64,
+        bear_max_position_pct: Decimal,
+        high_volatility_max_position_pct: Decimal,
+        mixed_max_position_pct: Decimal,
+        bear_max_pairwise_correlation: f64,
+        high_volatility_max_pairwise_correlation: f64,
+        mixed_max_pairwise_correlation: f64,
+    ) -> Self {
+        if let Some(rule) = policy.rules.get_mut(&MarketRegime::Bear) {
+            rule.top_n = Some(20);
+            rule.rebalance_freq_days = Some(60);
+            rule.max_gross_exposure = Some(bear_exposure);
+            rule.max_position_pct = Some(bear_max_position_pct);
+            rule.max_pairwise_correlation = Some(bear_max_pairwise_correlation);
+        }
+        if let Some(rule) = policy.rules.get_mut(&MarketRegime::HighVolatility) {
+            rule.top_n = Some(20);
+            rule.rebalance_freq_days = Some(60);
+            rule.max_gross_exposure = Some(high_volatility_exposure);
+            rule.max_position_pct = Some(high_volatility_max_position_pct);
+            rule.max_pairwise_correlation = Some(high_volatility_max_pairwise_correlation);
+        }
+        if let Some(rule) = policy.rules.get_mut(&MarketRegime::Mixed) {
+            rule.top_n = Some(20);
+            rule.rebalance_freq_days = Some(60);
+            rule.max_gross_exposure = Some(mixed_exposure);
+            rule.max_position_pct = Some(mixed_max_position_pct);
+            rule.max_pairwise_correlation = Some(mixed_max_pairwise_correlation);
+        }
+        policy
+    }
+
+    fn quality_state_alpha_selector_with_overlay(
+        mut policy: Self,
+        overlays: impl IntoIterator<Item = (MarketRegime, &'static str, f64, ScoreDirection)>,
+    ) -> Self {
+        for (regime, combo_name, weight, score_direction) in overlays {
+            if let Some(rule) = policy.rules.get_mut(&regime) {
+                rule.score_overlay = Some(FactorScoreOverlayConfig {
+                    combo_name: combo_name.to_string(),
+                    version: "1.0.0".to_string(),
+                    weight: weight.clamp(0.0, 1.0),
+                    score_direction,
+                });
+            }
+        }
+        policy
+    }
+
+    fn quality_state_alpha_selector(
+        benchmark: impl Into<String>,
+        spec: StateAlphaSelectorSpec,
+    ) -> Self {
+        let mut policy = Self::quality_bear_window_guard_v2(benchmark);
+        apply_state_alpha_rule(
+            &mut policy,
+            MarketRegime::Bull,
+            None,
+            None,
+            None,
+            None,
+            None,
+            spec.bull_sleeve,
+        );
+        apply_state_alpha_rule(
+            &mut policy,
+            MarketRegime::Bear,
+            Some(20),
+            Some(60),
+            Some(spec.bear_exposure),
+            Some(0.65),
+            Some(spec.bear_max_position_pct),
+            spec.bear_sleeve,
+        );
+        apply_state_alpha_rule(
+            &mut policy,
+            MarketRegime::HighVolatility,
+            Some(20),
+            Some(60),
+            Some(spec.high_volatility_exposure),
+            Some(0.65),
+            Some(spec.high_volatility_max_position_pct),
+            spec.high_volatility_sleeve,
+        );
+        apply_state_alpha_rule(
+            &mut policy,
+            MarketRegime::Sideways,
+            None,
+            None,
+            Some(1.0),
+            None,
+            None,
+            spec.sideways_sleeve,
+        );
+        apply_state_alpha_rule(
+            &mut policy,
+            MarketRegime::Mixed,
+            None,
+            None,
+            Some(1.0),
+            None,
+            None,
+            spec.mixed_sleeve,
+        );
+        policy
+    }
+
+    fn quality_event_window_return_sharpe_router(
+        benchmark: impl Into<String>,
+        bear_exposure: f64,
+        high_vol_exposure: f64,
+        bear_max_position_pct: Decimal,
+        high_vol_max_position_pct: Decimal,
+    ) -> Self {
+        let mut policy =
+            Self::quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1(benchmark);
+        if let Some(rule) = policy.rules.get_mut(&MarketRegime::Bear) {
+            rule.top_n = Some(20);
+            rule.rebalance_freq_days = Some(60);
+            rule.max_gross_exposure = Some(bear_exposure);
+            rule.max_pairwise_correlation = Some(0.65);
+            rule.max_position_pct = Some(bear_max_position_pct);
+        }
+        if let Some(rule) = policy.rules.get_mut(&MarketRegime::HighVolatility) {
+            rule.top_n = Some(20);
+            rule.rebalance_freq_days = Some(60);
+            rule.max_gross_exposure = Some(high_vol_exposure);
+            rule.max_pairwise_correlation = Some(0.65);
+            rule.max_position_pct = Some(high_vol_max_position_pct);
+        }
+        policy
+    }
+
     pub fn apply(&self, base: &SignalConfig, regime: MarketRegime) -> SignalConfig {
         self.rules
             .get(&regime)
@@ -2054,8 +3471,9 @@ pub async fn generate_signals_with_cache(
             .await?;
         }
         if let Some(blend) = config.prediction_blend.as_ref() {
-            let prediction_scores = load_prediction_scores_by_date(
+            let prediction_scores = load_prediction_scores_by_date_cached(
                 pool,
+                cache,
                 &blend.prediction_set_id,
                 start_date,
                 end_date,
@@ -2063,7 +3481,7 @@ pub async fn generate_signals_with_cache(
             .await?;
             blend_factor_prediction_scores(
                 &mut adjusted_scores,
-                &prediction_scores,
+                prediction_scores.as_ref(),
                 blend,
                 config.score_direction,
             );
@@ -2397,12 +3815,17 @@ async fn load_regime_base_scores_cached(
         .await?;
     }
     if let Some(blend) = config.prediction_blend.as_ref() {
-        let prediction_scores =
-            load_prediction_scores_by_date(pool, &blend.prediction_set_id, start_date, end_date)
-                .await?;
+        let prediction_scores = load_prediction_scores_by_date_cached(
+            pool,
+            cache,
+            &blend.prediction_set_id,
+            start_date,
+            end_date,
+        )
+        .await?;
         blend_factor_prediction_scores(
             &mut adjusted_scores,
-            &prediction_scores,
+            prediction_scores.as_ref(),
             blend,
             config.score_direction,
         );
@@ -2564,7 +3987,7 @@ async fn load_prediction_scores_by_date(
     prediction_set_id: &str,
     start_date: NaiveDate,
     end_date: NaiveDate,
-) -> Result<HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>, String> {
+) -> Result<PredictionScoresByDate, String> {
     let rows: Vec<(String, NaiveDate, f64, Option<i32>)> = sqlx::query_as(
         "SELECT symbol, trade_date, score, rank
          FROM model_prediction
@@ -2599,9 +4022,26 @@ async fn load_prediction_scores_by_date(
     Ok(scores_by_date)
 }
 
+async fn load_prediction_scores_by_date_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    prediction_set_id: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Arc<PredictionScoresByDate>, String> {
+    let key = SignalDataCacheKey::prediction_scores(prediction_set_id, start_date, end_date);
+    if let Some(scores) = cache.cached_prediction_scores(&key) {
+        return Ok(scores);
+    }
+
+    let scores =
+        load_prediction_scores_by_date(pool, prediction_set_id, start_date, end_date).await?;
+    Ok(cache.insert_prediction_scores(key, scores))
+}
+
 fn blend_factor_prediction_scores(
     factor_scores: &mut FactorScoresByDate,
-    prediction_scores: &HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
+    prediction_scores: &PredictionScoresByDate,
     blend: &PredictionBlendConfig,
     score_direction: ScoreDirection,
 ) {
@@ -5426,6 +6866,61 @@ mod tests {
     }
 
     #[test]
+    fn soft_candidate_risk_filter_keeps_more_return_candidates() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("VERY_HIGH_VOL".to_string(), 5.0),
+            ("MID_HIGH_VOL".to_string(), 4.0),
+            ("LOW_VOL_A".to_string(), 3.0),
+            ("LOW_VOL_B".to_string(), 2.0),
+            ("LOW_VOL_C".to_string(), 1.0),
+        ];
+        let return_history = HashMap::from([
+            (
+                "VERY_HIGH_VOL".to_string(),
+                dated_returns(&[0.15, -0.14, 0.13, -0.12, 0.11]),
+            ),
+            (
+                "MID_HIGH_VOL".to_string(),
+                dated_returns(&[0.07, -0.06, 0.06, -0.05, 0.05]),
+            ),
+            (
+                "LOW_VOL_A".to_string(),
+                dated_returns(&[0.004, 0.003, 0.005, 0.004, 0.003]),
+            ),
+            (
+                "LOW_VOL_B".to_string(),
+                dated_returns(&[0.005, 0.004, 0.003, 0.004, 0.005]),
+            ),
+            (
+                "LOW_VOL_C".to_string(),
+                dated_returns(&[0.006, 0.005, 0.004, 0.005, 0.006]),
+            ),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 4,
+            max_position_pct: Decimal::new(40, 2),
+            risk_budget_lookback_days: 5,
+            candidate_risk_filter_profile: CandidateRiskFilterProfile::SoftLowVolatilityV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(!weights.contains_key("VERY_HIGH_VOL"));
+        assert!(weights.contains_key("MID_HIGH_VOL"));
+        assert!(weights.contains_key("LOW_VOL_A"));
+        assert!(weights.len() >= 4);
+    }
+
+    #[test]
     fn risk_contribution_control_scales_dominant_risk_name() {
         let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
         let candidates = vec![
@@ -5699,6 +7194,115 @@ mod tests {
         assert_eq!(first.len(), second.len());
         assert_eq!(cache.stats().combo_score_hits, 2);
         assert_eq!(cache.stats().combo_score_misses, 0);
+    }
+
+    #[test]
+    fn signal_data_cache_reuses_larger_combo_candidate_pool_for_smaller_request() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let cached_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(3),
+            TradableUniverseProfile::All,
+        );
+        let requested_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(2),
+            TradableUniverseProfile::All,
+        );
+        let mut scores = HashMap::new();
+        scores.insert(
+            start,
+            vec![
+                ("AAA".to_string(), 0.9),
+                ("BBB".to_string(), 0.8),
+                ("CCC".to_string(), 0.7),
+            ],
+        );
+        let mut cache = SignalDataCache::default();
+        cache.store_combo_scores_for_test(cached_key, scores);
+
+        let reused = cache
+            .cached_combo_scores(&requested_key)
+            .expect("larger candidate pool should satisfy smaller request");
+
+        assert_eq!(
+            reused.get(&start).unwrap(),
+            &vec![("AAA".to_string(), 0.9), ("BBB".to_string(), 0.8)]
+        );
+        assert_eq!(cache.stats().combo_score_hits, 1);
+        assert_eq!(cache.stats().combo_score_misses, 0);
+    }
+
+    #[test]
+    fn signal_data_cache_does_not_reuse_combo_candidate_pool_across_direction_or_universe() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let cached_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(500),
+            TradableUniverseProfile::All,
+        );
+        let ascending_request = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Ascending,
+            Some(400),
+            TradableUniverseProfile::All,
+        );
+        let universe_request = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(400),
+            TradableUniverseProfile::ListedNonSt,
+        );
+        let mut cache = SignalDataCache::default();
+        cache.store_combo_scores_for_test(cached_key, HashMap::from([(start, Vec::new())]));
+
+        assert!(cache.cached_combo_scores(&ascending_request).is_none());
+        assert!(cache.cached_combo_scores(&universe_request).is_none());
+        assert_eq!(cache.stats().combo_score_hits, 0);
+        assert_eq!(cache.stats().combo_score_misses, 2);
+    }
+
+    #[test]
+    fn signal_data_cache_tracks_hits_for_reused_prediction_scores() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let key = SignalDataCacheKey::prediction_scores("pred-phase7-wide", start, end);
+        let mut cache = SignalDataCache::default();
+        let scores = HashMap::from([(
+            start,
+            vec![
+                ("AAA".to_string(), 0.1, Some(1)),
+                ("BBB".to_string(), 0.2, Some(2)),
+            ],
+        )]);
+
+        cache.store_prediction_scores_for_test(key.clone(), scores);
+        let first = cache.cached_prediction_scores(&key).expect("first hit");
+        let second = cache.cached_prediction_scores(&key).expect("second hit");
+
+        assert_eq!(first.len(), second.len());
+        assert_eq!(cache.stats().prediction_score_hits, 2);
+        assert_eq!(cache.stats().prediction_score_misses, 0);
     }
 
     #[test]
@@ -6069,6 +7673,648 @@ mod tests {
         assert_eq!(high_volatility.rebalance_freq_days, 40);
         assert_eq!(high_volatility.max_gross_exposure, 0.58);
         assert_eq!(high_volatility.max_position_pct, Decimal::new(75, 3));
+    }
+
+    #[test]
+    fn quality_bear_position_guard_v3_is_milder_for_return_preservation() {
+        let base = SignalConfig {
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_bear_position_guard_v3("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(policy.lookback_days, 126);
+        assert_eq!(policy.bear_drawdown_threshold, 0.14);
+        assert_eq!(bull.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bull.top_n, 20);
+        assert_eq!(bull.max_gross_exposure, 1.0);
+        assert_eq!(bear.score_direction, ScoreDirection::Ascending);
+        assert_eq!(bear.top_n, 25);
+        assert_eq!(bear.rebalance_freq_days, 80);
+        assert_eq!(bear.skip_top_pct, 0.05);
+        assert_eq!(bear.max_gross_exposure, 0.82);
+        assert_eq!(bear.max_position_pct, Decimal::new(11, 2));
+        assert_eq!(high_volatility.top_n, 25);
+        assert_eq!(high_volatility.rebalance_freq_days, 40);
+        assert_eq!(high_volatility.max_gross_exposure, 0.66);
+        assert_eq!(high_volatility.max_position_pct, Decimal::new(9, 2));
+    }
+
+    #[test]
+    fn quality_event_window_position_guard_keeps_event_sleeve_and_position_shape() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_event_window_position_guard_v3("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert!(bull.portfolio_sleeve.is_none());
+        assert_eq!(bear.top_n, 25);
+        assert_eq!(bear.rebalance_freq_days, 80);
+        assert_eq!(bear.max_gross_exposure, 0.82);
+        assert_eq!(bear.max_position_pct, Decimal::new(11, 2));
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event sleeve");
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(bear_sleeve.version, "1.0.0");
+        assert_eq!(bear_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((bear_sleeve.weight - 0.15).abs() < 1e-9);
+        assert_eq!(high_volatility.top_n, 25);
+        assert_eq!(high_volatility.max_gross_exposure, 0.66);
+        assert!(high_volatility.portfolio_sleeve.is_some());
+    }
+
+    #[test]
+    fn quality_event_window_return_sharpe_router_tightens_correlation_in_stress_only() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_event_window_return_sharpe_router_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(bull.max_pairwise_correlation, Some(0.75));
+        assert!(bull.portfolio_sleeve.is_none());
+        assert_eq!(bear.max_pairwise_correlation, Some(0.65));
+        assert_eq!(bear.top_n, 20);
+        assert_eq!(bear.max_gross_exposure, 0.72);
+        assert_eq!(bear.max_position_pct, Decimal::new(10, 2));
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event sleeve");
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert!((bear_sleeve.weight - 0.15).abs() < 1e-9);
+        assert_eq!(high_volatility.max_pairwise_correlation, Some(0.65));
+        assert_eq!(high_volatility.max_gross_exposure, 0.58);
+        assert!(high_volatility.portfolio_sleeve.is_some());
+    }
+
+    #[test]
+    fn quality_event_window_return_sharpe_router_frontier_interpolates_exposure() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let balanced =
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v3("000300.SH");
+        let tighter = MarketRegimePolicy::quality_event_window_return_sharpe_router_v4("000300.SH");
+
+        let balanced_bear = balanced.apply(&base, MarketRegime::Bear);
+        let tighter_bear = tighter.apply(&base, MarketRegime::Bear);
+        let balanced_high_vol = balanced.apply(&base, MarketRegime::HighVolatility);
+        let tighter_high_vol = tighter.apply(&base, MarketRegime::HighVolatility);
+
+        assert_eq!(balanced_bear.max_gross_exposure, 0.75);
+        assert_eq!(balanced_bear.max_position_pct, Decimal::new(10, 2));
+        assert_eq!(balanced_high_vol.max_gross_exposure, 0.62);
+        assert_eq!(balanced_high_vol.max_position_pct, Decimal::new(9, 2));
+        assert_eq!(tighter_bear.max_gross_exposure, 0.68);
+        assert_eq!(tighter_bear.max_position_pct, Decimal::new(9, 2));
+        assert_eq!(tighter_high_vol.max_gross_exposure, 0.54);
+        assert_eq!(tighter_high_vol.max_position_pct, Decimal::new(7, 2));
+        assert!(balanced_bear.portfolio_sleeve.is_some());
+        assert!(tighter_bear.portfolio_sleeve.is_some());
+    }
+
+    #[test]
+    fn quality_state_alpha_selector_routes_distinct_sleeves_by_regime() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_state_alpha_selector_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let sideways = policy.apply(&base, MarketRegime::Sideways);
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+
+        let bull_sleeve = bull.portfolio_sleeve.expect("bull quality/value sleeve");
+        assert_eq!(
+            bull_sleeve.combo_name,
+            "phase7_quality_value_recovery_confirm_v1"
+        );
+        assert_eq!(bull_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((bull_sleeve.weight - 0.05).abs() < 1e-9);
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event sleeve");
+        assert_eq!(bear.max_pairwise_correlation, Some(0.65));
+        assert_eq!(bear.max_gross_exposure, 0.68);
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert!((bear_sleeve.weight - 0.15).abs() < 1e-9);
+        let sideways_sleeve = sideways.portfolio_sleeve.expect("sideways low-risk sleeve");
+        assert_eq!(
+            sideways_sleeve.combo_name,
+            "phase7_price_volume_expanded_v1"
+        );
+        assert_eq!(sideways_sleeve.score_direction, ScoreDirection::Ascending);
+        assert!((sideways_sleeve.weight - 0.10).abs() < 1e-9);
+        let mixed_sleeve = mixed.portfolio_sleeve.expect("mixed value sleeve");
+        assert_eq!(mixed_sleeve.combo_name, "phase7_valuation_v1");
+        assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((mixed_sleeve.weight - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_state_alpha_overlay_selector_adds_small_orthogonal_overlay() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_state_alpha_overlay_selector_v1("000300.SH");
+
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event sleeve");
+        let bear_overlay = bear.score_overlay.expect("bear valuation overlay");
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(bear_overlay.combo_name, "phase7_valuation_v1");
+        assert_eq!(bear_overlay.score_direction, ScoreDirection::Descending);
+        assert!((bear_overlay.weight - 0.05).abs() < 1e-9);
+        let high_volatility_sleeve = high_volatility
+            .portfolio_sleeve
+            .expect("high-volatility low-risk sleeve");
+        let high_volatility_overlay = high_volatility
+            .score_overlay
+            .expect("high-volatility low-risk overlay");
+        assert_eq!(
+            high_volatility_sleeve.combo_name,
+            "phase7_price_volume_expanded_v1"
+        );
+        assert_eq!(
+            high_volatility_overlay.combo_name,
+            "phase7_price_volume_expanded_v1"
+        );
+        assert_eq!(
+            high_volatility_overlay.score_direction,
+            ScoreDirection::Ascending
+        );
+        assert!((high_volatility_overlay.weight - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_mixed_event_state_selector_routes_event_flow_in_mixed_state_only() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_mixed_event_state_overlay_selector_v1("000300.SH");
+
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        let sideways = policy.apply(&base, MarketRegime::Sideways);
+        let mixed_sleeve = mixed.portfolio_sleeve.expect("mixed event-window sleeve");
+        let mixed_overlay = mixed.score_overlay.expect("mixed valuation overlay");
+        let sideways_sleeve = sideways
+            .portfolio_sleeve
+            .expect("sideways valuation sleeve");
+
+        assert_eq!(mixed_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((mixed_sleeve.weight - 0.10).abs() < 1e-9);
+        assert_eq!(mixed_overlay.combo_name, "phase7_valuation_v1");
+        assert!((mixed_overlay.weight - 0.05).abs() < 1e-9);
+        assert_eq!(sideways_sleeve.combo_name, "phase7_valuation_v1");
+        assert!(sideways.score_overlay.is_none());
+    }
+
+    #[test]
+    fn quality_mixed_state_risk_memory_router_only_tightens_mixed_state() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v4("000300.SH");
+
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let mixed_sleeve = mixed.portfolio_sleeve.expect("mixed event-window sleeve");
+
+        assert_eq!(mixed_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(mixed.max_gross_exposure, 0.90);
+        assert_eq!(mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(mixed.max_pairwise_correlation, Some(0.70));
+        assert_eq!(bull.max_gross_exposure, 1.0);
+        assert_eq!(bull.max_position_pct, Decimal::new(15, 2));
+        assert_eq!(bull.max_pairwise_correlation, Some(0.75));
+    }
+
+    #[test]
+    fn quality_mixed_state_risk_memory_router_frontier_relaxes_mixed_risk_only() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let strict = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v14("000300.SH");
+        let relaxed = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v16("000300.SH");
+
+        let strict_mixed = strict.apply(&base, MarketRegime::Mixed);
+        let strict_bear = strict.apply(&base, MarketRegime::Bear);
+        let strict_bull = strict.apply(&base, MarketRegime::Bull);
+        let relaxed_mixed = relaxed.apply(&base, MarketRegime::Mixed);
+        let relaxed_bear = relaxed.apply(&base, MarketRegime::Bear);
+        let relaxed_bull = relaxed.apply(&base, MarketRegime::Bull);
+
+        assert_eq!(strict_mixed.max_gross_exposure, 1.0);
+        assert_eq!(strict_mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(strict_mixed.max_pairwise_correlation, Some(0.70));
+        assert_eq!(relaxed_mixed.max_gross_exposure, 1.0);
+        assert_eq!(relaxed_mixed.max_position_pct, Decimal::new(15, 2));
+        assert_eq!(relaxed_mixed.max_pairwise_correlation, Some(0.75));
+        assert_eq!(relaxed_bear.max_position_pct, strict_bear.max_position_pct);
+        assert_eq!(
+            relaxed_bear.max_pairwise_correlation,
+            strict_bear.max_pairwise_correlation
+        );
+        assert_eq!(relaxed_bull.max_position_pct, strict_bull.max_position_pct);
+        assert_eq!(
+            relaxed_bull.max_pairwise_correlation,
+            strict_bull.max_pairwise_correlation
+        );
+    }
+
+    #[test]
+    fn quality_mixed_orthogonal_alpha_routes_residual_confirmation_in_mixed_state() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_mixed_orthogonal_alpha_selector_v1("000300.SH");
+
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let mixed_sleeve = mixed
+            .portfolio_sleeve
+            .expect("mixed residual confirmation sleeve");
+        let mixed_overlay = mixed
+            .score_overlay
+            .expect("mixed valuation confirmation overlay");
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event-window sleeve");
+
+        assert_eq!(
+            mixed_sleeve.combo_name,
+            "phase7_quality_residual_confirm_10pct_v1"
+        );
+        assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Ascending);
+        assert!((mixed_sleeve.weight - 0.10).abs() < 1e-9);
+        assert_eq!(mixed_overlay.combo_name, "phase7_valuation_v1");
+        assert_eq!(mixed_overlay.score_direction, ScoreDirection::Descending);
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    }
+
+    #[test]
+    fn quality_mixed_orthogonal_risk_memory_reuses_cc_risk_shell() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy =
+            MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v2("000300.SH");
+
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let mixed_sleeve = mixed
+            .portfolio_sleeve
+            .expect("mixed value/recovery/event sleeve");
+        let mixed_overlay = mixed
+            .score_overlay
+            .expect("mixed residual confirmation overlay");
+
+        assert_eq!(
+            mixed_sleeve.combo_name,
+            "phase7_quality_value_recovery_event_confirm_v1"
+        );
+        assert_eq!(
+            mixed_overlay.combo_name,
+            "phase7_quality_residual_confirm_10pct_v1"
+        );
+        assert_eq!(mixed.max_gross_exposure, 0.90);
+        assert_eq!(mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(mixed.max_pairwise_correlation, Some(0.70));
+        assert_eq!(bull.max_gross_exposure, 1.0);
+        assert_eq!(bull.max_pairwise_correlation, Some(0.75));
+    }
+
+    #[test]
+    fn quality_state_sharpe_bridge_router_preserves_bx_return_sleeves_with_tighter_stress_risk() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_state_sharpe_bridge_router_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event-window sleeve");
+        let high_volatility_sleeve = high_volatility
+            .portfolio_sleeve
+            .expect("high-volatility low-risk sleeve");
+        let mixed_sleeve = mixed.portfolio_sleeve.expect("mixed value/recovery sleeve");
+
+        assert_eq!(bull.max_gross_exposure, 1.0);
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(
+            high_volatility_sleeve.combo_name,
+            "phase7_price_volume_expanded_v1"
+        );
+        assert_eq!(
+            mixed_sleeve.combo_name,
+            "phase7_quality_value_recovery_confirm_v1"
+        );
+        assert_eq!(bear.max_gross_exposure, 0.70);
+        assert_eq!(high_volatility.max_gross_exposure, 0.56);
+        assert_eq!(mixed.max_gross_exposure, 0.96);
+        assert_eq!(mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(mixed.max_pairwise_correlation, Some(0.70));
+    }
+
+    #[test]
+    fn quality_nonlinear_alpha_router_uses_distinct_state_alpha_without_handpicked_dates() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_nonlinear_alpha_router_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+
+        let bull_sleeve = bull
+            .portfolio_sleeve
+            .expect("bull valuation/recovery sleeve");
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event sleeve");
+        let bear_overlay = bear.score_overlay.expect("bear valuation overlay");
+        let mixed_sleeve = mixed
+            .portfolio_sleeve
+            .expect("mixed residual confirmation sleeve");
+        let mixed_overlay = mixed.score_overlay.expect("mixed quality/recovery overlay");
+        let high_vol_sleeve = high_volatility
+            .portfolio_sleeve
+            .expect("high-volatility low-risk sleeve");
+
+        assert_eq!(
+            bull_sleeve.combo_name,
+            "phase7_quality_value_recovery_event_confirm_v1"
+        );
+        assert_eq!(bull_sleeve.score_direction, ScoreDirection::Descending);
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(bear_overlay.combo_name, "phase7_valuation_v1");
+        assert_eq!(
+            mixed_sleeve.combo_name,
+            "phase7_quality_residual_confirm_10pct_v1"
+        );
+        assert_eq!(
+            mixed_overlay.combo_name,
+            "phase7_quality_value_recovery_confirm_v1"
+        );
+        assert_eq!(mixed.max_gross_exposure, 0.98);
+        assert_eq!(mixed.max_position_pct, Decimal::new(14, 2));
+        assert_eq!(mixed.max_pairwise_correlation, Some(0.72));
+        assert_eq!(
+            high_vol_sleeve.combo_name,
+            "phase7_price_volume_expanded_v1"
+        );
+        assert_eq!(high_volatility.max_gross_exposure, 0.60);
+    }
+
+    #[test]
+    fn quality_nonlinear_alpha_risk_memory_relaxed_routers_bridge_return_without_date_rules() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let strict = MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v1("000300.SH");
+        let relaxed =
+            MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v2("000300.SH");
+        let overlay_relaxed =
+            MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v3("000300.SH");
+
+        let strict_mixed = strict.apply(&base, MarketRegime::Mixed);
+        let relaxed_mixed = relaxed.apply(&base, MarketRegime::Mixed);
+        let overlay_mixed = overlay_relaxed.apply(&base, MarketRegime::Mixed);
+
+        assert_eq!(strict_mixed.max_gross_exposure, 0.94);
+        assert_eq!(strict_mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(strict_mixed.max_pairwise_correlation, Some(0.70));
+        assert_eq!(relaxed_mixed.max_gross_exposure, 0.97);
+        assert_eq!(relaxed_mixed.max_position_pct, Decimal::new(14, 2));
+        assert_eq!(relaxed_mixed.max_pairwise_correlation, Some(0.72));
+        assert_eq!(overlay_mixed.max_gross_exposure, 0.98);
+        assert_eq!(overlay_mixed.max_pairwise_correlation, Some(0.75));
+        assert!(relaxed_mixed.portfolio_sleeve.is_some());
+        assert!(overlay_mixed.score_overlay.is_some());
+    }
+
+    #[test]
+    fn quality_frontier_regime_bridge_keeps_return_sleeves_and_v14_mixed_risk_memory() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+        let policy = MarketRegimePolicy::quality_frontier_regime_bridge_router_v1("000300.SH");
+
+        let bull = policy.apply(&base, MarketRegime::Bull);
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        let high_volatility = policy.apply(&base, MarketRegime::HighVolatility);
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        let sideways = policy.apply(&base, MarketRegime::Sideways);
+        let bear_sleeve = bear.portfolio_sleeve.expect("bear event sleeve");
+        let high_vol_sleeve = high_volatility
+            .portfolio_sleeve
+            .expect("high-volatility price/volume sleeve");
+        let mixed_sleeve = mixed.portfolio_sleeve.expect("mixed value/recovery sleeve");
+        let sideways_sleeve = sideways
+            .portfolio_sleeve
+            .expect("sideways valuation sleeve");
+
+        assert_eq!(bull.max_gross_exposure, 1.0);
+        assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(
+            high_vol_sleeve.combo_name,
+            "phase7_price_volume_expanded_v1"
+        );
+        assert_eq!(
+            mixed_sleeve.combo_name,
+            "phase7_quality_value_recovery_confirm_v1"
+        );
+        assert_eq!(sideways_sleeve.combo_name, "phase7_valuation_v1");
+        assert_eq!(bear.max_gross_exposure, 0.74);
+        assert_eq!(high_volatility.max_gross_exposure, 0.60);
+        assert_eq!(mixed.max_gross_exposure, 1.0);
+        assert_eq!(mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(mixed.max_pairwise_correlation, Some(0.70));
+    }
+
+    #[test]
+    fn quality_frontier_regime_bridge_decomposition_splits_stress_and_mixed_risk_axes() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            top_n: 20,
+            rebalance_freq_days: 60,
+            max_gross_exposure: 1.0,
+            max_position_pct: Decimal::new(15, 2),
+            max_pairwise_correlation: Some(0.75),
+            skip_top_pct: 0.10,
+            score_direction: ScoreDirection::Ascending,
+            ..Default::default()
+        };
+
+        let stress_lift_strict_mixed =
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v4("000300.SH");
+        let base_stress_relaxed_mixed =
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v5("000300.SH");
+        let stress_lift_position_only =
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v6("000300.SH");
+        let stress_lift_correlation_only =
+            MarketRegimePolicy::quality_frontier_regime_bridge_router_v7("000300.SH");
+
+        let v4_bear = stress_lift_strict_mixed.apply(&base, MarketRegime::Bear);
+        let v4_mixed = stress_lift_strict_mixed.apply(&base, MarketRegime::Mixed);
+        let v5_bear = base_stress_relaxed_mixed.apply(&base, MarketRegime::Bear);
+        let v5_mixed = base_stress_relaxed_mixed.apply(&base, MarketRegime::Mixed);
+        let v6_mixed = stress_lift_position_only.apply(&base, MarketRegime::Mixed);
+        let v7_mixed = stress_lift_correlation_only.apply(&base, MarketRegime::Mixed);
+
+        assert_eq!(v4_bear.max_gross_exposure, 0.76);
+        assert_eq!(v4_mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(v4_mixed.max_pairwise_correlation, Some(0.70));
+        assert_eq!(v5_bear.max_gross_exposure, 0.74);
+        assert_eq!(v5_mixed.max_position_pct, Decimal::new(14, 2));
+        assert_eq!(v5_mixed.max_pairwise_correlation, Some(0.72));
+        assert_eq!(v6_mixed.max_position_pct, Decimal::new(14, 2));
+        assert_eq!(v6_mixed.max_pairwise_correlation, Some(0.70));
+        assert_eq!(v7_mixed.max_position_pct, Decimal::new(13, 2));
+        assert_eq!(v7_mixed.max_pairwise_correlation, Some(0.72));
+        assert!(v4_mixed.portfolio_sleeve.is_some());
+        assert!(v5_mixed.portfolio_sleeve.is_some());
     }
 
     #[test]
@@ -6444,6 +8690,34 @@ mod tests {
     }
 
     #[test]
+    fn quality_all_regime_event_window_sleeve_allocates_event_flow_in_every_state() {
+        let base = SignalConfig {
+            combo_name: "phase7_financial_quality_v1".to_string(),
+            version: "1.0.0".to_string(),
+            score_direction: ScoreDirection::Ascending,
+            max_gross_exposure: 1.0,
+            ..Default::default()
+        };
+        let policy =
+            MarketRegimePolicy::quality_all_regime_event_window_sleeve_10pct_v1("000300.SH");
+
+        for regime in [
+            MarketRegime::Bull,
+            MarketRegime::Bear,
+            MarketRegime::HighVolatility,
+            MarketRegime::Sideways,
+            MarketRegime::Mixed,
+        ] {
+            let active = policy.apply(&base, regime);
+            let sleeve = active.portfolio_sleeve.expect("all-regime event sleeve");
+            assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
+            assert_eq!(sleeve.version, "1.0.0");
+            assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+            assert!((sleeve.weight - 0.10).abs() < 1e-9);
+        }
+    }
+
+    #[test]
     fn quality_regime_alpha_portfolio_sleeve_can_route_event_window_by_regime() {
         let bear_only =
             MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_bear_only_v1(
@@ -6510,6 +8784,36 @@ mod tests {
         );
         assert_eq!(long_sleeve.score_direction, ScoreDirection::Descending);
         assert!((long_sleeve.weight - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_regime_alpha_portfolio_sleeve_can_select_event_quality_segment() {
+        let surprise =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1(
+                "000300.SH",
+            );
+        let confirm =
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1(
+                "000300.SH",
+            );
+
+        let surprise_sleeve = surprise
+            .rules
+            .get(&MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .expect("event-surprise sleeve");
+        let confirm_sleeve = confirm
+            .rules
+            .get(&MarketRegime::Bear)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .expect("event-confirm sleeve");
+
+        assert_eq!(surprise_sleeve.combo_name, "phase7_event_surprise_v1");
+        assert_eq!(surprise_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((surprise_sleeve.weight - 0.15).abs() < 1e-9);
+        assert_eq!(confirm_sleeve.combo_name, "phase7_event_earnings_v1");
+        assert_eq!(confirm_sleeve.score_direction, ScoreDirection::Descending);
+        assert!((confirm_sleeve.weight - 0.15).abs() < 1e-9);
     }
 
     #[test]
