@@ -15,16 +15,17 @@ use tracing::info;
 use uuid::Uuid;
 
 use quant_backtest::engine::{
-    BacktestConfig, BacktestMode, BacktestPersistenceMode, ExecutionPrice,
+    BacktestConfig, BacktestMode, BacktestPersistenceMode, ExecutionCarryPolicy, ExecutionPrice,
     ExecutionScheduleProfile, ExecutionTiming, RiskControlConfig, StrategySignal,
 };
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::{BacktestDataCache, BacktestRunner};
 use quant_backtest::signal_generator::{
-    CandidateRiskFilterProfile, CapacityRiskBudgetProfile, EventGateConfig, EventGateMode,
-    ExecutionImpactBudgetProfile, MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod,
-    PredictionBlendConfig, RiskContributionControlProfile, ScoreDirection, SignalDataCache,
-    StyleRiskBudgetProfile, TradableUniverseProfile,
+    CandidateRankingProfile, CandidateRiskFilterProfile, CapacityRiskBudgetProfile,
+    CashUtilizationProfile, EventGateConfig, EventGateMode, ExecutionImpactBudgetProfile,
+    MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig,
+    RiskContributionControlProfile, ScoreDirection, SignalDataCache, StyleRiskBudgetProfile,
+    TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -95,6 +96,9 @@ pub struct ExecutionRulesReq {
     pub execution_timing: Option<String>,
     pub execution_price: Option<String>,
     pub execution_schedule_profile: Option<String>,
+    pub execution_carry_policy: Option<String>,
+    pub execution_daily_target_move_limit_pct: Option<f64>,
+    pub execution_max_carry_days: Option<usize>,
     pub max_participation_rate: Option<f64>,
 }
 
@@ -358,6 +362,23 @@ fn parse_execution_schedule_profile(
         .unwrap_or(Ok(ExecutionScheduleProfile::Immediate))
 }
 
+fn parse_execution_carry_policy(value: Option<&str>) -> Result<ExecutionCarryPolicy, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ExecutionCarryPolicy::parse)
+        .unwrap_or(Ok(ExecutionCarryPolicy::Expire))
+}
+
+fn parse_execution_daily_target_move_limit(
+    rules: Option<&ExecutionRulesReq>,
+) -> Result<Option<Decimal>, String> {
+    rules
+        .and_then(|rules| rules.execution_daily_target_move_limit_pct)
+        .map(|value| decimal_from_f64(value, "execution_daily_target_move_limit_pct"))
+        .transpose()
+}
+
 fn decimal_from_f64(value: f64, field: &str) -> Result<Decimal, String> {
     Decimal::from_f64(value).ok_or_else(|| format!("{} must be a finite number", field))
 }
@@ -436,6 +457,17 @@ fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String>
             .as_ref()
             .and_then(|rules| rules.execution_schedule_profile.as_deref()),
     )?;
+    let execution_carry_policy = parse_execution_carry_policy(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_carry_policy.as_deref()),
+    )?;
+    let execution_daily_target_move_limit_pct =
+        parse_execution_daily_target_move_limit(req.execution_rules.as_ref())?;
+    let execution_max_carry_days = req
+        .execution_rules
+        .as_ref()
+        .and_then(|rules| rules.execution_max_carry_days);
     let max_participation_rate = req
         .execution_rules
         .as_ref()
@@ -465,6 +497,9 @@ fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String>
         execution_timing,
         execution_price,
         execution_schedule_profile,
+        execution_carry_policy,
+        execution_daily_target_move_limit_pct,
+        execution_max_carry_days,
         max_participation_rate,
         persistence_mode: parse_persistence_mode(req.persistence_mode.as_deref())?,
         risk_control: Default::default(),
@@ -839,9 +874,11 @@ pub struct RunFactorBacktestReq {
     pub capacity_penalty_strength: f64,
     pub industry_max_weight_pct: Option<f64>,
     pub capacity_risk_budget: Option<String>,
+    pub cash_utilization: Option<String>,
     pub execution_impact_budget: Option<String>,
     pub style_risk_budget: Option<String>,
     pub candidate_risk_filter: Option<String>,
+    pub candidate_ranking: Option<String>,
     pub risk_contribution_control: Option<String>,
     #[serde(default)]
     pub rebalance_hysteresis_pct: Option<f64>,
@@ -933,9 +970,11 @@ pub struct RunPredictionBacktestReq {
     pub capacity_penalty_strength: f64,
     pub industry_max_weight_pct: Option<f64>,
     pub capacity_risk_budget: Option<String>,
+    pub cash_utilization: Option<String>,
     pub execution_impact_budget: Option<String>,
     pub style_risk_budget: Option<String>,
     pub candidate_risk_filter: Option<String>,
+    pub candidate_ranking: Option<String>,
     pub risk_contribution_control: Option<String>,
     #[serde(default)]
     pub rebalance_hysteresis_pct: Option<f64>,
@@ -1049,6 +1088,14 @@ fn parse_capacity_risk_budget_profile(
         .unwrap_or(Ok(CapacityRiskBudgetProfile::Off))
 }
 
+fn parse_cash_utilization_profile(value: Option<&str>) -> Result<CashUtilizationProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(CashUtilizationProfile::parse)
+        .unwrap_or(Ok(CashUtilizationProfile::Off))
+}
+
 fn parse_execution_impact_budget_profile(
     value: Option<&str>,
 ) -> Result<ExecutionImpactBudgetProfile, String> {
@@ -1067,6 +1114,14 @@ fn parse_candidate_risk_filter_profile(
         .filter(|value| !value.is_empty())
         .map(CandidateRiskFilterProfile::parse)
         .unwrap_or(Ok(CandidateRiskFilterProfile::Off))
+}
+
+fn parse_candidate_ranking_profile(value: Option<&str>) -> Result<CandidateRankingProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(CandidateRankingProfile::parse)
+        .unwrap_or(Ok(CandidateRankingProfile::Off))
 }
 
 fn parse_risk_contribution_control_profile(
@@ -1867,6 +1922,17 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             .as_ref()
             .and_then(|rules| rules.execution_schedule_profile.as_deref()),
     )?;
+    let execution_carry_policy = parse_execution_carry_policy(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_carry_policy.as_deref()),
+    )?;
+    let execution_daily_target_move_limit_pct =
+        parse_execution_daily_target_move_limit(req.execution_rules.as_ref())?;
+    let execution_max_carry_days = req
+        .execution_rules
+        .as_ref()
+        .and_then(|rules| rules.execution_max_carry_days);
     let max_participation_rate = match req
         .execution_rules
         .as_ref()
@@ -1885,12 +1951,15 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
     let capacity_risk_budget_profile =
         parse_capacity_risk_budget_profile(req.capacity_risk_budget.as_deref())?;
+    let cash_utilization_profile = parse_cash_utilization_profile(req.cash_utilization.as_deref())?;
     let execution_impact_budget_profile =
         parse_execution_impact_budget_profile(req.execution_impact_budget.as_deref())?;
     let style_risk_budget_profile =
         parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
     let candidate_risk_filter_profile =
         parse_candidate_risk_filter_profile(req.candidate_risk_filter.as_deref())?;
+    let candidate_ranking_profile =
+        parse_candidate_ranking_profile(req.candidate_ranking.as_deref())?;
     let risk_contribution_control_profile =
         parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
 
@@ -1909,6 +1978,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         portfolio_notional_cny: positive_notional(req.initial_capital),
         max_participation_rate: max_participation_rate.and_then(|value| value.to_f64()),
         capacity_risk_budget_profile,
+        cash_utilization_profile,
         execution_impact_budget_profile,
         skip_top_pct: req.skip_top_pct,
         max_pairwise_correlation: req.max_pairwise_correlation,
@@ -1923,6 +1993,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         industry_max_weight_pct,
         style_risk_budget_profile,
         candidate_risk_filter_profile,
+        candidate_ranking_profile,
         risk_contribution_control_profile,
         rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
         partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
@@ -2028,6 +2099,9 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         execution_timing,
         execution_price,
         execution_schedule_profile,
+        execution_carry_policy,
+        execution_daily_target_move_limit_pct,
+        execution_max_carry_days,
         max_participation_rate,
         persistence_mode,
         risk_control: build_portfolio_risk_control(&req)?,
@@ -2080,6 +2154,17 @@ pub(crate) async fn execute_prediction_backtest(
             .as_ref()
             .and_then(|rules| rules.execution_schedule_profile.as_deref()),
     )?;
+    let execution_carry_policy = parse_execution_carry_policy(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_carry_policy.as_deref()),
+    )?;
+    let execution_daily_target_move_limit_pct =
+        parse_execution_daily_target_move_limit(req.execution_rules.as_ref())?;
+    let execution_max_carry_days = req
+        .execution_rules
+        .as_ref()
+        .and_then(|rules| rules.execution_max_carry_days);
     let max_participation_rate = req
         .execution_rules
         .as_ref()
@@ -2099,12 +2184,15 @@ pub(crate) async fn execute_prediction_backtest(
         optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
     let capacity_risk_budget_profile =
         parse_capacity_risk_budget_profile(req.capacity_risk_budget.as_deref())?;
+    let cash_utilization_profile = parse_cash_utilization_profile(req.cash_utilization.as_deref())?;
     let execution_impact_budget_profile =
         parse_execution_impact_budget_profile(req.execution_impact_budget.as_deref())?;
     let style_risk_budget_profile =
         parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
     let candidate_risk_filter_profile =
         parse_candidate_risk_filter_profile(req.candidate_risk_filter.as_deref())?;
+    let candidate_ranking_profile =
+        parse_candidate_ranking_profile(req.candidate_ranking.as_deref())?;
     let risk_contribution_control_profile =
         parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
 
@@ -2122,6 +2210,7 @@ pub(crate) async fn execute_prediction_backtest(
         portfolio_notional_cny: positive_notional(req.initial_capital),
         max_participation_rate: max_participation_rate.and_then(|value| value.to_f64()),
         capacity_risk_budget_profile,
+        cash_utilization_profile,
         execution_impact_budget_profile,
         skip_top_pct: req.skip_top_pct,
         max_pairwise_correlation: req.max_pairwise_correlation,
@@ -2136,6 +2225,7 @@ pub(crate) async fn execute_prediction_backtest(
         industry_max_weight_pct,
         style_risk_budget_profile,
         candidate_risk_filter_profile,
+        candidate_ranking_profile,
         risk_contribution_control_profile,
         rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
         partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
@@ -2184,6 +2274,9 @@ pub(crate) async fn execute_prediction_backtest(
         execution_timing,
         execution_price,
         execution_schedule_profile,
+        execution_carry_policy,
+        execution_daily_target_move_limit_pct,
+        execution_max_carry_days,
         max_participation_rate,
         persistence_mode,
         risk_control: Default::default(),
@@ -2269,6 +2362,9 @@ mod tests {
                 execution_timing: Some("next_open".into()),
                 execution_price: Some("open".into()),
                 execution_schedule_profile: None,
+                execution_carry_policy: None,
+                execution_daily_target_move_limit_pct: None,
+                execution_max_carry_days: None,
                 max_participation_rate: Some(0.10),
             }),
         };
@@ -2462,6 +2558,22 @@ mod tests {
     }
 
     #[test]
+    fn run_factor_backtest_request_accepts_cash_utilization_profile() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "cash_utilization": "fillable_gross_90_v1"
+        }))
+        .expect("factor request");
+
+        let profile = parse_cash_utilization_profile(req.cash_utilization.as_deref())
+            .expect("cash utilization");
+
+        assert_eq!(profile, CashUtilizationProfile::FillableGross90V1);
+    }
+
+    #[test]
     fn run_factor_backtest_request_accepts_execution_impact_budget() {
         let req: RunFactorBacktestReq = serde_json::from_value(json!({
             "combo_name": "phase7_financial_quality_v1",
@@ -2484,7 +2596,10 @@ mod tests {
             "start_date": "20250102",
             "end_date": "20250131",
             "execution_rules": {
-                "execution_schedule_profile": "twap_15d_v1"
+                "execution_schedule_profile": "twap_15d_v1",
+                "execution_carry_policy": "roll_forward_v1",
+                "execution_daily_target_move_limit_pct": 0.05,
+                "execution_max_carry_days": 20
             }
         }))
         .expect("factor request");
@@ -2497,6 +2612,16 @@ mod tests {
         .expect("execution schedule profile");
 
         assert_eq!(profile, ExecutionScheduleProfile::Twap15dV1);
+        let carry_policy = parse_execution_carry_policy(
+            req.execution_rules
+                .as_ref()
+                .and_then(|rules| rules.execution_carry_policy.as_deref()),
+        )
+        .expect("execution carry policy");
+        assert_eq!(carry_policy, ExecutionCarryPolicy::RollForwardV1);
+        let rules = req.execution_rules.as_ref().expect("execution rules");
+        assert_eq!(rules.execution_daily_target_move_limit_pct, Some(0.05));
+        assert_eq!(rules.execution_max_carry_days, Some(20));
     }
 
     #[test]
@@ -3107,9 +3232,11 @@ mod tests {
             capacity_penalty_strength: 0.0,
             industry_max_weight_pct: None,
             capacity_risk_budget: None,
+            cash_utilization: None,
             execution_impact_budget: None,
             style_risk_budget: None,
             candidate_risk_filter: None,
+            candidate_ranking: None,
             risk_contribution_control: None,
             rebalance_hysteresis_pct: None,
             partial_rebalance_ratio: None,

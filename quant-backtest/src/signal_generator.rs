@@ -43,6 +43,8 @@ pub struct SignalConfig {
     pub max_participation_rate: Option<f64>,
     /// Portfolio-level capacity budget applied after initial target-weight construction.
     pub capacity_risk_budget_profile: CapacityRiskBudgetProfile,
+    /// Candidate expansion profile used to keep target gross exposure fillable under execution caps.
+    pub cash_utilization_profile: CashUtilizationProfile,
     /// Rebalance-path execution budget applied against previous target weights.
     pub execution_impact_budget_profile: ExecutionImpactBudgetProfile,
     /// Skip top N% of ranked stocks to avoid value traps (extreme reversal = junk).
@@ -73,6 +75,8 @@ pub struct SignalConfig {
     pub style_risk_budget_profile: StyleRiskBudgetProfile,
     /// Candidate-pool risk filter applied before portfolio construction.
     pub candidate_risk_filter_profile: CandidateRiskFilterProfile,
+    /// Candidate ordering overlay applied before portfolio construction.
+    pub candidate_ranking_profile: CandidateRankingProfile,
     /// Portfolio-level risk-contribution control applied after weights are built.
     pub risk_contribution_control_profile: RiskContributionControlProfile,
     /// Minimum absolute target-weight delta required to move a position on rebalance.
@@ -117,6 +121,8 @@ pub struct PredictionSignalConfig {
     pub max_participation_rate: Option<f64>,
     /// Portfolio-level capacity budget applied after initial target-weight construction.
     pub capacity_risk_budget_profile: CapacityRiskBudgetProfile,
+    /// Candidate expansion profile used to keep target gross exposure fillable under execution caps.
+    pub cash_utilization_profile: CashUtilizationProfile,
     /// Rebalance-path execution budget applied against previous target weights.
     pub execution_impact_budget_profile: ExecutionImpactBudgetProfile,
     /// Skip top N% of ranked stocks.
@@ -145,6 +151,8 @@ pub struct PredictionSignalConfig {
     pub style_risk_budget_profile: StyleRiskBudgetProfile,
     /// Candidate-pool risk filter applied before portfolio construction.
     pub candidate_risk_filter_profile: CandidateRiskFilterProfile,
+    /// Candidate ordering overlay applied before portfolio construction.
+    pub candidate_ranking_profile: CandidateRankingProfile,
     /// Portfolio-level risk-contribution control applied after weights are built.
     pub risk_contribution_control_profile: RiskContributionControlProfile,
     /// Minimum absolute target-weight delta required to move a position on rebalance.
@@ -210,6 +218,7 @@ impl Default for PredictionSignalConfig {
             portfolio_notional_cny: None,
             max_participation_rate: None,
             capacity_risk_budget_profile: CapacityRiskBudgetProfile::Off,
+            cash_utilization_profile: CashUtilizationProfile::Off,
             execution_impact_budget_profile: ExecutionImpactBudgetProfile::Off,
             skip_top_pct: 0.0,
             max_pairwise_correlation: None,
@@ -224,6 +233,7 @@ impl Default for PredictionSignalConfig {
             industry_max_weight_pct: None,
             style_risk_budget_profile: StyleRiskBudgetProfile::Off,
             candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
+            candidate_ranking_profile: CandidateRankingProfile::Off,
             risk_contribution_control_profile: RiskContributionControlProfile::Off,
             rebalance_hysteresis_pct: 0.0,
             partial_rebalance_ratio: 1.0,
@@ -778,6 +788,7 @@ impl Default for SignalConfig {
             portfolio_notional_cny: None,
             max_participation_rate: None,
             capacity_risk_budget_profile: CapacityRiskBudgetProfile::Off,
+            cash_utilization_profile: CashUtilizationProfile::Off,
             execution_impact_budget_profile: ExecutionImpactBudgetProfile::Off,
             skip_top_pct: 0.0,
             max_pairwise_correlation: None,
@@ -792,6 +803,7 @@ impl Default for SignalConfig {
             industry_max_weight_pct: None,
             style_risk_budget_profile: StyleRiskBudgetProfile::Off,
             candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
+            candidate_ranking_profile: CandidateRankingProfile::Off,
             risk_contribution_control_profile: RiskContributionControlProfile::Off,
             rebalance_hysteresis_pct: 0.0,
             partial_rebalance_ratio: 1.0,
@@ -827,6 +839,19 @@ pub enum CapacityRiskBudgetProfile {
     Off,
     ParticipationBalancedV1,
     ParticipationStrictV1,
+    StressParticipationSoftCapV1,
+    StressParticipationTargetScaleV1,
+    StressParticipationFloor35V1,
+    StressParticipationFloor50V1,
+    StressParticipationFloor60V1,
+    StressParticipationFloor70V1,
+    StressParticipationSoftFloor60V1,
+    StressParticipationHeadroomFloor60V1,
+    StressParticipationHeadroomFloor70V1,
+    StressParticipationAlphaHeadroomFloor60V1,
+    StressParticipationAlphaHeadroomFloor70V1,
+    StressParticipationBlendedAlphaHeadroomFloor60V1,
+    StressParticipationBlendedAlphaHeadroomFloor70V1,
 }
 
 impl CapacityRiskBudgetProfile {
@@ -841,6 +866,74 @@ impl CapacityRiskBudgetProfile {
             | "participation-strict-v1"
             | "capacity_participation_strict_v1"
             | "capacity-participation-strict-v1" => Ok(Self::ParticipationStrictV1),
+            "stress_participation_soft_cap_v1"
+            | "stress-participation-soft-cap-v1"
+            | "capacity_stress_participation_soft_cap_v1"
+            | "capacity-stress-participation-soft-cap-v1" => Ok(Self::StressParticipationSoftCapV1),
+            "stress_participation_target_scale_v1"
+            | "stress-participation-target-scale-v1"
+            | "capacity_stress_participation_target_scale_v1"
+            | "capacity-stress-participation-target-scale-v1" => {
+                Ok(Self::StressParticipationTargetScaleV1)
+            }
+            "stress_participation_floor_35_v1"
+            | "stress-participation-floor-35-v1"
+            | "capacity_stress_participation_floor_35_v1"
+            | "capacity-stress-participation-floor-35-v1" => Ok(Self::StressParticipationFloor35V1),
+            "stress_participation_floor_50_v1"
+            | "stress-participation-floor-50-v1"
+            | "capacity_stress_participation_floor_50_v1"
+            | "capacity-stress-participation-floor-50-v1" => Ok(Self::StressParticipationFloor50V1),
+            "stress_participation_floor_60_v1"
+            | "stress-participation-floor-60-v1"
+            | "capacity_stress_participation_floor_60_v1"
+            | "capacity-stress-participation-floor-60-v1" => Ok(Self::StressParticipationFloor60V1),
+            "stress_participation_floor_70_v1"
+            | "stress-participation-floor-70-v1"
+            | "capacity_stress_participation_floor_70_v1"
+            | "capacity-stress-participation-floor-70-v1" => Ok(Self::StressParticipationFloor70V1),
+            "stress_participation_soft_floor_60_v1"
+            | "stress-participation-soft-floor-60-v1"
+            | "capacity_stress_participation_soft_floor_60_v1"
+            | "capacity-stress-participation-soft-floor-60-v1" => {
+                Ok(Self::StressParticipationSoftFloor60V1)
+            }
+            "stress_participation_headroom_floor_60_v1"
+            | "stress-participation-headroom-floor-60-v1"
+            | "capacity_stress_participation_headroom_floor_60_v1"
+            | "capacity-stress-participation-headroom-floor-60-v1" => {
+                Ok(Self::StressParticipationHeadroomFloor60V1)
+            }
+            "stress_participation_headroom_floor_70_v1"
+            | "stress-participation-headroom-floor-70-v1"
+            | "capacity_stress_participation_headroom_floor_70_v1"
+            | "capacity-stress-participation-headroom-floor-70-v1" => {
+                Ok(Self::StressParticipationHeadroomFloor70V1)
+            }
+            "stress_participation_alpha_headroom_floor_60_v1"
+            | "stress-participation-alpha-headroom-floor-60-v1"
+            | "capacity_stress_participation_alpha_headroom_floor_60_v1"
+            | "capacity-stress-participation-alpha-headroom-floor-60-v1" => {
+                Ok(Self::StressParticipationAlphaHeadroomFloor60V1)
+            }
+            "stress_participation_alpha_headroom_floor_70_v1"
+            | "stress-participation-alpha-headroom-floor-70-v1"
+            | "capacity_stress_participation_alpha_headroom_floor_70_v1"
+            | "capacity-stress-participation-alpha-headroom-floor-70-v1" => {
+                Ok(Self::StressParticipationAlphaHeadroomFloor70V1)
+            }
+            "stress_participation_blended_alpha_headroom_floor_60_v1"
+            | "stress-participation-blended-alpha-headroom-floor-60-v1"
+            | "capacity_stress_participation_blended_alpha_headroom_floor_60_v1"
+            | "capacity-stress-participation-blended-alpha-headroom-floor-60-v1" => {
+                Ok(Self::StressParticipationBlendedAlphaHeadroomFloor60V1)
+            }
+            "stress_participation_blended_alpha_headroom_floor_70_v1"
+            | "stress-participation-blended-alpha-headroom-floor-70-v1"
+            | "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+            | "capacity-stress-participation-blended-alpha-headroom-floor-70-v1" => {
+                Ok(Self::StressParticipationBlendedAlphaHeadroomFloor70V1)
+            }
             other => Err(format!("unsupported capacity_risk_budget: {}", other)),
         }
     }
@@ -852,12 +945,141 @@ impl CapacityRiskBudgetProfile {
                 low_capacity_quantile: 0.30,
                 low_capacity_max_weight_pct: 0.30,
                 refill_gross_exposure: true,
+                participation_cap_multiplier: 1.0,
+                min_target_gross_exposure_pct: None,
+                floor_refill_cap_multiplier: 1.0,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
             }),
             Self::ParticipationStrictV1 => Some(CapacityRiskBudgetParams {
                 low_capacity_quantile: 0.40,
                 low_capacity_max_weight_pct: 0.20,
                 refill_gross_exposure: true,
+                participation_cap_multiplier: 1.0,
+                min_target_gross_exposure_pct: None,
+                floor_refill_cap_multiplier: 1.0,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
             }),
+            Self::StressParticipationSoftCapV1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.15,
+                refill_gross_exposure: true,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: None,
+                floor_refill_cap_multiplier: 1.0,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
+            }),
+            Self::StressParticipationTargetScaleV1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: None,
+                floor_refill_cap_multiplier: 1.0,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
+            }),
+            Self::StressParticipationFloor35V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.35),
+                floor_refill_cap_multiplier: 1.0,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
+            }),
+            Self::StressParticipationFloor50V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.50),
+                floor_refill_cap_multiplier: 1.0,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
+            }),
+            Self::StressParticipationFloor60V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.60),
+                floor_refill_cap_multiplier: 1.25,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
+            }),
+            Self::StressParticipationFloor70V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.70),
+                floor_refill_cap_multiplier: 1.50,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
+            }),
+            Self::StressParticipationSoftFloor60V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.15,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.65,
+                min_target_gross_exposure_pct: Some(0.60),
+                floor_refill_cap_multiplier: 1.25,
+                floor_refill_mode: CapacityFloorRefillMode::ExistingWeight,
+            }),
+            Self::StressParticipationHeadroomFloor60V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.60),
+                floor_refill_cap_multiplier: 1.25,
+                floor_refill_mode: CapacityFloorRefillMode::Headroom,
+            }),
+            Self::StressParticipationHeadroomFloor70V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.70),
+                floor_refill_cap_multiplier: 1.50,
+                floor_refill_mode: CapacityFloorRefillMode::Headroom,
+            }),
+            Self::StressParticipationAlphaHeadroomFloor60V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.60),
+                floor_refill_cap_multiplier: 1.25,
+                floor_refill_mode: CapacityFloorRefillMode::AlphaHeadroom,
+            }),
+            Self::StressParticipationAlphaHeadroomFloor70V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.12,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.70),
+                floor_refill_cap_multiplier: 1.50,
+                floor_refill_mode: CapacityFloorRefillMode::AlphaHeadroom,
+            }),
+            Self::StressParticipationBlendedAlphaHeadroomFloor60V1 => {
+                Some(CapacityRiskBudgetParams {
+                    low_capacity_quantile: 0.35,
+                    low_capacity_max_weight_pct: 0.12,
+                    refill_gross_exposure: false,
+                    participation_cap_multiplier: 0.50,
+                    min_target_gross_exposure_pct: Some(0.60),
+                    floor_refill_cap_multiplier: 1.25,
+                    floor_refill_mode: CapacityFloorRefillMode::BlendedAlphaHeadroom,
+                })
+            }
+            Self::StressParticipationBlendedAlphaHeadroomFloor70V1 => {
+                Some(CapacityRiskBudgetParams {
+                    low_capacity_quantile: 0.35,
+                    low_capacity_max_weight_pct: 0.12,
+                    refill_gross_exposure: false,
+                    participation_cap_multiplier: 0.50,
+                    min_target_gross_exposure_pct: Some(0.70),
+                    floor_refill_cap_multiplier: 1.50,
+                    floor_refill_mode: CapacityFloorRefillMode::BlendedAlphaHeadroom,
+                })
+            }
         }
     }
 
@@ -871,6 +1093,79 @@ struct CapacityRiskBudgetParams {
     low_capacity_quantile: f64,
     low_capacity_max_weight_pct: f64,
     refill_gross_exposure: bool,
+    participation_cap_multiplier: f64,
+    min_target_gross_exposure_pct: Option<f64>,
+    floor_refill_cap_multiplier: f64,
+    floor_refill_mode: CapacityFloorRefillMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapacityFloorRefillMode {
+    ExistingWeight,
+    Headroom,
+    AlphaHeadroom,
+    BlendedAlphaHeadroom,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CashUtilizationProfile {
+    #[default]
+    Off,
+    FillableGross90V1,
+    FillableGross95V1,
+    StressFillGross98V1,
+}
+
+impl CashUtilizationProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "fillable_gross_90_v1"
+            | "fillable-gross-90-v1"
+            | "cash_utilization_90pct_v1"
+            | "cash-utilization-90pct-v1"
+            | "cash_utilization_fillable_gross_90_v1"
+            | "cash-utilization-fillable-gross-90-v1" => Ok(Self::FillableGross90V1),
+            "fillable_gross_95_v1"
+            | "fillable-gross-95-v1"
+            | "cash_utilization_95pct_v1"
+            | "cash-utilization-95pct-v1"
+            | "cash_utilization_fillable_gross_95_v1"
+            | "cash-utilization-fillable-gross-95-v1" => Ok(Self::FillableGross95V1),
+            "stress_fill_gross_98_v1"
+            | "stress-fill-gross-98-v1"
+            | "fillable_gross_98_v1"
+            | "fillable-gross-98-v1"
+            | "cash_utilization_stress_fill_gross_98_v1"
+            | "cash-utilization-stress-fill-gross-98-v1" => Ok(Self::StressFillGross98V1),
+            other => Err(format!("unsupported cash_utilization: {}", other)),
+        }
+    }
+
+    fn params(self) -> Option<CashUtilizationParams> {
+        match self {
+            Self::Off => None,
+            Self::FillableGross90V1 => Some(CashUtilizationParams {
+                min_gross_exposure_pct: 0.90,
+                max_holdings: 50,
+            }),
+            Self::FillableGross95V1 => Some(CashUtilizationParams {
+                min_gross_exposure_pct: 0.95,
+                max_holdings: 60,
+            }),
+            Self::StressFillGross98V1 => Some(CashUtilizationParams {
+                min_gross_exposure_pct: 0.98,
+                max_holdings: 120,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CashUtilizationParams {
+    min_gross_exposure_pct: f64,
+    max_holdings: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -999,6 +1294,7 @@ pub enum CandidateRiskFilterProfile {
     LowVolatilityLowCorrelationV1,
     SoftLowVolatilityV1,
     SoftLowVolatilityLowCorrelationV1,
+    SoftLiquidityLowVolatilityLowCorrelationV1,
 }
 
 impl CandidateRiskFilterProfile {
@@ -1013,6 +1309,10 @@ impl CandidateRiskFilterProfile {
             "soft_low_volatility_low_correlation_v1" | "soft-low-volatility-low-correlation-v1" => {
                 Ok(Self::SoftLowVolatilityLowCorrelationV1)
             }
+            "soft_liquidity_low_volatility_low_correlation_v1"
+            | "soft-liquidity-low-volatility-low-correlation-v1" => {
+                Ok(Self::SoftLiquidityLowVolatilityLowCorrelationV1)
+            }
             other => Err(format!("unsupported candidate_risk_filter: {}", other)),
         }
     }
@@ -1024,21 +1324,31 @@ impl CandidateRiskFilterProfile {
                 max_volatility_quantile: 0.70,
                 max_average_abs_correlation: None,
                 correlation_reference_limit: 0,
+                min_liquidity_quantile: None,
             }),
             Self::LowVolatilityLowCorrelationV1 => Some(CandidateRiskFilterParams {
                 max_volatility_quantile: 0.70,
                 max_average_abs_correlation: Some(0.55),
                 correlation_reference_limit: 120,
+                min_liquidity_quantile: None,
             }),
             Self::SoftLowVolatilityV1 => Some(CandidateRiskFilterParams {
                 max_volatility_quantile: 0.85,
                 max_average_abs_correlation: None,
                 correlation_reference_limit: 0,
+                min_liquidity_quantile: None,
             }),
             Self::SoftLowVolatilityLowCorrelationV1 => Some(CandidateRiskFilterParams {
                 max_volatility_quantile: 0.85,
                 max_average_abs_correlation: Some(0.70),
                 correlation_reference_limit: 120,
+                min_liquidity_quantile: None,
+            }),
+            Self::SoftLiquidityLowVolatilityLowCorrelationV1 => Some(CandidateRiskFilterParams {
+                max_volatility_quantile: 0.85,
+                max_average_abs_correlation: Some(0.70),
+                correlation_reference_limit: 120,
+                min_liquidity_quantile: Some(0.50),
             }),
         }
     }
@@ -1049,6 +1359,48 @@ struct CandidateRiskFilterParams {
     max_volatility_quantile: f64,
     max_average_abs_correlation: Option<f64>,
     correlation_reference_limit: usize,
+    min_liquidity_quantile: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateRankingProfile {
+    #[default]
+    Off,
+    CapacityAwareAlphaLiquidityV1,
+}
+
+impl CandidateRankingProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "capacity_aware_alpha_liquidity_v1"
+            | "capacity-aware-alpha-liquidity-v1"
+            | "capacity_aware_candidate_ranking_v1"
+            | "capacity-aware-candidate-ranking-v1" => Ok(Self::CapacityAwareAlphaLiquidityV1),
+            other => Err(format!("unsupported candidate_ranking: {}", other)),
+        }
+    }
+
+    fn params(self) -> Option<CandidateRankingParams> {
+        match self {
+            Self::Off => None,
+            Self::CapacityAwareAlphaLiquidityV1 => Some(CandidateRankingParams {
+                alpha_rank_weight: 0.30,
+                liquidity_rank_weight: 0.70,
+            }),
+        }
+    }
+
+    fn uses_capacity(self) -> bool {
+        self.params().is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CandidateRankingParams {
+    alpha_rank_weight: f64,
+    liquidity_rank_weight: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3481,6 +3833,7 @@ struct PortfolioConstructionConfig {
     portfolio_notional_cny: Option<f64>,
     max_participation_rate: Option<f64>,
     capacity_risk_budget_profile: CapacityRiskBudgetProfile,
+    cash_utilization_profile: CashUtilizationProfile,
     max_pairwise_correlation: Option<f64>,
     correlation_lookback_days: usize,
     kelly_fraction: f64,
@@ -3492,6 +3845,7 @@ struct PortfolioConstructionConfig {
     max_industry_weight_pct: Option<f64>,
     style_risk_budget_profile: StyleRiskBudgetProfile,
     candidate_risk_filter_profile: CandidateRiskFilterProfile,
+    candidate_ranking_profile: CandidateRankingProfile,
     risk_contribution_control_profile: RiskContributionControlProfile,
 }
 
@@ -3503,6 +3857,7 @@ impl Default for PortfolioConstructionConfig {
             portfolio_notional_cny: None,
             max_participation_rate: None,
             capacity_risk_budget_profile: CapacityRiskBudgetProfile::Off,
+            cash_utilization_profile: CashUtilizationProfile::Off,
             max_pairwise_correlation: None,
             correlation_lookback_days: 60,
             kelly_fraction: 0.0,
@@ -3514,6 +3869,7 @@ impl Default for PortfolioConstructionConfig {
             max_industry_weight_pct: None,
             style_risk_budget_profile: StyleRiskBudgetProfile::Off,
             candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
+            candidate_ranking_profile: CandidateRankingProfile::Off,
             risk_contribution_control_profile: RiskContributionControlProfile::Off,
         }
     }
@@ -3527,6 +3883,7 @@ impl From<&SignalConfig> for PortfolioConstructionConfig {
             portfolio_notional_cny: config.portfolio_notional_cny,
             max_participation_rate: config.max_participation_rate,
             capacity_risk_budget_profile: config.capacity_risk_budget_profile,
+            cash_utilization_profile: config.cash_utilization_profile,
             max_pairwise_correlation: config.max_pairwise_correlation,
             correlation_lookback_days: config.correlation_lookback_days,
             kelly_fraction: config.kelly_fraction,
@@ -3538,6 +3895,7 @@ impl From<&SignalConfig> for PortfolioConstructionConfig {
             max_industry_weight_pct: config.industry_max_weight_pct,
             style_risk_budget_profile: config.style_risk_budget_profile,
             candidate_risk_filter_profile: config.candidate_risk_filter_profile,
+            candidate_ranking_profile: config.candidate_ranking_profile,
             risk_contribution_control_profile: config.risk_contribution_control_profile,
         }
     }
@@ -3551,6 +3909,7 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
             portfolio_notional_cny: config.portfolio_notional_cny,
             max_participation_rate: config.max_participation_rate,
             capacity_risk_budget_profile: config.capacity_risk_budget_profile,
+            cash_utilization_profile: config.cash_utilization_profile,
             max_pairwise_correlation: config.max_pairwise_correlation,
             correlation_lookback_days: config.correlation_lookback_days,
             kelly_fraction: config.kelly_fraction,
@@ -3562,6 +3921,7 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
             max_industry_weight_pct: config.industry_max_weight_pct,
             style_risk_budget_profile: config.style_risk_budget_profile,
             candidate_risk_filter_profile: config.candidate_risk_filter_profile,
+            candidate_ranking_profile: config.candidate_ranking_profile,
             risk_contribution_control_profile: config.risk_contribution_control_profile,
         }
     }
@@ -3571,6 +3931,7 @@ impl PortfolioConstructionConfig {
     fn uses_capacity_inputs(&self) -> bool {
         self.portfolio_method == PortfolioConstructionMethod::RiskBudget
             || self.style_risk_budget_profile.uses_liquidity()
+            || self.candidate_ranking_profile.uses_capacity()
             || self.capacity_risk_budget_profile.uses_capacity()
             || (self.max_participation_rate.is_some() && self.portfolio_notional_cny.is_some())
     }
@@ -5639,13 +6000,24 @@ fn build_portfolio_weights(
     industry_by_symbol: &HashMap<String, String>,
     config: &PortfolioConstructionConfig,
 ) -> HashMap<String, Decimal> {
-    let risk_filtered_candidates =
-        filter_candidate_risk_pool(score_day, candidates, return_history, config);
+    let ranked_candidates = rank_candidates_for_capacity(
+        candidates,
+        average_amounts,
+        config.candidate_ranking_profile,
+    );
+    let risk_filtered_candidates = filter_candidate_risk_pool(
+        score_day,
+        &ranked_candidates,
+        return_history,
+        average_amounts,
+        config,
+    );
     let selected = select_uncorrelated_candidates(
         score_day,
         &risk_filtered_candidates,
         return_history,
         config,
+        cash_utilization_selection_limit(&risk_filtered_candidates, average_amounts, config),
     );
     if selected.is_empty() {
         return HashMap::new();
@@ -5689,15 +6061,91 @@ fn build_portfolio_weights(
     weights
 }
 
+fn rank_candidates_for_capacity(
+    candidates: &[(String, f64)],
+    average_amounts: &HashMap<String, f64>,
+    profile: CandidateRankingProfile,
+) -> Vec<(String, f64)> {
+    let Some(params) = profile.params() else {
+        return candidates.to_vec();
+    };
+    if candidates.len() <= 1 || average_amounts.is_empty() {
+        return candidates.to_vec();
+    }
+
+    let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
+    if amount_ranks.is_empty() {
+        return candidates.to_vec();
+    }
+    let denominator = candidates.len().saturating_sub(1).max(1) as f64;
+    let alpha_weight = params.alpha_rank_weight.max(0.0);
+    let liquidity_weight = params.liquidity_rank_weight.max(0.0);
+    let weight_sum = (alpha_weight + liquidity_weight).max(f64::EPSILON);
+    let mut ranked = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, (symbol, score))| {
+            let alpha_rank = 1.0 - (idx as f64 / denominator);
+            let liquidity_rank = amount_ranks.get(symbol).copied().unwrap_or(0.0);
+            let blended_rank =
+                (alpha_weight * alpha_rank + liquidity_weight * liquidity_rank) / weight_sum;
+            (idx, symbol.clone(), *score, blended_rank)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .3
+            .partial_cmp(&left.3)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    ranked
+        .into_iter()
+        .map(|(_, symbol, score, _)| (symbol, score))
+        .collect()
+}
+
+fn liquidity_rank_scores(
+    candidates: &[(String, f64)],
+    average_amounts: &HashMap<String, f64>,
+) -> HashMap<String, f64> {
+    let mut ranked_amounts = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (symbol, _))| {
+            average_amounts
+                .get(symbol)
+                .copied()
+                .filter(|amount| amount.is_finite() && *amount > 0.0)
+                .map(|amount| (idx, symbol.clone(), amount))
+        })
+        .collect::<Vec<_>>();
+    ranked_amounts.sort_by(|left, right| {
+        right
+            .2
+            .partial_cmp(&left.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let denominator = ranked_amounts.len().saturating_sub(1).max(1) as f64;
+    ranked_amounts
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (_, symbol, _))| (symbol, 1.0 - (rank as f64 / denominator)))
+        .collect()
+}
+
 fn select_uncorrelated_candidates(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     config: &PortfolioConstructionConfig,
+    selection_limit: usize,
 ) -> Vec<String> {
     let mut selected: Vec<String> = Vec::new();
+    let selection_limit = selection_limit.max(config.top_n).min(candidates.len());
     for (symbol, _) in candidates {
-        if selected.len() >= config.top_n {
+        if selected.len() >= selection_limit {
             break;
         }
         if let Some(limit) = config.max_pairwise_correlation {
@@ -5727,10 +6175,65 @@ fn select_uncorrelated_candidates(
     selected
 }
 
+fn cash_utilization_selection_limit(
+    candidates: &[(String, f64)],
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> usize {
+    let base_limit = config.top_n.min(candidates.len());
+    let Some(params) = config.cash_utilization_profile.params() else {
+        return base_limit;
+    };
+    if candidates.is_empty() || average_amounts.is_empty() {
+        return base_limit;
+    }
+
+    let target_gross = config
+        .max_gross_exposure
+        .clamp(0.0, params.min_gross_exposure_pct.clamp(0.0, 1.0));
+    if target_gross <= f64::EPSILON {
+        return base_limit;
+    }
+
+    let hard_limit = params.max_holdings.max(config.top_n).min(candidates.len());
+    let max_position_cap = config
+        .max_position_pct
+        .to_f64()
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    let mut cumulative_cap = 0.0;
+    let mut count = 0usize;
+    for (symbol, _) in candidates.iter().take(hard_limit) {
+        let participation_cap_multiplier = config
+            .capacity_risk_budget_profile
+            .params()
+            .map(|params| params.participation_cap_multiplier)
+            .unwrap_or(1.0);
+        let symbol_cap = participation_weight_cap_with_multiplier(
+            symbol,
+            average_amounts,
+            config,
+            participation_cap_multiplier,
+        )
+        .and_then(|value| value.to_f64())
+        .unwrap_or(max_position_cap)
+        .min(max_position_cap)
+        .clamp(0.0, 1.0);
+        cumulative_cap += symbol_cap;
+        count += 1;
+        if count >= config.top_n && cumulative_cap >= target_gross {
+            return count;
+        }
+    }
+
+    hard_limit
+}
+
 fn filter_candidate_risk_pool(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> Vec<(String, f64)> {
     let Some(params) = config.candidate_risk_filter_profile.params() else {
@@ -5802,6 +6305,29 @@ fn filter_candidate_risk_pool(
             .map(|corr| corr <= max_average_corr)
             .unwrap_or(true)
         });
+    }
+
+    if let Some(min_liquidity_quantile) = params.min_liquidity_quantile {
+        if let Some(liquidity_threshold) = quantile_value(
+            filtered
+                .iter()
+                .filter_map(|(symbol, _)| average_amounts.get(symbol).copied()),
+            min_liquidity_quantile,
+        ) {
+            let liquidity_filtered = filtered
+                .iter()
+                .filter(|(symbol, _)| {
+                    average_amounts
+                        .get(symbol)
+                        .map(|amount| *amount >= liquidity_threshold)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if liquidity_filtered.len() >= config.top_n {
+                filtered = liquidity_filtered;
+            }
+        }
     }
 
     if filtered.len() >= config.top_n {
@@ -5989,10 +6515,21 @@ fn participation_weight_cap(
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> Option<Decimal> {
+    participation_weight_cap_with_multiplier(symbol, average_amounts, config, 1.0)
+}
+
+fn participation_weight_cap_with_multiplier(
+    symbol: &str,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+    multiplier: f64,
+) -> Option<Decimal> {
     let participation_rate = config.max_participation_rate?;
     let notional = config.portfolio_notional_cny?;
+    let multiplier = multiplier.clamp(0.0, 1.0);
     if !participation_rate.is_finite()
         || !notional.is_finite()
+        || !multiplier.is_finite()
         || participation_rate <= 0.0
         || notional <= 0.0
     {
@@ -6002,16 +6539,17 @@ fn participation_weight_cap(
     if !average_amount.is_finite() || average_amount <= 0.0 {
         return None;
     }
-    let cap = (average_amount * participation_rate / notional).clamp(0.0, 1.0);
+    let cap = (average_amount * participation_rate * multiplier / notional).clamp(0.0, 1.0);
     Decimal::from_f64(cap)
 }
 
-fn target_weight_cap(
+fn target_weight_cap_with_multiplier(
     symbol: &str,
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
+    multiplier: f64,
 ) -> Decimal {
-    participation_weight_cap(symbol, average_amounts, config)
+    participation_weight_cap_with_multiplier(symbol, average_amounts, config, multiplier)
         .unwrap_or(config.max_position_pct)
         .min(config.max_position_pct)
         .max(Decimal::ZERO)
@@ -6061,13 +6599,85 @@ fn apply_capacity_risk_budget(
         .map(|symbol| {
             (
                 symbol.clone(),
-                target_weight_cap(symbol, average_amounts, config),
+                target_weight_cap_with_multiplier(
+                    symbol,
+                    average_amounts,
+                    config,
+                    params.participation_cap_multiplier,
+                ),
             )
         })
         .collect::<HashMap<_, _>>();
+    cap_weights_to_symbol_caps(weights, &caps, 8);
+
     let low_capacity_cap = Decimal::from_f64(params.low_capacity_max_weight_pct.clamp(0.0, 1.0))
         .unwrap_or(Decimal::ONE);
     cap_bucket_and_redistribute(weights, &low_capacity_symbols, low_capacity_cap, &caps, 8);
+
+    if let Some(min_target_gross_exposure_pct) = params.min_target_gross_exposure_pct {
+        let target_gross = Decimal::from_f64(
+            config
+                .max_gross_exposure
+                .clamp(0.0, 1.0)
+                .min(min_target_gross_exposure_pct.clamp(0.0, 1.0)),
+        )
+        .unwrap_or(Decimal::ZERO);
+        let current_gross = weights.values().copied().sum::<Decimal>();
+        if target_gross > current_gross {
+            let floor_caps = weights
+                .keys()
+                .map(|symbol| {
+                    (
+                        symbol.clone(),
+                        target_weight_cap_with_multiplier(
+                            symbol,
+                            average_amounts,
+                            config,
+                            params.floor_refill_cap_multiplier,
+                        ),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            match params.floor_refill_mode {
+                CapacityFloorRefillMode::ExistingWeight => {
+                    redistribute_weight(
+                        weights,
+                        &low_capacity_symbols,
+                        target_gross - current_gross,
+                        &floor_caps,
+                        8,
+                    );
+                }
+                CapacityFloorRefillMode::Headroom => {
+                    redistribute_weight_by_headroom(
+                        weights,
+                        &low_capacity_symbols,
+                        target_gross - current_gross,
+                        &floor_caps,
+                        8,
+                    );
+                }
+                CapacityFloorRefillMode::AlphaHeadroom => {
+                    redistribute_weight_by_alpha_headroom(
+                        weights,
+                        &low_capacity_symbols,
+                        target_gross - current_gross,
+                        &floor_caps,
+                        8,
+                    );
+                }
+                CapacityFloorRefillMode::BlendedAlphaHeadroom => {
+                    redistribute_weight_by_blended_alpha_headroom(
+                        weights,
+                        &low_capacity_symbols,
+                        target_gross - current_gross,
+                        &floor_caps,
+                        8,
+                    );
+                }
+            }
+        }
+    }
 
     if params.refill_gross_exposure {
         let target_gross =
@@ -6084,6 +6694,30 @@ fn apply_capacity_risk_budget(
         }
     }
     weights.retain(|_, weight| *weight > Decimal::ZERO);
+}
+
+fn cap_weights_to_symbol_caps(
+    weights: &mut HashMap<String, Decimal>,
+    caps: &HashMap<String, Decimal>,
+    iterations: usize,
+) -> Decimal {
+    if weights.is_empty() || caps.is_empty() {
+        return Decimal::ZERO;
+    }
+
+    let mut excess = Decimal::ZERO;
+    for (symbol, weight) in weights.iter_mut() {
+        let cap = caps.get(symbol).copied().unwrap_or(Decimal::ONE);
+        if *weight > cap {
+            excess += *weight - cap;
+            *weight = cap;
+        }
+    }
+
+    if excess <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    redistribute_weight(weights, &HashSet::new(), excess, caps, iterations)
 }
 
 fn cap_bucket_and_redistribute(
@@ -6168,6 +6802,217 @@ fn redistribute_weight(
                 equal_share
             };
             let addition = (remaining * share).min(headroom);
+            if addition <= Decimal::ZERO {
+                continue;
+            }
+            if let Some(target) = weights.get_mut(&symbol) {
+                *target += addition;
+                allocated += addition;
+            }
+        }
+
+        if allocated <= epsilon {
+            break;
+        }
+        remaining -= allocated;
+        if remaining <= epsilon {
+            return Decimal::ZERO;
+        }
+    }
+
+    remaining
+}
+
+fn redistribute_weight_by_headroom(
+    weights: &mut HashMap<String, Decimal>,
+    excluded_symbols: &HashSet<String>,
+    amount: Decimal,
+    caps: &HashMap<String, Decimal>,
+    iterations: usize,
+) -> Decimal {
+    let mut remaining = amount.max(Decimal::ZERO);
+    if remaining.is_zero() {
+        return Decimal::ZERO;
+    }
+    let epsilon = Decimal::new(1, 8);
+
+    for _ in 0..iterations.max(1) {
+        let eligible = weights
+            .iter()
+            .filter_map(|(symbol, weight)| {
+                if excluded_symbols.contains(symbol) {
+                    return None;
+                }
+                let cap = caps.get(symbol).copied().unwrap_or(Decimal::ONE);
+                let headroom = cap - *weight;
+                if headroom > epsilon {
+                    Some((symbol.clone(), headroom))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            break;
+        }
+
+        let headroom_sum = eligible
+            .iter()
+            .map(|(_, headroom)| *headroom)
+            .sum::<Decimal>();
+        if headroom_sum <= epsilon {
+            break;
+        }
+
+        let mut allocated = Decimal::ZERO;
+        for (symbol, headroom) in eligible {
+            let addition = (remaining * headroom / headroom_sum).min(headroom);
+            if addition <= Decimal::ZERO {
+                continue;
+            }
+            if let Some(target) = weights.get_mut(&symbol) {
+                *target += addition;
+                allocated += addition;
+            }
+        }
+
+        if allocated <= epsilon {
+            break;
+        }
+        remaining -= allocated;
+        if remaining <= epsilon {
+            return Decimal::ZERO;
+        }
+    }
+
+    remaining
+}
+
+fn redistribute_weight_by_alpha_headroom(
+    weights: &mut HashMap<String, Decimal>,
+    excluded_symbols: &HashSet<String>,
+    amount: Decimal,
+    caps: &HashMap<String, Decimal>,
+    iterations: usize,
+) -> Decimal {
+    let mut remaining = amount.max(Decimal::ZERO);
+    if remaining.is_zero() {
+        return Decimal::ZERO;
+    }
+    let epsilon = Decimal::new(1, 8);
+
+    for _ in 0..iterations.max(1) {
+        let eligible = weights
+            .iter()
+            .filter_map(|(symbol, weight)| {
+                if excluded_symbols.contains(symbol) {
+                    return None;
+                }
+                let cap = caps.get(symbol).copied().unwrap_or(Decimal::ONE);
+                let headroom = cap - *weight;
+                if headroom > epsilon {
+                    let alpha_weight = (*weight).max(epsilon);
+                    Some((symbol.clone(), headroom, alpha_weight * headroom))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            break;
+        }
+
+        let score_sum = eligible.iter().map(|(_, _, score)| *score).sum::<Decimal>();
+        if score_sum <= epsilon {
+            break;
+        }
+
+        let mut allocated = Decimal::ZERO;
+        for (symbol, headroom, score) in eligible {
+            let addition = (remaining * score / score_sum).min(headroom);
+            if addition <= Decimal::ZERO {
+                continue;
+            }
+            if let Some(target) = weights.get_mut(&symbol) {
+                *target += addition;
+                allocated += addition;
+            }
+        }
+
+        if allocated <= epsilon {
+            break;
+        }
+        remaining -= allocated;
+        if remaining <= epsilon {
+            return Decimal::ZERO;
+        }
+    }
+
+    remaining
+}
+
+fn redistribute_weight_by_blended_alpha_headroom(
+    weights: &mut HashMap<String, Decimal>,
+    excluded_symbols: &HashSet<String>,
+    amount: Decimal,
+    caps: &HashMap<String, Decimal>,
+    iterations: usize,
+) -> Decimal {
+    let mut remaining = amount.max(Decimal::ZERO);
+    if remaining.is_zero() {
+        return Decimal::ZERO;
+    }
+    let epsilon = Decimal::new(1, 8);
+
+    for _ in 0..iterations.max(1) {
+        let eligible = weights
+            .iter()
+            .filter_map(|(symbol, weight)| {
+                if excluded_symbols.contains(symbol) {
+                    return None;
+                }
+                let cap = caps.get(symbol).copied().unwrap_or(Decimal::ONE);
+                let headroom = cap - *weight;
+                if headroom > epsilon {
+                    Some((symbol.clone(), *weight, headroom))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            break;
+        }
+
+        let max_weight = eligible
+            .iter()
+            .map(|(_, weight, _)| *weight)
+            .max()
+            .unwrap_or(Decimal::ZERO);
+        let score_sum = eligible
+            .iter()
+            .map(|(_, weight, headroom)| {
+                let alpha_boost = if max_weight > epsilon {
+                    Decimal::ONE + (*weight / max_weight)
+                } else {
+                    Decimal::ONE
+                };
+                *headroom * alpha_boost
+            })
+            .sum::<Decimal>();
+        if score_sum <= epsilon {
+            break;
+        }
+
+        let mut allocated = Decimal::ZERO;
+        for (symbol, weight, headroom) in eligible {
+            let alpha_boost = if max_weight > epsilon {
+                Decimal::ONE + (weight / max_weight)
+            } else {
+                Decimal::ONE
+            };
+            let score = headroom * alpha_boost;
+            let addition = (remaining * score / score_sum).min(headroom);
             if addition <= Decimal::ZERO {
                 continue;
             }
@@ -7193,6 +8038,171 @@ mod tests {
     }
 
     #[test]
+    fn liquidity_candidate_risk_filter_prefers_tradable_low_volatility_names() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("THIN_HIGH_SCORE".to_string(), 100.0),
+            ("LIQUID_RISKY".to_string(), 99.0),
+            ("LIQUID_STABLE".to_string(), 98.0),
+            ("MID_LIQUID_STABLE".to_string(), 97.0),
+        ];
+        let return_history = HashMap::from([
+            (
+                "THIN_HIGH_SCORE".to_string(),
+                dated_returns(&[0.003, 0.004, 0.002, 0.003, 0.004]),
+            ),
+            (
+                "LIQUID_RISKY".to_string(),
+                dated_returns(&[0.12, -0.10, 0.11, -0.09, 0.10]),
+            ),
+            (
+                "LIQUID_STABLE".to_string(),
+                dated_returns(&[0.004, 0.003, 0.004, 0.003, 0.004]),
+            ),
+            (
+                "MID_LIQUID_STABLE".to_string(),
+                dated_returns(&[0.005, 0.004, 0.005, 0.004, 0.005]),
+            ),
+        ]);
+        let average_amounts = HashMap::from([
+            ("THIN_HIGH_SCORE".to_string(), 1_000_000.0),
+            ("LIQUID_RISKY".to_string(), 120_000_000.0),
+            ("LIQUID_STABLE".to_string(), 100_000_000.0),
+            ("MID_LIQUID_STABLE".to_string(), 80_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 1,
+            candidate_risk_filter_profile:
+                CandidateRiskFilterProfile::SoftLiquidityLowVolatilityLowCorrelationV1,
+            risk_budget_lookback_days: 5,
+            max_position_pct: Decimal::ONE,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights.contains_key("LIQUID_STABLE"));
+        assert!(!weights.contains_key("THIN_HIGH_SCORE"));
+        assert!(!weights.contains_key("LIQUID_RISKY"));
+    }
+
+    #[test]
+    fn capacity_aware_candidate_ranking_prefers_liquid_near_alpha_candidates() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("THIN_ALPHA_1".to_string(), 100.0),
+            ("THIN_ALPHA_2".to_string(), 99.0),
+            ("LIQUID_NEAR_ALPHA_1".to_string(), 98.0),
+            ("LIQUID_NEAR_ALPHA_2".to_string(), 97.0),
+        ];
+        let average_amounts = HashMap::from([
+            ("THIN_ALPHA_1".to_string(), 1_000_000.0),
+            ("THIN_ALPHA_2".to_string(), 1_200_000.0),
+            ("LIQUID_NEAR_ALPHA_1".to_string(), 1_000_000_000.0),
+            ("LIQUID_NEAR_ALPHA_2".to_string(), 800_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(50, 2),
+            candidate_ranking_profile: CandidateRankingProfile::CapacityAwareAlphaLiquidityV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights.contains_key("LIQUID_NEAR_ALPHA_1"));
+        assert!(weights.contains_key("LIQUID_NEAR_ALPHA_2"));
+        assert!(!weights.contains_key("THIN_ALPHA_1"));
+        assert!(!weights.contains_key("THIN_ALPHA_2"));
+    }
+
+    #[test]
+    fn cash_utilization_profile_expands_holdings_to_restore_fillable_gross() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = (0..20)
+            .map(|idx| (format!("S{:02}", idx + 1), 100.0 - idx as f64))
+            .collect::<Vec<_>>();
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| (symbol.clone(), 50_000_000.0))
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 5,
+            max_position_pct: Decimal::new(20, 2),
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.10),
+            max_gross_exposure: 1.0,
+            cash_utilization_profile: CashUtilizationProfile::FillableGross90V1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+
+        assert!(weights.len() > 5);
+        assert!(gross >= Decimal::new(90, 2));
+        assert!(weights.values().all(|weight| *weight <= Decimal::new(5, 2)));
+    }
+
+    #[test]
+    fn stress_fill_cash_utilization_expands_deeper_to_restore_strict_fillable_gross() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = (0..150)
+            .map(|idx| (format!("S{:03}", idx + 1), 100.0 - idx as f64))
+            .collect::<Vec<_>>();
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| (symbol.clone(), 25_000_000.0))
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 60,
+            max_position_pct: Decimal::new(10, 2),
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            max_gross_exposure: 1.0,
+            cash_utilization_profile: CashUtilizationProfile::StressFillGross98V1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+
+        assert!(weights.len() > 60);
+        assert!(gross >= Decimal::new(98, 2));
+        assert!(weights
+            .values()
+            .all(|weight| *weight <= Decimal::new(125, 4)));
+    }
+
+    #[test]
     fn capacity_risk_budget_caps_low_capacity_bucket_and_redistributes() {
         let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
         let candidates = vec![
@@ -7231,6 +8241,422 @@ mod tests {
         assert!(deep_capacity_weight >= Decimal::new(80, 2));
         assert!(weights["DEEP_A"] > Decimal::new(25, 2));
         assert!(weights["DEEP_B"] > Decimal::new(25, 2));
+    }
+
+    #[test]
+    fn stress_participation_budget_soft_caps_names_under_tight_capacity() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("DEEP_A".to_string(), 6.0),
+            ("THIN_A".to_string(), 5.0),
+            ("DEEP_B".to_string(), 4.0),
+            ("THIN_B".to_string(), 3.0),
+            ("DEEP_C".to_string(), 2.0),
+            ("DEEP_D".to_string(), 1.0),
+        ];
+        let average_amounts = HashMap::from([
+            ("DEEP_A".to_string(), 500_000_000.0),
+            ("DEEP_B".to_string(), 500_000_000.0),
+            ("DEEP_C".to_string(), 500_000_000.0),
+            ("DEEP_D".to_string(), 500_000_000.0),
+            ("THIN_A".to_string(), 20_000_000.0),
+            ("THIN_B".to_string(), 20_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 6,
+            max_position_pct: Decimal::new(40, 2),
+            max_gross_exposure: 1.0,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.10),
+            capacity_risk_budget_profile: CapacityRiskBudgetProfile::StressParticipationSoftCapV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights["THIN_A"] <= Decimal::new(1, 2));
+        assert!(weights["THIN_B"] <= Decimal::new(1, 2));
+        assert!(weights["DEEP_A"] > Decimal::new(1660, 4));
+        assert!(weights["DEEP_B"] > Decimal::new(1660, 4));
+    }
+
+    #[test]
+    fn stress_participation_target_scale_reduces_target_gross_to_capacity() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = (0..24)
+            .map(|idx| (format!("STRESS_{idx:02}"), (24 - idx) as f64))
+            .collect::<Vec<_>>();
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| (symbol.clone(), 25_000_000.0))
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 24,
+            max_position_pct: Decimal::new(8, 2),
+            max_gross_exposure: 0.90,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            capacity_risk_budget_profile:
+                CapacityRiskBudgetProfile::StressParticipationTargetScaleV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+
+        assert!(gross < Decimal::new(90, 2));
+        assert!(gross <= Decimal::new(15, 2));
+        assert!(weights.len() >= 12);
+        assert!(weights
+            .values()
+            .all(|weight| *weight <= Decimal::new(625, 5)));
+    }
+
+    #[test]
+    fn stress_participation_floor_scale_preserves_minimum_investable_gross() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let mut candidates = (0..10)
+            .map(|idx| (format!("DEEP_{idx:02}"), (20 - idx) as f64))
+            .collect::<Vec<_>>();
+        candidates.extend((0..2).map(|idx| (format!("THIN_{idx:02}"), (2 - idx) as f64)));
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| {
+                let amount = if symbol.starts_with("DEEP_") {
+                    let suffix = symbol
+                        .rsplit_once('_')
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    60_000_000.0 + suffix as f64 * 5_000_000.0
+                } else {
+                    10_000_000.0
+                };
+                (symbol.clone(), amount)
+            })
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 12,
+            max_position_pct: Decimal::new(8, 2),
+            max_gross_exposure: 0.90,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            capacity_risk_budget_profile: CapacityRiskBudgetProfile::StressParticipationFloor35V1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+        let deep_max = (0..10)
+            .filter_map(|idx| weights.get(&format!("DEEP_{idx:02}")).copied())
+            .max()
+            .unwrap_or(Decimal::ZERO);
+        let thin_weight = (0..2)
+            .filter_map(|idx| weights.get(&format!("THIN_{idx:02}")).copied())
+            .sum::<Decimal>();
+
+        assert!(gross >= Decimal::new(35, 2));
+        assert!(gross < Decimal::new(90, 2));
+        assert!(deep_max > Decimal::new(2, 2));
+        assert!(deep_max <= Decimal::new(6, 2));
+        assert!(thin_weight <= Decimal::new(1, 2));
+    }
+
+    #[test]
+    fn stress_participation_return_recovery_floor_keeps_higher_investable_gross() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let mut candidates = (0..20)
+            .map(|idx| (format!("DEEP_{idx:02}"), (40 - idx) as f64))
+            .collect::<Vec<_>>();
+        candidates.extend((0..4).map(|idx| (format!("THIN_{idx:02}"), (4 - idx) as f64)));
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| {
+                let amount = if symbol.starts_with("DEEP_") {
+                    let suffix = symbol
+                        .rsplit_once('_')
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    120_000_000.0 + suffix as f64 * 5_000_000.0
+                } else {
+                    10_000_000.0
+                };
+                (symbol.clone(), amount)
+            })
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 24,
+            max_position_pct: Decimal::new(6, 2),
+            max_gross_exposure: 0.90,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            capacity_risk_budget_profile: CapacityRiskBudgetProfile::StressParticipationFloor70V1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+        let thin_weight = (0..4)
+            .filter_map(|idx| weights.get(&format!("THIN_{idx:02}")).copied())
+            .sum::<Decimal>();
+
+        assert!(gross >= Decimal::new(70, 2));
+        assert!(gross < Decimal::new(90, 2));
+        assert!(thin_weight <= Decimal::new(12, 2));
+    }
+
+    #[test]
+    fn headroom_refill_allocates_more_weight_to_symbols_with_larger_pressure_headroom() {
+        let mut weights = HashMap::from([
+            ("LOW_HEADROOM".to_string(), Decimal::new(10, 2)),
+            ("HIGH_HEADROOM".to_string(), Decimal::new(10, 2)),
+        ]);
+        let caps = HashMap::from([
+            ("LOW_HEADROOM".to_string(), Decimal::new(20, 2)),
+            ("HIGH_HEADROOM".to_string(), Decimal::new(80, 2)),
+        ]);
+
+        let remaining = redistribute_weight_by_headroom(
+            &mut weights,
+            &HashSet::new(),
+            Decimal::new(20, 2),
+            &caps,
+            4,
+        );
+
+        assert!(remaining <= Decimal::new(1, 8));
+        assert!(weights["HIGH_HEADROOM"] > Decimal::new(25, 2));
+        assert!(weights["LOW_HEADROOM"] < Decimal::new(15, 2));
+    }
+
+    #[test]
+    fn alpha_headroom_refill_balances_existing_alpha_weight_and_pressure_headroom() {
+        let mut weights = HashMap::from([
+            ("HIGH_ALPHA_LOW_HEADROOM".to_string(), Decimal::new(30, 2)),
+            ("LOW_ALPHA_HIGH_HEADROOM".to_string(), Decimal::new(10, 2)),
+        ]);
+        let caps = HashMap::from([
+            ("HIGH_ALPHA_LOW_HEADROOM".to_string(), Decimal::new(50, 2)),
+            ("LOW_ALPHA_HIGH_HEADROOM".to_string(), Decimal::new(80, 2)),
+        ]);
+
+        let remaining = redistribute_weight_by_alpha_headroom(
+            &mut weights,
+            &HashSet::new(),
+            Decimal::new(20, 2),
+            &caps,
+            4,
+        );
+
+        assert!(remaining <= Decimal::new(1, 8));
+        assert!(weights["HIGH_ALPHA_LOW_HEADROOM"] > Decimal::new(38, 2));
+        assert!(weights["LOW_ALPHA_HIGH_HEADROOM"] > Decimal::new(18, 2));
+        assert!(weights["HIGH_ALPHA_LOW_HEADROOM"] < Decimal::new(50, 2));
+    }
+
+    #[test]
+    fn blended_alpha_headroom_refill_preserves_alpha_without_starving_headroom() {
+        let mut weights = HashMap::from([
+            ("HIGH_ALPHA_LOW_HEADROOM".to_string(), Decimal::new(30, 2)),
+            ("LOW_ALPHA_HIGH_HEADROOM".to_string(), Decimal::new(10, 2)),
+        ]);
+        let caps = HashMap::from([
+            ("HIGH_ALPHA_LOW_HEADROOM".to_string(), Decimal::new(50, 2)),
+            ("LOW_ALPHA_HIGH_HEADROOM".to_string(), Decimal::new(80, 2)),
+        ]);
+
+        let remaining = redistribute_weight_by_blended_alpha_headroom(
+            &mut weights,
+            &HashSet::new(),
+            Decimal::new(20, 2),
+            &caps,
+            4,
+        );
+
+        assert!(remaining <= Decimal::new(1, 8));
+        assert!(weights["HIGH_ALPHA_LOW_HEADROOM"] > Decimal::new(35, 2));
+        assert!(weights["LOW_ALPHA_HIGH_HEADROOM"] > Decimal::new(23, 2));
+        assert!(weights["HIGH_ALPHA_LOW_HEADROOM"] < Decimal::new(50, 2));
+    }
+
+    #[test]
+    fn stress_participation_headroom_floor_keeps_target_gross_with_capacity_weighted_refill() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let mut candidates = (0..20)
+            .map(|idx| (format!("DEEP_{idx:02}"), (40 - idx) as f64))
+            .collect::<Vec<_>>();
+        candidates.extend((0..4).map(|idx| (format!("THIN_{idx:02}"), (4 - idx) as f64)));
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| {
+                let amount = if symbol.starts_with("DEEP_") {
+                    let suffix = symbol
+                        .rsplit_once('_')
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    120_000_000.0 + suffix as f64 * 5_000_000.0
+                } else {
+                    10_000_000.0
+                };
+                (symbol.clone(), amount)
+            })
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 24,
+            max_position_pct: Decimal::new(6, 2),
+            max_gross_exposure: 0.90,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            capacity_risk_budget_profile:
+                CapacityRiskBudgetProfile::StressParticipationHeadroomFloor70V1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+        let thin_weight = (0..4)
+            .filter_map(|idx| weights.get(&format!("THIN_{idx:02}")).copied())
+            .sum::<Decimal>();
+
+        assert!(gross >= Decimal::new(70, 2));
+        assert!(gross < Decimal::new(90, 2));
+        assert!(thin_weight <= Decimal::new(12, 2));
+    }
+
+    #[test]
+    fn stress_participation_alpha_headroom_floor_keeps_target_gross_with_dual_objective_refill() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let mut candidates = (0..20)
+            .map(|idx| (format!("DEEP_{idx:02}"), (40 - idx) as f64))
+            .collect::<Vec<_>>();
+        candidates.extend((0..4).map(|idx| (format!("THIN_{idx:02}"), (4 - idx) as f64)));
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| {
+                let amount = if symbol.starts_with("DEEP_") {
+                    let suffix = symbol
+                        .rsplit_once('_')
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    120_000_000.0 + suffix as f64 * 5_000_000.0
+                } else {
+                    10_000_000.0
+                };
+                (symbol.clone(), amount)
+            })
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 24,
+            max_position_pct: Decimal::new(6, 2),
+            max_gross_exposure: 0.90,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            capacity_risk_budget_profile:
+                CapacityRiskBudgetProfile::StressParticipationAlphaHeadroomFloor70V1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+        let thin_weight = (0..4)
+            .filter_map(|idx| weights.get(&format!("THIN_{idx:02}")).copied())
+            .sum::<Decimal>();
+
+        assert!(gross >= Decimal::new(70, 2));
+        assert!(gross < Decimal::new(90, 2));
+        assert!(thin_weight <= Decimal::new(12, 2));
+    }
+
+    #[test]
+    fn stress_participation_blended_alpha_headroom_floor_keeps_capacity_floor() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let mut candidates = (0..20)
+            .map(|idx| (format!("DEEP_{idx:02}"), (40 - idx) as f64))
+            .collect::<Vec<_>>();
+        candidates.extend((0..4).map(|idx| (format!("THIN_{idx:02}"), (4 - idx) as f64)));
+        let average_amounts = candidates
+            .iter()
+            .map(|(symbol, _)| {
+                let amount = if symbol.starts_with("DEEP_") {
+                    let suffix = symbol
+                        .rsplit_once('_')
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    120_000_000.0 + suffix as f64 * 5_000_000.0
+                } else {
+                    10_000_000.0
+                };
+                (symbol.clone(), amount)
+            })
+            .collect::<HashMap<_, _>>();
+        let config = PortfolioConstructionConfig {
+            top_n: 24,
+            max_position_pct: Decimal::new(6, 2),
+            max_gross_exposure: 0.90,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            capacity_risk_budget_profile:
+                CapacityRiskBudgetProfile::StressParticipationBlendedAlphaHeadroomFloor70V1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+        let thin_weight = (0..4)
+            .filter_map(|idx| weights.get(&format!("THIN_{idx:02}")).copied())
+            .sum::<Decimal>();
+
+        assert!(gross >= Decimal::new(70, 2));
+        assert!(gross < Decimal::new(90, 2));
+        assert!(thin_weight <= Decimal::new(12, 2));
     }
 
     #[test]

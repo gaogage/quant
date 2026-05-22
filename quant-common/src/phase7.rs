@@ -2336,6 +2336,11 @@ fn with_candidate_risk_filter_seed(mut seed: Value, candidate_risk_filter: &str)
     seed
 }
 
+fn with_candidate_ranking_seed(mut seed: Value, candidate_ranking: &str) -> Value {
+    seed["candidate_ranking"] = json!(candidate_ranking);
+    seed
+}
+
 fn with_risk_contribution_control_seed(mut seed: Value, risk_contribution_control: &str) -> Value {
     seed["risk_contribution_control"] = json!(risk_contribution_control);
     seed
@@ -2343,6 +2348,11 @@ fn with_risk_contribution_control_seed(mut seed: Value, risk_contribution_contro
 
 fn with_capacity_risk_budget_seed(mut seed: Value, capacity_risk_budget: &str) -> Value {
     seed["capacity_risk_budget"] = json!(capacity_risk_budget);
+    seed
+}
+
+fn with_cash_utilization_seed(mut seed: Value, cash_utilization: &str) -> Value {
+    seed["cash_utilization"] = json!(cash_utilization);
     seed
 }
 
@@ -2357,6 +2367,35 @@ fn with_execution_schedule_seed(mut seed: Value, execution_schedule_profile: &st
         &mut seed,
         "execution_schedule_profile",
         json!(execution_schedule_profile),
+    );
+    seed
+}
+
+fn with_execution_schedule_control_seed(
+    mut seed: Value,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+) -> Value {
+    seed = with_execution_schedule_seed(seed, execution_schedule_profile);
+    seed["execution_daily_target_move_limit_pct"] =
+        json!(decimal_string(daily_target_move_limit_pct));
+    seed["execution_max_carry_days"] = json!(max_carry_days);
+    insert_execution_rule_value(
+        &mut seed,
+        "execution_daily_target_move_limit_pct",
+        json!(decimal_f64(daily_target_move_limit_pct)),
+    );
+    insert_execution_rule_value(&mut seed, "execution_max_carry_days", json!(max_carry_days));
+    seed
+}
+
+fn with_execution_carry_policy_seed(mut seed: Value, execution_carry_policy: &str) -> Value {
+    seed["execution_carry_policy"] = json!(execution_carry_policy);
+    insert_execution_rule_value(
+        &mut seed,
+        "execution_carry_policy",
+        json!(execution_carry_policy),
     );
     seed
 }
@@ -3887,6 +3926,16 @@ fn with_risk_budget_lookback_seed(
 fn with_top_n_seed(mut seed: Value, top_n: usize, profile_name: &str) -> Value {
     seed["top_n"] = json!(top_n);
     seed["top_n_profile"] = json!(profile_name);
+    seed
+}
+
+fn with_max_gross_exposure_seed(
+    mut seed: Value,
+    max_gross_exposure: &str,
+    profile_name: &str,
+) -> Value {
+    seed["max_gross_exposure"] = json!(max_gross_exposure);
+    seed["gross_exposure_profile"] = json!(profile_name);
     seed
 }
 
@@ -9980,6 +10029,2141 @@ fn professional_execution_patient_schedule_budget_seed_trials() -> Vec<Value> {
     seeds
 }
 
+fn professional_execution_daily_cap_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        ("twap_15d_v1", Decimal::new(5, 2), 20usize),
+        ("twap_20d_v1", Decimal::new(35, 3), 30usize),
+        ("twap_10d_v1", Decimal::new(25, 3), 15usize),
+    ];
+    for seed in professional_execution_impact_budget_seed_trials() {
+        for (execution_schedule_profile, daily_target_move_limit_pct, max_carry_days) in controls {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_execution_schedule_control_seed(
+                    seed.clone(),
+                    execution_schedule_profile,
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                )],
+            );
+        }
+    }
+    seeds
+}
+
+fn professional_execution_cash_drag_aware_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        ("twap_10d_v1", Decimal::new(8, 2), 30usize),
+        ("twap_15d_v1", Decimal::new(75, 3), 40usize),
+        ("twap_20d_v1", Decimal::new(6, 2), 45usize),
+    ];
+    for seed in professional_execution_impact_budget_seed_trials() {
+        for (execution_schedule_profile, daily_target_move_limit_pct, max_carry_days) in controls {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_execution_schedule_control_seed(
+                    seed.clone(),
+                    execution_schedule_profile,
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                )],
+            );
+        }
+    }
+    append_unique_seeds(
+        &mut seeds,
+        professional_execution_daily_cap_budget_seed_trials(),
+    );
+    seeds
+}
+
+fn professional_execution_feasible_fill_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    for seed in professional_execution_cash_drag_aware_budget_seed_trials() {
+        for cash_utilization in ["fillable_gross_90_v1", "fillable_gross_95_v1"] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_cash_utilization_seed(seed.clone(), cash_utilization)],
+            );
+        }
+    }
+    seeds
+}
+
+fn professional_execution_rolling_carry_budget_seed_trials() -> Vec<Value> {
+    professional_execution_feasible_fill_budget_seed_trials()
+        .into_iter()
+        .map(|seed| with_execution_carry_policy_seed(seed, "roll_forward_v1"))
+        .collect()
+}
+
+fn with_capacity_fill_frontier_seed(
+    seed: Value,
+    top_n: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    capacity_penalty_strength: &str,
+    capacity_risk_budget: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    score_candidate_pool_size: usize,
+) -> Value {
+    let profile_name = format!(
+        "capacity_fill_top{top_n}_maxpos{}_gross{}",
+        max_position_pct.replace('.', ""),
+        max_gross_exposure.replace('.', "")
+    );
+    let seed = with_top_n_seed(seed, top_n, &profile_name);
+    let seed = with_position_shape_seed(seed, &profile_name, max_position_pct, "0.65");
+    let seed = with_max_gross_exposure_seed(seed, max_gross_exposure, &profile_name);
+    let seed = with_execution_robustness_seed(
+        seed,
+        &profile_name,
+        capacity_penalty_strength,
+        "0.04",
+        "0.25",
+    );
+    let seed = with_capacity_risk_budget_seed(seed, capacity_risk_budget);
+    let seed = with_cash_utilization_seed(seed, "fillable_gross_95_v1");
+    let seed = with_execution_schedule_control_seed(
+        seed,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+    );
+    let mut seed = with_execution_carry_policy_seed(seed, "roll_forward_v1");
+    seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+    seed["capacity_fill_frontier_profile"] = json!(profile_name);
+    seed
+}
+
+fn professional_execution_capacity_fill_frontier_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            120usize,
+            "0.06",
+            "0.90",
+            "2.0",
+            "capacity_participation_strict_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            45usize,
+            900usize,
+        ),
+        (
+            160usize,
+            "0.05",
+            "0.80",
+            "2.0",
+            "capacity_participation_strict_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            60usize,
+            1200usize,
+        ),
+        (
+            80usize,
+            "0.08",
+            "1",
+            "1.5",
+            "capacity_participation_balanced_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            40usize,
+            900usize,
+        ),
+    ];
+    for seed in professional_execution_rolling_carry_budget_seed_trials() {
+        for (
+            top_n,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+        ) in controls
+        {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_capacity_fill_frontier_seed(
+                    seed.clone(),
+                    top_n,
+                    max_position_pct,
+                    max_gross_exposure,
+                    capacity_penalty_strength,
+                    capacity_risk_budget,
+                    execution_schedule_profile,
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                    score_candidate_pool_size,
+                )],
+            );
+        }
+    }
+    seeds
+}
+
+fn professional_execution_alpha_capacity_bridge_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            80usize,
+            "0.08",
+            "1",
+            "1.5",
+            "capacity_participation_balanced_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            40usize,
+            900usize,
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            120usize,
+            "0.06",
+            "0.90",
+            "2.0",
+            "capacity_participation_strict_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            45usize,
+            900usize,
+            "impact_turnover_15pct_v1",
+        ),
+    ];
+    for seed in professional_return_alpha_sharpe_bridge_seed_trials() {
+        for (
+            top_n,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            execution_impact_budget,
+        ) in controls
+        {
+            let seed = with_capacity_fill_frontier_seed(
+                seed.clone(),
+                top_n,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+            );
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_execution_impact_budget_seed(
+                    seed,
+                    execution_impact_budget,
+                )],
+            );
+        }
+    }
+    seeds
+}
+
+fn professional_execution_alpha_capacity_return_frontier_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            80usize,
+            "0.08",
+            "1",
+            "1.5",
+            "capacity_participation_balanced_v1",
+            "twap_10d_v1",
+            Decimal::new(8, 2),
+            30usize,
+            900usize,
+            "impact_turnover_20pct_v1",
+            None,
+        ),
+        (
+            80usize,
+            "0.08",
+            "1",
+            "1.25",
+            "capacity_participation_balanced_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            40usize,
+            900usize,
+            "impact_turnover_30pct_v1",
+            None,
+        ),
+        (
+            60usize,
+            "0.10",
+            "1",
+            "1.5",
+            "capacity_participation_balanced_v1",
+            "twap_10d_v1",
+            Decimal::new(8, 2),
+            30usize,
+            650usize,
+            "impact_turnover_20pct_v1",
+            Some("listed_non_st"),
+        ),
+        (
+            100usize,
+            "0.07",
+            "0.95",
+            "2.0",
+            "capacity_participation_strict_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            45usize,
+            1200usize,
+            "impact_turnover_15pct_v1",
+            Some("listed_non_st"),
+        ),
+    ];
+    for seed in professional_return_alpha_sharpe_bridge_seed_trials() {
+        for (
+            top_n,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            execution_impact_budget,
+            universe_profile,
+        ) in controls
+        {
+            let seed = with_capacity_fill_frontier_seed(
+                seed.clone(),
+                top_n,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+            );
+            let mut seed = with_execution_impact_budget_seed(seed, execution_impact_budget);
+            if let Some(universe_profile) = universe_profile {
+                seed["universe_profile"] = json!(universe_profile);
+            }
+            append_unique_seeds(&mut seeds, vec![seed]);
+        }
+    }
+    seeds
+}
+
+fn professional_execution_stress_fill_return_frontier_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            120usize,
+            "0.06",
+            "1",
+            "2.0",
+            "capacity_participation_strict_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            45usize,
+            1200usize,
+            "impact_turnover_15pct_v1",
+            "listed_non_st",
+        ),
+        (
+            160usize,
+            "0.05",
+            "1",
+            "2.0",
+            "capacity_participation_strict_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            60usize,
+            1500usize,
+            "impact_turnover_15pct_v1",
+            "listed_non_st",
+        ),
+        (
+            120usize,
+            "0.06",
+            "0.95",
+            "1.5",
+            "capacity_participation_balanced_v1",
+            "twap_10d_v1",
+            Decimal::new(8, 2),
+            45usize,
+            1200usize,
+            "impact_turnover_20pct_v1",
+            "listed_non_st",
+        ),
+        (
+            80usize,
+            "0.08",
+            "1",
+            "1.5",
+            "capacity_participation_balanced_v1",
+            "twap_10d_v1",
+            Decimal::new(8, 2),
+            30usize,
+            1200usize,
+            "impact_turnover_20pct_v1",
+            "all",
+        ),
+    ];
+    for seed in professional_return_alpha_sharpe_bridge_seed_trials() {
+        for (
+            top_n,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            execution_impact_budget,
+            universe_profile,
+        ) in controls
+        {
+            let seed = with_capacity_fill_frontier_seed(
+                seed.clone(),
+                top_n,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+            );
+            let seed = with_cash_utilization_seed(seed, "stress_fill_gross_98_v1");
+            let mut seed = with_execution_impact_budget_seed(seed, execution_impact_budget);
+            seed["universe_profile"] = json!(universe_profile);
+            append_unique_seeds(&mut seeds, vec![seed]);
+        }
+    }
+    seeds
+}
+
+fn professional_execution_stress_risk_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            80usize,
+            "0.08",
+            "1",
+            "1.5",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_10d_v1",
+            Decimal::new(8, 2),
+            30usize,
+            1200usize,
+            "impact_turnover_20pct_v1",
+            "all",
+        ),
+        (
+            60usize,
+            "0.10",
+            "1",
+            "1.5",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_10d_v1",
+            Decimal::new(8, 2),
+            30usize,
+            900usize,
+            "impact_turnover_20pct_v1",
+            "listed_non_st",
+        ),
+        (
+            100usize,
+            "0.07",
+            "0.95",
+            "2.0",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            45usize,
+            1200usize,
+            "impact_turnover_15pct_v1",
+            "listed_non_st",
+        ),
+        (
+            80usize,
+            "0.08",
+            "0.95",
+            "2.0",
+            "capacity_participation_strict_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            45usize,
+            1200usize,
+            "impact_turnover_15pct_v1",
+            "listed_non_st",
+        ),
+    ];
+    for seed in professional_return_alpha_sharpe_bridge_seed_trials() {
+        for (
+            top_n,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            execution_impact_budget,
+            universe_profile,
+        ) in controls
+        {
+            let seed = with_capacity_fill_frontier_seed(
+                seed.clone(),
+                top_n,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+            );
+            let seed = with_cash_utilization_seed(seed, "stress_fill_gross_98_v1");
+            let mut seed = with_execution_impact_budget_seed(seed, execution_impact_budget);
+            seed["universe_profile"] = json!(universe_profile);
+            append_unique_seeds(&mut seeds, vec![seed]);
+        }
+    }
+    seeds
+}
+
+fn professional_execution_capacity_stress_return_gate_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            100usize,
+            "0.06",
+            "0.95",
+            "2.5",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_15d_v1",
+            Decimal::new(6, 2),
+            60usize,
+            1500usize,
+            "impact_turnover_15pct_v1",
+            "listed_non_st",
+        ),
+        (
+            120usize,
+            "0.05",
+            "0.90",
+            "2.5",
+            "capacity_participation_strict_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            60usize,
+            1500usize,
+            "impact_turnover_15pct_v1",
+            "listed_non_st",
+        ),
+        (
+            80usize,
+            "0.08",
+            "1",
+            "2.0",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            45usize,
+            1200usize,
+            "impact_turnover_20pct_v1",
+            "all",
+        ),
+    ];
+    for seed in professional_return_alpha_sharpe_bridge_seed_trials() {
+        for (
+            top_n,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            execution_impact_budget,
+            universe_profile,
+        ) in controls
+        {
+            let seed = with_capacity_fill_frontier_seed(
+                seed.clone(),
+                top_n,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+            );
+            let seed = with_cash_utilization_seed(seed, "stress_fill_gross_98_v1");
+            let mut seed = with_execution_impact_budget_seed(seed, execution_impact_budget);
+            seed["universe_profile"] = json!(universe_profile);
+            append_unique_seeds(&mut seeds, vec![seed]);
+        }
+    }
+    seeds
+}
+
+fn with_low_impact_alpha_stress_return_seed(
+    seed: Value,
+    combo_name: &str,
+    top_n: usize,
+    rebalance_days: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    capacity_penalty_strength: &str,
+    capacity_risk_budget: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    score_candidate_pool_size: usize,
+    candidate_risk_filter: &str,
+    risk_contribution_control: &str,
+    market_regime: &str,
+    universe_profile: &str,
+) -> Value {
+    let profile_name = format!(
+        "low_impact_alpha_top{top_n}_rebalance{rebalance_days}_maxpos{}_gross{}",
+        max_position_pct.replace('.', ""),
+        max_gross_exposure.replace('.', "")
+    );
+    let seed = set_seed_score_direction(
+        retarget_seed_combo(seed, combo_name),
+        ScoreDirection::Ascending,
+    );
+    let seed = with_event_sleeve_seed(seed, market_regime, &profile_name);
+    let seed = with_candidate_risk_filter_seed(seed, candidate_risk_filter);
+    let seed = with_risk_contribution_control_seed(seed, risk_contribution_control);
+    let seed = with_rebalance_days_seed(seed, rebalance_days, &profile_name);
+    let seed = with_capacity_fill_frontier_seed(
+        seed,
+        top_n,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+    );
+    let seed = with_cash_utilization_seed(seed, "stress_fill_gross_98_v1");
+    let mut seed = with_execution_impact_budget_seed(seed, "impact_turnover_15pct_v1");
+    seed["low_impact_alpha_profile"] = json!(profile_name);
+    seed["universe_profile"] = json!(universe_profile);
+    seed
+}
+
+fn professional_execution_low_impact_alpha_stress_return_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            "phase7_quality_event_window_overlay_v1",
+            100usize,
+            180usize,
+            "0.06",
+            "0.95",
+            "2.5",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            60usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_value_recovery_confirm_v1",
+            120usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_participation_strict_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "main_board_non_st",
+        ),
+        (
+            "phase7_quality_residual_confirm_10pct_v1",
+            120usize,
+            220usize,
+            "0.05",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            60usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "listed_non_st",
+        ),
+        (
+            "phase7_blend_quality_growth_v1",
+            100usize,
+            160usize,
+            "0.06",
+            "0.95",
+            "2.0",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_15d_v1",
+            Decimal::new(6, 2),
+            60usize,
+            1200usize,
+            "soft_low_volatility_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+        (
+            "phase7_financial_quality_v1",
+            80usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "2.0",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_15d_v1",
+            Decimal::new(75, 3),
+            45usize,
+            1200usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+    ];
+    for (
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        universe_profile,
+    ) in controls
+    {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_low_impact_alpha_stress_return_seed(
+                anchor.clone(),
+                combo_name,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                universe_profile,
+            )],
+        );
+    }
+    seeds
+}
+
+fn professional_execution_stress_target_scaling_return_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            "phase7_quality_event_window_overlay_v1",
+            100usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_target_scale_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.05",
+            "0.80",
+            "3.0",
+            "capacity_stress_participation_target_scale_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            160usize,
+            180usize,
+            "0.04",
+            "0.70",
+            "3.0",
+            "capacity_stress_participation_target_scale_v1",
+            "twap_20d_v1",
+            Decimal::new(4, 2),
+            90usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_financial_quality_v1",
+            120usize,
+            160usize,
+            "0.05",
+            "0.80",
+            "2.5",
+            "capacity_stress_participation_target_scale_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_residual_confirm_10pct_v1",
+            120usize,
+            220usize,
+            "0.05",
+            "0.80",
+            "3.0",
+            "capacity_stress_participation_target_scale_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "listed_non_st",
+        ),
+    ];
+    for (
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        universe_profile,
+    ) in controls
+    {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_low_impact_alpha_stress_return_seed(
+                anchor.clone(),
+                combo_name,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                universe_profile,
+            )],
+        );
+    }
+    seeds
+}
+
+fn professional_execution_stress_floor_scaling_return_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            "phase7_quality_event_window_overlay_v1",
+            100usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_floor_35_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            100usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_floor_50_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.05",
+            "0.80",
+            "3.0",
+            "capacity_stress_participation_floor_35_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_financial_quality_v1",
+            100usize,
+            160usize,
+            "0.06",
+            "0.80",
+            "2.5",
+            "capacity_stress_participation_floor_35_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+    ];
+    for (
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        universe_profile,
+    ) in controls
+    {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_low_impact_alpha_stress_return_seed(
+                anchor.clone(),
+                combo_name,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                universe_profile,
+            )],
+        );
+    }
+    seeds
+}
+
+fn professional_execution_stress_floor_return_recovery_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            100usize,
+            180usize,
+            "0.06",
+            "1.00",
+            "2.5",
+            "capacity_stress_participation_soft_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_financial_quality_v1",
+            120usize,
+            160usize,
+            "0.05",
+            "0.90",
+            "2.0",
+            "capacity_stress_participation_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+    ];
+    for (
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        universe_profile,
+    ) in controls
+    {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_low_impact_alpha_stress_return_seed(
+                anchor.clone(),
+                combo_name,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                universe_profile,
+            )],
+        );
+    }
+    seeds
+}
+
+fn professional_execution_pressure_headroom_floor_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_headroom_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            160usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_headroom_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            90usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            160usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_headroom_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            90usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_financial_quality_v1",
+            160usize,
+            160usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_headroom_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            90usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+    ];
+    for (
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        universe_profile,
+    ) in controls
+    {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_low_impact_alpha_stress_return_seed(
+                anchor.clone(),
+                combo_name,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                universe_profile,
+            )],
+        );
+    }
+    seeds
+}
+
+fn professional_execution_alpha_headroom_floor_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            160usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            90usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_financial_quality_v1",
+            120usize,
+            160usize,
+            "0.05",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+    ];
+    for (
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        universe_profile,
+    ) in controls
+    {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_low_impact_alpha_stress_return_seed(
+                anchor.clone(),
+                combo_name,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                universe_profile,
+            )],
+        );
+    }
+    seeds
+}
+
+fn professional_execution_blended_alpha_headroom_floor_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_blended_alpha_headroom_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_quality_event_window_overlay_v1",
+            160usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            90usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "listed_non_st",
+        ),
+        (
+            "phase7_financial_quality_v1",
+            120usize,
+            160usize,
+            "0.05",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_blended_alpha_headroom_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            75usize,
+            1500usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "listed_non_st",
+        ),
+    ];
+    for (
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        universe_profile,
+    ) in controls
+    {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_low_impact_alpha_stress_return_seed(
+                anchor.clone(),
+                combo_name,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                universe_profile,
+            )],
+        );
+    }
+    seeds
+}
+
+fn with_event_anchor_execution_stress_seed(
+    seed: Value,
+    top_n: usize,
+    rebalance_days: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    capacity_penalty_strength: &str,
+    capacity_risk_budget: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    score_candidate_pool_size: usize,
+    universe_profile: &str,
+) -> Value {
+    let profile_name = format!(
+        "event_anchor_stress_top{top_n}_rebalance{rebalance_days}_maxpos{}_gross{}",
+        max_position_pct.replace('.', ""),
+        max_gross_exposure.replace('.', "")
+    );
+    let seed = with_candidate_risk_filter_seed(seed, "soft_low_volatility_low_correlation_v1");
+    let seed = with_risk_contribution_control_seed(seed, "soft_single_name_15pct_v1");
+    let seed = with_rebalance_days_seed(seed, rebalance_days, &profile_name);
+    let seed = with_capacity_fill_frontier_seed(
+        seed,
+        top_n,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+    );
+    let seed = with_cash_utilization_seed(seed, "stress_fill_gross_98_v1");
+    let mut seed = with_execution_impact_budget_seed(seed, "impact_turnover_15pct_v1");
+    seed["execution_event_stress_bridge_profile"] = json!(profile_name);
+    seed["universe_profile"] = json!(universe_profile);
+    seed
+}
+
+fn with_execution_participation_limit_seed(
+    mut seed: Value,
+    max_participation_rate: Decimal,
+) -> Value {
+    seed["execution_max_participation_rate"] = json!(decimal_string(max_participation_rate));
+    insert_execution_rule_value(
+        &mut seed,
+        "max_participation_rate",
+        json!(decimal_f64(max_participation_rate)),
+    );
+    seed
+}
+
+fn professional_execution_event_anchor_stress_bridge_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let controls = [
+        (
+            80usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "2.0",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1500usize,
+        ),
+        (
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(5, 2),
+            90usize,
+            1500usize,
+        ),
+        (
+            160usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_headroom_floor_70_v1",
+            Decimal::new(5, 2),
+            90usize,
+            1800usize,
+        ),
+    ];
+
+    if let Some(anchor) = phase7_current_anchor_bg_trial4_seed() {
+        for (
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+        ) in controls.iter().copied()
+        {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_event_anchor_execution_stress_seed(
+                    anchor.clone(),
+                    top_n,
+                    rebalance_days,
+                    max_position_pct,
+                    max_gross_exposure,
+                    capacity_penalty_strength,
+                    capacity_risk_budget,
+                    "twap_20d_v1",
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                    score_candidate_pool_size,
+                    "listed_non_st",
+                )],
+            );
+        }
+    }
+
+    for seed in professional_return_distribution_repair_seed_trials()
+        .into_iter()
+        .take(2)
+    {
+        for (
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+        ) in controls.iter().copied().take(2)
+        {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_event_anchor_execution_stress_seed(
+                    seed.clone(),
+                    top_n,
+                    rebalance_days,
+                    max_position_pct,
+                    max_gross_exposure,
+                    capacity_penalty_strength,
+                    capacity_risk_budget,
+                    "twap_20d_v1",
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                    score_candidate_pool_size,
+                    "listed_non_st",
+                )],
+            );
+        }
+    }
+
+    seeds
+}
+
+fn professional_execution_participation_aware_event_anchor_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    let mut event_anchor_seeds = Vec::new();
+    let mut high_sharpe_anchor_seeds = Vec::new();
+    let controls = [
+        (
+            80usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "2.0",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(6, 2),
+            75usize,
+            1800usize,
+            Decimal::new(10, 2),
+        ),
+        (
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(5, 2),
+            90usize,
+            2200usize,
+            Decimal::new(10, 2),
+        ),
+        (
+            160usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_headroom_floor_70_v1",
+            Decimal::new(5, 2),
+            90usize,
+            2200usize,
+            Decimal::new(5, 2),
+        ),
+    ];
+
+    if let Some(anchor) = phase7_current_anchor_bg_trial4_seed() {
+        for (
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            max_participation_rate,
+        ) in controls.iter().copied()
+        {
+            let seed = with_event_anchor_execution_stress_seed(
+                anchor.clone(),
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                "twap_20d_v1",
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                "listed_non_st",
+            );
+            let seed = with_candidate_risk_filter_seed(
+                seed,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+            );
+            let mut seed = with_execution_participation_limit_seed(seed, max_participation_rate);
+            seed["execution_participation_aware_anchor_profile"] = json!(format!(
+                "event_anchor_participation_top{top_n}_rebalance{rebalance_days}"
+            ));
+            append_unique_seeds(&mut event_anchor_seeds, vec![seed]);
+        }
+    }
+
+    for seed in professional_return_distribution_repair_seed_trials()
+        .into_iter()
+        .take(2)
+    {
+        for (
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            max_participation_rate,
+        ) in controls.iter().copied().take(2)
+        {
+            let seed = with_event_anchor_execution_stress_seed(
+                seed.clone(),
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                "twap_20d_v1",
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                "listed_non_st",
+            );
+            let seed = with_candidate_risk_filter_seed(
+                seed,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+            );
+            let mut seed = with_execution_participation_limit_seed(seed, max_participation_rate);
+            seed["execution_participation_aware_anchor_profile"] = json!(format!(
+                "event_anchor_participation_top{top_n}_rebalance{rebalance_days}"
+            ));
+            append_unique_seeds(&mut high_sharpe_anchor_seeds, vec![seed]);
+        }
+    }
+
+    if let Some(seed) = event_anchor_seeds.first().cloned() {
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+    if let Some(seed) = high_sharpe_anchor_seeds.first().cloned() {
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+    for seed in event_anchor_seeds
+        .into_iter()
+        .skip(1)
+        .chain(high_sharpe_anchor_seeds.into_iter().skip(1))
+    {
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    seeds
+}
+
+fn with_cl_anchor_fill_recovery_seed(
+    seed: Value,
+    top_n: usize,
+    rebalance_days: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    capacity_penalty_strength: &str,
+    capacity_risk_budget: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    score_candidate_pool_size: usize,
+    max_participation_rate: Decimal,
+    risk_contribution_control: &str,
+) -> Value {
+    let seed = with_event_anchor_execution_stress_seed(
+        seed,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        "twap_20d_v1",
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        "listed_non_st",
+    );
+    let seed =
+        with_candidate_risk_filter_seed(seed, "soft_liquidity_low_volatility_low_correlation_v1");
+    let seed = with_risk_contribution_control_seed(seed, risk_contribution_control);
+    let mut seed = with_execution_participation_limit_seed(seed, max_participation_rate);
+    seed["execution_cl_anchor_fill_recovery_profile"] = json!(format!(
+        "cl_fill_recovery_top{top_n}_rebalance{rebalance_days}"
+    ));
+    seed
+}
+
+fn professional_execution_cl_anchor_fill_recovery_seed_trials() -> Vec<Value> {
+    let high_sharpe_anchors = professional_return_distribution_repair_seed_trials();
+    let Some(cl_anchor) = high_sharpe_anchors.first().cloned() else {
+        return Vec::new();
+    };
+    let cm_anchor = high_sharpe_anchors.get(1).cloned();
+    let mut seeds = Vec::new();
+
+    for (
+        anchor,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        max_participation_rate,
+        risk_contribution_control,
+    ) in [
+        (
+            cl_anchor.clone(),
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(8, 2),
+            90usize,
+            2400usize,
+            Decimal::new(10, 2),
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            cl_anchor.clone(),
+            160usize,
+            180usize,
+            "0.05",
+            "0.90",
+            "3.0",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(6, 2),
+            90usize,
+            2600usize,
+            Decimal::new(10, 2),
+            "soft_single_name_15pct_v1",
+        ),
+        (
+            cl_anchor,
+            100usize,
+            160usize,
+            "0.07",
+            "0.95",
+            "2.0",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            Decimal::new(12, 2),
+            "soft_single_name_20pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_cl_anchor_fill_recovery_seed(
+                anchor,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                max_participation_rate,
+                risk_contribution_control,
+            )],
+        );
+    }
+
+    if let Some(cm_anchor) = cm_anchor {
+        for (
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            max_participation_rate,
+            risk_contribution_control,
+        ) in [
+            (
+                120usize,
+                180usize,
+                "0.06",
+                "0.90",
+                "2.5",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                Decimal::new(8, 2),
+                90usize,
+                2400usize,
+                Decimal::new(10, 2),
+                "soft_single_name_20pct_v1",
+            ),
+            (
+                160usize,
+                180usize,
+                "0.05",
+                "0.90",
+                "3.0",
+                "capacity_stress_participation_headroom_floor_70_v1",
+                Decimal::new(6, 2),
+                90usize,
+                2600usize,
+                Decimal::new(10, 2),
+                "soft_single_name_15pct_v1",
+            ),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_cl_anchor_fill_recovery_seed(
+                    cm_anchor.clone(),
+                    top_n,
+                    rebalance_days,
+                    max_position_pct,
+                    max_gross_exposure,
+                    capacity_penalty_strength,
+                    capacity_risk_budget,
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                    score_candidate_pool_size,
+                    max_participation_rate,
+                    risk_contribution_control,
+                )],
+            );
+        }
+    }
+
+    seeds
+}
+
+fn with_capacity_aware_candidate_ranking_seed(seed: Value, profile_name: &str) -> Value {
+    let seed = with_candidate_ranking_seed(seed, "capacity_aware_alpha_liquidity_v1");
+    let mut seed = seed;
+    seed["execution_capacity_aware_candidate_ranking_profile"] = json!(profile_name);
+    seed
+}
+
+fn professional_execution_capacity_aware_candidate_ranking_seed_trials() -> Vec<Value> {
+    let high_sharpe_anchors = professional_return_distribution_repair_seed_trials();
+    let Some(cl_anchor) = high_sharpe_anchors.first().cloned() else {
+        return Vec::new();
+    };
+    let cm_anchor = high_sharpe_anchors.get(1).cloned();
+    let mut seeds = Vec::new();
+
+    for (
+        anchor,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        max_participation_rate,
+        risk_contribution_control,
+    ) in [
+        (
+            cl_anchor.clone(),
+            100usize,
+            180usize,
+            "0.08",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(8, 2),
+            90usize,
+            2200usize,
+            Decimal::new(10, 2),
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            cl_anchor.clone(),
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(8, 2),
+            90usize,
+            2200usize,
+            Decimal::new(10, 2),
+            "soft_single_name_20pct_v1",
+        ),
+        (
+            cl_anchor,
+            80usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "2.0",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            Decimal::new(8, 2),
+            75usize,
+            1800usize,
+            Decimal::new(12, 2),
+            "soft_single_name_20pct_v1",
+        ),
+    ] {
+        let seed = with_cl_anchor_fill_recovery_seed(
+            anchor,
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            max_participation_rate,
+            risk_contribution_control,
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_capacity_aware_candidate_ranking_seed(
+                seed,
+                &format!("capacity_rank_top{top_n}_rebalance{rebalance_days}"),
+            )],
+        );
+    }
+
+    if let Some(cm_anchor) = cm_anchor {
+        let seed = with_cl_anchor_fill_recovery_seed(
+            cm_anchor,
+            100,
+            180,
+            "0.08",
+            "0.90",
+            "2.5",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            Decimal::new(8, 2),
+            90,
+            2200,
+            Decimal::new(10, 2),
+            "soft_single_name_20pct_v1",
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_capacity_aware_candidate_ranking_seed(
+                seed,
+                "capacity_rank_cm_top100_rebalance180",
+            )],
+        );
+    }
+
+    seeds
+}
+
 fn professional_return_alpha_sharpe_bridge_seed_trials() -> Vec<Value> {
     let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
         return Vec::new();
@@ -11460,12 +13644,15 @@ pub struct LayeredSearchConfig {
     pub risk_budget_lookback_days: Vec<usize>,
     pub capacity_penalty_strength: Vec<Decimal>,
     pub capacity_risk_budget_profiles: Vec<String>,
+    pub cash_utilization_profiles: Vec<String>,
     pub execution_impact_budget_profiles: Vec<String>,
     pub execution_schedule_profiles: Vec<String>,
+    pub execution_carry_policy_profiles: Vec<String>,
     pub cost_capacity_stress_profiles: Vec<CostCapacityStressProfile>,
     pub industry_max_weight_pct: Vec<Option<Decimal>>,
     pub style_risk_budget_profiles: Vec<String>,
     pub candidate_risk_filter_profiles: Vec<String>,
+    pub candidate_ranking_profiles: Vec<String>,
     pub risk_contribution_control_profiles: Vec<String>,
     pub rebalance_hysteresis_pct: Vec<Decimal>,
     pub partial_rebalance_ratio: Vec<Decimal>,
@@ -11534,8 +13721,10 @@ impl LayeredSearchConfig {
             risk_budget_lookback_days: vec![60, 120],
             capacity_penalty_strength: vec![Decimal::ZERO, Decimal::new(75, 2)],
             capacity_risk_budget_profiles: vec!["off".to_string()],
+            cash_utilization_profiles: vec!["off".to_string()],
             execution_impact_budget_profiles: vec!["off".to_string()],
             execution_schedule_profiles: vec!["immediate".to_string()],
+            execution_carry_policy_profiles: vec!["expire".to_string()],
             cost_capacity_stress_profiles: vec![CostCapacityStressProfile::off()],
             industry_max_weight_pct: vec![
                 None,
@@ -11544,6 +13733,7 @@ impl LayeredSearchConfig {
             ],
             style_risk_budget_profiles: vec!["off".to_string()],
             candidate_risk_filter_profiles: vec!["off".to_string()],
+            candidate_ranking_profiles: vec!["off".to_string()],
             risk_contribution_control_profiles: vec!["off".to_string()],
             rebalance_hysteresis_pct: vec![Decimal::ZERO],
             partial_rebalance_ratio: vec![Decimal::ONE],
@@ -15172,6 +17362,598 @@ impl LayeredSearchConfig {
         config
     }
 
+    pub fn professional_execution_daily_cap_budget_default() -> Self {
+        let mut config = Self::professional_execution_patient_schedule_budget_default();
+        config.seed_trials = professional_execution_daily_cap_budget_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_cash_drag_aware_budget_default() -> Self {
+        let mut config = Self::professional_execution_daily_cap_budget_default();
+        config.seed_trials = professional_execution_cash_drag_aware_budget_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_feasible_fill_budget_default() -> Self {
+        let mut config = Self::professional_execution_cash_drag_aware_budget_default();
+        config.cash_utilization_profiles = vec![
+            "fillable_gross_90_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.seed_trials = professional_execution_feasible_fill_budget_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_fill_ratio_budget_default() -> Self {
+        Self::professional_execution_feasible_fill_budget_default()
+    }
+
+    pub fn professional_execution_rolling_carry_budget_default() -> Self {
+        let mut config = Self::professional_execution_fill_ratio_budget_default();
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.seed_trials = professional_execution_rolling_carry_budget_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_capacity_fill_frontier_default() -> Self {
+        let mut config = Self::professional_execution_rolling_carry_budget_default();
+        config.top_n = vec![80, 120, 160];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(68, 2)];
+        config.max_gross_exposure = vec![Decimal::new(80, 2), Decimal::new(90, 2), Decimal::ONE];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(150, 2),
+            Decimal::new(200, 2),
+            Decimal::new(250, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_participation_strict_v1".to_string(),
+            "capacity_participation_balanced_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["fillable_gross_95_v1".to_string()];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_20pct_v1".to_string(),
+            "impact_turnover_15pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![900, 1200];
+        config.seed_trials = professional_execution_capacity_fill_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_alpha_capacity_bridge_default() -> Self {
+        let mut config = Self::professional_return_alpha_sharpe_bridge_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+        ];
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.top_n = vec![80, 120];
+        config.rebalance_days = vec![60, 120];
+        config.max_position_pct = vec![Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(68, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::ONE];
+        config.capacity_penalty_strength = vec![Decimal::new(150, 2), Decimal::new(200, 2)];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_participation_balanced_v1".to_string(),
+            "capacity_participation_strict_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["fillable_gross_95_v1".to_string()];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_20pct_v1".to_string(),
+            "impact_turnover_15pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![900, 1200];
+        config.seed_trials = professional_execution_alpha_capacity_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_alpha_capacity_return_frontier_default() -> Self {
+        let mut config = Self::professional_execution_alpha_capacity_bridge_default();
+        config.top_n = vec![60, 80, 100];
+        config.max_position_pct = vec![Decimal::new(7, 2), Decimal::new(8, 2), Decimal::new(10, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(68, 2)];
+        config.max_gross_exposure = vec![Decimal::new(95, 2), Decimal::ONE];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(125, 2),
+            Decimal::new(150, 2),
+            Decimal::new(200, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_participation_balanced_v1".to_string(),
+            "capacity_participation_strict_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["fillable_gross_95_v1".to_string()];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_30pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+            "impact_turnover_15pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_10d_v1".to_string(), "twap_15d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![650, 900, 1200];
+        config.universe_profiles = vec!["all".to_string(), "listed_non_st".to_string()];
+        config.seed_trials = professional_execution_alpha_capacity_return_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_stress_fill_return_frontier_default() -> Self {
+        let mut config = Self::professional_execution_alpha_capacity_return_frontier_default();
+        config.top_n = vec![80, 120, 160];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(68, 2)];
+        config.max_gross_exposure = vec![Decimal::new(95, 2), Decimal::ONE];
+        config.capacity_penalty_strength = vec![Decimal::new(150, 2), Decimal::new(200, 2)];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_participation_strict_v1".to_string(),
+            "capacity_participation_balanced_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec![
+            "stress_fill_gross_98_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_20pct_v1".to_string(),
+            "impact_turnover_15pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_10d_v1".to_string(), "twap_15d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![900, 1200, 1500];
+        config.universe_profiles = vec!["all".to_string(), "listed_non_st".to_string()];
+        config.seed_trials = professional_execution_stress_fill_return_frontier_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_stress_risk_budget_default() -> Self {
+        let mut config = Self::professional_execution_alpha_capacity_return_frontier_default();
+        config.top_n = vec![60, 80, 100];
+        config.max_position_pct = vec![Decimal::new(7, 2), Decimal::new(8, 2), Decimal::new(10, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(68, 2)];
+        config.max_gross_exposure = vec![Decimal::new(95, 2), Decimal::ONE];
+        config.capacity_penalty_strength = vec![Decimal::new(150, 2), Decimal::new(200, 2)];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_soft_cap_v1".to_string(),
+            "capacity_participation_strict_v1".to_string(),
+            "capacity_participation_balanced_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec![
+            "stress_fill_gross_98_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_20pct_v1".to_string(),
+            "impact_turnover_15pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_10d_v1".to_string(), "twap_15d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![900, 1200];
+        config.universe_profiles = vec!["all".to_string(), "listed_non_st".to_string()];
+        config.seed_trials = professional_execution_stress_risk_budget_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_capacity_stress_return_gate_default() -> Self {
+        let mut config = Self::professional_execution_stress_risk_budget_default();
+        config.top_n = vec![80, 100, 120];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(68, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2), Decimal::ONE];
+        config.capacity_penalty_strength = vec![Decimal::new(200, 2), Decimal::new(250, 2)];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_soft_cap_v1".to_string(),
+            "capacity_participation_strict_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec![
+            "stress_fill_gross_98_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_15pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![1200, 1500];
+        config.universe_profiles = vec!["all".to_string(), "listed_non_st".to_string()];
+        config.seed_trials = professional_execution_capacity_stress_return_gate_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_low_impact_alpha_stress_return_default() -> Self {
+        let mut config = Self::professional_execution_capacity_stress_return_gate_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_window_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0"),
+        ];
+        config.score_directions = vec![ScoreDirection::Ascending];
+        config.market_regime_policies = vec![
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.top_n = vec![80, 100, 120];
+        config.rebalance_days = vec![160, 180, 220];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(65, 2), Decimal::new(68, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(200, 2),
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_soft_cap_v1".to_string(),
+            "capacity_participation_strict_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles =
+            vec!["twap_20d_v1".to_string(), "twap_15d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_low_volatility_low_correlation_v1".to_string(),
+            "soft_low_volatility_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_15pct_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![1200, 1500];
+        config.universe_profiles =
+            vec!["listed_non_st".to_string(), "main_board_non_st".to_string()];
+        config.seed_trials = professional_execution_low_impact_alpha_stress_return_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_stress_target_scaling_return_default() -> Self {
+        let mut config = Self::professional_execution_low_impact_alpha_stress_return_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_window_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0"),
+        ];
+        config.top_n = vec![100, 120, 160];
+        config.rebalance_days = vec![160, 180, 220];
+        config.max_position_pct = vec![Decimal::new(4, 2), Decimal::new(5, 2), Decimal::new(6, 2)];
+        config.max_gross_exposure = vec![
+            Decimal::new(60, 2),
+            Decimal::new(70, 2),
+            Decimal::new(80, 2),
+            Decimal::new(90, 2),
+        ];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+            Decimal::new(350, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_target_scale_v1".to_string(),
+            "capacity_stress_participation_soft_cap_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![1200, 1500];
+        config.universe_profiles =
+            vec!["listed_non_st".to_string(), "main_board_non_st".to_string()];
+        config.seed_trials = professional_execution_stress_target_scaling_return_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_stress_floor_scaling_return_default() -> Self {
+        let mut config = Self::professional_execution_stress_target_scaling_return_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_window_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0"),
+        ];
+        config.top_n = vec![100, 120, 160];
+        config.rebalance_days = vec![160, 180, 220];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_gross_exposure = vec![
+            Decimal::new(70, 2),
+            Decimal::new(80, 2),
+            Decimal::new(90, 2),
+        ];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(200, 2),
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_floor_35_v1".to_string(),
+            "capacity_stress_participation_floor_50_v1".to_string(),
+            "capacity_stress_participation_target_scale_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![1200, 1500];
+        config.universe_profiles =
+            vec!["listed_non_st".to_string(), "main_board_non_st".to_string()];
+        config.seed_trials = professional_execution_stress_floor_scaling_return_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_stress_floor_return_recovery_default() -> Self {
+        let mut config = Self::professional_execution_stress_floor_scaling_return_default();
+        config.top_n = vec![100, 120, 160];
+        config.rebalance_days = vec![160, 180, 220];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_gross_exposure = vec![
+            Decimal::new(80, 2),
+            Decimal::new(90, 2),
+            Decimal::new(100, 2),
+        ];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(200, 2),
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_floor_60_v1".to_string(),
+            "capacity_stress_participation_floor_70_v1".to_string(),
+            "capacity_stress_participation_soft_floor_60_v1".to_string(),
+            "capacity_stress_participation_floor_50_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![1200, 1500];
+        config.universe_profiles =
+            vec!["listed_non_st".to_string(), "main_board_non_st".to_string()];
+        config.seed_trials = professional_execution_stress_floor_return_recovery_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_pressure_headroom_floor_default() -> Self {
+        let mut config = Self::professional_execution_stress_floor_return_recovery_default();
+        config.top_n = vec![120, 160, 200];
+        config.rebalance_days = vec![160, 180, 220];
+        config.max_position_pct = vec![Decimal::new(4, 2), Decimal::new(5, 2), Decimal::new(6, 2)];
+        config.max_gross_exposure = vec![
+            Decimal::new(80, 2),
+            Decimal::new(90, 2),
+            Decimal::new(100, 2),
+        ];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+            Decimal::new(350, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_floor_70_v1".to_string(),
+            "capacity_stress_participation_soft_floor_60_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(4, 2), Decimal::new(5, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![1500, 1800];
+        config.universe_profiles =
+            vec!["listed_non_st".to_string(), "main_board_non_st".to_string()];
+        config.seed_trials = professional_execution_pressure_headroom_floor_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_alpha_headroom_floor_default() -> Self {
+        let mut config = Self::professional_execution_pressure_headroom_floor_default();
+        config.top_n = vec![100, 120, 160];
+        config.rebalance_days = vec![160, 180, 220];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_gross_exposure = vec![
+            Decimal::new(80, 2),
+            Decimal::new(90, 2),
+            Decimal::new(100, 2),
+        ];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(200, 2),
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_floor_70_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![1500, 1800];
+        config.universe_profiles =
+            vec!["listed_non_st".to_string(), "main_board_non_st".to_string()];
+        config.seed_trials = professional_execution_alpha_headroom_floor_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_blended_alpha_headroom_floor_default() -> Self {
+        let mut config = Self::professional_execution_alpha_headroom_floor_default();
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_blended_alpha_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_headroom_floor_70_v1".to_string(),
+        ];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(4, 2), Decimal::new(5, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.seed_trials = professional_execution_blended_alpha_headroom_floor_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_event_anchor_stress_bridge_default() -> Self {
+        let mut config = Self::professional_execution_alpha_headroom_floor_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_window_overlay_v1", "1.0.0"),
+        ];
+        config.market_regime_policies = vec![
+            "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.top_n = vec![80, 120, 160];
+        config.rebalance_days = vec![160, 180];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(200, 2),
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_floor_70_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.candidate_risk_filter_profiles =
+            vec!["soft_low_volatility_low_correlation_v1".to_string()];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_15pct_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2)];
+        config.score_candidate_pool_sizes = vec![1500, 1800];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_execution_event_anchor_stress_bridge_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_participation_aware_event_anchor_default() -> Self {
+        let mut config = Self::professional_execution_event_anchor_stress_bridge_default();
+        config.candidate_risk_filter_profiles =
+            vec!["soft_liquidity_low_volatility_low_correlation_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![1800, 2200];
+        config.seed_trials = professional_execution_participation_aware_event_anchor_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_cl_anchor_fill_recovery_default() -> Self {
+        let mut config = Self::professional_execution_participation_aware_event_anchor_default();
+        config.market_regime_policies = vec![
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
+        config.top_n = vec![100, 120, 160];
+        config.rebalance_days = vec![160, 180];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(7, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(200, 2),
+            Decimal::new(250, 2),
+            Decimal::new(300, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_headroom_floor_70_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.candidate_risk_filter_profiles =
+            vec!["soft_liquidity_low_volatility_low_correlation_v1".to_string()];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(25, 2), Decimal::new(35, 2)];
+        config.score_candidate_pool_sizes = vec![2200, 2400, 2600];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.event_gate_profiles = vec![
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom40",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(40, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "valuation_exclude_bottom45",
+                "phase7_valuation_v1",
+                "exclude_negative",
+                Decimal::new(45, 2),
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.seed_trials = professional_execution_cl_anchor_fill_recovery_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_capacity_aware_candidate_ranking_default() -> Self {
+        let mut config = Self::professional_execution_cl_anchor_fill_recovery_default();
+        config.top_n = vec![80, 100, 120];
+        config.max_position_pct = vec![Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.candidate_ranking_profiles = vec!["capacity_aware_alpha_liquidity_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![1800, 2200];
+        config.seed_trials = professional_execution_capacity_aware_candidate_ranking_seed_trials();
+        config
+    }
+
     pub fn professional_return_alpha_sharpe_bridge_default() -> Self {
         let mut config = Self::professional_v14_ultra_micro_lift_default();
         config.market_regime_policies = vec![
@@ -16081,12 +18863,15 @@ impl LayeredSearchConfig {
             self.risk_budget_lookback_days.len(),
             self.capacity_penalty_strength.len(),
             self.capacity_risk_budget_profiles.len(),
+            self.cash_utilization_profiles.len(),
             self.execution_impact_budget_profiles.len(),
             self.execution_schedule_profiles.len(),
+            self.execution_carry_policy_profiles.len(),
             self.cost_capacity_stress_profiles.len(),
             self.industry_max_weight_pct.len(),
             self.style_risk_budget_profiles.len(),
             self.candidate_risk_filter_profiles.len(),
+            self.candidate_ranking_profiles.len(),
             self.risk_contribution_control_profiles.len(),
             self.rebalance_hysteresis_pct.len(),
             self.partial_rebalance_ratio.len(),
@@ -16191,10 +18976,14 @@ pub fn build_layered_search_plan(
             config.capacity_penalty_strength[indices.capacity_penalty_strength];
         let capacity_risk_budget_profile =
             &config.capacity_risk_budget_profiles[indices.capacity_risk_budget_profile];
+        let cash_utilization_profile =
+            &config.cash_utilization_profiles[indices.cash_utilization_profile];
         let execution_impact_budget_profile =
             &config.execution_impact_budget_profiles[indices.execution_impact_budget_profile];
         let execution_schedule_profile =
             &config.execution_schedule_profiles[indices.execution_schedule_profile];
+        let execution_carry_policy_profile =
+            &config.execution_carry_policy_profiles[indices.execution_carry_policy_profile];
         let cost_capacity_stress_profile =
             &config.cost_capacity_stress_profiles[indices.cost_capacity_stress_profile];
         let industry_max_weight_pct =
@@ -16203,6 +18992,8 @@ pub fn build_layered_search_plan(
             &config.style_risk_budget_profiles[indices.style_risk_budget_profile];
         let candidate_risk_filter_profile =
             &config.candidate_risk_filter_profiles[indices.candidate_risk_filter_profile];
+        let candidate_ranking_profile =
+            &config.candidate_ranking_profiles[indices.candidate_ranking_profile];
         let risk_contribution_control_profile =
             &config.risk_contribution_control_profiles[indices.risk_contribution_control_profile];
         let rebalance_hysteresis_pct =
@@ -16238,12 +19029,14 @@ pub fn build_layered_search_plan(
             "risk_budget_lookback_days": risk_budget_lookback_days,
             "capacity_penalty_strength": decimal_string(capacity_penalty_strength),
             "capacity_risk_budget": capacity_risk_budget_profile,
+            "cash_utilization": cash_utilization_profile,
             "execution_impact_budget": execution_impact_budget_profile,
             "execution_schedule_profile": execution_schedule_profile,
             "cost_capacity_stress_profile": cost_capacity_stress_profile.profile_name,
             "industry_max_weight_pct": industry_max_weight_pct.map(decimal_string),
             "style_risk_budget": style_risk_budget_profile,
             "candidate_risk_filter": candidate_risk_filter_profile,
+            "candidate_ranking": candidate_ranking_profile,
             "risk_contribution_control": risk_contribution_control_profile,
             "rebalance_hysteresis_pct": decimal_string(rebalance_hysteresis_pct),
             "partial_rebalance_ratio": decimal_string(partial_rebalance_ratio),
@@ -16258,6 +19051,7 @@ pub fn build_layered_search_plan(
         });
         apply_cost_capacity_stress_profile(&mut parameters, cost_capacity_stress_profile);
         apply_execution_schedule_profile(&mut parameters, execution_schedule_profile);
+        apply_execution_carry_policy_profile(&mut parameters, execution_carry_policy_profile);
         if let (Some(start), Some(full), Some(min_exposure)) = (
             portfolio_drawdown_control.reduce_start_pct,
             portfolio_drawdown_control.reduce_full_pct,
@@ -16419,6 +19213,15 @@ fn apply_execution_schedule_profile(parameters: &mut Value, execution_schedule_p
     );
 }
 
+fn apply_execution_carry_policy_profile(parameters: &mut Value, execution_carry_policy: &str) {
+    let policy = execution_carry_policy.trim();
+    if policy.is_empty() || policy == "expire" || policy == "off" || policy == "default" {
+        return;
+    }
+    parameters["execution_carry_policy"] = json!(policy);
+    insert_execution_rule_value(parameters, "execution_carry_policy", json!(policy));
+}
+
 fn insert_execution_rule_value(parameters: &mut Value, key: &str, value: Value) {
     let Some(parameters) = parameters.as_object_mut() else {
         return;
@@ -16466,12 +19269,15 @@ struct LayeredTrialIndices {
     risk_budget_lookback_days: usize,
     capacity_penalty_strength: usize,
     capacity_risk_budget_profile: usize,
+    cash_utilization_profile: usize,
     execution_impact_budget_profile: usize,
     execution_schedule_profile: usize,
+    execution_carry_policy_profile: usize,
     cost_capacity_stress_profile: usize,
     industry_max_weight_pct: usize,
     style_risk_budget_profile: usize,
     candidate_risk_filter_profile: usize,
+    candidate_ranking_profile: usize,
     risk_contribution_control_profile: usize,
     rebalance_hysteresis_pct: usize,
     partial_rebalance_ratio: usize,
@@ -16492,10 +19298,14 @@ impl LayeredTrialIndices {
             take_axis_index(&mut index, config.capacity_penalty_strength.len())?;
         let capacity_risk_budget_profile =
             take_axis_index(&mut index, config.capacity_risk_budget_profiles.len())?;
+        let cash_utilization_profile =
+            take_axis_index(&mut index, config.cash_utilization_profiles.len())?;
         let execution_impact_budget_profile =
             take_axis_index(&mut index, config.execution_impact_budget_profiles.len())?;
         let execution_schedule_profile =
             take_axis_index(&mut index, config.execution_schedule_profiles.len())?;
+        let execution_carry_policy_profile =
+            take_axis_index(&mut index, config.execution_carry_policy_profiles.len())?;
         let cost_capacity_stress_profile =
             take_axis_index(&mut index, config.cost_capacity_stress_profiles.len())?;
         let industry_max_weight_pct =
@@ -16504,6 +19314,8 @@ impl LayeredTrialIndices {
             take_axis_index(&mut index, config.style_risk_budget_profiles.len())?;
         let candidate_risk_filter_profile =
             take_axis_index(&mut index, config.candidate_risk_filter_profiles.len())?;
+        let candidate_ranking_profile =
+            take_axis_index(&mut index, config.candidate_ranking_profiles.len())?;
         let risk_contribution_control_profile =
             take_axis_index(&mut index, config.risk_contribution_control_profiles.len())?;
         let rebalance_hysteresis_pct =
@@ -16551,12 +19363,15 @@ impl LayeredTrialIndices {
             risk_budget_lookback_days,
             capacity_penalty_strength,
             capacity_risk_budget_profile,
+            cash_utilization_profile,
             execution_impact_budget_profile,
             execution_schedule_profile,
+            execution_carry_policy_profile,
             cost_capacity_stress_profile,
             industry_max_weight_pct,
             style_risk_budget_profile,
             candidate_risk_filter_profile,
+            candidate_ranking_profile,
             risk_contribution_control_profile,
             rebalance_hysteresis_pct,
             partial_rebalance_ratio,
@@ -16665,6 +19480,23 @@ pub struct CandidateMetrics {
     pub benchmark_return: Decimal,
     pub turnover: Decimal,
     pub num_trades: u64,
+    pub execution_schedule_expired_count: u64,
+    #[serde(default)]
+    pub execution_schedule_roll_forward_count: u64,
+    pub max_execution_target_gap: Decimal,
+    pub final_cash_weight: Decimal,
+    #[serde(default)]
+    pub final_target_gross_exposure: Decimal,
+    #[serde(default)]
+    pub final_actual_gross_exposure: Decimal,
+    #[serde(default)]
+    pub final_unfilled_target_gap: Decimal,
+    #[serde(default = "default_candidate_execution_fill_ratio")]
+    pub final_execution_fill_ratio: Decimal,
+}
+
+fn default_candidate_execution_fill_ratio() -> Decimal {
+    Decimal::ONE
 }
 
 impl Default for CandidateMetrics {
@@ -16679,6 +19511,14 @@ impl Default for CandidateMetrics {
             benchmark_return: Decimal::ZERO,
             turnover: Decimal::ZERO,
             num_trades: 0,
+            execution_schedule_expired_count: 0,
+            execution_schedule_roll_forward_count: 0,
+            max_execution_target_gap: Decimal::ZERO,
+            final_cash_weight: Decimal::ZERO,
+            final_target_gross_exposure: Decimal::ZERO,
+            final_actual_gross_exposure: Decimal::ZERO,
+            final_unfilled_target_gap: Decimal::ZERO,
+            final_execution_fill_ratio: Decimal::ONE,
         }
     }
 }
@@ -16698,6 +19538,28 @@ impl CandidateMetrics {
                 .get("num_trades")
                 .and_then(Value::as_u64)
                 .unwrap_or_else(|| decimal_field(metrics, "num_trades").to_u64().unwrap_or(0)),
+            execution_schedule_expired_count: metrics
+                .get("execution_schedule_expired_count")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| {
+                    decimal_field(metrics, "execution_schedule_expired_count")
+                        .to_u64()
+                        .unwrap_or(0)
+                }),
+            execution_schedule_roll_forward_count: metrics
+                .get("execution_schedule_roll_forward_count")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| {
+                    decimal_field(metrics, "execution_schedule_roll_forward_count")
+                        .to_u64()
+                        .unwrap_or(0)
+                }),
+            max_execution_target_gap: decimal_field(metrics, "max_execution_target_gap_pct"),
+            final_cash_weight: decimal_field(metrics, "final_cash_weight_pct"),
+            final_target_gross_exposure: decimal_field(metrics, "final_target_gross_exposure_pct"),
+            final_actual_gross_exposure: decimal_field(metrics, "final_actual_gross_exposure_pct"),
+            final_unfilled_target_gap: decimal_field(metrics, "final_unfilled_target_gap_pct"),
+            final_execution_fill_ratio: decimal_field(metrics, "final_execution_fill_ratio"),
         }
     }
 }
@@ -16857,6 +19719,647 @@ mod tests {
     }
 
     #[test]
+    fn candidate_metrics_parse_execution_fill_diagnostics() {
+        let metrics = CandidateMetrics::from_optimization_metrics(&json!({
+            "annual_return_pct": 0.18,
+            "final_cash_weight_pct": 0.65,
+            "final_target_gross_exposure_pct": 0.35,
+            "final_actual_gross_exposure_pct": 0.34,
+            "final_unfilled_target_gap_pct": 0.01,
+            "final_execution_fill_ratio": 0.9714
+        }));
+
+        assert_eq!(metrics.final_cash_weight, Decimal::new(65, 2));
+        assert_eq!(metrics.final_target_gross_exposure, Decimal::new(35, 2));
+        assert_eq!(metrics.final_actual_gross_exposure, Decimal::new(34, 2));
+        assert_eq!(metrics.final_unfilled_target_gap, Decimal::new(1, 2));
+        assert_eq!(metrics.final_execution_fill_ratio, Decimal::new(9714, 4));
+    }
+
+    #[test]
+    fn professional_execution_fill_ratio_profile_preserves_feasible_fill_axis() {
+        let config = LayeredSearchConfig::professional_execution_fill_ratio_budget_default();
+
+        assert_eq!(
+            config.cash_utilization_profiles,
+            vec![
+                "fillable_gross_90_v1".to_string(),
+                "fillable_gross_95_v1".to_string()
+            ]
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["cash_utilization"] == "fillable_gross_90_v1"
+                && trial["execution_schedule_profile"] == "twap_15d_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_rolling_carry_profile_adds_roll_forward_policy() {
+        let config = LayeredSearchConfig::professional_execution_rolling_carry_budget_default();
+
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["execution_carry_policy"] == "roll_forward_v1"
+                && trial["execution_rules"]["execution_carry_policy"] == "roll_forward_v1"
+                && trial["cash_utilization"] == "fillable_gross_95_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_capacity_fill_frontier_profile_expands_fill_search_space() {
+        let config = LayeredSearchConfig::professional_execution_capacity_fill_frontier_default();
+
+        assert_eq!(config.top_n, vec![80, 120, 160]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)]
+        );
+        assert_eq!(
+            config.max_gross_exposure,
+            vec![Decimal::new(80, 2), Decimal::new(90, 2), Decimal::ONE]
+        );
+        assert_eq!(
+            config.cash_utilization_profiles,
+            vec!["fillable_gross_95_v1".to_string()]
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["execution_carry_policy"] == "roll_forward_v1"
+                && trial["execution_rules"]["execution_carry_policy"] == "roll_forward_v1"
+                && trial["top_n"] == 120
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["cash_utilization"] == "fillable_gross_95_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_alpha_capacity_bridge_profile_combines_alpha_and_fill_constraints() {
+        let config = LayeredSearchConfig::professional_execution_alpha_capacity_bridge_default();
+
+        assert_eq!(
+            config.combo_versions,
+            vec![
+                ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+                ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+                ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ]
+        );
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_state_alpha_overlay_selector_v1".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert_eq!(config.top_n, vec![80, 120]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(6, 2), Decimal::new(8, 2)]
+        );
+        assert_eq!(
+            config.max_gross_exposure,
+            vec![Decimal::new(90, 2), Decimal::ONE]
+        );
+        assert_eq!(
+            config.execution_carry_policy_profiles,
+            vec!["roll_forward_v1".to_string()]
+        );
+        assert!(config.seed_trials.len() >= 24);
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["capacity_fill_frontier_profile"] == "capacity_fill_top80_maxpos008_gross1"
+                && trial["top_n"] == 80
+                && trial["max_position_pct"] == "0.08"
+                && trial["max_gross_exposure"] == "1"
+                && trial["cash_utilization"] == "fillable_gross_95_v1"
+                && trial["execution_carry_policy"] == "roll_forward_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom40"
+                && trial["capacity_fill_frontier_profile"]
+                    == "capacity_fill_top120_maxpos006_gross090"
+                && trial["capacity_risk_budget"] == "capacity_participation_strict_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_alpha_capacity_return_frontier_profile_expands_near_miss_axes() {
+        let config =
+            LayeredSearchConfig::professional_execution_alpha_capacity_return_frontier_default();
+
+        assert_eq!(config.top_n, vec![60, 80, 100]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(7, 2), Decimal::new(8, 2), Decimal::new(10, 2)]
+        );
+        assert_eq!(
+            config.max_gross_exposure,
+            vec![Decimal::new(95, 2), Decimal::ONE]
+        );
+        assert_eq!(
+            config.capacity_penalty_strength,
+            vec![
+                Decimal::new(125, 2),
+                Decimal::new(150, 2),
+                Decimal::new(200, 2)
+            ]
+        );
+        assert_eq!(
+            config.universe_profiles,
+            vec!["all".to_string(), "listed_non_st".to_string()]
+        );
+        assert!(config
+            .execution_impact_budget_profiles
+            .contains(&"impact_turnover_30pct_v1".to_string()));
+        assert!(config
+            .execution_schedule_profiles
+            .contains(&"twap_10d_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["capacity_fill_frontier_profile"] == "capacity_fill_top80_maxpos008_gross1"
+                && trial["top_n"] == 80
+                && trial["max_position_pct"] == "0.08"
+                && trial["max_gross_exposure"] == "1"
+                && trial["capacity_risk_budget"] == "capacity_participation_balanced_v1"
+                && trial["execution_schedule_profile"] == "twap_10d_v1"
+                && trial["execution_impact_budget"] == "impact_turnover_20pct_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["universe_profile"] == "listed_non_st"
+                && trial["top_n"] == 60
+                && trial["max_position_pct"] == "0.10"
+                && trial["max_gross_exposure"] == "1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_stress_fill_return_frontier_profile_adds_stress_fill_axis() {
+        let config =
+            LayeredSearchConfig::professional_execution_stress_fill_return_frontier_default();
+
+        assert_eq!(config.top_n, vec![80, 120, 160]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)]
+        );
+        assert_eq!(
+            config.cash_utilization_profiles,
+            vec![
+                "stress_fill_gross_98_v1".to_string(),
+                "fillable_gross_95_v1".to_string()
+            ]
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["cash_utilization"] == "stress_fill_gross_98_v1"
+                && trial["top_n"] == 120
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "1"
+                && trial["universe_profile"] == "listed_non_st"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_stress_risk_budget_profile_adds_soft_participation_axis() {
+        let config = LayeredSearchConfig::professional_execution_stress_risk_budget_default();
+
+        assert_eq!(config.top_n, vec![60, 80, 100]);
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_soft_cap_v1".to_string()));
+        assert!(config
+            .cash_utilization_profiles
+            .contains(&"stress_fill_gross_98_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["cash_utilization"] == "stress_fill_gross_98_v1"
+                && trial["capacity_risk_budget"] == "capacity_stress_participation_soft_cap_v1"
+                && trial["top_n"] == 80
+                && trial["max_position_pct"] == "0.08"
+                && trial["max_gross_exposure"] == "1"
+                && trial["execution_schedule_profile"] == "twap_10d_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_capacity_stress_return_gate_profile_targets_stress_return_frontier() {
+        let config =
+            LayeredSearchConfig::professional_execution_capacity_stress_return_gate_default();
+
+        assert_eq!(config.top_n, vec![80, 100, 120]);
+        assert_eq!(
+            config.capacity_penalty_strength,
+            vec![Decimal::new(200, 2), Decimal::new(250, 2)]
+        );
+        assert_eq!(
+            config.execution_impact_budget_profiles,
+            vec![
+                "impact_turnover_15pct_v1".to_string(),
+                "impact_turnover_20pct_v1".to_string()
+            ]
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_state_alpha_overlay_selector_v1"
+                && trial["event_gate_profile"] == "valuation_exclude_bottom45"
+                && trial["cash_utilization"] == "stress_fill_gross_98_v1"
+                && trial["capacity_risk_budget"] == "capacity_stress_participation_soft_cap_v1"
+                && trial["top_n"] == 100
+                && trial["max_position_pct"] == "0.06"
+                && trial["execution_impact_budget"] == "impact_turnover_15pct_v1"
+                && trial["execution_schedule_profile"] == "twap_15d_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_low_impact_alpha_stress_return_profile_targets_long_hold_sources() {
+        let config =
+            LayeredSearchConfig::professional_execution_low_impact_alpha_stress_return_default();
+
+        assert_eq!(config.top_n, vec![80, 100, 120]);
+        assert_eq!(config.rebalance_days, vec![160, 180, 220]);
+        assert_eq!(
+            config.combo_versions,
+            vec![
+                ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+                ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+                ComboVersion::new("phase7_quality_event_window_overlay_v1", "1.0.0"),
+                ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+                ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0")
+            ]
+        );
+        assert_eq!(
+            config.execution_impact_budget_profiles,
+            vec!["impact_turnover_15pct_v1".to_string()]
+        );
+        assert_eq!(
+            config.execution_schedule_profiles,
+            vec!["twap_20d_v1".to_string(), "twap_15d_v1".to_string()]
+        );
+        assert_eq!(
+            config.execution_carry_policy_profiles,
+            vec!["roll_forward_v1".to_string()]
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["cash_utilization"] == "stress_fill_gross_98_v1"
+                && trial["capacity_risk_budget"] == "capacity_stress_participation_soft_cap_v1"
+                && trial["execution_impact_budget"] == "impact_turnover_15pct_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 100
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "0.95"
+                && trial["rebalance"] == "180"
+                && trial["universe_profile"] == "listed_non_st"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_stress_target_scaling_return_profile_adds_target_scale_axis() {
+        let config =
+            LayeredSearchConfig::professional_execution_stress_target_scaling_return_default();
+
+        assert_eq!(config.top_n, vec![100, 120, 160]);
+        assert_eq!(
+            config.max_gross_exposure,
+            vec![
+                Decimal::new(60, 2),
+                Decimal::new(70, 2),
+                Decimal::new(80, 2),
+                Decimal::new(90, 2)
+            ]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_target_scale_v1".to_string()));
+        assert_eq!(
+            config.execution_schedule_profiles,
+            vec!["twap_20d_v1".to_string()]
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["capacity_risk_budget"] == "capacity_stress_participation_target_scale_v1"
+                && trial["cash_utilization"] == "stress_fill_gross_98_v1"
+                && trial["execution_impact_budget"] == "impact_turnover_15pct_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 120
+                && trial["max_position_pct"] == "0.05"
+                && trial["max_gross_exposure"] == "0.80"
+                && trial["rebalance"] == "180"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["capacity_risk_budget"] == "capacity_stress_participation_target_scale_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 100
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["rebalance"] == "180"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_stress_floor_scaling_return_profile_adds_gross_floor_axis() {
+        let config =
+            LayeredSearchConfig::professional_execution_stress_floor_scaling_return_default();
+
+        assert_eq!(config.top_n, vec![100, 120, 160]);
+        assert_eq!(
+            config.max_gross_exposure,
+            vec![
+                Decimal::new(70, 2),
+                Decimal::new(80, 2),
+                Decimal::new(90, 2)
+            ]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_floor_35_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_floor_50_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["capacity_risk_budget"] == "capacity_stress_participation_floor_35_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 100
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["rebalance"] == "180"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_stress_floor_return_recovery_profile_extends_floor_axis() {
+        let config =
+            LayeredSearchConfig::professional_execution_stress_floor_return_recovery_default();
+
+        assert_eq!(config.top_n, vec![100, 120, 160]);
+        assert_eq!(
+            config.max_gross_exposure,
+            vec![
+                Decimal::new(80, 2),
+                Decimal::new(90, 2),
+                Decimal::new(100, 2)
+            ]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_floor_60_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_floor_70_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_soft_floor_60_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["capacity_risk_budget"] == "capacity_stress_participation_floor_70_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 120
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["rebalance"] == "180"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_pressure_headroom_floor_profile_targets_perturbed_fill_recovery() {
+        let config = LayeredSearchConfig::professional_execution_pressure_headroom_floor_default();
+
+        assert_eq!(config.top_n, vec![120, 160, 200]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(4, 2), Decimal::new(5, 2), Decimal::new(6, 2)]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_headroom_floor_70_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_headroom_floor_60_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["capacity_risk_budget"]
+                    == "capacity_stress_participation_headroom_floor_70_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 160
+                && trial["max_position_pct"] == "0.05"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["rebalance"] == "180"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_alpha_headroom_floor_profile_balances_return_and_fill() {
+        let config = LayeredSearchConfig::professional_execution_alpha_headroom_floor_default();
+
+        assert_eq!(config.top_n, vec![100, 120, 160]);
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_60_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["capacity_risk_budget"]
+                    == "capacity_stress_participation_alpha_headroom_floor_70_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 120
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["rebalance"] == "180"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_blended_alpha_headroom_floor_profile_keeps_dual_axis() {
+        let config =
+            LayeredSearchConfig::professional_execution_blended_alpha_headroom_floor_default();
+
+        assert_eq!(config.top_n, vec![100, 120, 160]);
+        assert!(config.capacity_risk_budget_profiles.contains(
+            &"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()
+        ));
+        assert!(config.capacity_risk_budget_profiles.contains(
+            &"capacity_stress_participation_blended_alpha_headroom_floor_60_v1".to_string()
+        ));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
+                && trial["capacity_risk_budget"]
+                    == "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 120
+                && trial["max_position_pct"] == "0.06"
+                && trial["max_gross_exposure"] == "0.90"
+                && trial["rebalance"] == "180"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_event_anchor_stress_bridge_profile_keeps_strong_alpha_anchors() {
+        let config =
+            LayeredSearchConfig::professional_execution_event_anchor_stress_bridge_default();
+
+        assert_eq!(config.top_n, vec![80, 120, 160]);
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_mixed_orthogonal_risk_memory_router_v3".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+                && trial["capacity_risk_budget"]
+                    == "capacity_stress_participation_alpha_headroom_floor_70_v1"
+                && trial["execution_impact_budget"] == "impact_turnover_15pct_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["top_n"] == 80
+                && trial["rebalance"] == "160"
+                && trial["universe_profile"] == "listed_non_st"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                || trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_participation_aware_event_anchor_profile_prefers_tradable_events() {
+        let config =
+            LayeredSearchConfig::professional_execution_participation_aware_event_anchor_default();
+
+        assert_eq!(config.top_n, vec![80, 120, 160]);
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["soft_liquidity_low_volatility_low_correlation_v1".to_string()]
+        );
+        assert_eq!(
+            config.execution_impact_budget_profiles,
+            vec!["impact_turnover_15pct_v1".to_string()]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
+                && trial["candidate_risk_filter"]
+                    == "soft_liquidity_low_volatility_low_correlation_v1"
+                && trial["execution_impact_budget"] == "impact_turnover_15pct_v1"
+                && trial["execution_schedule_profile"] == "twap_20d_v1"
+                && trial["execution_rules"]["max_participation_rate"] == json!(0.10)
+                && trial["top_n"] == 120
+                && trial["rebalance"] == "180"
+                && trial["universe_profile"] == "listed_non_st"
+        }));
+        assert!(
+            config.seed_trials.iter().take(3).any(|trial| {
+                trial["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3"
+                    || trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+            }),
+            "tiny OOS smoke should cover at least one CL/CM-style high-Sharpe anchor"
+        );
+    }
+
+    #[test]
+    fn professional_execution_cl_anchor_fill_recovery_profile_starts_from_high_sharpe_anchor() {
+        let config = LayeredSearchConfig::professional_execution_cl_anchor_fill_recovery_default();
+
+        assert_eq!(config.top_n, vec![100, 120, 160]);
+        assert_eq!(
+            config.candidate_risk_filter_profiles,
+            vec!["soft_liquidity_low_volatility_low_correlation_v1".to_string()]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_mixed_orthogonal_risk_memory_router_v3".to_string()));
+
+        let first_seed = config
+            .seed_trials
+            .first()
+            .expect("phase7_ep should seed the CL high-Sharpe anchor first");
+        assert_eq!(
+            first_seed["market_regime"],
+            "quality_mixed_orthogonal_risk_memory_router_v3"
+        );
+        assert_eq!(
+            first_seed["candidate_risk_filter"],
+            "soft_liquidity_low_volatility_low_correlation_v1"
+        );
+        assert_eq!(first_seed["top_n"], 120);
+        assert_eq!(first_seed["max_position_pct"], "0.06");
+        assert_eq!(first_seed["max_gross_exposure"], "0.90");
+        assert_eq!(
+            first_seed["capacity_risk_budget"],
+            "capacity_stress_participation_alpha_headroom_floor_70_v1"
+        );
+        assert_eq!(
+            first_seed["execution_rules"]["max_participation_rate"],
+            json!(0.10)
+        );
+        assert_eq!(
+            first_seed["execution_cl_anchor_fill_recovery_profile"],
+            "cl_fill_recovery_top120_rebalance180"
+        );
+    }
+
+    #[test]
+    fn professional_execution_capacity_aware_candidate_ranking_profile_adds_ranking_axis() {
+        let config =
+            LayeredSearchConfig::professional_execution_capacity_aware_candidate_ranking_default();
+
+        assert_eq!(
+            config.candidate_ranking_profiles,
+            vec!["capacity_aware_alpha_liquidity_v1".to_string()]
+        );
+        assert_eq!(config.top_n, vec![80, 100, 120]);
+        assert_eq!(config.score_candidate_pool_sizes, vec![1800, 2200]);
+
+        let first_seed = config
+            .seed_trials
+            .first()
+            .expect("phase7_eq should seed the CL high-Sharpe anchor first");
+        assert_eq!(
+            first_seed["candidate_ranking"],
+            "capacity_aware_alpha_liquidity_v1"
+        );
+        assert_eq!(
+            first_seed["candidate_risk_filter"],
+            "soft_liquidity_low_volatility_low_correlation_v1"
+        );
+        assert_eq!(
+            first_seed["execution_capacity_aware_candidate_ranking_profile"],
+            "capacity_rank_top100_rebalance180"
+        );
+        assert_eq!(first_seed["top_n"], 100);
+        assert_eq!(first_seed["max_position_pct"], "0.08");
+        assert_eq!(first_seed["max_gross_exposure"], "0.90");
+        assert_eq!(
+            first_seed["execution_rules"]["max_participation_rate"],
+            json!(0.10)
+        );
+    }
+
+    #[test]
     fn candidate_screening_keeps_low_return_result_as_defensive() {
         let metrics = CandidateMetrics {
             annual_return: Decimal::new(209, 4),
@@ -16934,12 +20437,15 @@ mod tests {
             risk_budget_lookback_days: vec![60],
             capacity_penalty_strength: vec![Decimal::ZERO],
             capacity_risk_budget_profiles: vec!["off".to_string()],
+            cash_utilization_profiles: vec!["off".to_string()],
             execution_impact_budget_profiles: vec!["off".to_string()],
             execution_schedule_profiles: vec!["immediate".to_string()],
+            execution_carry_policy_profiles: vec!["expire".to_string()],
             cost_capacity_stress_profiles: vec![CostCapacityStressProfile::off()],
             industry_max_weight_pct: vec![None],
             style_risk_budget_profiles: vec!["off".to_string()],
             candidate_risk_filter_profiles: vec!["off".to_string()],
+            candidate_ranking_profiles: vec!["off".to_string()],
             risk_contribution_control_profiles: vec!["off".to_string()],
             rebalance_hysteresis_pct: vec![Decimal::ZERO],
             partial_rebalance_ratio: vec![Decimal::ONE],
@@ -21040,6 +24546,70 @@ mod tests {
             trial.parameters["execution_schedule_profile"] == "twap_20d_v1"
                 && trial.parameters["execution_rules"]["execution_schedule_profile"]
                     == "twap_20d_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_daily_cap_profile_adds_target_move_and_carry_limits() {
+        let config = LayeredSearchConfig::professional_execution_daily_cap_budget_default();
+        let resource_plan = LocalResourcePlan {
+            max_trials: 24,
+            batch_size: 8,
+            ..LocalResourcePlan::for_machine(10, 32)
+        };
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert!(plan.trials.iter().any(|trial| {
+            trial.parameters["execution_schedule_profile"] == "twap_15d_v1"
+                && trial.parameters["execution_daily_target_move_limit_pct"] == "0.05"
+                && trial.parameters["execution_max_carry_days"] == 20
+                && trial.parameters["execution_rules"]["execution_daily_target_move_limit_pct"]
+                    == json!(0.05)
+                && trial.parameters["execution_rules"]["execution_max_carry_days"] == 20
+        }));
+    }
+
+    #[test]
+    fn professional_execution_cash_drag_aware_profile_adds_fill_friendly_controls() {
+        let config = LayeredSearchConfig::professional_execution_cash_drag_aware_budget_default();
+        let resource_plan = LocalResourcePlan {
+            max_trials: 24,
+            batch_size: 8,
+            ..LocalResourcePlan::for_machine(10, 32)
+        };
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert!(plan.trials.iter().any(|trial| {
+            trial.parameters["execution_schedule_profile"] == "twap_15d_v1"
+                && trial.parameters["execution_daily_target_move_limit_pct"] == "0.075"
+                && trial.parameters["execution_max_carry_days"] == 40
+                && trial.parameters["execution_rules"]["execution_daily_target_move_limit_pct"]
+                    == json!(0.075)
+                && trial.parameters["execution_rules"]["execution_max_carry_days"] == 40
+        }));
+    }
+
+    #[test]
+    fn professional_execution_feasible_fill_profile_adds_cash_utilization_axis() {
+        let config = LayeredSearchConfig::professional_execution_feasible_fill_budget_default();
+        let resource_plan = LocalResourcePlan {
+            max_trials: 24,
+            batch_size: 8,
+            ..LocalResourcePlan::for_machine(10, 32)
+        };
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert_eq!(
+            config.cash_utilization_profiles,
+            vec![
+                "fillable_gross_90_v1".to_string(),
+                "fillable_gross_95_v1".to_string()
+            ]
+        );
+        assert!(plan.trials.iter().any(|trial| {
+            trial.parameters["cash_utilization"] == "fillable_gross_90_v1"
+                && trial.parameters["capacity_risk_budget"] == "capacity_participation_strict_v1"
+                && trial.parameters["execution_schedule_profile"] == "twap_15d_v1"
         }));
     }
 

@@ -6,6 +6,10 @@ use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+fn default_execution_fill_ratio() -> Decimal {
+    Decimal::one()
+}
+
 /// 回测绩效指标
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestMetrics {
@@ -27,6 +31,19 @@ pub struct BacktestMetrics {
     pub num_trades: usize,
     pub win_rate_pct: Decimal,
     pub profit_factor: Decimal,
+    pub execution_schedule_expired_count: usize,
+    #[serde(default)]
+    pub execution_schedule_roll_forward_count: usize,
+    pub max_execution_target_gap_pct: Decimal,
+    pub final_cash_weight_pct: Decimal,
+    #[serde(default)]
+    pub final_target_gross_exposure_pct: Decimal,
+    #[serde(default)]
+    pub final_actual_gross_exposure_pct: Decimal,
+    #[serde(default)]
+    pub final_unfilled_target_gap_pct: Decimal,
+    #[serde(default = "default_execution_fill_ratio")]
+    pub final_execution_fill_ratio: Decimal,
 }
 
 impl Default for BacktestMetrics {
@@ -50,6 +67,14 @@ impl Default for BacktestMetrics {
             num_trades: 0,
             win_rate_pct: Decimal::zero(),
             profit_factor: Decimal::zero(),
+            execution_schedule_expired_count: 0,
+            execution_schedule_roll_forward_count: 0,
+            max_execution_target_gap_pct: Decimal::zero(),
+            final_cash_weight_pct: Decimal::zero(),
+            final_target_gross_exposure_pct: Decimal::zero(),
+            final_actual_gross_exposure_pct: Decimal::zero(),
+            final_unfilled_target_gap_pct: Decimal::zero(),
+            final_execution_fill_ratio: Decimal::one(),
         }
     }
 }
@@ -189,6 +214,14 @@ impl BacktestMetrics {
             num_trades: 0,
             win_rate_pct: Decimal::zero(),
             profit_factor: Decimal::zero(),
+            execution_schedule_expired_count: 0,
+            execution_schedule_roll_forward_count: 0,
+            max_execution_target_gap_pct: Decimal::zero(),
+            final_cash_weight_pct: Decimal::zero(),
+            final_target_gross_exposure_pct: Decimal::zero(),
+            final_actual_gross_exposure_pct: Decimal::zero(),
+            final_unfilled_target_gap_pct: Decimal::zero(),
+            final_execution_fill_ratio: Decimal::one(),
         }
     }
 

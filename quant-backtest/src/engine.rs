@@ -101,6 +101,12 @@ pub struct BacktestConfig {
     pub execution_price: ExecutionPrice,
     #[serde(default)]
     pub execution_schedule_profile: ExecutionScheduleProfile,
+    #[serde(default)]
+    pub execution_carry_policy: ExecutionCarryPolicy,
+    #[serde(default)]
+    pub execution_daily_target_move_limit_pct: Option<Decimal>,
+    #[serde(default)]
+    pub execution_max_carry_days: Option<usize>,
     pub max_participation_rate: Option<Decimal>,
     /// Database persistence depth. Summary-only keeps result/equity curve for discovery and
     /// robustness, while skipping heavy detail tables.
@@ -225,6 +231,9 @@ impl Default for BacktestConfig {
             execution_timing: ExecutionTiming::NextOpen,
             execution_price: ExecutionPrice::Open,
             execution_schedule_profile: ExecutionScheduleProfile::Immediate,
+            execution_carry_policy: ExecutionCarryPolicy::Expire,
+            execution_daily_target_move_limit_pct: None,
+            execution_max_carry_days: None,
             max_participation_rate: None,
             persistence_mode: BacktestPersistenceMode::Full,
             risk_control: RiskControlConfig::default(),
@@ -324,6 +333,31 @@ impl ExecutionScheduleProfile {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCarryPolicy {
+    Expire,
+    RollForwardV1,
+}
+
+impl Default for ExecutionCarryPolicy {
+    fn default() -> Self {
+        Self::Expire
+    }
+}
+
+impl ExecutionCarryPolicy {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "" | "expire" | "expire_v1" | "drop" | "drop_on_ttl" => Ok(Self::Expire),
+            "roll_forward_v1" | "roll-forward-v1" | "rolling_carry_v1" | "continue_v1" => {
+                Ok(Self::RollForwardV1)
+            }
+            other => Err(format!("unsupported execution_carry_policy: {}", other)),
+        }
+    }
+}
+
 // ─── Result ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +382,7 @@ struct PendingExecutionSchedule {
     source_signal_date: NaiveDate,
     final_target_weights: HashMap<String, Decimal>,
     remaining_steps: usize,
+    elapsed_steps: usize,
 }
 
 pub struct BacktestEngine {
@@ -365,6 +400,10 @@ pub struct BacktestEngine {
     position_peak_price: HashMap<String, Decimal>,
     position_risk_cooldown_remaining: HashMap<String, u32>,
     pending_execution_schedule: Option<PendingExecutionSchedule>,
+    execution_schedule_expired_count: usize,
+    execution_schedule_roll_forward_count: usize,
+    max_execution_target_gap_pct: Decimal,
+    latest_target_gross_exposure_pct: Decimal,
 }
 
 impl BacktestEngine {
@@ -388,6 +427,10 @@ impl BacktestEngine {
             position_peak_price: HashMap::new(),
             position_risk_cooldown_remaining: HashMap::new(),
             pending_execution_schedule: None,
+            execution_schedule_expired_count: 0,
+            execution_schedule_roll_forward_count: 0,
+            max_execution_target_gap_pct: Decimal::zero(),
+            latest_target_gross_exposure_pct: Decimal::zero(),
         }
     }
 
@@ -487,6 +530,7 @@ impl BacktestEngine {
             source_signal_date: signal.date,
             final_target_weights: signal.target_weights.clone(),
             remaining_steps: total_steps,
+            elapsed_steps: 0,
         });
     }
 
@@ -521,6 +565,7 @@ impl BacktestEngine {
                 .copied()
                 .unwrap_or_default();
             let scheduled_weight = current_weight + (final_weight - current_weight) * step_fraction;
+            let scheduled_weight = self.cap_daily_target_move(current_weight, scheduled_weight);
             if !scheduled_weight.is_zero() || self.portfolio.holdings.contains_key(&symbol) {
                 target_weights.insert(
                     symbol,
@@ -535,13 +580,34 @@ impl BacktestEngine {
         })
     }
 
-    fn pending_execution_gap_within_tolerance(&self) -> bool {
+    fn cap_daily_target_move(&self, current_weight: Decimal, scheduled_weight: Decimal) -> Decimal {
+        let Some(limit) = self
+            .config
+            .execution_daily_target_move_limit_pct
+            .filter(|limit| *limit > Decimal::zero())
+        else {
+            return scheduled_weight;
+        };
+        let lower = if current_weight > limit {
+            current_weight - limit
+        } else {
+            Decimal::zero()
+        };
+        let upper = (current_weight + limit).min(Decimal::ONE);
+        scheduled_weight.clamp(lower, upper)
+    }
+
+    fn execution_gap_tolerance() -> Decimal {
+        Decimal::new(5, 4)
+    }
+
+    fn pending_execution_gap(&self) -> Decimal {
         let Some(pending) = self.pending_execution_schedule.as_ref() else {
-            return true;
+            return Decimal::zero();
         };
         let total_value = self.portfolio.total_value();
         if total_value.is_zero() {
-            return true;
+            return Decimal::zero();
         }
         let mut symbols = pending
             .final_target_weights
@@ -550,8 +616,7 @@ impl BacktestEngine {
             .collect::<HashSet<_>>();
         symbols.extend(self.portfolio.holdings.keys().cloned());
 
-        let tolerance = Decimal::new(5, 4);
-        let total_gap = symbols
+        symbols
             .into_iter()
             .map(|symbol| {
                 let current_weight = self.current_portfolio_weight(&symbol, total_value);
@@ -566,19 +631,57 @@ impl BacktestEngine {
                     current_weight - final_weight
                 }
             })
-            .sum::<Decimal>();
-        total_gap <= tolerance
+            .sum::<Decimal>()
     }
 
     fn advance_pending_execution_schedule(&mut self) {
-        let should_clear = self.pending_execution_gap_within_tolerance();
-        let Some(pending) = self.pending_execution_schedule.as_mut() else {
-            return;
-        };
-        if should_clear {
+        let gap = self.pending_execution_gap();
+        let should_clear = gap <= Self::execution_gap_tolerance();
+        let total_steps = self
+            .config
+            .execution_schedule_profile
+            .execution_days()
+            .max(1);
+        let mut clear_pending = should_clear;
+        let mut abandon_expired = false;
+        let mut roll_forward = false;
+        {
+            let Some(pending) = self.pending_execution_schedule.as_mut() else {
+                return;
+            };
+            pending.elapsed_steps += 1;
+            let carry_expired = self
+                .config
+                .execution_max_carry_days
+                .is_some_and(|max_carry_days| pending.elapsed_steps >= max_carry_days.max(1));
+            if carry_expired && !should_clear {
+                match self.config.execution_carry_policy {
+                    ExecutionCarryPolicy::Expire => {
+                        abandon_expired = true;
+                        clear_pending = true;
+                    }
+                    ExecutionCarryPolicy::RollForwardV1 => {
+                        roll_forward = true;
+                        pending.elapsed_steps = 0;
+                        pending.remaining_steps = total_steps;
+                        clear_pending = false;
+                    }
+                }
+            } else if carry_expired {
+                clear_pending = true;
+            } else if !clear_pending && pending.remaining_steps > 1 {
+                pending.remaining_steps -= 1;
+            }
+        }
+        if abandon_expired && gap > Self::execution_gap_tolerance() {
+            self.execution_schedule_expired_count += 1;
+            self.max_execution_target_gap_pct = self.max_execution_target_gap_pct.max(gap);
+        }
+        if roll_forward {
+            self.execution_schedule_roll_forward_count += 1;
+        }
+        if clear_pending {
             self.pending_execution_schedule = None;
-        } else if pending.remaining_steps > 1 {
-            pending.remaining_steps -= 1;
         }
     }
 
@@ -1194,8 +1297,10 @@ impl BacktestEngine {
         // Phase 2: 按目标权重计算买卖
         let mut signal_targets = signal.target_weights.iter().collect::<Vec<_>>();
         signal_targets.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut target_gross_exposure = Decimal::zero();
         for (sym, raw_target_w) in signal_targets {
             let target_w = (*raw_target_w * exposure_scale).clamp(Decimal::zero(), Decimal::ONE);
+            target_gross_exposure += target_w;
             let target_amount = total_value * target_w;
             let current_mv = self
                 .portfolio
@@ -1283,6 +1388,8 @@ impl BacktestEngine {
                 }
             }
         }
+        self.latest_target_gross_exposure_pct =
+            target_gross_exposure.clamp(Decimal::zero(), Decimal::ONE);
 
         // Phase 3: 先卖后买
         for (sym, qty, target_w) in &to_sell {
@@ -1392,6 +1499,35 @@ impl BacktestEngine {
         let mut metrics =
             super::metrics::BacktestMetrics::compute(&nav, &bm_nav, self.config.initial_capital);
         metrics.num_trades = self.portfolio.trades.len();
+        metrics.execution_schedule_expired_count = self.execution_schedule_expired_count;
+        metrics.execution_schedule_roll_forward_count = self.execution_schedule_roll_forward_count;
+        metrics.max_execution_target_gap_pct = self.max_execution_target_gap_pct;
+        let final_value = self.portfolio.total_value();
+        metrics.final_cash_weight_pct = if final_value.is_zero() {
+            Decimal::zero()
+        } else {
+            self.portfolio.cash / final_value
+        };
+        metrics.final_target_gross_exposure_pct = self.latest_target_gross_exposure_pct;
+        metrics.final_actual_gross_exposure_pct = if final_value.is_zero() {
+            Decimal::zero()
+        } else {
+            self.portfolio
+                .holdings
+                .values()
+                .map(|holding| holding.market_value())
+                .sum::<Decimal>()
+                / final_value
+        };
+        metrics.final_unfilled_target_gap_pct = (metrics.final_target_gross_exposure_pct
+            - metrics.final_actual_gross_exposure_pct)
+            .max(Decimal::zero());
+        metrics.final_execution_fill_ratio = if metrics.final_target_gross_exposure_pct.is_zero() {
+            Decimal::ONE
+        } else {
+            (metrics.final_actual_gross_exposure_pct / metrics.final_target_gross_exposure_pct)
+                .clamp(Decimal::zero(), Decimal::ONE)
+        };
         let total_traded_amount = self
             .portfolio
             .trades
@@ -1705,6 +1841,108 @@ mod tests {
             e.portfolio.trades[0].event_reason.as_deref(),
             Some("execution_schedule_twap_15d_v1_buy")
         );
+    }
+
+    #[test]
+    fn execution_schedule_caps_daily_target_move_and_expires_carry() {
+        let mut config = BacktestConfig::default();
+        config.max_position_pct = d("1.01");
+        config.execution_schedule_profile = ExecutionScheduleProfile::Twap5dV1;
+        config.execution_daily_target_move_limit_pct = Some(d("0.05"));
+        config.execution_max_carry_days = Some(2);
+        let mut e = BacktestEngine::new(config);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.95")),
+        );
+
+        assert_eq!(e.portfolio.trades.len(), 1);
+        assert!(
+            e.portfolio.trades[0].amount < d("60000"),
+            "daily target move cap should limit first slice, got {}",
+            e.portfolio.trades[0].amount
+        );
+        assert!(e.pending_execution_schedule.is_some());
+
+        e.process_day(&market("2024-01-03", ("A", "10"), ("A", "10")), None);
+
+        assert_eq!(e.portfolio.trades.len(), 2);
+        assert!(e.pending_execution_schedule.is_none());
+
+        let output = e.finalize();
+        assert_eq!(output.metrics.execution_schedule_expired_count, 1);
+        assert!(output.metrics.max_execution_target_gap_pct > Decimal::zero());
+        assert!(output.metrics.final_cash_weight_pct > d("0.80"));
+    }
+
+    #[test]
+    fn execution_schedule_roll_forward_policy_continues_pending_target_after_carry_ttl() {
+        let mut config = BacktestConfig::default();
+        config.max_position_pct = d("1.01");
+        config.execution_schedule_profile = ExecutionScheduleProfile::Twap5dV1;
+        config.execution_daily_target_move_limit_pct = Some(d("0.05"));
+        config.execution_max_carry_days = Some(2);
+        config.execution_carry_policy = ExecutionCarryPolicy::RollForwardV1;
+        let mut e = BacktestEngine::new(config);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.95")),
+        );
+        e.process_day(&market("2024-01-03", ("A", "10"), ("A", "10")), None);
+
+        assert!(e.pending_execution_schedule.is_some());
+        assert_eq!(e.execution_schedule_expired_count, 0);
+        assert_eq!(e.execution_schedule_roll_forward_count, 1);
+
+        e.process_day(&market("2024-01-04", ("A", "10"), ("A", "10")), None);
+        assert!(e.portfolio.trades.len() >= 3);
+
+        let output = e.finalize();
+        assert_eq!(output.metrics.execution_schedule_expired_count, 0);
+        assert_eq!(output.metrics.execution_schedule_roll_forward_count, 1);
+        assert!(output.metrics.final_actual_gross_exposure_pct > d("0.10"));
+    }
+
+    #[test]
+    fn execution_fill_metrics_separate_intentional_cash_from_unfilled_capacity() {
+        let mut intended_cash = eng();
+        intended_cash.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.35")),
+        );
+
+        let intended_cash_output = intended_cash.finalize();
+        assert!(intended_cash_output.metrics.final_cash_weight_pct > d("0.60"));
+        assert_eq!(
+            intended_cash_output.metrics.final_target_gross_exposure_pct,
+            d("0.35")
+        );
+        assert!(intended_cash_output.metrics.final_actual_gross_exposure_pct > d("0.34"));
+        assert!(
+            intended_cash_output.metrics.final_unfilled_target_gap_pct < d("0.02"),
+            "intentional cash should not be treated as unfilled execution gap"
+        );
+        assert!(intended_cash_output.metrics.final_execution_fill_ratio > d("0.97"));
+
+        let mut capacity_config = BacktestConfig::default();
+        capacity_config.max_position_pct = d("1.01");
+        capacity_config.max_participation_rate = Some(d("0.10"));
+        let mut capacity_limited = BacktestEngine::new(capacity_config);
+        let mut thin_market = market("2024-01-02", ("A", "10"), ("A", "9.9"));
+        thin_market.amount.insert("A".into(), d("100000"));
+
+        capacity_limited.process_day(&thin_market, Some(&signal("A", "0.80")));
+
+        let capacity_output = capacity_limited.finalize();
+        assert_eq!(
+            capacity_output.metrics.final_target_gross_exposure_pct,
+            d("0.80")
+        );
+        assert!(capacity_output.metrics.final_actual_gross_exposure_pct < d("0.02"));
+        assert!(capacity_output.metrics.final_unfilled_target_gap_pct > d("0.78"));
+        assert!(capacity_output.metrics.final_execution_fill_ratio < d("0.03"));
     }
 
     #[test]
