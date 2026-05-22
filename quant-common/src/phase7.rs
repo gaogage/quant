@@ -2351,6 +2351,16 @@ fn with_execution_impact_budget_seed(mut seed: Value, execution_impact_budget: &
     seed
 }
 
+fn with_execution_schedule_seed(mut seed: Value, execution_schedule_profile: &str) -> Value {
+    seed["execution_schedule_profile"] = json!(execution_schedule_profile);
+    insert_execution_rule_value(
+        &mut seed,
+        "execution_schedule_profile",
+        json!(execution_schedule_profile),
+    );
+    seed
+}
+
 fn with_prediction_confirmation_seed(
     mut seed: Value,
     prediction_set_id: &str,
@@ -9938,6 +9948,38 @@ fn professional_execution_impact_budget_seed_trials() -> Vec<Value> {
     seeds
 }
 
+fn professional_execution_schedule_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    for seed in professional_execution_impact_budget_seed_trials() {
+        for execution_schedule_profile in ["twap_3d_v1", "twap_5d_v1", "twap_10d_v1"] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_execution_schedule_seed(
+                    seed.clone(),
+                    execution_schedule_profile,
+                )],
+            );
+        }
+    }
+    seeds
+}
+
+fn professional_execution_patient_schedule_budget_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+    for seed in professional_execution_impact_budget_seed_trials() {
+        for execution_schedule_profile in ["twap_10d_v1", "twap_15d_v1", "twap_20d_v1"] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_execution_schedule_seed(
+                    seed.clone(),
+                    execution_schedule_profile,
+                )],
+            );
+        }
+    }
+    seeds
+}
+
 fn professional_return_alpha_sharpe_bridge_seed_trials() -> Vec<Value> {
     let Some(return_anchor) = phase7_current_anchor_bg_trial4_seed() else {
         return Vec::new();
@@ -11419,6 +11461,7 @@ pub struct LayeredSearchConfig {
     pub capacity_penalty_strength: Vec<Decimal>,
     pub capacity_risk_budget_profiles: Vec<String>,
     pub execution_impact_budget_profiles: Vec<String>,
+    pub execution_schedule_profiles: Vec<String>,
     pub cost_capacity_stress_profiles: Vec<CostCapacityStressProfile>,
     pub industry_max_weight_pct: Vec<Option<Decimal>>,
     pub style_risk_budget_profiles: Vec<String>,
@@ -11492,6 +11535,7 @@ impl LayeredSearchConfig {
             capacity_penalty_strength: vec![Decimal::ZERO, Decimal::new(75, 2)],
             capacity_risk_budget_profiles: vec!["off".to_string()],
             execution_impact_budget_profiles: vec!["off".to_string()],
+            execution_schedule_profiles: vec!["immediate".to_string()],
             cost_capacity_stress_profiles: vec![CostCapacityStressProfile::off()],
             industry_max_weight_pct: vec![
                 None,
@@ -15106,6 +15150,28 @@ impl LayeredSearchConfig {
         config
     }
 
+    pub fn professional_execution_schedule_budget_default() -> Self {
+        let mut config = Self::professional_execution_impact_budget_default();
+        config.execution_schedule_profiles = vec![
+            "twap_3d_v1".to_string(),
+            "twap_5d_v1".to_string(),
+            "twap_10d_v1".to_string(),
+        ];
+        config.seed_trials = professional_execution_schedule_budget_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_patient_schedule_budget_default() -> Self {
+        let mut config = Self::professional_execution_schedule_budget_default();
+        config.execution_schedule_profiles = vec![
+            "twap_10d_v1".to_string(),
+            "twap_15d_v1".to_string(),
+            "twap_20d_v1".to_string(),
+        ];
+        config.seed_trials = professional_execution_patient_schedule_budget_seed_trials();
+        config
+    }
+
     pub fn professional_return_alpha_sharpe_bridge_default() -> Self {
         let mut config = Self::professional_v14_ultra_micro_lift_default();
         config.market_regime_policies = vec![
@@ -16016,6 +16082,7 @@ impl LayeredSearchConfig {
             self.capacity_penalty_strength.len(),
             self.capacity_risk_budget_profiles.len(),
             self.execution_impact_budget_profiles.len(),
+            self.execution_schedule_profiles.len(),
             self.cost_capacity_stress_profiles.len(),
             self.industry_max_weight_pct.len(),
             self.style_risk_budget_profiles.len(),
@@ -16126,6 +16193,8 @@ pub fn build_layered_search_plan(
             &config.capacity_risk_budget_profiles[indices.capacity_risk_budget_profile];
         let execution_impact_budget_profile =
             &config.execution_impact_budget_profiles[indices.execution_impact_budget_profile];
+        let execution_schedule_profile =
+            &config.execution_schedule_profiles[indices.execution_schedule_profile];
         let cost_capacity_stress_profile =
             &config.cost_capacity_stress_profiles[indices.cost_capacity_stress_profile];
         let industry_max_weight_pct =
@@ -16170,6 +16239,7 @@ pub fn build_layered_search_plan(
             "capacity_penalty_strength": decimal_string(capacity_penalty_strength),
             "capacity_risk_budget": capacity_risk_budget_profile,
             "execution_impact_budget": execution_impact_budget_profile,
+            "execution_schedule_profile": execution_schedule_profile,
             "cost_capacity_stress_profile": cost_capacity_stress_profile.profile_name,
             "industry_max_weight_pct": industry_max_weight_pct.map(decimal_string),
             "style_risk_budget": style_risk_budget_profile,
@@ -16187,6 +16257,7 @@ pub fn build_layered_search_plan(
             "benchmark": config.benchmark,
         });
         apply_cost_capacity_stress_profile(&mut parameters, cost_capacity_stress_profile);
+        apply_execution_schedule_profile(&mut parameters, execution_schedule_profile);
         if let (Some(start), Some(full), Some(min_exposure)) = (
             portfolio_drawdown_control.reduce_start_pct,
             portfolio_drawdown_control.reduce_full_pct,
@@ -16328,14 +16399,38 @@ fn apply_cost_capacity_stress_profile(parameters: &mut Value, profile: &CostCapa
         parameters["cost_model"] = Value::Object(cost_model);
     }
 
-    let mut execution_rules = serde_json::Map::new();
-    insert_decimal_if_some(
-        &mut execution_rules,
-        "max_participation_rate",
-        profile.max_participation_rate,
+    if let Some(max_participation_rate) = profile.max_participation_rate {
+        insert_execution_rule_value(
+            parameters,
+            "max_participation_rate",
+            json!(decimal_f64(max_participation_rate)),
+        );
+    }
+}
+
+fn apply_execution_schedule_profile(parameters: &mut Value, execution_schedule_profile: &str) {
+    if execution_schedule_profile.trim().is_empty() || execution_schedule_profile == "immediate" {
+        return;
+    }
+    insert_execution_rule_value(
+        parameters,
+        "execution_schedule_profile",
+        json!(execution_schedule_profile),
     );
-    if !execution_rules.is_empty() {
-        parameters["execution_rules"] = Value::Object(execution_rules);
+}
+
+fn insert_execution_rule_value(parameters: &mut Value, key: &str, value: Value) {
+    let Some(parameters) = parameters.as_object_mut() else {
+        return;
+    };
+    let execution_rules = parameters
+        .entry("execution_rules".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !execution_rules.is_object() {
+        *execution_rules = Value::Object(serde_json::Map::new());
+    }
+    if let Value::Object(execution_rules) = execution_rules {
+        execution_rules.insert(key.to_string(), value);
     }
 }
 
@@ -16372,6 +16467,7 @@ struct LayeredTrialIndices {
     capacity_penalty_strength: usize,
     capacity_risk_budget_profile: usize,
     execution_impact_budget_profile: usize,
+    execution_schedule_profile: usize,
     cost_capacity_stress_profile: usize,
     industry_max_weight_pct: usize,
     style_risk_budget_profile: usize,
@@ -16398,6 +16494,8 @@ impl LayeredTrialIndices {
             take_axis_index(&mut index, config.capacity_risk_budget_profiles.len())?;
         let execution_impact_budget_profile =
             take_axis_index(&mut index, config.execution_impact_budget_profiles.len())?;
+        let execution_schedule_profile =
+            take_axis_index(&mut index, config.execution_schedule_profiles.len())?;
         let cost_capacity_stress_profile =
             take_axis_index(&mut index, config.cost_capacity_stress_profiles.len())?;
         let industry_max_weight_pct =
@@ -16454,6 +16552,7 @@ impl LayeredTrialIndices {
             capacity_penalty_strength,
             capacity_risk_budget_profile,
             execution_impact_budget_profile,
+            execution_schedule_profile,
             cost_capacity_stress_profile,
             industry_max_weight_pct,
             style_risk_budget_profile,
@@ -16836,6 +16935,7 @@ mod tests {
             capacity_penalty_strength: vec![Decimal::ZERO],
             capacity_risk_budget_profiles: vec!["off".to_string()],
             execution_impact_budget_profiles: vec!["off".to_string()],
+            execution_schedule_profiles: vec!["immediate".to_string()],
             cost_capacity_stress_profiles: vec![CostCapacityStressProfile::off()],
             industry_max_weight_pct: vec![None],
             style_risk_budget_profiles: vec!["off".to_string()],
@@ -20889,6 +20989,57 @@ mod tests {
 
         assert!(plan.trials.iter().any(|trial| {
             trial.parameters["execution_impact_budget"] == "impact_turnover_20pct_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_schedule_budget_profile_adds_twap_axis() {
+        let config = LayeredSearchConfig::professional_execution_schedule_budget_default();
+
+        assert!(config
+            .execution_schedule_profiles
+            .contains(&"twap_5d_v1".to_string()));
+        assert!(config
+            .execution_impact_budget_profiles
+            .contains(&"impact_turnover_20pct_v1".to_string()));
+
+        let resource_plan = LocalResourcePlan {
+            max_trials: 24,
+            batch_size: 8,
+            ..LocalResourcePlan::for_machine(10, 32)
+        };
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert!(plan.trials.iter().any(|trial| {
+            trial.parameters["execution_schedule_profile"] == "twap_5d_v1"
+                && trial.parameters["execution_rules"]["execution_schedule_profile"] == "twap_5d_v1"
+        }));
+    }
+
+    #[test]
+    fn professional_execution_patient_schedule_profile_adds_long_twap_axis() {
+        let config = LayeredSearchConfig::professional_execution_patient_schedule_budget_default();
+
+        assert_eq!(
+            config.execution_schedule_profiles,
+            vec![
+                "twap_10d_v1".to_string(),
+                "twap_15d_v1".to_string(),
+                "twap_20d_v1".to_string()
+            ]
+        );
+
+        let resource_plan = LocalResourcePlan {
+            max_trials: 24,
+            batch_size: 8,
+            ..LocalResourcePlan::for_machine(10, 32)
+        };
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert!(plan.trials.iter().any(|trial| {
+            trial.parameters["execution_schedule_profile"] == "twap_20d_v1"
+                && trial.parameters["execution_rules"]["execution_schedule_profile"]
+                    == "twap_20d_v1"
         }));
     }
 

@@ -15,8 +15,8 @@ use tracing::info;
 use uuid::Uuid;
 
 use quant_backtest::engine::{
-    BacktestConfig, BacktestMode, BacktestPersistenceMode, ExecutionPrice, ExecutionTiming,
-    RiskControlConfig, StrategySignal,
+    BacktestConfig, BacktestMode, BacktestPersistenceMode, ExecutionPrice,
+    ExecutionScheduleProfile, ExecutionTiming, RiskControlConfig, StrategySignal,
 };
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::{BacktestDataCache, BacktestRunner};
@@ -94,6 +94,7 @@ pub struct CostModelReq {
 pub struct ExecutionRulesReq {
     pub execution_timing: Option<String>,
     pub execution_price: Option<String>,
+    pub execution_schedule_profile: Option<String>,
     pub max_participation_rate: Option<f64>,
 }
 
@@ -347,6 +348,16 @@ fn parse_execution_price(value: Option<&str>) -> Result<ExecutionPrice, String> 
     }
 }
 
+fn parse_execution_schedule_profile(
+    value: Option<&str>,
+) -> Result<ExecutionScheduleProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ExecutionScheduleProfile::parse)
+        .unwrap_or(Ok(ExecutionScheduleProfile::Immediate))
+}
+
 fn decimal_from_f64(value: f64, field: &str) -> Result<Decimal, String> {
     Decimal::from_f64(value).ok_or_else(|| format!("{} must be a finite number", field))
 }
@@ -420,6 +431,11 @@ fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String>
             .as_ref()
             .and_then(|rules| rules.execution_price.as_deref()),
     )?;
+    let execution_schedule_profile = parse_execution_schedule_profile(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_schedule_profile.as_deref()),
+    )?;
     let max_participation_rate = req
         .execution_rules
         .as_ref()
@@ -448,6 +464,7 @@ fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String>
             .unwrap_or_else(|| "daily".into()),
         execution_timing,
         execution_price,
+        execution_schedule_profile,
         max_participation_rate,
         persistence_mode: parse_persistence_mode(req.persistence_mode.as_deref())?,
         risk_control: Default::default(),
@@ -1845,6 +1862,11 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         Ok(value) => value,
         Err(message) => return Err(message),
     };
+    let execution_schedule_profile = parse_execution_schedule_profile(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_schedule_profile.as_deref()),
+    )?;
     let max_participation_rate = match req
         .execution_rules
         .as_ref()
@@ -2005,6 +2027,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         rebalance_frequency: req.rebalance.clone(),
         execution_timing,
         execution_price,
+        execution_schedule_profile,
         max_participation_rate,
         persistence_mode,
         risk_control: build_portfolio_risk_control(&req)?,
@@ -2051,6 +2074,11 @@ pub(crate) async fn execute_prediction_backtest(
         req.execution_rules
             .as_ref()
             .and_then(|rules| rules.execution_price.as_deref()),
+    )?;
+    let execution_schedule_profile = parse_execution_schedule_profile(
+        req.execution_rules
+            .as_ref()
+            .and_then(|rules| rules.execution_schedule_profile.as_deref()),
     )?;
     let max_participation_rate = req
         .execution_rules
@@ -2155,6 +2183,7 @@ pub(crate) async fn execute_prediction_backtest(
         rebalance_frequency: req.rebalance.clone(),
         execution_timing,
         execution_price,
+        execution_schedule_profile,
         max_participation_rate,
         persistence_mode,
         risk_control: Default::default(),
@@ -2239,6 +2268,7 @@ mod tests {
             execution_rules: Some(ExecutionRulesReq {
                 execution_timing: Some("next_open".into()),
                 execution_price: Some("open".into()),
+                execution_schedule_profile: None,
                 max_participation_rate: Some(0.10),
             }),
         };
@@ -2445,6 +2475,28 @@ mod tests {
             .expect("execution impact budget");
 
         assert_eq!(profile, ExecutionImpactBudgetProfile::Turnover20PctV1);
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_execution_schedule_profile() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "execution_rules": {
+                "execution_schedule_profile": "twap_15d_v1"
+            }
+        }))
+        .expect("factor request");
+
+        let profile = parse_execution_schedule_profile(
+            req.execution_rules
+                .as_ref()
+                .and_then(|rules| rules.execution_schedule_profile.as_deref()),
+        )
+        .expect("execution schedule profile");
+
+        assert_eq!(profile, ExecutionScheduleProfile::Twap15dV1);
     }
 
     #[test]

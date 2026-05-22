@@ -99,6 +99,8 @@ pub struct BacktestConfig {
     pub rebalance_frequency: String,
     pub execution_timing: ExecutionTiming,
     pub execution_price: ExecutionPrice,
+    #[serde(default)]
+    pub execution_schedule_profile: ExecutionScheduleProfile,
     pub max_participation_rate: Option<Decimal>,
     /// Database persistence depth. Summary-only keeps result/equity curve for discovery and
     /// robustness, while skipping heavy detail tables.
@@ -222,6 +224,7 @@ impl Default for BacktestConfig {
             rebalance_frequency: "daily".into(),
             execution_timing: ExecutionTiming::NextOpen,
             execution_price: ExecutionPrice::Open,
+            execution_schedule_profile: ExecutionScheduleProfile::Immediate,
             max_participation_rate: None,
             persistence_mode: BacktestPersistenceMode::Full,
             risk_control: RiskControlConfig::default(),
@@ -264,6 +267,63 @@ pub enum ExecutionPrice {
     Close,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionScheduleProfile {
+    Immediate,
+    Twap3dV1,
+    Twap5dV1,
+    Twap10dV1,
+    Twap15dV1,
+    Twap20dV1,
+}
+
+impl Default for ExecutionScheduleProfile {
+    fn default() -> Self {
+        Self::Immediate
+    }
+}
+
+impl ExecutionScheduleProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "" | "off" | "immediate" => Ok(Self::Immediate),
+            "twap_3d_v1" | "twap3d_v1" | "twap_3d" => Ok(Self::Twap3dV1),
+            "twap_5d_v1" | "twap5d_v1" | "twap_5d" => Ok(Self::Twap5dV1),
+            "twap_10d_v1" | "twap10d_v1" | "twap_10d" => Ok(Self::Twap10dV1),
+            "twap_15d_v1" | "twap15d_v1" | "twap_15d" => Ok(Self::Twap15dV1),
+            "twap_20d_v1" | "twap20d_v1" | "twap_20d" => Ok(Self::Twap20dV1),
+            other => Err(format!("unsupported execution_schedule_profile: {}", other)),
+        }
+    }
+
+    fn execution_days(self) -> usize {
+        match self {
+            Self::Immediate => 1,
+            Self::Twap3dV1 => 3,
+            Self::Twap5dV1 => 5,
+            Self::Twap10dV1 => 10,
+            Self::Twap15dV1 => 15,
+            Self::Twap20dV1 => 20,
+        }
+    }
+
+    fn is_immediate(self) -> bool {
+        self == Self::Immediate
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::Twap3dV1 => "twap_3d_v1",
+            Self::Twap5dV1 => "twap_5d_v1",
+            Self::Twap10dV1 => "twap_10d_v1",
+            Self::Twap15dV1 => "twap_15d_v1",
+            Self::Twap20dV1 => "twap_20d_v1",
+        }
+    }
+}
+
 // ─── Result ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +343,13 @@ pub struct BacktestOutput {
 
 // ─── Engine ───────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
+struct PendingExecutionSchedule {
+    source_signal_date: NaiveDate,
+    final_target_weights: HashMap<String, Decimal>,
+    remaining_steps: usize,
+}
+
 pub struct BacktestEngine {
     config: BacktestConfig,
     pub portfolio: Portfolio,
@@ -297,6 +364,7 @@ pub struct BacktestEngine {
     position_buy_date: HashMap<String, NaiveDate>,
     position_peak_price: HashMap<String, Decimal>,
     position_risk_cooldown_remaining: HashMap<String, u32>,
+    pending_execution_schedule: Option<PendingExecutionSchedule>,
 }
 
 impl BacktestEngine {
@@ -319,6 +387,7 @@ impl BacktestEngine {
             position_buy_date: HashMap::new(),
             position_peak_price: HashMap::new(),
             position_risk_cooldown_remaining: HashMap::new(),
+            pending_execution_schedule: None,
         }
     }
 
@@ -336,8 +405,18 @@ impl BacktestEngine {
         self.update_position_risk_state(market);
         self.execute_position_risk_controls(market);
 
-        if let Some(sig) = signal {
-            self.execute_rebalance(sig, market);
+        if self.config.execution_schedule_profile.is_immediate() {
+            if let Some(sig) = signal {
+                self.execute_rebalance(sig, market);
+            }
+        } else {
+            if let Some(sig) = signal {
+                self.start_pending_execution_schedule(sig);
+            }
+            if let Some(scheduled_signal) = self.pending_execution_schedule_signal(market.date) {
+                self.execute_rebalance(&scheduled_signal, market);
+                self.advance_pending_execution_schedule();
+            }
         }
 
         self.equity_curve
@@ -395,6 +474,111 @@ impl BacktestEngine {
         match self.config.execution_price {
             ExecutionPrice::Open => market.open.get(symbol).copied().unwrap_or_default(),
             ExecutionPrice::Close => market.close.get(symbol).copied().unwrap_or_default(),
+        }
+    }
+
+    fn start_pending_execution_schedule(&mut self, signal: &StrategySignal) {
+        let total_steps = self
+            .config
+            .execution_schedule_profile
+            .execution_days()
+            .max(1);
+        self.pending_execution_schedule = Some(PendingExecutionSchedule {
+            source_signal_date: signal.date,
+            final_target_weights: signal.target_weights.clone(),
+            remaining_steps: total_steps,
+        });
+    }
+
+    fn current_portfolio_weight(&self, symbol: &str, total_value: Decimal) -> Decimal {
+        if total_value.is_zero() {
+            return Decimal::zero();
+        }
+        self.portfolio
+            .holdings
+            .get(symbol)
+            .map(|holding| holding.market_value() / total_value)
+            .unwrap_or_default()
+    }
+
+    fn pending_execution_schedule_signal(&self, trade_date: NaiveDate) -> Option<StrategySignal> {
+        let pending = self.pending_execution_schedule.as_ref()?;
+        let total_value = self.portfolio.total_value();
+        let step_fraction = Decimal::ONE / Decimal::from(pending.remaining_steps.max(1) as u64);
+        let mut symbols = pending
+            .final_target_weights
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        symbols.extend(self.portfolio.holdings.keys().cloned());
+
+        let mut target_weights = HashMap::new();
+        for symbol in symbols {
+            let current_weight = self.current_portfolio_weight(&symbol, total_value);
+            let final_weight = pending
+                .final_target_weights
+                .get(&symbol)
+                .copied()
+                .unwrap_or_default();
+            let scheduled_weight = current_weight + (final_weight - current_weight) * step_fraction;
+            if !scheduled_weight.is_zero() || self.portfolio.holdings.contains_key(&symbol) {
+                target_weights.insert(
+                    symbol,
+                    scheduled_weight.clamp(Decimal::zero(), Decimal::ONE),
+                );
+            }
+        }
+
+        Some(StrategySignal {
+            date: pending.source_signal_date.min(trade_date),
+            target_weights,
+        })
+    }
+
+    fn pending_execution_gap_within_tolerance(&self) -> bool {
+        let Some(pending) = self.pending_execution_schedule.as_ref() else {
+            return true;
+        };
+        let total_value = self.portfolio.total_value();
+        if total_value.is_zero() {
+            return true;
+        }
+        let mut symbols = pending
+            .final_target_weights
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        symbols.extend(self.portfolio.holdings.keys().cloned());
+
+        let tolerance = Decimal::new(5, 4);
+        let total_gap = symbols
+            .into_iter()
+            .map(|symbol| {
+                let current_weight = self.current_portfolio_weight(&symbol, total_value);
+                let final_weight = pending
+                    .final_target_weights
+                    .get(&symbol)
+                    .copied()
+                    .unwrap_or_default();
+                if final_weight >= current_weight {
+                    final_weight - current_weight
+                } else {
+                    current_weight - final_weight
+                }
+            })
+            .sum::<Decimal>();
+        total_gap <= tolerance
+    }
+
+    fn advance_pending_execution_schedule(&mut self) {
+        let should_clear = self.pending_execution_gap_within_tolerance();
+        let Some(pending) = self.pending_execution_schedule.as_mut() else {
+            return;
+        };
+        if should_clear {
+            self.pending_execution_schedule = None;
+        } else if pending.remaining_steps > 1 {
+            pending.remaining_steps -= 1;
         }
     }
 
@@ -469,6 +653,30 @@ impl BacktestEngine {
             trade.event_reason = Some(reason.into());
             trade.target_weight = Some(target_weight);
             trade.executed_weight = Some(executed_weight);
+        }
+    }
+
+    fn rebalance_target_reason(&self, base_reason: &str) -> String {
+        if self.config.execution_schedule_profile.is_immediate() {
+            base_reason.into()
+        } else {
+            format!(
+                "{}_execution_schedule_{}",
+                base_reason,
+                self.config.execution_schedule_profile.as_str()
+            )
+        }
+    }
+
+    fn rebalance_trade_reason(&self, side: &str) -> String {
+        if self.config.execution_schedule_profile.is_immediate() {
+            format!("rebalance_{}", side)
+        } else {
+            format!(
+                "execution_schedule_{}_{}",
+                self.config.execution_schedule_profile.as_str(),
+                side
+            )
         }
     }
 
@@ -1012,15 +1220,15 @@ impl BacktestEngine {
                 target_weight: target_w,
                 target_quantity,
                 reason: Some(if exposure_scale >= Decimal::ONE {
-                    "rebalance_signal".into()
+                    self.rebalance_target_reason("rebalance_signal")
                 } else if sharpe_scale < drawdown_scale.min(volatility_scale) {
-                    "rebalance_signal_portfolio_sharpe_scaled".into()
+                    self.rebalance_target_reason("rebalance_signal_portfolio_sharpe_scaled")
                 } else if volatility_scale < drawdown_scale {
-                    "rebalance_signal_portfolio_volatility_scaled".into()
+                    self.rebalance_target_reason("rebalance_signal_portfolio_volatility_scaled")
                 } else if drawdown_scale < Decimal::ONE {
-                    "rebalance_signal_portfolio_drawdown_scaled".into()
+                    self.rebalance_target_reason("rebalance_signal_portfolio_drawdown_scaled")
                 } else {
-                    "rebalance_signal_portfolio_risk_scaled".into()
+                    self.rebalance_target_reason("rebalance_signal_portfolio_risk_scaled")
                 }),
             });
 
@@ -1101,7 +1309,8 @@ impl BacktestEngine {
                 .is_some()
             {
                 let executed_weight = (capped_qty * price) / total_value;
-                self.annotate_last_trade(*target_w, executed_weight, "rebalance_sell");
+                let reason = self.rebalance_trade_reason("sell");
+                self.annotate_last_trade(*target_w, executed_weight, &reason);
                 self.cleanup_closed_position_metadata(sym);
             }
         }
@@ -1169,7 +1378,8 @@ impl BacktestEngine {
                     .is_some()
                 {
                     let executed_weight = (qty * *price) / total_value;
-                    self.annotate_last_trade(*target_w, executed_weight, "rebalance_buy");
+                    let reason = self.rebalance_trade_reason("buy");
+                    self.annotate_last_trade(*target_w, executed_weight, &reason);
                     self.update_position_metadata_after_buy(sym, market.date, *price);
                 }
             }
@@ -1440,6 +1650,61 @@ mod tests {
         let o = e.finalize();
         assert_eq!(o.trades.len(), 1);
         assert!(o.trades[0].quantity > Decimal::zero());
+    }
+
+    #[test]
+    fn execution_schedule_splits_rebalance_and_continues_without_new_signal() {
+        let mut config = BacktestConfig::default();
+        config.max_position_pct = d("1.01");
+        config.execution_schedule_profile = ExecutionScheduleProfile::Twap5dV1;
+        let mut e = BacktestEngine::new(config);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.95")),
+        );
+
+        assert_eq!(e.portfolio.trades.len(), 1);
+        let first_trade_amount = e.portfolio.trades[0].amount;
+        assert!(
+            first_trade_amount < d("250000"),
+            "first TWAP slice should be materially smaller than full target amount, got {}",
+            first_trade_amount
+        );
+        assert!(e.pending_execution_schedule.is_some());
+
+        e.process_day(&market("2024-01-03", ("A", "10"), ("A", "10")), None);
+
+        assert_eq!(e.portfolio.trades.len(), 2);
+        assert!(e.portfolio.trades[1].amount > Decimal::zero());
+        assert_eq!(
+            e.portfolio.trades[1].event_reason.as_deref(),
+            Some("execution_schedule_twap_5d_v1_buy")
+        );
+    }
+
+    #[test]
+    fn patient_execution_schedule_uses_smaller_initial_twap_slice() {
+        let mut config = BacktestConfig::default();
+        config.max_position_pct = d("1.01");
+        config.execution_schedule_profile = ExecutionScheduleProfile::Twap15dV1;
+        let mut e = BacktestEngine::new(config);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.95")),
+        );
+
+        assert_eq!(e.portfolio.trades.len(), 1);
+        assert!(
+            e.portfolio.trades[0].amount < d("80000"),
+            "15-day TWAP should only execute a small initial slice, got {}",
+            e.portfolio.trades[0].amount
+        );
+        assert_eq!(
+            e.portfolio.trades[0].event_reason.as_deref(),
+            Some("execution_schedule_twap_15d_v1_buy")
+        );
     }
 
     #[test]

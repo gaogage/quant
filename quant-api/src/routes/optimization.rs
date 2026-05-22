@@ -1193,6 +1193,21 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_execution_impact_budget".to_string(),
             LayeredSearchConfig::professional_execution_impact_budget_default(),
         ),
+        "professional_execution_schedule_budget"
+        | "execution_schedule_budget"
+        | "phase7_execution_schedule_budget"
+        | "phase7_ds" => (
+            "professional_execution_schedule_budget".to_string(),
+            LayeredSearchConfig::professional_execution_schedule_budget_default(),
+        ),
+        "professional_execution_patient_schedule_budget"
+        | "execution_patient_schedule_budget"
+        | "patient_execution_schedule_budget"
+        | "phase7_execution_patient_schedule_budget"
+        | "phase7_dt" => (
+            "professional_execution_patient_schedule_budget".to_string(),
+            LayeredSearchConfig::professional_execution_patient_schedule_budget_default(),
+        ),
         "professional_return_alpha_sharpe_bridge"
         | "return_alpha_sharpe_bridge"
         | "phase7_return_alpha_sharpe_bridge"
@@ -5681,6 +5696,11 @@ fn active_correlation_controls(parameters: &Value) -> Vec<Value> {
             controls.push(json!({"name": "execution_impact_budget", "value": budget}));
         }
     }
+    if let Some(profile) = parameter_str(parameters, "execution_schedule_profile") {
+        if profile != "immediate" && profile != "off" {
+            controls.push(json!({"name": "execution_schedule_profile", "value": profile}));
+        }
+    }
     controls
 }
 
@@ -5729,6 +5749,12 @@ fn correlation_control_score(parameters: &Value) -> f64 {
     }
     if parameter_str(parameters, "execution_impact_budget")
         .map(|value| value != "off")
+        .unwrap_or(false)
+    {
+        score += 0.10;
+    }
+    if parameter_str(parameters, "execution_schedule_profile")
+        .map(|value| value != "immediate" && value != "off")
         .unwrap_or(false)
     {
         score += 0.10;
@@ -6476,7 +6502,26 @@ fn optional_execution_rules_from_maps(
     params: &Map<String, Value>,
     template: &Map<String, Value>,
 ) -> Result<Option<ExecutionRulesReq>, String> {
-    optional_struct_from_merged_maps(params, template, "execution_rules")
+    let mut merged =
+        merged_object_from_maps(params, template, "execution_rules")?.unwrap_or_else(Map::new);
+    for source in [template, params] {
+        if let Some(value) = source.get("execution_schedule_profile") {
+            match value {
+                Value::Null => {}
+                Value::String(_) | Value::Number(_) => {
+                    merged.insert("execution_schedule_profile".to_string(), value.clone());
+                }
+                _ => return Err("execution_schedule_profile must be a string or number".into()),
+            }
+        }
+    }
+    if merged.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::from_value(Value::Object(merged))
+            .map(Some)
+            .map_err(|error| format!("execution_rules must be a valid object: {}", error))
+    }
 }
 
 fn optional_struct_from_merged_maps<T>(
@@ -6622,8 +6667,8 @@ fn build_prediction_trial_request(
         risk_contribution_control: optional_string("risk_contribution_control")?,
         rebalance_hysteresis_pct: optional_f64_value("rebalance_hysteresis_pct")?,
         partial_rebalance_ratio: optional_f64_value("partial_rebalance_ratio")?,
-        cost_model: None,
-        execution_rules: None,
+        cost_model: optional_cost_model_from_maps(params, template)?,
+        execution_rules: optional_execution_rules_from_maps(params, template)?,
         benchmark: optional_string("benchmark")?.or_else(|| Some("000300.SH".into())),
         start_date: string_value("start_date", None)?,
         end_date: string_value("end_date", None)?,
@@ -9085,7 +9130,7 @@ mod tests {
             objective: json!({"type": "risk_adjusted", "maximize": true}),
             constraints: None,
         };
-        let params = json!({
+        let mut params = json!({
             "top_n": 8,
             "rebalance": "5",
             "max_position_pct": 0.08,
@@ -9128,6 +9173,7 @@ mod tests {
             "time_stop_days": "120",
             "reentry_cooldown_days": "10"
         });
+        params["execution_schedule_profile"] = json!("twap_5d_v1");
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
 
@@ -9154,6 +9200,12 @@ mod tests {
         assert_eq!(
             req.execution_impact_budget.as_deref(),
             Some("impact_turnover_20pct_v1")
+        );
+        assert_eq!(
+            req.execution_rules
+                .as_ref()
+                .and_then(|rules| rules.execution_schedule_profile.as_deref()),
+            Some("twap_5d_v1")
         );
         assert_eq!(
             req.style_risk_budget.as_deref(),
@@ -12784,6 +12836,69 @@ mod tests {
         assert!(bundle.plan.trials.iter().all(|trial| {
             trial.parameters["combo_name"] == "phase7_financial_quality_v1"
                 && trial.parameters["portfolio_method"] == "risk_budget"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_execution_schedule_budget_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_ds".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_schedule_budget"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["execution_schedule_profile"] == "twap_5d_v1"
+                && trial.parameters["execution_rules"]["execution_schedule_profile"] == "twap_5d_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_patient_execution_schedule_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_dt".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_patient_schedule_budget"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["execution_schedule_profile"] == "twap_20d_v1"
+                && trial.parameters["execution_rules"]["execution_schedule_profile"]
+                    == "twap_20d_v1"
         }));
     }
 
