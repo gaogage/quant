@@ -317,6 +317,14 @@ async fn main() {
             post(routes::optimization::run_phase7_oos_walk_forward_discovery),
         )
         .route(
+            "/api/v1/quant/optimizations/phase7-oos-profile-comparison/plan",
+            post(routes::optimization::plan_phase7_oos_profile_comparison),
+        )
+        .route(
+            "/api/v1/quant/optimizations/phase7-oos-profile-comparison/smoke",
+            post(routes::optimization::launch_phase7_oos_profile_comparison_smoke),
+        )
+        .route(
             "/api/v1/quant/experiments/{experiment_run_id}",
             get(routes::optimization::get_experiment_run),
         )

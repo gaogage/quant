@@ -3057,6 +3057,39 @@ mod tests {
     }
 
     #[test]
+    fn market_regime_request_builds_bull_sleeve_alpha_selector_policy() {
+        let req = MarketRegimeBacktestReq {
+            enabled: Some(true),
+            policy: Some("quality_state_alpha_selector_v2".to_string()),
+            benchmark: None,
+            lookback_days: None,
+            min_observations: None,
+        };
+
+        let policy = build_market_regime_policy(Some(&req), "000300.SH")
+            .expect("valid regime policy")
+            .expect("enabled policy");
+
+        let bull_sleeve = policy
+            .rules
+            .get(&quant_backtest::signal_generator::MarketRegime::Bull)
+            .and_then(|rule| rule.portfolio_sleeve.as_ref())
+            .expect("bull value/recovery sleeve");
+        assert_eq!(
+            bull_sleeve.combo_name,
+            "phase7_quality_value_recovery_confirm_v1"
+        );
+        assert!((bull_sleeve.weight - 0.10).abs() < 1e-9);
+        assert_eq!(
+            policy
+                .rules
+                .get(&quant_backtest::signal_generator::MarketRegime::Bear)
+                .and_then(|rule| rule.max_gross_exposure),
+            Some(0.75)
+        );
+    }
+
+    #[test]
     fn market_regime_request_builds_event_quality_segment_policies() {
         for (policy_name, combo_name) in [
             (

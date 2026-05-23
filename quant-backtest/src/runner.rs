@@ -94,10 +94,33 @@ impl BacktestDataCache {
                 Some(days.clone())
             }
             None => {
-                self.stats.trading_day_misses += 1;
-                None
+                if let Some(days) = self.cached_trading_days_from_covering_window(start, end) {
+                    self.stats.trading_day_hits += 1;
+                    self.trading_days.insert((start, end), days.clone());
+                    Some(days)
+                } else {
+                    self.stats.trading_day_misses += 1;
+                    None
+                }
             }
         }
+    }
+
+    fn cached_trading_days_from_covering_window(
+        &self,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Option<Vec<NaiveDate>> {
+        self.trading_days
+            .iter()
+            .filter(|((cached_start, cached_end), _)| *cached_start <= start && *cached_end >= end)
+            .min_by_key(|((cached_start, cached_end), _)| (*cached_end - *cached_start).num_days())
+            .map(|(_, days)| {
+                days.iter()
+                    .copied()
+                    .filter(|day| *day >= start && *day <= end)
+                    .collect()
+            })
     }
 
     fn insert_trading_days(
@@ -123,10 +146,40 @@ impl BacktestDataCache {
                 Some(data.clone())
             }
             None => {
-                self.stats.benchmark_data_misses += 1;
-                None
+                if let Some(data) =
+                    self.cached_benchmark_data_from_covering_window(benchmark, start, end)
+                {
+                    self.stats.benchmark_data_hits += 1;
+                    self.benchmark_data.insert(key, data.clone());
+                    Some(data)
+                } else {
+                    self.stats.benchmark_data_misses += 1;
+                    None
+                }
             }
         }
+    }
+
+    fn cached_benchmark_data_from_covering_window(
+        &self,
+        benchmark: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Option<HashMap<NaiveDate, (Decimal, Decimal)>> {
+        self.benchmark_data
+            .iter()
+            .filter(|((cached_benchmark, cached_start, cached_end), _)| {
+                cached_benchmark == benchmark && *cached_start <= start && *cached_end >= end
+            })
+            .min_by_key(|((_, cached_start, cached_end), _)| {
+                (*cached_end - *cached_start).num_days()
+            })
+            .map(|(_, data)| {
+                data.iter()
+                    .filter(|(day, _)| **day >= start && **day <= end)
+                    .map(|(day, values)| (*day, *values))
+                    .collect()
+            })
     }
 
     fn insert_benchmark_data(
@@ -148,21 +201,60 @@ impl BacktestDataCache {
         end: NaiveDate,
     ) -> (Vec<String>, DailyBarsByDate) {
         let symbols = normalized_symbol_key(symbols);
-        let bucket = self.daily_bars.entry((start, end)).or_default();
         let mut missing = Vec::new();
         let mut cached = HashMap::new();
+        let mut reusable_records: Vec<(String, Vec<DailyBarRecord>)> = Vec::new();
 
         for symbol in symbols {
-            if let Some(records) = bucket.get(&symbol) {
+            if let Some(records) = self
+                .daily_bars
+                .get(&(start, end))
+                .and_then(|bucket| bucket.get(&symbol))
+            {
                 self.stats.daily_bar_symbol_hits += 1;
                 merge_daily_bar_records(&mut cached, records);
+            } else if let Some(records) =
+                self.cached_daily_bar_records_from_covering_window(&symbol, start, end)
+            {
+                self.stats.daily_bar_symbol_hits += 1;
+                merge_daily_bar_records(&mut cached, &records);
+                reusable_records.push((symbol, records));
             } else {
                 self.stats.daily_bar_symbol_misses += 1;
                 missing.push(symbol);
             }
         }
 
+        if !reusable_records.is_empty() {
+            let bucket = self.daily_bars.entry((start, end)).or_default();
+            for (symbol, records) in reusable_records {
+                bucket.insert(symbol, records);
+            }
+        }
+
         (missing, cached)
+    }
+
+    fn cached_daily_bar_records_from_covering_window(
+        &self,
+        symbol: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Option<Vec<DailyBarRecord>> {
+        self.daily_bars
+            .iter()
+            .filter(|((cached_start, cached_end), bucket)| {
+                *cached_start <= start && *cached_end >= end && bucket.contains_key(symbol)
+            })
+            .min_by_key(|((cached_start, cached_end), _)| (*cached_end - *cached_start).num_days())
+            .and_then(|(_, bucket)| bucket.get(symbol))
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|record| record.trade_date >= start && record.trade_date <= end)
+                    .cloned()
+                    .collect()
+            })
     }
 
     fn insert_daily_bar_rows(
@@ -1127,5 +1219,144 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.daily_bar_symbol_hits, 1);
         assert_eq!(stats.daily_bar_symbol_misses, 3);
+    }
+
+    #[test]
+    fn backtest_data_cache_reuses_wider_daily_bar_window_for_narrower_request() {
+        let wide_start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let narrow_start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let narrow_end = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let wide_end = NaiveDate::from_ymd_opt(2024, 1, 4).unwrap();
+        let mut cache = BacktestDataCache::default();
+
+        let symbols = vec!["000001.SZ".to_string()];
+        cache.insert_daily_bar_rows(
+            wide_start,
+            wide_end,
+            &symbols,
+            vec![
+                DailyBarRecord {
+                    trade_date: wide_start,
+                    symbol: "000001.SZ".into(),
+                    open: Decimal::new(101, 1),
+                    close: Decimal::new(102, 1),
+                    pre_close: Decimal::new(100, 1),
+                    amount: Decimal::new(1000, 0),
+                },
+                DailyBarRecord {
+                    trade_date: narrow_start,
+                    symbol: "000001.SZ".into(),
+                    open: Decimal::new(111, 1),
+                    close: Decimal::new(112, 1),
+                    pre_close: Decimal::new(110, 1),
+                    amount: Decimal::new(1100, 0),
+                },
+                DailyBarRecord {
+                    trade_date: narrow_end,
+                    symbol: "000001.SZ".into(),
+                    open: Decimal::new(121, 1),
+                    close: Decimal::new(122, 1),
+                    pre_close: Decimal::new(120, 1),
+                    amount: Decimal::new(1200, 0),
+                },
+                DailyBarRecord {
+                    trade_date: wide_end,
+                    symbol: "000001.SZ".into(),
+                    open: Decimal::new(131, 1),
+                    close: Decimal::new(132, 1),
+                    pre_close: Decimal::new(130, 1),
+                    amount: Decimal::new(1300, 0),
+                },
+            ],
+        );
+
+        let (missing, cached) = cache.cached_daily_bar_symbols(&symbols, narrow_start, narrow_end);
+
+        assert!(missing.is_empty());
+        assert_eq!(cached.len(), 2);
+        assert!(!cached.contains_key(&wide_start));
+        assert!(!cached.contains_key(&wide_end));
+        assert_eq!(
+            cached
+                .get(&narrow_start)
+                .and_then(|day| day.get("000001.SZ"))
+                .map(|(_, close, _, _)| *close),
+            Some(Decimal::new(112, 1))
+        );
+        assert_eq!(
+            cached
+                .get(&narrow_end)
+                .and_then(|day| day.get("000001.SZ"))
+                .map(|(_, close, _, _)| *close),
+            Some(Decimal::new(122, 1))
+        );
+        let stats = cache.stats();
+        assert_eq!(stats.daily_bar_symbol_hits, 1);
+        assert_eq!(stats.daily_bar_symbol_misses, 0);
+    }
+
+    #[test]
+    fn backtest_data_cache_reuses_wider_trading_days_for_narrower_request() {
+        let wide_start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let narrow_start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let narrow_end = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let wide_end = NaiveDate::from_ymd_opt(2024, 1, 4).unwrap();
+        let mut cache = BacktestDataCache::default();
+
+        cache.insert_trading_days(
+            wide_start,
+            wide_end,
+            vec![wide_start, narrow_start, narrow_end, wide_end],
+        );
+
+        let cached = cache
+            .cached_trading_days(narrow_start, narrow_end)
+            .expect("narrow trading days should be served from wider cache");
+
+        assert_eq!(cached, vec![narrow_start, narrow_end]);
+        let stats = cache.stats();
+        assert_eq!(stats.trading_day_hits, 1);
+        assert_eq!(stats.trading_day_misses, 0);
+    }
+
+    #[test]
+    fn backtest_data_cache_reuses_wider_benchmark_window_for_narrower_request() {
+        let wide_start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let narrow_start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let narrow_end = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let wide_end = NaiveDate::from_ymd_opt(2024, 1, 4).unwrap();
+        let mut cache = BacktestDataCache::default();
+        let benchmark = "000300.SH";
+
+        cache.insert_benchmark_data(
+            benchmark,
+            wide_start,
+            wide_end,
+            HashMap::from([
+                (wide_start, (Decimal::new(100, 0), Decimal::new(99, 0))),
+                (narrow_start, (Decimal::new(101, 0), Decimal::new(100, 0))),
+                (narrow_end, (Decimal::new(102, 0), Decimal::new(101, 0))),
+                (wide_end, (Decimal::new(103, 0), Decimal::new(102, 0))),
+            ]),
+        );
+
+        let cached = cache
+            .cached_benchmark_data(benchmark, narrow_start, narrow_end)
+            .expect("narrow benchmark data should be served from wider cache");
+
+        assert_eq!(cached.len(), 2);
+        assert!(!cached.contains_key(&wide_start));
+        assert!(!cached.contains_key(&wide_end));
+        assert_eq!(
+            cached.get(&narrow_start).copied(),
+            Some((Decimal::new(101, 0), Decimal::new(100, 0)))
+        );
+        assert_eq!(
+            cached.get(&narrow_end).copied(),
+            Some((Decimal::new(102, 0), Decimal::new(101, 0)))
+        );
+        let stats = cache.stats();
+        assert_eq!(stats.benchmark_data_hits, 1);
+        assert_eq!(stats.benchmark_data_misses, 0);
     }
 }

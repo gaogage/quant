@@ -64,6 +64,32 @@ if event_alpha_sql.exists():
 else:
     failed.append(("phase7_event_alpha.sql must exist for local incremental DDL", "sql/phase7_event_alpha.sql", ["missing file"]))
 
+phase7_metadata_sql = ROOT / "sql/phase7_professional_metadata.sql"
+if phase7_metadata_sql.exists():
+    phase7_metadata_text = phase7_metadata_sql.read_text(encoding="utf-8")
+    for required in [
+        "PHASE7_PROFESSIONAL",
+        "phase7-professional-v1",
+        "full-market-2016-v1",
+        "research-full-2016-2026-20260515",
+        "ON CONFLICT (strategy_code) DO UPDATE",
+        "ON CONFLICT (strategy_version_id) DO UPDATE",
+        "ON CONFLICT (data_version_id) DO UPDATE",
+        "phase7_quality_value_recovery_event_confirm_v1",
+        "phase7_quality_event_window_overlay_v1",
+        "phase7_quality_value_recovery_confirm_v1",
+        "phase7_quality_relative_strength_v1",
+        "pit_required",
+        "walk_forward_required",
+        "bootstrap_required",
+        "market_scenario_required",
+        "cost_capacity_required",
+    ]:
+        if required not in phase7_metadata_text:
+            failed.append(("Phase 7 metadata seed must restore professional FK aliases", str(phase7_metadata_sql.relative_to(ROOT)), [required]))
+else:
+    failed.append(("Phase 7 metadata seed must exist for local DB rebuilds", "sql/phase7_professional_metadata.sql", ["missing file"]))
+
 schema_sql = ROOT.parent / "docs/projects/quant/tasks/quant/sql/001_initial_schema.sql"
 if schema_sql.exists():
     schema_text = schema_sql.read_text(encoding="utf-8")
@@ -286,6 +312,8 @@ if phase7_common.exists():
         "phase7_quality_event_surprise_confirm_v1",
         "phase7_quality_event_confirm_v1",
         "phase7_quality_value_recovery_event_confirm_v1",
+        "phase7_quality_value_recovery_confirm_v1",
+        "phase7_quality_relative_strength_v1",
         "quality_event_confirm_5pct",
         "quality_event_surprise_confirm_5pct",
         "quality_value_recovery_event_confirm_5pct",

@@ -253,8 +253,12 @@ type FactorScoresByDate = HashMap<NaiveDate, Vec<(String, f64)>>;
 type PredictionScoresByDate = HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>;
 type SymbolReturnHistory = HashMap<String, Vec<(NaiveDate, f64)>>;
 type AverageAmounts = HashMap<String, f64>;
+type AverageAmountHistory = HashMap<String, Vec<(NaiveDate, f64)>>;
+type AverageAmountsByDate = HashMap<NaiveDate, AverageAmounts>;
 type IndustryMap = HashMap<String, String>;
 type BenchmarkReturns = Vec<(NaiveDate, f64)>;
+
+const PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS: usize = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FactorScoreSourceKey {
@@ -304,6 +308,12 @@ pub(crate) enum SignalDataCacheKey {
         symbol: String,
         start_date: NaiveDate,
         end_date: NaiveDate,
+    },
+    AverageAmountHistorySymbol {
+        symbol: String,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
     },
     PredictionScores {
         prediction_set_id: String,
@@ -373,6 +383,20 @@ impl SignalDataCacheKey {
         }
     }
 
+    fn average_amount_history_symbol(
+        symbol: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> Self {
+        Self::AverageAmountHistorySymbol {
+            symbol: symbol.to_string(),
+            start_date,
+            end_date,
+            lookback_days,
+        }
+    }
+
     fn prediction_scores(
         prediction_set_id: &str,
         start_date: NaiveDate,
@@ -437,6 +461,7 @@ pub struct SignalDataCache {
     trading_days: HashMap<SignalDataCacheKey, Arc<Vec<NaiveDate>>>,
     return_history: HashMap<SignalDataCacheKey, Arc<SymbolReturnHistory>>,
     average_amounts: HashMap<SignalDataCacheKey, Arc<AverageAmounts>>,
+    average_amount_history: HashMap<SignalDataCacheKey, Arc<AverageAmountHistory>>,
     prediction_scores: HashMap<SignalDataCacheKey, Arc<PredictionScoresByDate>>,
     industry_classifications: HashMap<SignalDataCacheKey, Arc<IndustryMap>>,
     benchmark_returns: HashMap<SignalDataCacheKey, Arc<BenchmarkReturns>>,
@@ -465,19 +490,31 @@ impl SignalDataCache {
         &mut self,
         key: &SignalDataCacheKey,
     ) -> Option<Arc<FactorScoresByDate>> {
-        let Some((requested_size, source_scores)) =
+        let Some((reuse_plan, source_scores)) =
             self.combo_scores
                 .iter()
                 .find_map(|(candidate_key, scores)| {
-                    reusable_combo_candidate_pool_size(candidate_key, key)
-                        .map(|requested_size| (requested_size, Arc::clone(scores)))
+                    reusable_combo_candidate_pool(candidate_key, key)
+                        .map(|reuse_plan| (reuse_plan, Arc::clone(scores)))
                 })
         else {
             self.stats.combo_score_misses += 1;
             return None;
         };
 
-        let pruned = prune_factor_scores_by_date(source_scores.as_ref(), requested_size);
+        let pruned = match reuse_plan {
+            ComboScoreReusePlan::RankedPool { requested_size } => {
+                prune_factor_scores_by_date(source_scores.as_ref(), requested_size)
+            }
+            ComboScoreReusePlan::UnboundedPool {
+                requested_size,
+                score_direction,
+            } => rank_and_prune_factor_scores_by_date(
+                source_scores.as_ref(),
+                requested_size,
+                score_direction,
+            ),
+        };
         let pruned = self.insert_combo_scores(key.clone(), pruned);
         self.stats.combo_score_hits += 1;
         Some(pruned)
@@ -621,6 +658,63 @@ impl SignalDataCache {
         result
     }
 
+    fn cached_average_amount_history_symbols(
+        &mut self,
+        symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> (Vec<String>, AverageAmountHistory) {
+        let mut missing_symbols = Vec::new();
+        let mut result = HashMap::new();
+        for symbol in normalized_symbol_key(symbols) {
+            let key = SignalDataCacheKey::average_amount_history_symbol(
+                &symbol,
+                start_date,
+                end_date,
+                lookback_days,
+            );
+            match self.average_amount_history.get(&key) {
+                Some(value) => {
+                    self.stats.average_amount_hits += 1;
+                    let rows = value.as_ref().get(&symbol).cloned().unwrap_or_default();
+                    result.insert(symbol, rows);
+                }
+                None => {
+                    self.stats.average_amount_misses += 1;
+                    missing_symbols.push(symbol);
+                }
+            }
+        }
+        (missing_symbols, result)
+    }
+
+    fn insert_average_amount_history_symbols(
+        &mut self,
+        requested_symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+        mut value: AverageAmountHistory,
+    ) -> AverageAmountHistory {
+        let mut result = HashMap::new();
+        for symbol in normalized_symbol_key(requested_symbols) {
+            let rows = value.remove(&symbol).unwrap_or_default();
+            result.insert(symbol.clone(), rows.clone());
+            let mut symbol_history = HashMap::new();
+            symbol_history.insert(symbol.clone(), rows);
+            let key = SignalDataCacheKey::average_amount_history_symbol(
+                &symbol,
+                start_date,
+                end_date,
+                lookback_days,
+            );
+            self.average_amount_history
+                .insert(key, Arc::new(symbol_history));
+        }
+        result
+    }
+
     fn cached_prediction_scores(
         &mut self,
         key: &SignalDataCacheKey,
@@ -715,10 +809,21 @@ impl SignalDataCache {
     }
 }
 
-fn reusable_combo_candidate_pool_size(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComboScoreReusePlan {
+    RankedPool {
+        requested_size: usize,
+    },
+    UnboundedPool {
+        requested_size: usize,
+        score_direction: ScoreDirection,
+    },
+}
+
+fn reusable_combo_candidate_pool(
     candidate: &SignalDataCacheKey,
     requested: &SignalDataCacheKey,
-) -> Option<usize> {
+) -> Option<ComboScoreReusePlan> {
     let (
         SignalDataCacheKey::ComboScores {
             combo_name: candidate_combo_name,
@@ -726,7 +831,7 @@ fn reusable_combo_candidate_pool_size(
             start_date: candidate_start_date,
             end_date: candidate_end_date,
             score_direction: candidate_score_direction,
-            score_candidate_pool_size: Some(candidate_pool_size),
+            score_candidate_pool_size: candidate_pool_size,
             universe_profile: candidate_universe_profile,
         },
         SignalDataCacheKey::ComboScores {
@@ -743,18 +848,35 @@ fn reusable_combo_candidate_pool_size(
         return None;
     };
 
-    if candidate_combo_name == requested_combo_name
+    let same_score_window = candidate_combo_name == requested_combo_name
         && candidate_version == requested_version
         && candidate_start_date == requested_start_date
         && candidate_end_date == requested_end_date
-        && candidate_score_direction == requested_score_direction
-        && candidate_universe_profile == requested_universe_profile
-        && candidate_pool_size >= requested_pool_size
-    {
-        Some(*requested_pool_size)
-    } else {
-        None
+        && candidate_universe_profile == requested_universe_profile;
+    if !same_score_window {
+        return None;
     }
+
+    if let Some(candidate_pool_size) = candidate_pool_size {
+        if candidate_score_direction == requested_score_direction
+            && candidate_pool_size >= requested_pool_size
+        {
+            return Some(ComboScoreReusePlan::RankedPool {
+                requested_size: *requested_pool_size,
+            });
+        }
+    }
+
+    if candidate_pool_size.is_none() {
+        if let Some(score_direction) = requested_score_direction {
+            return Some(ComboScoreReusePlan::UnboundedPool {
+                requested_size: *requested_pool_size,
+                score_direction: *score_direction,
+            });
+        }
+    }
+
+    None
 }
 
 fn prune_factor_scores_by_date(
@@ -771,6 +893,31 @@ fn prune_factor_scores_by_date(
                     .cloned()
                     .collect::<Vec<_>>(),
             )
+        })
+        .collect()
+}
+
+fn rank_and_prune_factor_scores_by_date(
+    scores_by_date: &FactorScoresByDate,
+    requested_size: usize,
+    score_direction: ScoreDirection,
+) -> FactorScoresByDate {
+    scores_by_date
+        .iter()
+        .map(|(date, rows)| {
+            let mut ranked = rows.clone();
+            ranked.sort_by(|left, right| match score_direction {
+                ScoreDirection::Descending => right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0)),
+                ScoreDirection::Ascending => left
+                    .1
+                    .total_cmp(&right.1)
+                    .then_with(|| left.0.cmp(&right.0)),
+            });
+            ranked.truncate(requested_size);
+            (*date, ranked)
         })
         .collect()
 }
@@ -1368,6 +1515,8 @@ pub enum CandidateRankingProfile {
     #[default]
     Off,
     CapacityAwareAlphaLiquidityV1,
+    AlphaFirstLowImpactV1,
+    RelativeStrengthAlphaLiquidityV1,
 }
 
 impl CandidateRankingProfile {
@@ -1378,6 +1527,18 @@ impl CandidateRankingProfile {
             | "capacity-aware-alpha-liquidity-v1"
             | "capacity_aware_candidate_ranking_v1"
             | "capacity-aware-candidate-ranking-v1" => Ok(Self::CapacityAwareAlphaLiquidityV1),
+            "alpha_first_low_impact_v1"
+            | "alpha-first-low-impact-v1"
+            | "alpha_first_liquidity_v1"
+            | "alpha-first-liquidity-v1" => Ok(Self::AlphaFirstLowImpactV1),
+            "relative_strength_alpha_liquidity_v1"
+            | "relative-strength-alpha-liquidity-v1"
+            | "return_aware_alpha_liquidity_v1"
+            | "return-aware-alpha-liquidity-v1"
+            | "pit_relative_strength_alpha_liquidity_v1"
+            | "pit-relative-strength-alpha-liquidity-v1" => {
+                Ok(Self::RelativeStrengthAlphaLiquidityV1)
+            }
             other => Err(format!("unsupported candidate_ranking: {}", other)),
         }
     }
@@ -1388,6 +1549,17 @@ impl CandidateRankingProfile {
             Self::CapacityAwareAlphaLiquidityV1 => Some(CandidateRankingParams {
                 alpha_rank_weight: 0.30,
                 liquidity_rank_weight: 0.70,
+                relative_strength_rank_weight: 0.0,
+            }),
+            Self::AlphaFirstLowImpactV1 => Some(CandidateRankingParams {
+                alpha_rank_weight: 0.75,
+                liquidity_rank_weight: 0.25,
+                relative_strength_rank_weight: 0.0,
+            }),
+            Self::RelativeStrengthAlphaLiquidityV1 => Some(CandidateRankingParams {
+                alpha_rank_weight: 0.45,
+                liquidity_rank_weight: 0.25,
+                relative_strength_rank_weight: 0.30,
             }),
         }
     }
@@ -1401,6 +1573,7 @@ impl CandidateRankingProfile {
 struct CandidateRankingParams {
     alpha_rank_weight: f64,
     liquidity_rank_weight: f64,
+    relative_strength_rank_weight: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -4041,6 +4214,7 @@ pub async fn generate_signals_with_cache(
         &all_symbols,
         start_date,
         end_date,
+        trading_days.as_ref(),
         &portfolio_config,
     )
     .await?;
@@ -4143,6 +4317,7 @@ pub async fn generate_regime_signals_with_cache(
         &all_symbols,
         start_date,
         end_date,
+        trading_days.as_ref(),
         &portfolio_config,
     )
     .await?;
@@ -4453,6 +4628,7 @@ async fn build_prediction_signals_from_rows(
         &all_symbols,
         start_date,
         end_date,
+        &trading_days,
         &PortfolioConstructionConfig::from(config),
     )
     .await?;
@@ -4969,12 +5145,75 @@ fn retain_scores_with_min_average_amount(
     }
 }
 
+fn build_pit_average_amounts_by_date(
+    amount_history: &AverageAmountHistory,
+    as_of_dates: &[NaiveDate],
+    lookback_days: usize,
+) -> AverageAmountsByDate {
+    if amount_history.is_empty() || as_of_dates.is_empty() {
+        return HashMap::new();
+    }
+    let mut dates = as_of_dates.to_vec();
+    dates.sort_unstable();
+    dates.dedup();
+    let lookback_days = lookback_days.max(1);
+    let mut amounts_by_date: AverageAmountsByDate =
+        dates.iter().map(|date| (*date, HashMap::new())).collect();
+
+    for (symbol, rows) in amount_history {
+        let mut rows = rows
+            .iter()
+            .copied()
+            .filter(|(_, amount)| amount.is_finite() && *amount > 0.0)
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            continue;
+        }
+        rows.sort_unstable_by_key(|(date, _)| *date);
+
+        let mut left = 0usize;
+        let mut right = 0usize;
+        let mut amount_sum = 0.0;
+        for as_of in &dates {
+            while right < rows.len() && rows[right].0 <= *as_of {
+                amount_sum += rows[right].1;
+                right += 1;
+            }
+            while right.saturating_sub(left) > lookback_days {
+                amount_sum -= rows[left].1;
+                left += 1;
+            }
+            let count = right.saturating_sub(left);
+            if count == 0 {
+                continue;
+            }
+            amounts_by_date
+                .entry(*as_of)
+                .or_default()
+                .insert(symbol.clone(), amount_sum / count as f64);
+        }
+    }
+
+    amounts_by_date.retain(|_, amounts| !amounts.is_empty());
+    amounts_by_date
+}
+
+fn average_amounts_for_score_day(
+    average_amounts_by_date: &AverageAmountsByDate,
+    score_day: NaiveDate,
+) -> AverageAmounts {
+    average_amounts_by_date
+        .get(&score_day)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn build_rebalance_factor_signals<F>(
     trading_days: &[NaiveDate],
     scores_by_date: &HashMap<NaiveDate, Vec<(String, f64)>>,
     base_config: &SignalConfig,
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
+    average_amounts_by_date: &AverageAmountsByDate,
     industry_by_symbol: &HashMap<String, String>,
     active_config_for_day: F,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String>
@@ -4985,7 +5224,7 @@ where
         trading_days,
         base_config,
         return_history,
-        average_amounts,
+        average_amounts_by_date,
         industry_by_symbol,
         |score_day, _active_config| scores_by_date.get(&score_day).cloned(),
         active_config_for_day,
@@ -4996,7 +5235,7 @@ fn build_rebalance_factor_signals_with_score_selector<F, S>(
     trading_days: &[NaiveDate],
     base_config: &SignalConfig,
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
+    average_amounts_by_date: &AverageAmountsByDate,
     industry_by_symbol: &HashMap<String, String>,
     scores_for_day: S,
     active_config_for_day: F,
@@ -5022,11 +5261,12 @@ where
             Some(day) => day,
             None => continue,
         };
+        let average_amounts = average_amounts_for_score_day(average_amounts_by_date, score_day);
         let mut target_weights = match build_portfolio_sleeve_target_weights(
             score_day,
             &active_config,
             return_history,
-            average_amounts,
+            &average_amounts,
             industry_by_symbol,
             &scores_for_day,
         ) {
@@ -5366,7 +5606,7 @@ fn build_rebalance_prediction_signals(
     scores_by_date: &HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
     config: &PredictionSignalConfig,
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
+    average_amounts_by_date: &AverageAmountsByDate,
     industry_by_symbol: &HashMap<String, String>,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
     let min_idx = 1 + config.entry_delay_days;
@@ -5400,11 +5640,12 @@ fn build_rebalance_prediction_signals(
             continue;
         }
 
+        let average_amounts = average_amounts_for_score_day(average_amounts_by_date, score_day);
         let mut target_weights = build_portfolio_weights(
             score_day,
             &candidates,
             return_history,
-            average_amounts,
+            &average_amounts,
             industry_by_symbol,
             &PortfolioConstructionConfig::from(config),
         );
@@ -5835,6 +6076,76 @@ async fn load_average_amounts_cached(
     Ok(Arc::new(amounts))
 }
 
+async fn load_average_amount_history(
+    pool: &PgPool,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    lookback_days: usize,
+) -> Result<AverageAmountHistory, String> {
+    if symbols.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let query_start = start_date - Duration::days((lookback_days as i64).saturating_mul(3).max(1));
+    let rows: Vec<(String, NaiveDate, Option<Decimal>)> = sqlx::query_as(
+        "SELECT symbol, trade_date, amount
+         FROM market_stock_daily_bar
+         WHERE symbol = ANY($1)
+           AND trade_date >= $2 AND trade_date <= $3
+           AND amount > 0
+         ORDER BY symbol, trade_date",
+    )
+    .bind(symbols)
+    .bind(query_start)
+    .bind(end_date)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load PIT portfolio capacity history: {}", e))?;
+
+    let mut history = HashMap::new();
+    for (symbol, trade_date, amount) in rows {
+        let Some(amount) = amount
+            .and_then(|value| value.to_f64())
+            .filter(|value| value.is_finite() && *value > 0.0)
+        else {
+            continue;
+        };
+        history
+            .entry(symbol)
+            .or_insert_with(Vec::new)
+            .push((trade_date, amount));
+    }
+    Ok(history)
+}
+
+async fn load_average_amount_history_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    lookback_days: usize,
+) -> Result<Arc<AverageAmountHistory>, String> {
+    let (missing_symbols, mut history) =
+        cache.cached_average_amount_history_symbols(symbols, start_date, end_date, lookback_days);
+    if missing_symbols.is_empty() {
+        return Ok(Arc::new(history));
+    }
+    let loaded_history =
+        load_average_amount_history(pool, &missing_symbols, start_date, end_date, lookback_days)
+            .await?;
+    let loaded_history = cache.insert_average_amount_history_symbols(
+        &missing_symbols,
+        start_date,
+        end_date,
+        lookback_days,
+        loaded_history,
+    );
+    history.extend(loaded_history);
+    Ok(Arc::new(history))
+}
+
 async fn load_industry_classifications(
     pool: &PgPool,
     symbols: &[String],
@@ -5879,10 +6190,23 @@ async fn load_portfolio_capacity_inputs(
     symbols: &[String],
     start_date: NaiveDate,
     end_date: NaiveDate,
+    trading_days: &[NaiveDate],
     config: &PortfolioConstructionConfig,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<AverageAmountsByDate, String> {
     if config.uses_capacity_inputs() {
-        load_average_amounts(pool, symbols, start_date, end_date).await
+        let history = load_average_amount_history(
+            pool,
+            symbols,
+            start_date,
+            end_date,
+            PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+        )
+        .await?;
+        Ok(build_pit_average_amounts_by_date(
+            &history,
+            trading_days,
+            PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+        ))
     } else {
         Ok(HashMap::new())
     }
@@ -5894,10 +6218,24 @@ async fn load_portfolio_capacity_inputs_cached(
     symbols: &[String],
     start_date: NaiveDate,
     end_date: NaiveDate,
+    trading_days: &[NaiveDate],
     config: &PortfolioConstructionConfig,
-) -> Result<Arc<AverageAmounts>, String> {
+) -> Result<Arc<AverageAmountsByDate>, String> {
     if config.uses_capacity_inputs() {
-        load_average_amounts_cached(pool, cache, symbols, start_date, end_date).await
+        let history = load_average_amount_history_cached(
+            pool,
+            cache,
+            symbols,
+            start_date,
+            end_date,
+            PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+        )
+        .await?;
+        Ok(Arc::new(build_pit_average_amounts_by_date(
+            history.as_ref(),
+            trading_days,
+            PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+        )))
     } else {
         Ok(Arc::new(HashMap::new()))
     }
@@ -6001,9 +6339,12 @@ fn build_portfolio_weights(
     config: &PortfolioConstructionConfig,
 ) -> HashMap<String, Decimal> {
     let ranked_candidates = rank_candidates_for_capacity(
+        score_day,
         candidates,
+        return_history,
         average_amounts,
         config.candidate_ranking_profile,
+        config.risk_budget_lookback_days,
     );
     let risk_filtered_candidates = filter_candidate_risk_pool(
         score_day,
@@ -6062,33 +6403,40 @@ fn build_portfolio_weights(
 }
 
 fn rank_candidates_for_capacity(
+    score_day: NaiveDate,
     candidates: &[(String, f64)],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     average_amounts: &HashMap<String, f64>,
     profile: CandidateRankingProfile,
+    lookback_days: usize,
 ) -> Vec<(String, f64)> {
     let Some(params) = profile.params() else {
         return candidates.to_vec();
     };
-    if candidates.len() <= 1 || average_amounts.is_empty() {
+    if candidates.len() <= 1 {
         return candidates.to_vec();
     }
 
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
-    if amount_ranks.is_empty() {
-        return candidates.to_vec();
-    }
+    let relative_strength_ranks =
+        relative_strength_rank_scores(candidates, return_history, score_day, lookback_days);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
     let alpha_weight = params.alpha_rank_weight.max(0.0);
     let liquidity_weight = params.liquidity_rank_weight.max(0.0);
-    let weight_sum = (alpha_weight + liquidity_weight).max(f64::EPSILON);
+    let relative_strength_weight = params.relative_strength_rank_weight.max(0.0);
+    let weight_sum = (alpha_weight + liquidity_weight + relative_strength_weight).max(f64::EPSILON);
     let mut ranked = candidates
         .iter()
         .enumerate()
         .map(|(idx, (symbol, score))| {
             let alpha_rank = 1.0 - (idx as f64 / denominator);
-            let liquidity_rank = amount_ranks.get(symbol).copied().unwrap_or(0.0);
-            let blended_rank =
-                (alpha_weight * alpha_rank + liquidity_weight * liquidity_rank) / weight_sum;
+            let liquidity_rank = amount_ranks.get(symbol).copied().unwrap_or(0.5);
+            let relative_strength_rank =
+                relative_strength_ranks.get(symbol).copied().unwrap_or(0.5);
+            let blended_rank = (alpha_weight * alpha_rank
+                + liquidity_weight * liquidity_rank
+                + relative_strength_weight * relative_strength_rank)
+                / weight_sum;
             (idx, symbol.clone(), *score, blended_rank)
         })
         .collect::<Vec<_>>();
@@ -6103,6 +6451,52 @@ fn rank_candidates_for_capacity(
         .into_iter()
         .map(|(_, symbol, score, _)| (symbol, score))
         .collect()
+}
+
+fn relative_strength_rank_scores(
+    candidates: &[(String, f64)],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    score_day: NaiveDate,
+    lookback_days: usize,
+) -> HashMap<String, f64> {
+    let mut ranked_returns = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (symbol, _))| {
+            let returns = trailing_returns(return_history, symbol, score_day, lookback_days);
+            trailing_total_return(&returns).map(|total_return| (idx, symbol.clone(), total_return))
+        })
+        .collect::<Vec<_>>();
+    if ranked_returns.is_empty() {
+        return HashMap::new();
+    }
+    ranked_returns.sort_by(|left, right| {
+        right
+            .2
+            .partial_cmp(&left.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let denominator = ranked_returns.len().saturating_sub(1).max(1) as f64;
+    ranked_returns
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (_, symbol, _))| (symbol, 1.0 - (rank as f64 / denominator)))
+        .collect()
+}
+
+fn trailing_total_return(returns: &[f64]) -> Option<f64> {
+    let mut seen = false;
+    let total_return = returns
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > -1.0)
+        .fold(1.0, |acc, value| {
+            seen = true;
+            acc * (1.0 + value)
+        })
+        - 1.0;
+    seen.then_some(total_return)
 }
 
 fn liquidity_rank_scores(
@@ -7480,6 +7874,94 @@ mod tests {
     }
 
     #[test]
+    fn pit_average_amounts_by_date_never_uses_future_amount_rows() {
+        let as_of = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let future_day = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
+        let amount_history = HashMap::from([
+            (
+                "FUTURE_LIQUID".to_string(),
+                vec![(as_of, 1_000_000.0), (future_day, 1_000_000_000.0)],
+            ),
+            (
+                "LIQUID_NOW".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 900_000_000.0),
+                    (as_of, 800_000_000.0),
+                ],
+            ),
+        ]);
+
+        let average_amounts_by_date =
+            build_pit_average_amounts_by_date(&amount_history, &[as_of], 2);
+        let average_amounts = average_amounts_by_date
+            .get(&as_of)
+            .expect("as-of liquidity snapshot");
+
+        assert_eq!(average_amounts["FUTURE_LIQUID"], 1_000_000.0);
+        assert!(average_amounts["LIQUID_NOW"] > average_amounts["FUTURE_LIQUID"]);
+    }
+
+    #[test]
+    fn factor_signals_use_score_day_pit_capacity_snapshot() {
+        let trading_days = vec![
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(),
+        ];
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let mut scores_by_date = HashMap::new();
+        scores_by_date.insert(
+            score_day,
+            vec![
+                ("FUTURE_LIQUID_ALPHA".to_string(), 100.0),
+                ("LIQUID_NEAR_ALPHA".to_string(), 99.0),
+                ("LIQUID_BACKUP".to_string(), 98.0),
+                ("THIN_BACKUP".to_string(), 97.0),
+            ],
+        );
+        let average_amounts_by_date = HashMap::from([
+            (
+                score_day,
+                HashMap::from([
+                    ("FUTURE_LIQUID_ALPHA".to_string(), 1_000_000.0),
+                    ("LIQUID_NEAR_ALPHA".to_string(), 900_000_000.0),
+                    ("LIQUID_BACKUP".to_string(), 800_000_000.0),
+                    ("THIN_BACKUP".to_string(), 1_000_000.0),
+                ]),
+            ),
+            (
+                NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(),
+                HashMap::from([("FUTURE_LIQUID_ALPHA".to_string(), 1_000_000_000.0)]),
+            ),
+        ]);
+        let config = SignalConfig {
+            top_n: 2,
+            rebalance_freq_days: 1,
+            max_position_pct: Decimal::new(50, 2),
+            candidate_ranking_profile: CandidateRankingProfile::CapacityAwareAlphaLiquidityV1,
+            ..Default::default()
+        };
+
+        let signals = build_rebalance_factor_signals(
+            &trading_days,
+            &scores_by_date,
+            &config,
+            &HashMap::new(),
+            &average_amounts_by_date,
+            &HashMap::new(),
+            |_day, base| base.clone(),
+        )
+        .expect("factor signals");
+        let signal = signals
+            .get(&NaiveDate::from_ymd_opt(2026, 1, 7).unwrap())
+            .expect("signal from score day");
+
+        assert!(!signal.target_weights.contains_key("FUTURE_LIQUID_ALPHA"));
+        assert!(signal.target_weights.contains_key("LIQUID_NEAR_ALPHA"));
+        assert!(signal.target_weights.contains_key("LIQUID_BACKUP"));
+    }
+
+    #[test]
     fn prediction_signals_use_previous_day_ranked_predictions() {
         let trading_days = vec![
             NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(),
@@ -8128,6 +8610,105 @@ mod tests {
         assert!(weights.contains_key("LIQUID_NEAR_ALPHA_2"));
         assert!(!weights.contains_key("THIN_ALPHA_1"));
         assert!(!weights.contains_key("THIN_ALPHA_2"));
+    }
+
+    #[test]
+    fn alpha_first_low_impact_ranking_preserves_alpha_with_liquidity_bias() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("ALPHA_LEADER".to_string(), 100.0),
+            ("LIQUID_NEAR_ALPHA".to_string(), 99.0),
+            ("LIQUID_BACKUP".to_string(), 98.0),
+            ("THIN_BACKUP".to_string(), 97.0),
+        ];
+        let average_amounts = HashMap::from([
+            ("ALPHA_LEADER".to_string(), 80_000_000.0),
+            ("LIQUID_NEAR_ALPHA".to_string(), 1_000_000_000.0),
+            ("LIQUID_BACKUP".to_string(), 900_000_000.0),
+            ("THIN_BACKUP".to_string(), 1_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(50, 2),
+            candidate_ranking_profile: CandidateRankingProfile::AlphaFirstLowImpactV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &HashMap::new(),
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights.contains_key("ALPHA_LEADER"));
+        assert!(weights.contains_key("LIQUID_NEAR_ALPHA"));
+        assert!(!weights.contains_key("LIQUID_BACKUP"));
+        assert!(!weights.contains_key("THIN_BACKUP"));
+    }
+
+    #[test]
+    fn relative_strength_alpha_liquidity_ranking_uses_only_pit_trailing_returns() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let future_day = NaiveDate::from_ymd_opt(2026, 1, 9).unwrap();
+        let candidates = vec![
+            ("ALPHA_LEADER".to_string(), 100.0),
+            ("RELATIVE_STRENGTH".to_string(), 99.0),
+            ("FUTURE_SPIKE".to_string(), 98.0),
+            ("LIQUID_BACKUP".to_string(), 97.0),
+        ];
+        let return_history = HashMap::from([
+            (
+                "ALPHA_LEADER".to_string(),
+                dated_returns(&[0.0, 0.0, 0.0, 0.0, 0.0]),
+            ),
+            (
+                "RELATIVE_STRENGTH".to_string(),
+                dated_returns(&[0.02, 0.03, 0.01, 0.02, 0.03]),
+            ),
+            (
+                "FUTURE_SPIKE".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), -0.02),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.02),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), -0.01),
+                    (future_day, 0.30),
+                ],
+            ),
+            (
+                "LIQUID_BACKUP".to_string(),
+                dated_returns(&[0.0, 0.0, 0.0, 0.0, 0.0]),
+            ),
+        ]);
+        let average_amounts = HashMap::from([
+            ("ALPHA_LEADER".to_string(), 200_000_000.0),
+            ("RELATIVE_STRENGTH".to_string(), 1_000_000_000.0),
+            ("FUTURE_SPIKE".to_string(), 900_000_000.0),
+            ("LIQUID_BACKUP".to_string(), 800_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(50, 2),
+            risk_budget_lookback_days: 5,
+            candidate_ranking_profile: CandidateRankingProfile::RelativeStrengthAlphaLiquidityV1,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(weights.contains_key("RELATIVE_STRENGTH"));
+        assert!(weights.contains_key("ALPHA_LEADER"));
+        assert!(!weights.contains_key("FUTURE_SPIKE"));
+        assert!(!weights.contains_key("LIQUID_BACKUP"));
     }
 
     #[test]
@@ -9246,6 +9827,52 @@ mod tests {
         let reused = cache
             .cached_combo_scores(&requested_key)
             .expect("larger candidate pool should satisfy smaller request");
+
+        assert_eq!(
+            reused.get(&start).unwrap(),
+            &vec![("AAA".to_string(), 0.9), ("BBB".to_string(), 0.8)]
+        );
+        assert_eq!(cache.stats().combo_score_hits, 1);
+        assert_eq!(cache.stats().combo_score_misses, 0);
+    }
+
+    #[test]
+    fn signal_data_cache_reuses_unbounded_combo_scores_for_directional_pool_request() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let cached_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            None,
+            TradableUniverseProfile::ListedNonSt,
+        );
+        let requested_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+            ScoreDirection::Descending,
+            Some(2),
+            TradableUniverseProfile::ListedNonSt,
+        );
+        let mut scores = HashMap::new();
+        scores.insert(
+            start,
+            vec![
+                ("CCC".to_string(), 0.7),
+                ("AAA".to_string(), 0.9),
+                ("BBB".to_string(), 0.8),
+            ],
+        );
+        let mut cache = SignalDataCache::default();
+        cache.store_combo_scores_for_test(cached_key, scores);
+
+        let reused = cache
+            .cached_combo_scores(&requested_key)
+            .expect("unbounded cache should satisfy directional pool request");
 
         assert_eq!(
             reused.get(&start).unwrap(),

@@ -115,6 +115,12 @@ pub struct Phase7OosWalkForwardDiscoveryRequest {
     pub max_perturbed_oos_drawdown_pct: Option<f64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Phase7OosProfileComparisonPlanRequest {
+    pub base: Phase7OosWalkForwardDiscoveryRequest,
+    pub profiles: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OosCostCapacityPerturbationRequest {
     pub name: Option<String>,
@@ -322,6 +328,7 @@ struct OosDiscoveryPlan {
 struct OosWindowExecution {
     window: OosDiscoveryWindow,
     train_optimization_task_id: String,
+    train_execution_policy: OosTrainExecutionPolicy,
     train_batches: Vec<Value>,
     selected_candidate: DiscoveryCandidate,
     train_robustness: Option<Value>,
@@ -534,7 +541,6 @@ fn default_oos_train_selection_gate_policy() -> Value {
         "enforce_trial_constraint_violations": false,
         "min_trade_count": 20,
         "min_annual_return": 0.0,
-        "min_excess_return": 0.0,
         "min_sharpe": 0.0,
         "max_drawdown": 0.50,
         "min_score_gap": -999.0,
@@ -663,7 +669,42 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "execution_capacity_aware_candidate_ranking"
         | "capacity_aware_candidate_ranking"
         | "phase7_execution_capacity_aware_candidate_ranking"
-        | "phase7_eq" => merge_gate_policy(
+        | "phase7_eq"
+        | "professional_execution_pit_capacity_ranking"
+        | "execution_pit_capacity_ranking"
+        | "pit_capacity_ranking"
+        | "phase7_execution_pit_capacity_ranking"
+        | "phase7_er"
+        | "professional_execution_pit_alpha_first_low_impact"
+        | "execution_pit_alpha_first_low_impact"
+        | "pit_alpha_first_low_impact"
+        | "phase7_execution_pit_alpha_first_low_impact"
+        | "phase7_es"
+        | "professional_execution_pit_excess_return_recovery"
+        | "execution_pit_excess_return_recovery"
+        | "pit_excess_return_recovery"
+        | "phase7_execution_pit_excess_return_recovery"
+        | "phase7_et"
+        | "professional_execution_bull_sleeve_cash_recovery"
+        | "execution_bull_sleeve_cash_recovery"
+        | "bull_sleeve_cash_recovery"
+        | "phase7_execution_bull_sleeve_cash_recovery"
+        | "phase7_eu"
+        | "professional_execution_oos_regime_alpha_rebuild"
+        | "execution_oos_regime_alpha_rebuild"
+        | "oos_regime_alpha_rebuild"
+        | "phase7_execution_oos_regime_alpha_rebuild"
+        | "phase7_ev"
+        | "professional_execution_oos_benchmark_excess_rebuild"
+        | "execution_oos_benchmark_excess_rebuild"
+        | "oos_benchmark_excess_rebuild"
+        | "phase7_execution_oos_benchmark_excess_rebuild"
+        | "phase7_ew"
+        | "professional_execution_oos_execution_adaptive_rebuild"
+        | "execution_oos_execution_adaptive_rebuild"
+        | "oos_execution_adaptive_rebuild"
+        | "phase7_execution_oos_execution_adaptive_rebuild"
+        | "phase7_ex" => merge_gate_policy(
             base,
             &json!({
                 "enable_train_cost_capacity_perturbation_gate": true,
@@ -1570,6 +1611,62 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_execution_capacity_aware_candidate_ranking".to_string(),
             LayeredSearchConfig::professional_execution_capacity_aware_candidate_ranking_default(),
         ),
+        "professional_execution_pit_capacity_ranking"
+        | "execution_pit_capacity_ranking"
+        | "pit_capacity_ranking"
+        | "phase7_execution_pit_capacity_ranking"
+        | "phase7_er" => (
+            "professional_execution_pit_capacity_ranking".to_string(),
+            LayeredSearchConfig::professional_execution_pit_capacity_ranking_default(),
+        ),
+        "professional_execution_pit_alpha_first_low_impact"
+        | "execution_pit_alpha_first_low_impact"
+        | "pit_alpha_first_low_impact"
+        | "phase7_execution_pit_alpha_first_low_impact"
+        | "phase7_es" => (
+            "professional_execution_pit_alpha_first_low_impact".to_string(),
+            LayeredSearchConfig::professional_execution_pit_alpha_first_low_impact_default(),
+        ),
+        "professional_execution_pit_excess_return_recovery"
+        | "execution_pit_excess_return_recovery"
+        | "pit_excess_return_recovery"
+        | "phase7_execution_pit_excess_return_recovery"
+        | "phase7_et" => (
+            "professional_execution_pit_excess_return_recovery".to_string(),
+            LayeredSearchConfig::professional_execution_pit_excess_return_recovery_default(),
+        ),
+        "professional_execution_bull_sleeve_cash_recovery"
+        | "execution_bull_sleeve_cash_recovery"
+        | "bull_sleeve_cash_recovery"
+        | "phase7_execution_bull_sleeve_cash_recovery"
+        | "phase7_eu" => (
+            "professional_execution_bull_sleeve_cash_recovery".to_string(),
+            LayeredSearchConfig::professional_execution_bull_sleeve_cash_recovery_default(),
+        ),
+        "professional_execution_oos_regime_alpha_rebuild"
+        | "execution_oos_regime_alpha_rebuild"
+        | "oos_regime_alpha_rebuild"
+        | "phase7_execution_oos_regime_alpha_rebuild"
+        | "phase7_ev" => (
+            "professional_execution_oos_regime_alpha_rebuild".to_string(),
+            LayeredSearchConfig::professional_execution_oos_regime_alpha_rebuild_default(),
+        ),
+        "professional_execution_oos_benchmark_excess_rebuild"
+        | "execution_oos_benchmark_excess_rebuild"
+        | "oos_benchmark_excess_rebuild"
+        | "phase7_execution_oos_benchmark_excess_rebuild"
+        | "phase7_ew" => (
+            "professional_execution_oos_benchmark_excess_rebuild".to_string(),
+            LayeredSearchConfig::professional_execution_oos_benchmark_excess_rebuild_default(),
+        ),
+        "professional_execution_oos_execution_adaptive_rebuild"
+        | "execution_oos_execution_adaptive_rebuild"
+        | "oos_execution_adaptive_rebuild"
+        | "phase7_execution_oos_execution_adaptive_rebuild"
+        | "phase7_ex" => (
+            "professional_execution_oos_execution_adaptive_rebuild".to_string(),
+            LayeredSearchConfig::professional_execution_oos_execution_adaptive_rebuild_default(),
+        ),
         "professional_return_alpha_sharpe_bridge"
         | "return_alpha_sharpe_bridge"
         | "phase7_return_alpha_sharpe_bridge"
@@ -2183,6 +2280,25 @@ pub async fn run_phase7_oos_walk_forward_discovery(
     }
 }
 
+pub async fn plan_phase7_oos_profile_comparison(
+    Json(req): Json<Phase7OosProfileComparisonPlanRequest>,
+) -> impl IntoResponse {
+    match build_phase7_oos_profile_comparison_plan(&req.base, req.profiles) {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn launch_phase7_oos_profile_comparison_smoke(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7OosProfileComparisonPlanRequest>,
+) -> impl IntoResponse {
+    match start_phase7_oos_profile_comparison_smoke(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
 pub async fn get_experiment_run(
     State(state): State<Arc<AppState>>,
     Path(experiment_run_id): Path<String>,
@@ -2395,6 +2511,14 @@ fn normalized_trial_concurrency(value: Option<usize>) -> usize {
         .clamp(1, 16)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OosTrainExecutionPolicy {
+    requested_cache_mode: &'static str,
+    cache_mode: &'static str,
+    requested_trial_concurrency: usize,
+    trial_concurrency: usize,
+}
+
 fn normalize_oos_train_cache_mode(mode: Option<&str>) -> Result<&'static str, String> {
     match mode
         .map(str::trim)
@@ -2403,18 +2527,48 @@ fn normalize_oos_train_cache_mode(mode: Option<&str>) -> Result<&'static str, St
     {
         "shared_window" | "shared" | "window_shared" | "reuse" => Ok("shared_window"),
         "per_trial_isolated" | "isolated" | "parallel_isolated" => Ok("per_trial_isolated"),
+        "auto" | "adaptive" | "resource_adaptive" => Ok("auto"),
         other => Err(format!("unsupported train_cache_mode: {}", other)),
     }
 }
 
-fn oos_train_trial_concurrency(
+fn resolve_oos_train_execution_policy(
     req: &Phase7OosWalkForwardDiscoveryRequest,
-) -> Result<usize, String> {
-    match normalize_oos_train_cache_mode(req.train_cache_mode.as_deref())? {
-        "shared_window" => Ok(1),
-        "per_trial_isolated" => Ok(normalized_trial_concurrency(req.trial_concurrency)),
-        other => Err(format!("unsupported train_cache_mode: {}", other)),
-    }
+    resource_plan: &LocalResourcePlan,
+) -> Result<OosTrainExecutionPolicy, String> {
+    let requested_cache_mode = normalize_oos_train_cache_mode(req.train_cache_mode.as_deref())?;
+    let requested_trial_concurrency = normalized_trial_concurrency(req.trial_concurrency);
+    let (cache_mode, trial_concurrency) = match requested_cache_mode {
+        "shared_window" => ("shared_window", 1),
+        "per_trial_isolated" => ("per_trial_isolated", requested_trial_concurrency),
+        "auto" => {
+            let planned_trials = req
+                .max_trials_per_window
+                .unwrap_or(resource_plan.max_trials);
+            let enough_work = planned_trials
+                >= resource_plan
+                    .batch_size
+                    .saturating_mul(4)
+                    .max(requested_trial_concurrency.saturating_mul(2));
+            let enough_resources =
+                resource_plan.max_parallel_trials >= 2 && resource_plan.memory_budget_gb >= 8;
+            if enough_work && enough_resources {
+                (
+                    "per_trial_isolated",
+                    requested_trial_concurrency.min(resource_plan.max_parallel_trials),
+                )
+            } else {
+                ("shared_window", 1)
+            }
+        }
+        other => return Err(format!("unsupported train_cache_mode: {}", other)),
+    };
+    Ok(OosTrainExecutionPolicy {
+        requested_cache_mode,
+        cache_mode,
+        requested_trial_concurrency,
+        trial_concurrency,
+    })
 }
 
 async fn start_phase7_oos_walk_forward_discovery_background(
@@ -2458,6 +2612,38 @@ async fn start_phase7_oos_walk_forward_discovery_background(
         "plan": plan_json,
         "resource_plan": LocalResourcePlan::local_mac(),
         "poll_url": format!("/api/v1/quant/experiments/{}", experiment_run_id),
+    }))
+}
+
+async fn start_phase7_oos_profile_comparison_smoke(
+    db: &sqlx::PgPool,
+    req: Phase7OosProfileComparisonPlanRequest,
+) -> Result<Value, String> {
+    let launch_requests =
+        build_phase7_oos_profile_comparison_launch_requests(&req.base, req.profiles)?;
+    let mut launches = Vec::new();
+    for launch_req in launch_requests {
+        let search_profile = launch_req
+            .search_profile
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let request = oos_request_plan_json(&launch_req);
+        let launched = start_phase7_oos_walk_forward_discovery_background(db, launch_req).await?;
+        launches.push(json!({
+            "search_profile": search_profile,
+            "experiment_run_id": launched["experiment_run_id"],
+            "status": launched["status"],
+            "poll_url": launched["poll_url"],
+            "request": request,
+            "plan": launched["plan"],
+        }));
+    }
+
+    Ok(json!({
+        "search_method": "phase7_oos_profile_comparison_smoke",
+        "execution_mode": "background",
+        "profile_count": launches.len(),
+        "launches": launches,
     }))
 }
 
@@ -2635,7 +2821,8 @@ async fn execute_oos_discovery_window(
     let mut train_signal_cache = SignalDataCache::default();
     let mut train_backtest_cache = BacktestDataCache::default();
     let mut train_batches = Vec::new();
-    let trial_concurrency = oos_train_trial_concurrency(req)?;
+    let train_execution_policy =
+        resolve_oos_train_execution_policy(req, &LocalResourcePlan::local_mac())?;
     for _ in 0..max_batches {
         let batch = execute_pending_trials_with_caches_and_concurrency(
             db,
@@ -2644,7 +2831,7 @@ async fn execute_oos_discovery_window(
             None,
             &mut train_signal_cache,
             &mut train_backtest_cache,
-            trial_concurrency,
+            train_execution_policy.trial_concurrency,
         )
         .await?;
         let executed = batch["executed"].as_i64().unwrap_or(0);
@@ -2706,6 +2893,7 @@ async fn execute_oos_discovery_window(
     Ok(OosWindowExecution {
         window: window.clone(),
         train_optimization_task_id: train_task_id,
+        train_execution_policy,
         train_batches,
         selected_candidate,
         train_robustness,
@@ -2924,6 +3112,20 @@ fn train_cost_capacity_stress_aware_selection_enabled(
     )
     .or_else(|| constraint_bool(Some(train_gate_policy), "stress_aware_train_selection"))
     .unwrap_or(true)
+}
+
+fn best_effort_train_selection_for_diagnostics_enabled(train_gate_policy: &Value) -> bool {
+    constraint_bool(
+        Some(train_gate_policy),
+        "allow_best_effort_train_selection_for_diagnostics",
+    )
+    .or_else(|| {
+        constraint_bool(
+            Some(train_gate_policy),
+            "diagnostic_best_effort_train_selection",
+        )
+    })
+    .unwrap_or(false)
 }
 
 fn default_oos_cost_capacity_perturbations() -> Vec<OosCostCapacityPerturbationRequest> {
@@ -3804,6 +4006,127 @@ fn build_oos_discovery_plan(
     })
 }
 
+fn default_phase7_oos_comparison_profiles() -> Vec<String> {
+    vec![
+        "phase7_ev".to_string(),
+        "phase7_ew".to_string(),
+        "phase7_ex".to_string(),
+    ]
+}
+
+fn profile_comparison_request(
+    base: &Phase7OosWalkForwardDiscoveryRequest,
+    search_profile: &str,
+) -> Phase7OosWalkForwardDiscoveryRequest {
+    let mut req = base.clone();
+    req.search_profile = Some(search_profile.to_string());
+    req.plan_only = Some(true);
+    req.execution_mode = Some("inline".to_string());
+    req.train_cache_mode = Some(
+        req.train_cache_mode
+            .filter(|mode| !mode.trim().is_empty())
+            .unwrap_or_else(|| "auto".to_string()),
+    );
+    req
+}
+
+fn oos_request_plan_json(req: &Phase7OosWalkForwardDiscoveryRequest) -> Value {
+    json!({
+        "strategy_version_id": req.strategy_version_id,
+        "data_version_id": req.data_version_id,
+        "search_profile": req.search_profile,
+        "max_trials_per_window": req.max_trials_per_window,
+        "trial_batch_limit": req.trial_batch_limit,
+        "trial_concurrency": req.trial_concurrency,
+        "train_cache_mode": req.train_cache_mode,
+        "max_batches_per_window": req.max_batches_per_window,
+        "train_window_days": req.train_window_days,
+        "test_window_days": req.test_window_days,
+        "step_days": req.step_days,
+        "validation_mode": req.validation_mode,
+        "include_partial_last_window": req.include_partial_last_window,
+        "plan_only": req.plan_only,
+        "execution_mode": req.execution_mode,
+        "oos_top_n": req.oos_top_n,
+        "enable_cost_capacity_perturbation_gate": req.enable_cost_capacity_perturbation_gate,
+    })
+}
+
+fn build_phase7_oos_profile_comparison_plan(
+    base: &Phase7OosWalkForwardDiscoveryRequest,
+    profiles: Option<Vec<String>>,
+) -> Result<Value, String> {
+    let profiles = profiles.unwrap_or_else(default_phase7_oos_comparison_profiles);
+    if profiles.is_empty() {
+        return Err("profile comparison requires at least one search_profile".to_string());
+    }
+
+    let mut profile_plans = Vec::new();
+    for profile in profiles {
+        let profile = profile.trim();
+        if profile.is_empty() {
+            return Err("profile comparison search_profile must not be empty".to_string());
+        }
+        let req = profile_comparison_request(base, profile);
+        let plan = build_oos_discovery_plan(&req)?;
+        let plan_json = oos_discovery_plan_json(&plan);
+        let config = oos_walk_forward_experiment_config(&req, &plan_json);
+        profile_plans.push(json!({
+            "search_profile": profile,
+            "request": oos_request_plan_json(&req),
+            "plan": plan_json,
+            "config": config,
+        }));
+    }
+
+    Ok(json!({
+        "search_method": "phase7_oos_profile_comparison_plan",
+        "profile_count": profile_plans.len(),
+        "profiles": profile_plans,
+    }))
+}
+
+fn bounded_profile_comparison_smoke_request(
+    base: &Phase7OosWalkForwardDiscoveryRequest,
+    search_profile: &str,
+) -> Phase7OosWalkForwardDiscoveryRequest {
+    let mut req = profile_comparison_request(base, search_profile);
+    req.plan_only = Some(false);
+    req.execution_mode = Some("background".to_string());
+    req.train_cache_mode = Some(
+        req.train_cache_mode
+            .filter(|mode| !mode.trim().is_empty())
+            .unwrap_or_else(|| "auto".to_string()),
+    );
+    req.max_trials_per_window = Some(req.max_trials_per_window.unwrap_or(8).clamp(1, 8));
+    req.trial_batch_limit = Some(req.trial_batch_limit.unwrap_or(8).clamp(1, 8));
+    req.max_batches_per_window = Some(req.max_batches_per_window.unwrap_or(1).clamp(1, 1));
+    req.oos_top_n = Some(req.oos_top_n.unwrap_or(3).clamp(1, 3));
+    req
+}
+
+fn build_phase7_oos_profile_comparison_launch_requests(
+    base: &Phase7OosWalkForwardDiscoveryRequest,
+    profiles: Option<Vec<String>>,
+) -> Result<Vec<Phase7OosWalkForwardDiscoveryRequest>, String> {
+    let profiles = profiles.unwrap_or_else(default_phase7_oos_comparison_profiles);
+    if profiles.is_empty() {
+        return Err("profile comparison launch requires at least one search_profile".to_string());
+    }
+
+    profiles
+        .iter()
+        .map(|profile| {
+            let profile = profile.trim();
+            if profile.is_empty() {
+                Err("profile comparison search_profile must not be empty".to_string())
+            } else {
+                Ok(bounded_profile_comparison_smoke_request(base, profile))
+            }
+        })
+        .collect()
+}
+
 fn build_holdout_oos_windows(
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -4089,6 +4412,16 @@ async fn select_oos_training_candidate(
                 evaluation.train_cost_capacity_perturbations,
             ));
         }
+        if best_effort_train_selection_for_diagnostics_enabled(gate_policy)
+            && !evaluated_candidates.is_empty()
+        {
+            let evaluation = evaluated_candidates.remove(0);
+            return Ok((
+                evaluation.candidate,
+                Some(evaluation.robustness),
+                evaluation.train_cost_capacity_perturbations,
+            ));
+        }
         if let Some(evaluation) = evaluated_candidates.first() {
             return Err(format!(
                 "window {} has no training candidate passing robustness; best stress-aware rejected trial {} status {} train cost/capacity pass ratio {}/{} stress_adjusted_score {}",
@@ -4107,6 +4440,9 @@ async fn select_oos_training_candidate(
     }
 
     if let Some((candidate, robustness)) = first_rejected {
+        if best_effort_train_selection_for_diagnostics_enabled(gate_policy) {
+            return Ok((candidate, Some(robustness), Vec::new()));
+        }
         return Err(format!(
             "window {} has no training candidate passing robustness; best rejected trial {} status {}",
             window_index,
@@ -4414,6 +4750,12 @@ fn oos_window_execution_json(execution: &OosWindowExecution, train_gate_policy: 
     json!({
         "window": oos_window_json(&execution.window),
         "train_optimization_task_id": execution.train_optimization_task_id,
+        "train_execution_policy": {
+            "requested_cache_mode": execution.train_execution_policy.requested_cache_mode,
+            "cache_mode": execution.train_execution_policy.cache_mode,
+            "requested_trial_concurrency": execution.train_execution_policy.requested_trial_concurrency,
+            "trial_concurrency": execution.train_execution_policy.trial_concurrency,
+        },
         "train_batches": execution.train_batches,
         "selected_candidate": discovery_candidate_json(&execution.selected_candidate),
         "train_robustness": execution.train_robustness,
@@ -4672,10 +5014,15 @@ fn oos_walk_forward_experiment_config(
     let train_selection_gate_policy = resolve_oos_train_selection_gate_policy(req);
     let train_cost_gate =
         train_cost_capacity_perturbation_gate_config(req, &train_selection_gate_policy);
-    let requested_trial_concurrency = normalized_trial_concurrency(req.trial_concurrency);
-    let train_cache_mode =
-        normalize_oos_train_cache_mode(req.train_cache_mode.as_deref()).unwrap_or("shared_window");
-    let train_trial_concurrency = oos_train_trial_concurrency(req).unwrap_or(1);
+    let train_execution_policy =
+        resolve_oos_train_execution_policy(req, &LocalResourcePlan::local_mac()).unwrap_or(
+            OosTrainExecutionPolicy {
+                requested_cache_mode: "shared_window",
+                cache_mode: "shared_window",
+                requested_trial_concurrency: 1,
+                trial_concurrency: 1,
+            },
+        );
     let train_stress_score_profile =
         train_cost_capacity_stress_score_profile(&train_selection_gate_policy);
     json!({
@@ -4685,10 +5032,11 @@ fn oos_walk_forward_experiment_config(
         "max_trials_per_window": req.max_trials_per_window,
         "exhaustive_search": req.exhaustive_search.unwrap_or(false),
         "trial_batch_limit": req.trial_batch_limit,
-        "requested_trial_concurrency": requested_trial_concurrency,
-        "trial_concurrency": requested_trial_concurrency,
-        "train_trial_concurrency": train_trial_concurrency,
-        "train_cache_mode": train_cache_mode,
+        "requested_trial_concurrency": train_execution_policy.requested_trial_concurrency,
+        "trial_concurrency": train_execution_policy.requested_trial_concurrency,
+        "requested_train_cache_mode": train_execution_policy.requested_cache_mode,
+        "train_trial_concurrency": train_execution_policy.trial_concurrency,
+        "train_cache_mode": train_execution_policy.cache_mode,
         "max_batches_per_window": req.max_batches_per_window,
         "require_train_robustness_approval": req.require_train_robustness_approval.unwrap_or(true),
         "train_selection_gate_policy": train_selection_gate_policy,
@@ -9439,7 +9787,10 @@ mod tests {
             normalize_oos_train_cache_mode(None).unwrap(),
             "shared_window"
         );
-        assert_eq!(oos_train_trial_concurrency(&req).unwrap(), 1);
+        let policy =
+            resolve_oos_train_execution_policy(&req, &LocalResourcePlan::for_machine(10, 32))
+                .unwrap();
+        assert_eq!(policy.trial_concurrency, 1);
 
         let config =
             oos_walk_forward_experiment_config(&req, &json!({"validation_mode": "walk_forward"}));
@@ -9492,13 +9843,234 @@ mod tests {
             normalize_oos_train_cache_mode(Some("isolated")).unwrap(),
             "per_trial_isolated"
         );
-        assert_eq!(oos_train_trial_concurrency(&req).unwrap(), 4);
+        let policy =
+            resolve_oos_train_execution_policy(&req, &LocalResourcePlan::for_machine(10, 32))
+                .unwrap();
+        assert_eq!(policy.trial_concurrency, 4);
 
         let config =
             oos_walk_forward_experiment_config(&req, &json!({"validation_mode": "walk_forward"}));
         assert_eq!(config["requested_trial_concurrency"], json!(4));
         assert_eq!(config["train_trial_concurrency"], json!(4));
         assert_eq!(config["train_cache_mode"], json!("per_trial_isolated"));
+    }
+
+    #[test]
+    fn oos_train_execution_auto_cache_prefers_shared_for_small_windows() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: Some(8),
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: Some(4),
+            train_cache_mode: Some("auto".to_string()),
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+        let resource_plan = LocalResourcePlan::for_machine(10, 32);
+
+        let policy = resolve_oos_train_execution_policy(&req, &resource_plan).unwrap();
+
+        assert_eq!(policy.cache_mode, "shared_window");
+        assert_eq!(policy.trial_concurrency, 1);
+        assert_eq!(policy.requested_cache_mode, "auto");
+    }
+
+    #[test]
+    fn oos_train_execution_auto_cache_uses_isolated_parallel_for_large_windows() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: Some(96),
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: Some(8),
+            train_cache_mode: Some("auto".to_string()),
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+        let resource_plan = LocalResourcePlan::for_machine(10, 32);
+
+        let policy = resolve_oos_train_execution_policy(&req, &resource_plan).unwrap();
+
+        assert_eq!(policy.cache_mode, "per_trial_isolated");
+        assert_eq!(policy.trial_concurrency, 8);
+        assert_eq!(policy.requested_cache_mode, "auto");
+    }
+
+    #[test]
+    fn phase7_oos_profile_comparison_plan_defaults_to_ev_ew_ex_with_auto_cache() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20200101",
+                "end_date": "20250101",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials_per_window: Some(8),
+            search_profile: None,
+            trial_batch_limit: Some(2),
+            trial_concurrency: Some(4),
+            train_cache_mode: None,
+            max_batches_per_window: Some(1),
+            train_window_days: Some(365 * 3),
+            test_window_days: Some(365),
+            step_days: Some(365),
+            validation_mode: Some("walk_forward".to_string()),
+            in_sample_ratio: None,
+            include_partial_last_window: Some(false),
+            plan_only: None,
+            execution_mode: Some("background".to_string()),
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: Some(3),
+            enable_cost_capacity_perturbation_gate: Some(true),
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let plan = build_phase7_oos_profile_comparison_plan(&req, None).expect("comparison plan");
+
+        let profiles = plan["profiles"].as_array().expect("profiles");
+        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles[0]["search_profile"], json!("phase7_ev"));
+        assert_eq!(profiles[1]["search_profile"], json!("phase7_ew"));
+        assert_eq!(profiles[2]["search_profile"], json!("phase7_ex"));
+        assert!(profiles.iter().all(|profile| {
+            profile["request"]["plan_only"] == json!(true)
+                && profile["request"]["execution_mode"] == json!("inline")
+                && profile["request"]["train_cache_mode"] == json!("auto")
+                && profile["plan"]["window_count"] == json!(2)
+                && profile["config"]["train_cache_mode"] == json!("shared_window")
+        }));
+    }
+
+    #[test]
+    fn phase7_oos_profile_comparison_launch_requests_are_bounded_background_smokes() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20200101",
+                "end_date": "20250101",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials_per_window: Some(64),
+            search_profile: None,
+            trial_batch_limit: Some(64),
+            trial_concurrency: Some(8),
+            train_cache_mode: None,
+            max_batches_per_window: Some(16),
+            train_window_days: Some(365 * 3),
+            test_window_days: Some(365),
+            step_days: Some(365),
+            validation_mode: Some("walk_forward".to_string()),
+            in_sample_ratio: None,
+            include_partial_last_window: Some(false),
+            plan_only: Some(true),
+            execution_mode: Some("inline".to_string()),
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: Some(20),
+            enable_cost_capacity_perturbation_gate: Some(true),
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let requests =
+            build_phase7_oos_profile_comparison_launch_requests(&req, None).expect("launch reqs");
+
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].search_profile.as_deref(), Some("phase7_ev"));
+        assert_eq!(requests[1].search_profile.as_deref(), Some("phase7_ew"));
+        assert_eq!(requests[2].search_profile.as_deref(), Some("phase7_ex"));
+        assert!(requests.iter().all(|request| {
+            request.plan_only == Some(false)
+                && request.execution_mode.as_deref() == Some("background")
+                && request.train_cache_mode.as_deref() == Some("auto")
+                && request.max_trials_per_window == Some(8)
+                && request.trial_batch_limit == Some(8)
+                && request.max_batches_per_window == Some(1)
+                && request.oos_top_n == Some(3)
+        }));
     }
 
     #[test]
@@ -15253,6 +15825,63 @@ mod tests {
     }
 
     #[test]
+    fn phase7_er_defaults_oos_train_gate_to_capacity_stress_return() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: None,
+            search_profile: Some("phase7_er".to_string()),
+            trial_batch_limit: None,
+            trial_concurrency: None,
+            train_cache_mode: None,
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: Some(true),
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: Some(0.80),
+            min_perturbed_oos_calmar: Some(1.2),
+            max_perturbed_oos_drawdown_pct: Some(0.35),
+        };
+
+        let config =
+            oos_walk_forward_experiment_config(&req, &json!({"validation_mode": "walk_forward"}));
+
+        assert_eq!(
+            config["train_cost_capacity_perturbation_gate"]["stress_aware_selection_score"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            config["train_selection_gate_policy"]["capacity_stress_target_annual_return"],
+            json!(0.15)
+        );
+        assert_eq!(
+            config["train_selection_gate_policy"]["min_train_final_execution_fill_ratio"],
+            json!(0.90)
+        );
+    }
+
+    #[test]
     fn phase7_layered_request_accepts_execution_feasible_fill_profile() {
         let req = Phase7LayeredOptimizationRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
@@ -15991,6 +16620,387 @@ mod tests {
         assert_eq!(
             first_trial.parameters["execution_rules"]["max_participation_rate"],
             json!(0.10)
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_pit_capacity_ranking_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_er".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_pit_capacity_ranking"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_er"));
+        assert_eq!(
+            gate_policy["enable_train_cost_capacity_perturbation_gate"],
+            true
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_er should seed the EQ capacity anchor first");
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "capacity_aware_alpha_liquidity_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["execution_capacity_aware_candidate_ranking_profile"],
+            "capacity_rank_top100_rebalance180"
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_pit_alpha_first_low_impact_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_es".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_pit_alpha_first_low_impact"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_es"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_es should seed alpha-first PIT capacity recovery first");
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "alpha_first_low_impact_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["pit_capacity_recovery_profile"],
+            "pit_alpha_first_event_top80_rebalance160"
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_pit_excess_return_recovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_et".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_pit_excess_return_recovery"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_et"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_et should seed PIT excess-return recovery first");
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "relative_strength_alpha_liquidity_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["pit_excess_return_recovery_profile"],
+            "pit_excess_event_top80_rebalance120"
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_bull_sleeve_cash_recovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_eu".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_bull_sleeve_cash_recovery"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_eu"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_eu should seed nearest-candidate recovery first");
+        assert_eq!(
+            first_trial.parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert_eq!(
+            first_trial.parameters["event_gate_profile"],
+            "valuation_exclude_bottom40"
+        );
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "capacity_aware_alpha_liquidity_v1"
+        );
+        assert_eq!(first_trial.parameters["candidate_risk_filter"], "off");
+        assert_eq!(first_trial.parameters["risk_contribution_control"], "off");
+        assert_eq!(first_trial.parameters["cash_utilization"], "off");
+        assert_eq!(first_trial.parameters["execution_impact_budget"], "off");
+        assert_eq!(
+            first_trial.parameters["portfolio_volatility_control"],
+            "vol120_18_55_100"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["market_regime"]
+                == "quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1"
+                && trial.parameters["cash_utilization"] == "off"
+                && trial.parameters["portfolio_volatility_control"] == "vol120_18_55_100"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_oos_regime_alpha_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_ev".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_oos_regime_alpha_rebuild"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_ev"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_ev should seed OOS regime alpha rebuild first");
+        assert_eq!(
+            first_trial.parameters["oos_regime_alpha_rebuild_profile"],
+            "oos_rebuild_quality_bull_top30_vol22"
+        );
+        assert_eq!(
+            first_trial.parameters["portfolio_volatility_control"],
+            "vol120_22_65_100"
+        );
+        assert_eq!(first_trial.parameters["candidate_risk_filter"], "off");
+        assert_eq!(first_trial.parameters["cash_utilization"], "off");
+        assert_eq!(first_trial.parameters["execution_impact_budget"], "off");
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_oos_benchmark_excess_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_ew".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_oos_benchmark_excess_rebuild"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_ew"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_ew should seed OOS benchmark-excess rebuild first");
+        assert_eq!(
+            first_trial.parameters["oos_benchmark_excess_rebuild_profile"],
+            "oos_excess_event_nonlinear_top100_vol24"
+        );
+        assert_eq!(
+            first_trial.parameters["portfolio_volatility_control"],
+            "vol120_24_70_100"
+        );
+        assert_eq!(
+            first_trial.parameters["market_regime"],
+            "quality_nonlinear_alpha_risk_memory_router_v3"
+        );
+        assert_eq!(first_trial.parameters["cash_utilization"], "off");
+        assert_eq!(first_trial.parameters["execution_impact_budget"], "off");
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_oos_execution_adaptive_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_ex".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_oos_execution_adaptive_rebuild"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_ex"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_ex should seed OOS execution-adaptive rebuild first");
+        assert_eq!(
+            first_trial.parameters["oos_execution_adaptive_rebuild_profile"],
+            "oos_execution_adaptive_event_top100_vol24"
+        );
+        assert_eq!(
+            first_trial.parameters["portfolio_sharpe_control"],
+            "gentle_roll_sharpe180_025_neg20_70"
+        );
+        assert_eq!(
+            first_trial.parameters["capacity_risk_budget"],
+            "capacity_stress_participation_headroom_floor_70_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["execution_schedule_profile"],
+            "twap_10d_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["execution_carry_policy"],
+            "roll_forward_v1"
         );
     }
 
@@ -17211,7 +18221,7 @@ mod tests {
 
         assert_eq!(train_policy["candidate_tier"], "oos_train_selection");
         assert_eq!(train_policy["min_annual_return"], 0.0);
-        assert_eq!(train_policy["min_excess_return"], 0.0);
+        assert!(train_policy.get("min_excess_return").is_none());
         assert_eq!(train_policy["min_sharpe"], 0.0);
         assert_eq!(train_policy["min_walk_forward_windows"], 1);
         assert!(train_policy.get("min_sortino").is_none());
@@ -17322,6 +18332,62 @@ mod tests {
                 && gate["passed"] == true
                 && gate["enforced"] == false
         }));
+    }
+
+    #[test]
+    fn oos_train_selection_policy_does_not_require_positive_train_excess_by_default() {
+        let evaluation = evaluate_robustness_gates(
+            Decimal::new(10, 1),
+            Some(Decimal::new(9, 1)),
+            &json!({
+                "num_trades": 80,
+                "annual_return_pct": "0.14",
+                "excess_return_pct": "-0.15",
+                "sharpe_ratio": "1.02",
+                "sortino_ratio": "1.51",
+                "calmar_ratio": "2.27",
+                "max_drawdown_pct": "0.06"
+            }),
+            &json!([
+                {
+                    "constraint": "min_annual_return",
+                    "severity": "hard",
+                    "limit": "0.15",
+                    "actual": "0.14"
+                },
+                {
+                    "constraint": "min_excess_return",
+                    "severity": "hard",
+                    "limit": "0.0",
+                    "actual": "-0.15"
+                }
+            ]),
+            Some(&default_oos_train_selection_gate_policy()),
+        );
+
+        assert_eq!(evaluation.status, "approved_candidate");
+        assert!(!evaluation
+            .gates
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gate| { gate["gate"] == "min_excess_return" }));
+    }
+
+    #[test]
+    fn oos_train_selection_best_effort_diagnostic_mode_is_opt_in() {
+        let default_policy = default_oos_train_selection_gate_policy();
+        let diagnostic_policy = merge_gate_policy(
+            default_policy.clone(),
+            &json!({"allow_best_effort_train_selection_for_diagnostics": true}),
+        );
+
+        assert!(!best_effort_train_selection_for_diagnostics_enabled(
+            &default_policy
+        ));
+        assert!(best_effort_train_selection_for_diagnostics_enabled(
+            &diagnostic_policy
+        ));
     }
 
     #[test]
