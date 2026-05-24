@@ -6312,6 +6312,8 @@ async fn generate_regime_signals_with_cache_internal(
         average_amounts.as_ref(),
         industry_by_symbol.as_ref(),
         &return_risk_matrices,
+        &HashMap::new(),
+        false,
         |score_day, active_config| {
             score_rows_for_active_config(&score_sources, score_day, active_config)
         },
@@ -7332,6 +7334,36 @@ where
         average_amounts_by_date,
         industry_by_symbol,
         return_risk_matrices,
+        &HashMap::new(),
+        false,
+        |score_day, _active_config| scores_by_date.get(&score_day).cloned(),
+        active_config_for_day,
+    )
+}
+
+#[cfg(test)]
+fn build_rebalance_factor_signals_with_return_risk_stats_matrices<F>(
+    trading_days: &[NaiveDate],
+    scores_by_date: &HashMap<NaiveDate, Vec<(String, f64)>>,
+    base_config: &SignalConfig,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts_by_date: &AverageAmountsByDate,
+    industry_by_symbol: &HashMap<String, String>,
+    return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
+    active_config_for_day: F,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String>
+where
+    F: Fn(NaiveDate, &SignalConfig) -> SignalConfig,
+{
+    build_rebalance_factor_signals_with_score_selector_and_return_risk_matrices(
+        trading_days,
+        base_config,
+        return_history,
+        average_amounts_by_date,
+        industry_by_symbol,
+        &HashMap::new(),
+        return_risk_stats_matrices,
+        true,
         |score_day, _active_config| scores_by_date.get(&score_day).cloned(),
         active_config_for_day,
     )
@@ -7358,6 +7390,8 @@ where
         average_amounts_by_date,
         industry_by_symbol,
         &HashMap::new(),
+        &HashMap::new(),
+        false,
         scores_for_day,
         active_config_for_day,
     )
@@ -7370,6 +7404,8 @@ fn build_rebalance_factor_signals_with_score_selector_and_return_risk_matrices<F
     average_amounts_by_date: &AverageAmountsByDate,
     industry_by_symbol: &HashMap<String, String>,
     return_risk_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskMatrix>>,
+    return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
+    prefer_return_risk_stats_matrices: bool,
     scores_for_day: S,
     active_config_for_day: F,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String>
@@ -7402,6 +7438,8 @@ where
             &average_amounts,
             industry_by_symbol,
             return_risk_matrices,
+            return_risk_stats_matrices,
+            prefer_return_risk_stats_matrices,
             &scores_for_day,
         ) {
             Some(weights) => weights,
@@ -7447,6 +7485,8 @@ fn build_portfolio_sleeve_target_weights<S>(
     average_amounts: &HashMap<String, f64>,
     industry_by_symbol: &HashMap<String, String>,
     return_risk_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskMatrix>>,
+    return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
+    prefer_return_risk_stats_matrices: bool,
     scores_for_day: &S,
 ) -> Option<HashMap<String, Decimal>>
 where
@@ -7461,6 +7501,8 @@ where
         average_amounts,
         industry_by_symbol,
         return_risk_matrices,
+        return_risk_stats_matrices,
+        prefer_return_risk_stats_matrices,
         scores_for_day,
     )?;
 
@@ -7479,6 +7521,8 @@ where
         average_amounts,
         industry_by_symbol,
         return_risk_matrices,
+        return_risk_stats_matrices,
+        prefer_return_risk_stats_matrices,
         scores_for_day,
     ) else {
         return Some(base_weights);
@@ -7499,6 +7543,8 @@ fn build_single_sleeve_target_weights<S>(
     average_amounts: &HashMap<String, f64>,
     industry_by_symbol: &HashMap<String, String>,
     return_risk_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskMatrix>>,
+    return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
+    prefer_return_risk_stats_matrices: bool,
     scores_for_day: &S,
 ) -> Option<HashMap<String, Decimal>>
 where
@@ -7522,15 +7568,40 @@ where
     }
 
     let portfolio_config = PortfolioConstructionConfig::from(config);
-    let target_weights = build_portfolio_weights_with_return_risk_matrices(
-        score_day,
-        &candidates,
-        return_history,
-        average_amounts,
-        industry_by_symbol,
-        &portfolio_config,
-        Some(return_risk_matrices),
-    );
+    let target_weights = if prefer_return_risk_stats_matrices {
+        preloaded_return_risk_stats_matrix(return_risk_stats_matrices, &portfolio_config)
+            .map(|matrix| {
+                build_portfolio_weights_with_return_risk_stats_matrix(
+                    score_day,
+                    &candidates,
+                    matrix.as_ref(),
+                    average_amounts,
+                    industry_by_symbol,
+                    &portfolio_config,
+                )
+            })
+            .unwrap_or_else(|| {
+                build_portfolio_weights_with_return_risk_matrices(
+                    score_day,
+                    &candidates,
+                    return_history,
+                    average_amounts,
+                    industry_by_symbol,
+                    &portfolio_config,
+                    Some(return_risk_matrices),
+                )
+            })
+    } else {
+        build_portfolio_weights_with_return_risk_matrices(
+            score_day,
+            &candidates,
+            return_history,
+            average_amounts,
+            industry_by_symbol,
+            &portfolio_config,
+            Some(return_risk_matrices),
+        )
+    };
     if target_weights.len() < config.top_n.min(5) {
         return None;
     }
@@ -8982,6 +9053,17 @@ fn preloaded_return_risk_matrix(
     preloaded_return_risk_matrices
         .and_then(|matrices| matrices.get(&lookback_days.max(1)))
         .cloned()
+}
+
+fn preloaded_return_risk_stats_matrix(
+    return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
+    config: &PortfolioConstructionConfig,
+) -> Option<Arc<ScoreDateReturnRiskStatsMatrix>> {
+    let lookbacks = portfolio_return_risk_matrix_lookback_days(config);
+    let [lookback_days] = lookbacks.as_slice() else {
+        return None;
+    };
+    return_risk_stats_matrices.get(lookback_days).cloned()
 }
 
 fn build_portfolio_weights(
@@ -13415,6 +13497,94 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &preloaded_matrices,
+            |_day, base| base.clone(),
+        )
+        .expect("factor signals");
+        let signal = signals
+            .get(&NaiveDate::from_ymd_opt(2026, 1, 6).unwrap())
+            .expect("rebalance signal");
+
+        assert!(signal.target_weights.contains_key("AAA"));
+        assert!(signal.target_weights.contains_key("BBB"));
+        assert!(!signal.target_weights.contains_key("CCC"));
+    }
+
+    #[test]
+    fn factor_signals_can_use_preloaded_candidate_scoped_return_risk_stats_matrix() {
+        let trading_days = vec![
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(),
+        ];
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let scores_by_date = HashMap::from([(
+            score_day,
+            vec![
+                ("AAA".to_string(), 3.0),
+                ("BBB".to_string(), 2.0),
+                ("CCC".to_string(), 1.0),
+            ],
+        )]);
+        let raw_return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[0.12, -0.11, 0.10, -0.09, 0.08]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[0.004, 0.003, 0.005, 0.004, 0.003]),
+            ),
+            (
+                "CCC".to_string(),
+                dated_returns(&[0.005, 0.004, 0.003, 0.004, 0.005]),
+            ),
+        ]);
+        let preloaded_return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[0.004, 0.003, 0.005, 0.004, 0.003]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[0.005, 0.004, 0.003, 0.004, 0.005]),
+            ),
+            (
+                "CCC".to_string(),
+                dated_returns(&[0.12, -0.11, 0.10, -0.09, 0.08]),
+            ),
+        ]);
+        let symbols = vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()];
+        let pairwise_scope = return_risk_stats_pairwise_scope_for_portfolio_candidate_pool(
+            score_day, &symbols, &symbols,
+        );
+        let preloaded_stats_matrices = HashMap::from([(
+            5,
+            Arc::new(
+                build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+                    &preloaded_return_history,
+                    &[score_day],
+                    &symbols,
+                    5,
+                    &pairwise_scope,
+                ),
+            ),
+        )]);
+        let config = SignalConfig {
+            top_n: 2,
+            rebalance_freq_days: 1,
+            max_position_pct: Decimal::new(60, 2),
+            candidate_risk_filter_profile: CandidateRiskFilterProfile::LowVolatilityV1,
+            risk_budget_lookback_days: 5,
+            ..Default::default()
+        };
+
+        let signals = build_rebalance_factor_signals_with_return_risk_stats_matrices(
+            &trading_days,
+            &scores_by_date,
+            &config,
+            &raw_return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &preloaded_stats_matrices,
             |_day, base| base.clone(),
         )
         .expect("factor signals");
