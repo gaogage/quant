@@ -469,6 +469,10 @@ pub struct SignalDataCacheStats {
     pub persistent_return_risk_feature_matrix_hits: usize,
     pub persistent_return_risk_feature_matrix_misses: usize,
     pub persistent_return_risk_feature_matrix_writes: usize,
+    pub persistent_return_risk_feature_matrix_rows_loaded: usize,
+    pub persistent_return_risk_feature_matrix_return_values_loaded: usize,
+    pub persistent_return_risk_feature_matrix_rows_written: usize,
+    pub persistent_return_risk_feature_matrix_return_values_written: usize,
     pub prediction_score_hits: usize,
     pub prediction_score_misses: usize,
     pub industry_classification_hits: usize,
@@ -1324,6 +1328,18 @@ pub fn signal_cache_stats_delta(
         persistent_return_risk_feature_matrix_writes: after
             .persistent_return_risk_feature_matrix_writes
             .saturating_sub(before.persistent_return_risk_feature_matrix_writes),
+        persistent_return_risk_feature_matrix_rows_loaded: after
+            .persistent_return_risk_feature_matrix_rows_loaded
+            .saturating_sub(before.persistent_return_risk_feature_matrix_rows_loaded),
+        persistent_return_risk_feature_matrix_return_values_loaded: after
+            .persistent_return_risk_feature_matrix_return_values_loaded
+            .saturating_sub(before.persistent_return_risk_feature_matrix_return_values_loaded),
+        persistent_return_risk_feature_matrix_rows_written: after
+            .persistent_return_risk_feature_matrix_rows_written
+            .saturating_sub(before.persistent_return_risk_feature_matrix_rows_written),
+        persistent_return_risk_feature_matrix_return_values_written: after
+            .persistent_return_risk_feature_matrix_return_values_written
+            .saturating_sub(before.persistent_return_risk_feature_matrix_return_values_written),
         prediction_score_hits: after
             .prediction_score_hits
             .saturating_sub(before.prediction_score_hits),
@@ -1791,6 +1807,27 @@ impl SignalDataCache {
                 self.stats.persistent_return_risk_feature_matrix_writes += 1;
             }
         }
+    }
+
+    fn record_persistent_return_risk_feature_matrix_payload_loaded(
+        &mut self,
+        rows: usize,
+        return_values: usize,
+    ) {
+        self.stats.persistent_return_risk_feature_matrix_rows_loaded += rows;
+        self.stats
+            .persistent_return_risk_feature_matrix_return_values_loaded += return_values;
+    }
+
+    fn record_persistent_return_risk_feature_matrix_payload_written(
+        &mut self,
+        rows: usize,
+        return_values: usize,
+    ) {
+        self.stats
+            .persistent_return_risk_feature_matrix_rows_written += rows;
+        self.stats
+            .persistent_return_risk_feature_matrix_return_values_written += return_values;
     }
 
     pub(crate) fn cached_combo_scores(
@@ -8266,6 +8303,10 @@ async fn load_return_risk_feature_matrix_persistent_cached(
                 cache.record_persistent_market_feature_hit(
                     PersistentMarketFeatureKind::ReturnRiskFeatureMatrix,
                 );
+                cache.record_persistent_return_risk_feature_matrix_payload_loaded(
+                    matrix.row_count(),
+                    matrix.return_value_count(),
+                );
                 return Ok(cache.insert_return_risk_feature_matrix(matrix_key, matrix));
             }
             Ok(None) => {
@@ -8327,6 +8368,10 @@ async fn load_return_risk_feature_matrix_persistent_cached(
             Ok(true) => {
                 cache.record_persistent_market_feature_write(
                     PersistentMarketFeatureKind::ReturnRiskFeatureMatrix,
+                );
+                cache.record_persistent_return_risk_feature_matrix_payload_written(
+                    matrix.row_count(),
+                    matrix.return_value_count(),
                 );
             }
             Ok(false) => {}
@@ -9309,6 +9354,41 @@ fn relative_strength_rank_scores_from_matrix(
         .collect()
 }
 
+// Phase 7-ER staged helper: same ranking contract as the raw/matrix paths, but
+// reads precomputed single-symbol stats instead of the trailing return vector.
+#[allow(dead_code)]
+fn relative_strength_rank_scores_from_stats_matrix(
+    candidates: &[(String, f64)],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
+    score_day: NaiveDate,
+) -> HashMap<String, f64> {
+    let mut ranked_returns = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (symbol, _))| {
+            matrix
+                .total_return(score_day, symbol)
+                .map(|total_return| (idx, symbol.clone(), total_return))
+        })
+        .collect::<Vec<_>>();
+    if ranked_returns.is_empty() {
+        return HashMap::new();
+    }
+    ranked_returns.sort_by(|left, right| {
+        right
+            .2
+            .partial_cmp(&left.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let denominator = ranked_returns.len().saturating_sub(1).max(1) as f64;
+    ranked_returns
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (_, symbol, _))| (symbol, 1.0 - (rank as f64 / denominator)))
+        .collect()
+}
+
 fn trailing_total_return(returns: &[f64]) -> Option<f64> {
     let mut seen = false;
     let total_return = returns
@@ -9400,6 +9480,38 @@ fn select_uncorrelated_candidates_from_matrix(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
     matrix: &ScoreDateReturnRiskMatrix,
+    config: &PortfolioConstructionConfig,
+    selection_limit: usize,
+) -> Vec<String> {
+    let mut selected: Vec<String> = Vec::new();
+    let selection_limit = selection_limit.max(config.top_n).min(candidates.len());
+    for (symbol, _) in candidates {
+        if selected.len() >= selection_limit {
+            break;
+        }
+        if let Some(limit) = config.max_pairwise_correlation {
+            let too_correlated = selected.iter().any(|selected_symbol| {
+                matrix
+                    .pearson_correlation(score_day, symbol, selected_symbol)
+                    .map(|corr| corr.abs() > limit)
+                    .unwrap_or(false)
+            });
+            if too_correlated {
+                continue;
+            }
+        }
+        selected.push(symbol.clone());
+    }
+    selected
+}
+
+// Phase 7-ER staged helper: mirrors select_uncorrelated_candidates while reading
+// pairwise correlations from a precomputed stats matrix.
+#[allow(dead_code)]
+fn select_uncorrelated_candidates_from_stats_matrix(
+    score_day: NaiveDate,
+    candidates: &[(String, f64)],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
     config: &PortfolioConstructionConfig,
     selection_limit: usize,
 ) -> Vec<String> {
@@ -9689,6 +9801,108 @@ fn filter_candidate_risk_pool_from_matrix(
     }
 }
 
+// Phase 7-ER staged helper: mirrors filter_candidate_risk_pool while reading
+// volatility and average correlation from a precomputed stats matrix.
+#[allow(dead_code)]
+fn filter_candidate_risk_pool_from_stats_matrix(
+    score_day: NaiveDate,
+    candidates: &[(String, f64)],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<(String, f64)> {
+    let Some(params) = config.candidate_risk_filter_profile.params() else {
+        return candidates.to_vec();
+    };
+    if candidates.len() <= config.top_n || candidates.is_empty() {
+        return candidates.to_vec();
+    }
+
+    let volatility_scores = candidates
+        .iter()
+        .filter_map(|(symbol, _)| {
+            matrix
+                .sample_volatility(score_day, symbol)
+                .map(|volatility| (symbol.as_str(), volatility))
+        })
+        .collect::<Vec<_>>();
+
+    let Some(volatility_threshold) = quantile_value(
+        volatility_scores.iter().map(|(_, volatility)| *volatility),
+        params.max_volatility_quantile,
+    ) else {
+        return candidates.to_vec();
+    };
+
+    let low_volatility_symbols = volatility_scores
+        .iter()
+        .filter(|(_, volatility)| *volatility <= volatility_threshold)
+        .map(|(symbol, _)| *symbol)
+        .collect::<HashSet<_>>();
+
+    let mut filtered = candidates
+        .iter()
+        .filter(|(symbol, _)| {
+            if volatility_scores
+                .iter()
+                .any(|(known, _)| *known == symbol.as_str())
+            {
+                low_volatility_symbols.contains(symbol.as_str())
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(max_average_corr) = params.max_average_abs_correlation {
+        let reference_limit = params
+            .correlation_reference_limit
+            .max(config.top_n.saturating_mul(4))
+            .max(20);
+        let reference_symbols = filtered
+            .iter()
+            .take(reference_limit)
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        filtered.retain(|(symbol, _)| {
+            matrix
+                .average_abs_correlation_to_reference(score_day, symbol, &reference_symbols)
+                .map(|corr| corr <= max_average_corr)
+                .unwrap_or(true)
+        });
+    }
+
+    if let Some(min_liquidity_quantile) = params.min_liquidity_quantile {
+        if let Some(liquidity_threshold) = quantile_value(
+            filtered
+                .iter()
+                .filter_map(|(symbol, _)| average_amounts.get(symbol).copied()),
+            min_liquidity_quantile,
+        ) {
+            let liquidity_filtered = filtered
+                .iter()
+                .filter(|(symbol, _)| {
+                    average_amounts
+                        .get(symbol)
+                        .map(|amount| *amount >= liquidity_threshold)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if liquidity_filtered.len() >= config.top_n {
+                filtered = liquidity_filtered;
+            }
+        }
+    }
+
+    if filtered.len() >= config.top_n {
+        filtered
+    } else {
+        candidates.to_vec()
+    }
+}
+
 fn quantile_value(values: impl Iterator<Item = f64>, quantile: f64) -> Option<f64> {
     let mut values = values.filter(|value| value.is_finite()).collect::<Vec<_>>();
     if values.is_empty() {
@@ -9757,6 +9971,29 @@ fn build_kelly_raw_weights_from_matrix(
     score_day: NaiveDate,
     symbols: &[String],
     matrix: &ScoreDateReturnRiskMatrix,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let kelly = matrix
+            .fractional_kelly_weight(score_day, symbol, config.kelly_fraction)
+            .unwrap_or(0.0);
+        raw_weights.push(kelly.max(0.0));
+    }
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+// Phase 7-ER staged helper: mirrors build_kelly_raw_weights while applying the
+// caller's Kelly fraction to precomputed mean/variance stats.
+#[allow(dead_code)]
+fn build_kelly_raw_weights_from_stats_matrix(
+    score_day: NaiveDate,
+    symbols: &[String],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
     config: &PortfolioConstructionConfig,
 ) -> Vec<f64> {
     let mut raw_weights = Vec::with_capacity(symbols.len());
@@ -9846,6 +10083,41 @@ fn build_risk_budget_raw_weights_from_matrix(
     }
 }
 
+// Phase 7-ER staged helper: mirrors build_risk_budget_raw_weights while reading
+// volatility and concentration penalty from a precomputed stats matrix.
+#[allow(dead_code)]
+fn build_risk_budget_raw_weights_from_stats_matrix(
+    score_day: NaiveDate,
+    symbols: &[String],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20);
+        let concentration_penalty =
+            matrix.covariance_concentration_penalty(score_day, symbol, symbols);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
+        let raw = capacity_multiplier / risk_denominator;
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
 fn build_min_variance_raw_weights(
     score_day: NaiveDate,
     symbols: &[String],
@@ -9892,6 +10164,45 @@ fn build_min_variance_raw_weights_from_matrix(
     score_day: NaiveDate,
     symbols: &[String],
     matrix: &ScoreDateReturnRiskMatrix,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let volatility = matrix
+            .sample_volatility(score_day, symbol)
+            .unwrap_or(0.20)
+            .max(0.01);
+        let concentration_penalty =
+            matrix.covariance_concentration_penalty(score_day, symbol, symbols);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        let variance = volatility * volatility;
+        let covariance_penalty = concentration_penalty.max(1.0).powi(2);
+        let raw = capacity_multiplier / (variance.max(0.0001) * covariance_penalty);
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+// Phase 7-ER staged helper: mirrors build_min_variance_raw_weights while reading
+// volatility and concentration penalty from a precomputed stats matrix.
+#[allow(dead_code)]
+fn build_min_variance_raw_weights_from_stats_matrix(
+    score_day: NaiveDate,
+    symbols: &[String],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> Vec<f64> {
@@ -10929,6 +11240,14 @@ struct ReturnRiskFeatureMatrixRow {
 
 #[allow(dead_code)]
 impl ScoreDateReturnRiskMatrix {
+    fn row_count(&self) -> usize {
+        self.returns_by_score_symbol.len()
+    }
+
+    fn return_value_count(&self) -> usize {
+        self.returns_by_score_symbol.values().map(Vec::len).sum()
+    }
+
     pub(crate) fn returns(&self, score_day: NaiveDate, symbol: &str) -> &[f64] {
         #[cfg(test)]
         record_score_date_return_risk_matrix_read();
@@ -11006,6 +11325,152 @@ impl ScoreDateReturnRiskMatrix {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+struct ScoreDateReturnRiskStatsMatrix {
+    stats_by_score_symbol: HashMap<(NaiveDate, String), ReturnRiskSingleSymbolStats>,
+    pairwise_correlations: HashMap<(NaiveDate, String, String), f64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+struct ReturnRiskSingleSymbolStats {
+    return_count: usize,
+    total_return: Option<f64>,
+    sample_volatility: Option<f64>,
+    kelly_mean: Option<f64>,
+    kelly_population_variance: Option<f64>,
+}
+
+#[allow(dead_code)]
+impl ReturnRiskSingleSymbolStats {
+    fn from_returns(returns: &[f64]) -> Self {
+        let (kelly_mean, kelly_population_variance) = if returns.len() >= 3 {
+            let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+            let variance = returns
+                .iter()
+                .map(|value| {
+                    let diff = *value - mean;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / returns.len() as f64;
+            (Some(mean), Some(variance))
+        } else {
+            (None, None)
+        };
+
+        Self {
+            return_count: returns.len(),
+            total_return: trailing_total_return(returns),
+            sample_volatility: sample_volatility(returns),
+            kelly_mean,
+            kelly_population_variance,
+        }
+    }
+
+    fn fractional_kelly_weight(&self, fraction: f64) -> Option<f64> {
+        if self.return_count < 3 || fraction <= 0.0 {
+            return None;
+        }
+        let mean = self.kelly_mean?;
+        let variance = self.kelly_population_variance?;
+        if variance <= f64::EPSILON {
+            return None;
+        }
+        Some((mean / variance * fraction).clamp(0.0, 1.0))
+    }
+}
+
+#[allow(dead_code)]
+impl ScoreDateReturnRiskStatsMatrix {
+    fn stats(&self, score_day: NaiveDate, symbol: &str) -> Option<&ReturnRiskSingleSymbolStats> {
+        self.stats_by_score_symbol
+            .get(&(score_day, symbol.to_string()))
+    }
+
+    fn return_count(&self, score_day: NaiveDate, symbol: &str) -> usize {
+        self.stats(score_day, symbol)
+            .map(|stats| stats.return_count)
+            .unwrap_or_default()
+    }
+
+    fn total_return(&self, score_day: NaiveDate, symbol: &str) -> Option<f64> {
+        self.stats(score_day, symbol)
+            .and_then(|stats| stats.total_return)
+    }
+
+    fn sample_volatility(&self, score_day: NaiveDate, symbol: &str) -> Option<f64> {
+        self.stats(score_day, symbol)
+            .and_then(|stats| stats.sample_volatility)
+    }
+
+    fn fractional_kelly_weight(
+        &self,
+        score_day: NaiveDate,
+        symbol: &str,
+        fraction: f64,
+    ) -> Option<f64> {
+        self.stats(score_day, symbol)
+            .and_then(|stats| stats.fractional_kelly_weight(fraction))
+    }
+
+    fn pearson_correlation(&self, score_day: NaiveDate, left: &str, right: &str) -> Option<f64> {
+        if left == right {
+            return self.stats(score_day, left).and_then(|stats| {
+                (stats.return_count >= 3 && stats.sample_volatility.is_some()).then_some(1.0)
+            });
+        }
+        self.pairwise_correlations
+            .get(&pairwise_correlation_key(score_day, left, right))
+            .copied()
+    }
+
+    fn average_abs_correlation_to_reference(
+        &self,
+        score_day: NaiveDate,
+        symbol: &str,
+        reference_symbols: &[String],
+    ) -> Option<f64> {
+        let correlations = reference_symbols
+            .iter()
+            .filter(|other| other.as_str() != symbol)
+            .filter_map(|other| {
+                self.pearson_correlation(score_day, symbol, other)
+                    .map(f64::abs)
+            })
+            .collect::<Vec<_>>();
+        if correlations.is_empty() {
+            None
+        } else {
+            Some(correlations.iter().sum::<f64>() / correlations.len() as f64)
+        }
+    }
+
+    fn covariance_concentration_penalty(
+        &self,
+        score_day: NaiveDate,
+        symbol: &str,
+        symbols: &[String],
+    ) -> f64 {
+        self.average_abs_correlation_to_reference(score_day, symbol, symbols)
+            .map(|average_abs_corr| 1.0 + average_abs_corr)
+            .unwrap_or(1.0)
+    }
+}
+
+fn pairwise_correlation_key(
+    score_day: NaiveDate,
+    left: &str,
+    right: &str,
+) -> (NaiveDate, String, String) {
+    if left <= right {
+        (score_day, left.to_string(), right.to_string())
+    } else {
+        (score_day, right.to_string(), left.to_string())
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn build_score_date_return_risk_matrix(
     return_history: &SymbolReturnHistory,
     score_days: &[NaiveDate],
@@ -11023,6 +11488,53 @@ pub(crate) fn build_score_date_return_risk_matrix(
     }
     ScoreDateReturnRiskMatrix {
         returns_by_score_symbol,
+    }
+}
+
+#[allow(dead_code)]
+fn build_score_date_return_risk_stats_matrix(
+    return_history: &SymbolReturnHistory,
+    score_days: &[NaiveDate],
+    symbols: &[String],
+    lookback_days: usize,
+) -> ScoreDateReturnRiskStatsMatrix {
+    let mut stats_by_score_symbol = HashMap::new();
+    let mut pairwise_correlations = HashMap::new();
+    let symbols = normalized_symbol_key(symbols);
+    for score_day in normalized_dates(score_days) {
+        let returns_by_symbol = symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.clone(),
+                    trailing_returns(return_history, symbol, score_day, lookback_days),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (symbol, returns) in &returns_by_symbol {
+            stats_by_score_symbol.insert(
+                (score_day, symbol.clone()),
+                ReturnRiskSingleSymbolStats::from_returns(returns),
+            );
+        }
+
+        for left_idx in 0..returns_by_symbol.len() {
+            for right_idx in (left_idx + 1)..returns_by_symbol.len() {
+                let (left_symbol, left_returns) = &returns_by_symbol[left_idx];
+                let (right_symbol, right_returns) = &returns_by_symbol[right_idx];
+                if let Some(correlation) = pearson_correlation(left_returns, right_returns) {
+                    pairwise_correlations.insert(
+                        pairwise_correlation_key(score_day, left_symbol, right_symbol),
+                        correlation,
+                    );
+                }
+            }
+        }
+    }
+    ScoreDateReturnRiskStatsMatrix {
+        stats_by_score_symbol,
+        pairwise_correlations,
     }
 }
 
@@ -12865,6 +13377,288 @@ mod tests {
     }
 
     #[test]
+    fn score_date_return_risk_stats_matrix_matches_raw_single_symbol_metrics() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let future_day = NaiveDate::from_ymd_opt(2026, 1, 9).unwrap();
+        let symbols = vec!["AAA".to_string(), "BBB".to_string()];
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.030),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), -0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), 0.015),
+                    (future_day, 0.750),
+                ],
+            ),
+            (
+                "BBB".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), -0.005),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), 0.006),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), -0.004),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 0.005),
+                    (future_day, 0.650),
+                ],
+            ),
+        ]);
+        let raw_matrix =
+            build_score_date_return_risk_matrix(&return_history, &[score_day], &symbols, 4);
+        let stats_matrix =
+            build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 4);
+        let raw_returns = raw_matrix.returns(score_day, "AAA");
+
+        assert_eq!(
+            stats_matrix.return_count(score_day, "AAA"),
+            raw_returns.len()
+        );
+        assert_eq!(
+            stats_matrix.total_return(score_day, "AAA"),
+            trailing_total_return(raw_returns)
+        );
+        assert_eq!(
+            stats_matrix.sample_volatility(score_day, "AAA"),
+            sample_volatility(raw_returns)
+        );
+        assert_eq!(
+            stats_matrix.fractional_kelly_weight(score_day, "AAA", 0.25),
+            fractional_kelly_weight(raw_returns, 0.25)
+        );
+        assert_eq!(stats_matrix.return_count(score_day, "MISSING"), 0);
+        assert_eq!(
+            stats_matrix.total_return(score_day, "AAA"),
+            trailing_total_return(&[0.030, -0.010, 0.020, 0.015])
+        );
+    }
+
+    #[test]
+    fn relative_strength_and_kelly_can_use_stats_matrix_without_raw_returns() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("AAA".to_string(), 3.0),
+            ("BBB".to_string(), 2.0),
+            ("CCC".to_string(), 1.0),
+        ];
+        let symbols = candidates
+            .iter()
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[0.010, 0.020, 0.015, 0.018]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[0.004, 0.006, 0.005, 0.007]),
+            ),
+            (
+                "CCC".to_string(),
+                dated_returns(&[-0.010, 0.004, -0.006, 0.003]),
+            ),
+        ]);
+        let config = PortfolioConstructionConfig {
+            kelly_fraction: 0.30,
+            kelly_lookback_days: 4,
+            ..Default::default()
+        };
+        let stats_matrix =
+            build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 4);
+
+        assert_eq!(
+            relative_strength_rank_scores_from_stats_matrix(&candidates, &stats_matrix, score_day),
+            relative_strength_rank_scores(&candidates, &return_history, score_day, 4)
+        );
+        assert_eq!(
+            build_kelly_raw_weights_from_stats_matrix(score_day, &symbols, &stats_matrix, &config),
+            build_kelly_raw_weights(score_day, &symbols, &return_history, &config)
+        );
+    }
+
+    #[test]
+    fn score_date_return_risk_stats_matrix_matches_raw_pairwise_risk_metrics() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let future_day = NaiveDate::from_ymd_opt(2026, 1, 9).unwrap();
+        let symbols = vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()];
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.030),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), -0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), 0.015),
+                    (future_day, 0.750),
+                ],
+            ),
+            (
+                "BBB".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.012),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.018),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.028),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), -0.009),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.022),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), 0.014),
+                    (future_day, -0.700),
+                ],
+            ),
+            (
+                "CCC".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), -0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), 0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), -0.015),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), -0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), 0.005),
+                    (future_day, 0.600),
+                ],
+            ),
+        ]);
+        let raw_matrix =
+            build_score_date_return_risk_matrix(&return_history, &[score_day], &symbols, 5);
+        let stats_matrix =
+            build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 5);
+
+        assert_eq!(
+            stats_matrix.pearson_correlation(score_day, "AAA", "BBB"),
+            raw_matrix.pearson_correlation(score_day, "AAA", "BBB")
+        );
+        assert_eq!(
+            stats_matrix.pearson_correlation(score_day, "BBB", "AAA"),
+            raw_matrix.pearson_correlation(score_day, "BBB", "AAA")
+        );
+        assert_eq!(
+            stats_matrix.average_abs_correlation_to_reference(score_day, "AAA", &symbols),
+            raw_matrix.average_abs_correlation_to_reference(score_day, "AAA", &symbols)
+        );
+        assert_eq!(
+            stats_matrix.covariance_concentration_penalty(score_day, "AAA", &symbols),
+            raw_matrix.covariance_concentration_penalty(score_day, "AAA", &symbols)
+        );
+        assert_eq!(
+            stats_matrix.pearson_correlation(score_day, "AAA", "AAA"),
+            raw_matrix.pearson_correlation(score_day, "AAA", "AAA")
+        );
+    }
+
+    #[test]
+    fn stats_matrix_correlation_consumers_match_raw_portfolio_helpers() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("AAA".to_string(), 6.0),
+            ("BBB".to_string(), 5.0),
+            ("CCC".to_string(), 4.0),
+            ("DDD".to_string(), 3.0),
+        ];
+        let symbols = candidates
+            .iter()
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[0.010, -0.020, 0.030, -0.010, 0.020]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[0.011, -0.019, 0.029, -0.011, 0.021]),
+            ),
+            (
+                "CCC".to_string(),
+                dated_returns(&[-0.020, 0.010, -0.015, 0.020, -0.010]),
+            ),
+            (
+                "DDD".to_string(),
+                dated_returns(&[0.040, -0.035, 0.030, -0.025, 0.020]),
+            ),
+        ]);
+        let average_amounts = HashMap::from([
+            ("AAA".to_string(), 900_000_000.0),
+            ("BBB".to_string(), 800_000_000.0),
+            ("CCC".to_string(), 600_000_000.0),
+            ("DDD".to_string(), 400_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_pairwise_correlation: Some(0.80),
+            correlation_lookback_days: 5,
+            risk_budget_lookback_days: 5,
+            capacity_penalty_strength: 0.25,
+            candidate_risk_filter_profile:
+                CandidateRiskFilterProfile::SoftLowVolatilityLowCorrelationV1,
+            ..Default::default()
+        };
+        let stats_matrix =
+            build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 5);
+
+        assert_eq!(
+            select_uncorrelated_candidates_from_stats_matrix(
+                score_day,
+                &candidates,
+                &stats_matrix,
+                &config,
+                4,
+            ),
+            select_uncorrelated_candidates(score_day, &candidates, &return_history, &config, 4)
+        );
+        assert_eq!(
+            filter_candidate_risk_pool_from_stats_matrix(
+                score_day,
+                &candidates,
+                &stats_matrix,
+                &average_amounts,
+                &config,
+            ),
+            filter_candidate_risk_pool(
+                score_day,
+                &candidates,
+                &return_history,
+                &average_amounts,
+                &config,
+            )
+        );
+        assert_eq!(
+            build_risk_budget_raw_weights_from_stats_matrix(
+                score_day,
+                &symbols,
+                &stats_matrix,
+                &average_amounts,
+                &config,
+            ),
+            build_risk_budget_raw_weights(
+                score_day,
+                &symbols,
+                &return_history,
+                &average_amounts,
+                &config,
+            )
+        );
+        assert_eq!(
+            build_min_variance_raw_weights_from_stats_matrix(
+                score_day,
+                &symbols,
+                &stats_matrix,
+                &average_amounts,
+                &config,
+            ),
+            build_min_variance_raw_weights(
+                score_day,
+                &symbols,
+                &return_history,
+                &average_amounts,
+                &config,
+            )
+        );
+    }
+
+    #[test]
     fn build_portfolio_weights_uses_score_date_return_risk_matrix_consumers() {
         let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
         let candidates = vec![
@@ -14186,6 +14980,58 @@ mod tests {
         assert_eq!(stats.persistent_return_risk_feature_matrix_hits, 1);
         assert_eq!(stats.persistent_return_risk_feature_matrix_misses, 1);
         assert_eq!(stats.persistent_return_risk_feature_matrix_writes, 1);
+    }
+
+    #[test]
+    fn signal_cache_stats_delta_tracks_return_risk_matrix_payload_volume() {
+        let before = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_rows_loaded: 10,
+            persistent_return_risk_feature_matrix_return_values_loaded: 100,
+            persistent_return_risk_feature_matrix_rows_written: 20,
+            persistent_return_risk_feature_matrix_return_values_written: 200,
+            ..SignalDataCacheStats::default()
+        };
+        let after = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_rows_loaded: 70,
+            persistent_return_risk_feature_matrix_return_values_loaded: 850,
+            persistent_return_risk_feature_matrix_rows_written: 95,
+            persistent_return_risk_feature_matrix_return_values_written: 1_250,
+            ..SignalDataCacheStats::default()
+        };
+
+        let delta = signal_cache_stats_delta(before, after);
+
+        assert_eq!(delta.persistent_return_risk_feature_matrix_rows_loaded, 60);
+        assert_eq!(
+            delta.persistent_return_risk_feature_matrix_return_values_loaded,
+            750
+        );
+        assert_eq!(delta.persistent_return_risk_feature_matrix_rows_written, 75);
+        assert_eq!(
+            delta.persistent_return_risk_feature_matrix_return_values_written,
+            1_050
+        );
+    }
+
+    #[test]
+    fn signal_data_cache_records_return_risk_matrix_payload_volume() {
+        let mut cache = SignalDataCache::default();
+
+        cache.record_persistent_return_risk_feature_matrix_payload_loaded(3, 180);
+        cache.record_persistent_return_risk_feature_matrix_payload_loaded(2, 90);
+        cache.record_persistent_return_risk_feature_matrix_payload_written(5, 270);
+
+        let stats = cache.stats();
+        assert_eq!(stats.persistent_return_risk_feature_matrix_rows_loaded, 5);
+        assert_eq!(
+            stats.persistent_return_risk_feature_matrix_return_values_loaded,
+            270
+        );
+        assert_eq!(stats.persistent_return_risk_feature_matrix_rows_written, 5);
+        assert_eq!(
+            stats.persistent_return_risk_feature_matrix_return_values_written,
+            270
+        );
     }
 
     #[test]
