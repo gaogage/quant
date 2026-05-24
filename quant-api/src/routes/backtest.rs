@@ -21,11 +21,13 @@ use quant_backtest::engine::{
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::{BacktestDataCache, BacktestMarketDataPrewarmReport, BacktestRunner};
 use quant_backtest::signal_generator::{
-    prewarm_market_feature_cache, CandidateRankingProfile, CandidateRiskFilterProfile,
-    CapacityRiskBudgetProfile, CashUtilizationProfile, EventGateConfig, EventGateMode,
-    ExecutionImpactBudgetProfile, MarketFeaturePrewarmReport, MarketRegime, MarketRegimePolicy,
-    PortfolioConstructionMethod, PredictionBlendConfig, RiskContributionControlProfile,
-    ScoreDirection, SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
+    prewarm_factor_signal_batch_feature_cache, prewarm_market_feature_cache,
+    CandidateRankingProfile, CandidateRiskFilterProfile, CapacityRiskBudgetProfile,
+    CashUtilizationProfile, EventGateConfig, EventGateMode, ExecutionImpactBudgetProfile,
+    FactorSignalBatchPrewarmReport, FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport,
+    MarketFeatureSnapshotScope, MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod,
+    PredictionBlendConfig, RiskContributionControlProfile, ScoreDirection, SignalConfig,
+    SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -1270,6 +1272,96 @@ fn optional_positive_decimal_pct(
     decimal_from_f64(value, name).map(Some)
 }
 
+fn factor_rebalance_frequency(rebalance: &str) -> usize {
+    match rebalance {
+        "daily" => 1,
+        "weekly" => 5,
+        "monthly" => 20,
+        value => value.parse::<usize>().unwrap_or(20),
+    }
+}
+
+fn parse_execution_max_participation_rate(
+    req: &RunFactorBacktestReq,
+) -> Result<Option<Decimal>, String> {
+    req.execution_rules
+        .as_ref()
+        .and_then(|rules| rules.max_participation_rate)
+        .map(|value| decimal_from_f64(value, "execution_rules.max_participation_rate"))
+        .transpose()
+}
+
+fn build_factor_signal_config(
+    req: &RunFactorBacktestReq,
+    rebalance_freq_days: usize,
+    max_participation_rate: Option<Decimal>,
+) -> Result<SignalConfig, String> {
+    let score_direction = parse_score_direction(&req.score_direction)?;
+    let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
+    let universe_profile = parse_tradable_universe_profile(req.universe_profile.as_deref())?;
+    let industry_max_weight_pct =
+        optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
+    let capacity_risk_budget_profile =
+        parse_capacity_risk_budget_profile(req.capacity_risk_budget.as_deref())?;
+    let cash_utilization_profile = parse_cash_utilization_profile(req.cash_utilization.as_deref())?;
+    let execution_impact_budget_profile =
+        parse_execution_impact_budget_profile(req.execution_impact_budget.as_deref())?;
+    let style_risk_budget_profile =
+        parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
+    let candidate_risk_filter_profile =
+        parse_candidate_risk_filter_profile(req.candidate_risk_filter.as_deref())?;
+    let candidate_ranking_profile =
+        parse_candidate_ranking_profile(req.candidate_ranking.as_deref())?;
+    let risk_contribution_control_profile =
+        parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
+
+    Ok(SignalConfig {
+        combo_name: req.combo_name.clone(),
+        version: req.version.clone(),
+        top_n: req.top_n,
+        rebalance_freq_days,
+        entry_delay_days: req.entry_delay,
+        min_daily_amount_cny: if req.min_amount > 0.0 {
+            Some(req.min_amount)
+        } else {
+            None
+        },
+        max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
+        portfolio_notional_cny: positive_notional(req.initial_capital),
+        max_participation_rate: max_participation_rate.and_then(|value| value.to_f64()),
+        capacity_risk_budget_profile,
+        cash_utilization_profile,
+        execution_impact_budget_profile,
+        skip_top_pct: req.skip_top_pct,
+        max_pairwise_correlation: req.max_pairwise_correlation,
+        correlation_lookback_days: req.correlation_lookback_days,
+        kelly_fraction: req.kelly_fraction,
+        kelly_lookback_days: req.kelly_lookback_days,
+        max_gross_exposure: req.max_gross_exposure,
+        score_direction,
+        portfolio_method,
+        risk_budget_lookback_days: req.risk_budget_lookback_days,
+        capacity_penalty_strength: req.capacity_penalty_strength,
+        industry_max_weight_pct,
+        style_risk_budget_profile,
+        candidate_risk_filter_profile,
+        candidate_ranking_profile,
+        risk_contribution_control_profile,
+        rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
+        partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
+        score_candidate_pool_size: req.score_candidate_pool_size.filter(|size| *size > 0),
+        universe_profile,
+        prediction_blend: build_prediction_blend_config(
+            req.prediction_set_id.as_ref(),
+            req.prediction_blend_weight,
+            req.prediction_min_percentile,
+        )?,
+        event_gate: build_event_gate_config(req)?,
+        score_overlay: None,
+        portfolio_sleeve: None,
+    })
+}
+
 fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskControlConfig, String> {
     let start = optional_decimal_pct(
         req.portfolio_drawdown_reduce_start_pct,
@@ -1877,6 +1969,40 @@ pub(crate) async fn execute_factor_backtest_with_signal_cache(
     execute_factor_backtest_with_caches(db, task_id, req, signal_cache, None).await
 }
 
+pub(crate) async fn prewarm_factor_signal_cache_for_requests(
+    db: &sqlx::PgPool,
+    requests: &[RunFactorBacktestReq],
+    signal_cache: &mut SignalDataCache,
+) -> Result<FactorSignalBatchPrewarmReport, String> {
+    let mut specs = Vec::with_capacity(requests.len());
+    for req in requests {
+        let start = parse_yyyymmdd(&req.start_date, "start_date")?;
+        let end = parse_yyyymmdd(&req.end_date, "end_date")?;
+        if end < start {
+            return Err("end_date must be greater than or equal to start_date".into());
+        }
+        let rebalance_freq_days = factor_rebalance_frequency(&req.rebalance);
+        let (effective_start, _) = resolve_effective_factor_coverage(db, req, start, end).await?;
+        let max_participation_rate = parse_execution_max_participation_rate(req)?;
+        let config = build_factor_signal_config(req, rebalance_freq_days, max_participation_rate)?;
+        let benchmark = req.benchmark.clone().unwrap_or_else(|| "000300.SH".into());
+        let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
+        specs.push(FactorSignalFeaturePrewarmSpec {
+            data_version_id: req.data_version_id.clone(),
+            train_start: effective_start,
+            train_end: end,
+            test_start: effective_start,
+            test_end: end,
+            feature_start: effective_start,
+            feature_end: end,
+            config,
+            regime_policy,
+        });
+    }
+
+    prewarm_factor_signal_batch_feature_cache(db, signal_cache, &specs).await
+}
+
 pub(crate) async fn execute_factor_backtest_with_caches(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -1889,12 +2015,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     if end < start {
         return Err("end_date must be greater than or equal to start_date".into());
     }
-    let reb_freq = match req.rebalance.as_str() {
-        "daily" => 1,
-        "weekly" => 5,
-        "monthly" => 20,
-        s => s.parse::<usize>().unwrap_or(20),
-    };
+    let reb_freq = factor_rebalance_frequency(&req.rebalance);
     let (effective_start, effective_coverage) =
         resolve_effective_factor_coverage(db, &req, start, end).await?;
     let capital = decimal_from_f64(req.initial_capital, "initial_capital")?;
@@ -1935,81 +2056,11 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         .execution_rules
         .as_ref()
         .and_then(|rules| rules.execution_max_carry_days);
-    let max_participation_rate = match req
-        .execution_rules
-        .as_ref()
-        .and_then(|rules| rules.max_participation_rate)
-        .map(|value| decimal_from_f64(value, "execution_rules.max_participation_rate"))
-        .transpose()
-    {
+    let max_participation_rate = match parse_execution_max_participation_rate(&req) {
         Ok(value) => value,
         Err(message) => return Err(message),
     };
-
-    let score_direction = parse_score_direction(&req.score_direction)?;
-    let portfolio_method = parse_portfolio_method(&req.portfolio_method)?;
-    let universe_profile = parse_tradable_universe_profile(req.universe_profile.as_deref())?;
-    let industry_max_weight_pct =
-        optional_unit_f64(req.industry_max_weight_pct, "industry_max_weight_pct")?;
-    let capacity_risk_budget_profile =
-        parse_capacity_risk_budget_profile(req.capacity_risk_budget.as_deref())?;
-    let cash_utilization_profile = parse_cash_utilization_profile(req.cash_utilization.as_deref())?;
-    let execution_impact_budget_profile =
-        parse_execution_impact_budget_profile(req.execution_impact_budget.as_deref())?;
-    let style_risk_budget_profile =
-        parse_style_risk_budget_profile(req.style_risk_budget.as_deref())?;
-    let candidate_risk_filter_profile =
-        parse_candidate_risk_filter_profile(req.candidate_risk_filter.as_deref())?;
-    let candidate_ranking_profile =
-        parse_candidate_ranking_profile(req.candidate_ranking.as_deref())?;
-    let risk_contribution_control_profile =
-        parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
-
-    let sig_config = quant_backtest::signal_generator::SignalConfig {
-        combo_name: req.combo_name.clone(),
-        version: req.version.clone(),
-        top_n: req.top_n,
-        rebalance_freq_days: reb_freq,
-        entry_delay_days: req.entry_delay,
-        min_daily_amount_cny: if req.min_amount > 0.0 {
-            Some(req.min_amount)
-        } else {
-            None
-        },
-        max_position_pct: decimal_from_f64(req.max_position_pct, "max_position_pct")?,
-        portfolio_notional_cny: positive_notional(req.initial_capital),
-        max_participation_rate: max_participation_rate.and_then(|value| value.to_f64()),
-        capacity_risk_budget_profile,
-        cash_utilization_profile,
-        execution_impact_budget_profile,
-        skip_top_pct: req.skip_top_pct,
-        max_pairwise_correlation: req.max_pairwise_correlation,
-        correlation_lookback_days: req.correlation_lookback_days,
-        kelly_fraction: req.kelly_fraction,
-        kelly_lookback_days: req.kelly_lookback_days,
-        max_gross_exposure: req.max_gross_exposure,
-        score_direction,
-        portfolio_method,
-        risk_budget_lookback_days: req.risk_budget_lookback_days,
-        capacity_penalty_strength: req.capacity_penalty_strength,
-        industry_max_weight_pct,
-        style_risk_budget_profile,
-        candidate_risk_filter_profile,
-        candidate_ranking_profile,
-        risk_contribution_control_profile,
-        rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
-        partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
-        score_candidate_pool_size: req.score_candidate_pool_size.filter(|size| *size > 0),
-        universe_profile,
-        prediction_blend: build_prediction_blend_config(
-            req.prediction_set_id.as_ref(),
-            req.prediction_blend_weight,
-            req.prediction_min_percentile,
-        )?,
-        event_gate: build_event_gate_config(&req)?,
-        score_overlay: None,
-        portfolio_sleeve: None,
-    };
+    let sig_config = build_factor_signal_config(&req, reb_freq, max_participation_rate.clone())?;
 
     info!(
         task_id,
@@ -2021,15 +2072,23 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     );
 
     let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
+    let snapshot_scope = MarketFeatureSnapshotScope::new(
+        &req.data_version_id,
+        effective_start,
+        end,
+        effective_start,
+        end,
+    );
     let signals = match (regime_policy.as_ref(), signal_cache.as_deref_mut()) {
         (Some(policy), Some(cache)) => {
-            quant_backtest::signal_generator::generate_regime_signals_with_cache(
+            quant_backtest::signal_generator::generate_regime_signals_with_cache_and_market_feature_snapshot(
                 db,
                 &sig_config,
                 policy,
                 effective_start,
                 end,
                 cache,
+                &snapshot_scope,
             )
             .await
         }
@@ -2044,12 +2103,13 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             .await
         }
         (None, Some(cache)) => {
-            quant_backtest::signal_generator::generate_signals_with_cache(
+            quant_backtest::signal_generator::generate_signals_with_cache_and_market_feature_snapshot(
                 db,
                 &sig_config,
                 effective_start,
                 end,
                 cache,
+                &snapshot_scope,
             )
             .await
         }
@@ -2106,7 +2166,14 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     let market_data_prewarm_report = if let Some(cache) = backtest_cache.as_deref_mut() {
         Some(
             runner
-                .prewarm_market_data_cache(cache, &benchmark, &all_symbols, effective_start, end)
+                .prewarm_market_data_cache(
+                    cache,
+                    &req.data_version_id,
+                    &benchmark,
+                    &all_symbols,
+                    effective_start,
+                    end,
+                )
                 .await
                 .map_err(|error| error.to_string())?,
         )

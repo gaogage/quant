@@ -20,9 +20,10 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::routes::backtest::{
-    execute_factor_backtest_with_caches, execute_prediction_backtest, CostModelReq,
-    EffectiveCoverageReq, ExecutionRulesReq, FactorBacktestRunOutput, MarketRegimeBacktestReq,
-    RunFactorBacktestReq, RunPredictionBacktestReq,
+    execute_factor_backtest_with_caches, execute_prediction_backtest,
+    prewarm_factor_signal_cache_for_requests, CostModelReq, EffectiveCoverageReq,
+    ExecutionRulesReq, FactorBacktestRunOutput, MarketRegimeBacktestReq, RunFactorBacktestReq,
+    RunPredictionBacktestReq,
 };
 use crate::AppState;
 use quant_backtest::runner::{
@@ -218,6 +219,12 @@ fn backtest_cache_stats_delta(
         daily_bar_symbol_hits: after
             .daily_bar_symbol_hits
             .saturating_sub(before.daily_bar_symbol_hits),
+        daily_bar_covering_window_hits: after
+            .daily_bar_covering_window_hits
+            .saturating_sub(before.daily_bar_covering_window_hits),
+        daily_bar_snapshot_hits: after
+            .daily_bar_snapshot_hits
+            .saturating_sub(before.daily_bar_snapshot_hits),
         daily_bar_symbol_misses: after
             .daily_bar_symbol_misses
             .saturating_sub(before.daily_bar_symbol_misses),
@@ -419,6 +426,13 @@ struct EliteMetricProfile {
 enum OptimizationTrialBacktestRequest {
     Factor(RunFactorBacktestReq),
     Prediction(RunPredictionBacktestReq),
+}
+
+struct FactorSignalBatchPrewarmPlan {
+    requested_trials: usize,
+    factor_requests: Vec<RunFactorBacktestReq>,
+    prediction_trials: usize,
+    invalid_trials: usize,
 }
 
 fn default_random_seed() -> u64 {
@@ -5331,6 +5345,33 @@ async fn execute_pending_trials_with_caches(
     .await
 }
 
+fn plan_factor_signal_batch_prewarm_requests(
+    task: &OptimizationTaskExecutionContext,
+    pending_trials: &[(String, i32, Value)],
+) -> FactorSignalBatchPrewarmPlan {
+    let mut factor_requests = Vec::new();
+    let mut prediction_trials = 0;
+    let mut invalid_trials = 0;
+    for (_trial_id, _trial_index, params) in pending_trials {
+        match build_optimization_trial_request(task, params) {
+            Ok(OptimizationTrialBacktestRequest::Factor(request)) => factor_requests.push(request),
+            Ok(OptimizationTrialBacktestRequest::Prediction(_)) => {
+                prediction_trials += 1;
+            }
+            Err(_) => {
+                invalid_trials += 1;
+            }
+        }
+    }
+
+    FactorSignalBatchPrewarmPlan {
+        requested_trials: pending_trials.len(),
+        factor_requests,
+        prediction_trials,
+        invalid_trials,
+    }
+}
+
 async fn execute_pending_trials_with_caches_and_concurrency(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -5421,6 +5462,40 @@ async fn execute_pending_trials_with_caches_and_concurrency(
         )
         .await;
     }
+
+    let signal_batch_prewarm_plan =
+        plan_factor_signal_batch_prewarm_requests(&task, &pending_trials);
+    let signal_batch_prewarm = if signal_batch_prewarm_plan.factor_requests.is_empty() {
+        None
+    } else {
+        let factor_request_count = signal_batch_prewarm_plan.factor_requests.len();
+        Some(
+            match prewarm_factor_signal_cache_for_requests(
+                db,
+                &signal_batch_prewarm_plan.factor_requests,
+                signal_cache,
+            )
+            .await
+            {
+                Ok(report) => json!({
+                    "status": "completed",
+                    "requested_trials": signal_batch_prewarm_plan.requested_trials,
+                    "factor_requests": factor_request_count,
+                    "prediction_trials": signal_batch_prewarm_plan.prediction_trials,
+                    "invalid_trials": signal_batch_prewarm_plan.invalid_trials,
+                    "report": report,
+                }),
+                Err(error) => json!({
+                    "status": "failed",
+                    "requested_trials": signal_batch_prewarm_plan.requested_trials,
+                    "factor_requests": factor_request_count,
+                    "prediction_trials": signal_batch_prewarm_plan.prediction_trials,
+                    "invalid_trials": signal_batch_prewarm_plan.invalid_trials,
+                    "error": error,
+                }),
+            },
+        )
+    };
 
     let mut completed = 0;
     let mut failed = 0;
@@ -5525,6 +5600,7 @@ async fn execute_pending_trials_with_caches_and_concurrency(
         "performance_gates": gates,
         "trial_concurrency": 1,
         "cache_mode": "shared_window",
+        "signal_batch_prewarm": signal_batch_prewarm,
         "signal_cache": signal_cache_stats,
         "backtest_cache": backtest_cache_stats,
     }))
@@ -5755,9 +5831,18 @@ fn add_signal_cache_stats(total: &mut SignalDataCacheStats, value: SignalDataCac
     total.trading_day_hits += value.trading_day_hits;
     total.trading_day_misses += value.trading_day_misses;
     total.return_history_hits += value.return_history_hits;
+    total.return_history_covering_window_hits += value.return_history_covering_window_hits;
+    total.return_history_snapshot_hits += value.return_history_snapshot_hits;
     total.return_history_misses += value.return_history_misses;
     total.average_amount_hits += value.average_amount_hits;
+    total.average_amount_symbol_hits += value.average_amount_symbol_hits;
+    total.average_amount_history_hits += value.average_amount_history_hits;
+    total.average_amount_history_covering_window_hits +=
+        value.average_amount_history_covering_window_hits;
+    total.average_amount_history_snapshot_hits += value.average_amount_history_snapshot_hits;
     total.average_amount_misses += value.average_amount_misses;
+    total.average_amount_symbol_misses += value.average_amount_symbol_misses;
+    total.average_amount_history_misses += value.average_amount_history_misses;
     total.prediction_score_hits += value.prediction_score_hits;
     total.prediction_score_misses += value.prediction_score_misses;
     total.industry_classification_hits += value.industry_classification_hits;
@@ -5772,6 +5857,8 @@ fn add_backtest_cache_stats(total: &mut BacktestDataCacheStats, value: BacktestD
     total.benchmark_data_hits += value.benchmark_data_hits;
     total.benchmark_data_misses += value.benchmark_data_misses;
     total.daily_bar_symbol_hits += value.daily_bar_symbol_hits;
+    total.daily_bar_covering_window_hits += value.daily_bar_covering_window_hits;
+    total.daily_bar_snapshot_hits += value.daily_bar_snapshot_hits;
     total.daily_bar_symbol_misses += value.daily_bar_symbol_misses;
     total.trading_profile_symbol_hits += value.trading_profile_symbol_hits;
     total.trading_profile_symbol_misses += value.trading_profile_symbol_misses;
@@ -17350,7 +17437,17 @@ mod tests {
             prediction_score_hits: 2,
             prediction_score_misses: 1,
             return_history_hits: 100,
+            return_history_covering_window_hits: 12,
+            return_history_snapshot_hits: 7,
+            average_amount_hits: 70,
+            average_amount_symbol_hits: 28,
+            average_amount_history_hits: 42,
+            average_amount_history_covering_window_hits: 14,
+            average_amount_history_snapshot_hits: 8,
+            average_amount_symbol_misses: 11,
+            average_amount_history_misses: 39,
             return_history_misses: 50,
+            average_amount_misses: 50,
             ..Default::default()
         };
         let after_signal = SignalDataCacheStats {
@@ -17359,7 +17456,17 @@ mod tests {
             prediction_score_hits: 8,
             prediction_score_misses: 1,
             return_history_hits: 130,
+            return_history_covering_window_hits: 20,
+            return_history_snapshot_hits: 16,
+            average_amount_hits: 95,
+            average_amount_symbol_hits: 40,
+            average_amount_history_hits: 55,
+            average_amount_history_covering_window_hits: 20,
+            average_amount_history_snapshot_hits: 18,
+            average_amount_symbol_misses: 13,
+            average_amount_history_misses: 42,
             return_history_misses: 55,
+            average_amount_misses: 55,
             ..Default::default()
         };
         let signal_delta = signal_cache_stats_delta(before_signal, after_signal);
@@ -17369,10 +17476,22 @@ mod tests {
         assert_eq!(signal_delta.prediction_score_hits, 6);
         assert_eq!(signal_delta.prediction_score_misses, 0);
         assert_eq!(signal_delta.return_history_hits, 30);
+        assert_eq!(signal_delta.return_history_covering_window_hits, 8);
+        assert_eq!(signal_delta.return_history_snapshot_hits, 9);
+        assert_eq!(signal_delta.average_amount_hits, 25);
+        assert_eq!(signal_delta.average_amount_symbol_hits, 12);
+        assert_eq!(signal_delta.average_amount_history_hits, 13);
+        assert_eq!(signal_delta.average_amount_history_covering_window_hits, 6);
+        assert_eq!(signal_delta.average_amount_history_snapshot_hits, 10);
         assert_eq!(signal_delta.return_history_misses, 5);
+        assert_eq!(signal_delta.average_amount_misses, 5);
+        assert_eq!(signal_delta.average_amount_symbol_misses, 2);
+        assert_eq!(signal_delta.average_amount_history_misses, 3);
 
         let before_backtest = BacktestDataCacheStats {
             daily_bar_symbol_hits: 50,
+            daily_bar_covering_window_hits: 10,
+            daily_bar_snapshot_hits: 5,
             daily_bar_symbol_misses: 20,
             trading_profile_symbol_hits: 40,
             trading_profile_symbol_misses: 20,
@@ -17380,6 +17499,8 @@ mod tests {
         };
         let after_backtest = BacktestDataCacheStats {
             daily_bar_symbol_hits: 80,
+            daily_bar_covering_window_hits: 22,
+            daily_bar_snapshot_hits: 9,
             daily_bar_symbol_misses: 22,
             trading_profile_symbol_hits: 70,
             trading_profile_symbol_misses: 22,
@@ -17388,9 +17509,74 @@ mod tests {
         let backtest_delta = backtest_cache_stats_delta(before_backtest, after_backtest);
 
         assert_eq!(backtest_delta.daily_bar_symbol_hits, 30);
+        assert_eq!(backtest_delta.daily_bar_covering_window_hits, 12);
+        assert_eq!(backtest_delta.daily_bar_snapshot_hits, 4);
         assert_eq!(backtest_delta.daily_bar_symbol_misses, 2);
         assert_eq!(backtest_delta.trading_profile_symbol_hits, 30);
         assert_eq!(backtest_delta.trading_profile_symbol_misses, 2);
+    }
+
+    #[test]
+    fn factor_batch_signal_prewarm_plan_extracts_only_valid_factor_requests() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "phase7-professional-v1".into(),
+            data_version_id: "full-market-2016-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "version": "1.0.0",
+                "start_date": "20200101",
+                "end_date": "20230101",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "20",
+                "max_position_pct": 0.08
+            }),
+            objective: json!({"type": "professional_candidate"}),
+            constraints: None,
+        };
+        let pending_trials = vec![
+            (
+                "trial-factor-a".to_string(),
+                1,
+                json!({"top_n": 18, "market_regime": "quality_bear_window_guard_v2"}),
+            ),
+            (
+                "trial-prediction".to_string(),
+                2,
+                json!({
+                    "signal_source": "prediction",
+                    "prediction_set_id": "pred-phase7-v1"
+                }),
+            ),
+            (
+                "trial-invalid".to_string(),
+                3,
+                json!({"top_n": {"bad": "shape"}}),
+            ),
+            (
+                "trial-factor-b".to_string(),
+                4,
+                json!({"rebalance": "60", "score_candidate_pool_size": 600}),
+            ),
+        ];
+
+        let plan = plan_factor_signal_batch_prewarm_requests(&task, &pending_trials);
+
+        assert_eq!(plan.requested_trials, 4);
+        assert_eq!(plan.factor_requests.len(), 2);
+        assert_eq!(plan.prediction_trials, 1);
+        assert_eq!(plan.invalid_trials, 1);
+        assert_eq!(plan.factor_requests[0].top_n, 18);
+        assert_eq!(
+            plan.factor_requests[0]
+                .market_regime
+                .as_ref()
+                .unwrap()
+                .policy,
+            Some("quality_bear_window_guard_v2".to_string())
+        );
+        assert_eq!(plan.factor_requests[1].rebalance, "60");
+        assert_eq!(plan.factor_requests[1].score_candidate_pool_size, Some(600));
     }
 
     #[test]
@@ -18269,6 +18455,13 @@ mod tests {
                 effective_coverage: None,
                 market_data_prewarm_report: Some(
                     quant_backtest::runner::BacktestMarketDataPrewarmReport {
+                        snapshot_key: quant_backtest::runner::BacktestMarketDataSnapshotKey::new(
+                            "full-market-2016-v1",
+                            "000300.SH",
+                            NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                            NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+                            &["AAA".to_string(), "BBB".to_string()],
+                        ),
                         start_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
                         end_date: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
                         benchmark: "000300.SH".to_string(),

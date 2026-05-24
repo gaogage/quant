@@ -6,7 +6,9 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -69,6 +71,8 @@ pub struct BacktestDataCacheStats {
     pub benchmark_data_hits: usize,
     pub benchmark_data_misses: usize,
     pub daily_bar_symbol_hits: usize,
+    pub daily_bar_covering_window_hits: usize,
+    pub daily_bar_snapshot_hits: usize,
     pub daily_bar_symbol_misses: usize,
     pub trading_profile_symbol_hits: usize,
     pub trading_profile_symbol_misses: usize,
@@ -76,6 +80,7 @@ pub struct BacktestDataCacheStats {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BacktestMarketDataPrewarmReport {
+    pub snapshot_key: BacktestMarketDataSnapshotKey,
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
     pub benchmark: String,
@@ -103,6 +108,12 @@ pub fn backtest_cache_stats_delta(
         daily_bar_symbol_hits: after
             .daily_bar_symbol_hits
             .saturating_sub(before.daily_bar_symbol_hits),
+        daily_bar_covering_window_hits: after
+            .daily_bar_covering_window_hits
+            .saturating_sub(before.daily_bar_covering_window_hits),
+        daily_bar_snapshot_hits: after
+            .daily_bar_snapshot_hits
+            .saturating_sub(before.daily_bar_snapshot_hits),
         daily_bar_symbol_misses: after
             .daily_bar_symbol_misses
             .saturating_sub(before.daily_bar_symbol_misses),
@@ -115,12 +126,46 @@ pub fn backtest_cache_stats_delta(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct BacktestMarketDataSnapshotKey {
+    pub data_version_id: String,
+    pub benchmark: String,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub universe_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct BacktestMarketDataSnapshot {
+    key: BacktestMarketDataSnapshotKey,
+    daily_bars: HashMap<String, Arc<Vec<DailyBarRecord>>>,
+}
+
+impl BacktestMarketDataSnapshotKey {
+    pub fn new(
+        data_version_id: impl AsRef<str>,
+        benchmark: impl AsRef<str>,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        symbols: &[String],
+    ) -> Self {
+        Self {
+            data_version_id: data_version_id.as_ref().trim().to_string(),
+            benchmark: benchmark.as_ref().trim().to_string(),
+            start_date,
+            end_date,
+            universe_hash: symbol_universe_hash(symbols),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct BacktestDataCache {
     trading_days: HashMap<(NaiveDate, NaiveDate), Arc<Vec<NaiveDate>>>,
     benchmark_data:
         HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
     daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    market_data_snapshots: HashMap<BacktestMarketDataSnapshotKey, Arc<BacktestMarketDataSnapshot>>,
     trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
     stats: BacktestDataCacheStats,
 }
@@ -131,6 +176,7 @@ pub struct BacktestDataCacheSnapshot {
     benchmark_data:
         HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
     daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    market_data_snapshots: HashMap<BacktestMarketDataSnapshotKey, Arc<BacktestMarketDataSnapshot>>,
     trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
 }
 
@@ -144,6 +190,7 @@ impl BacktestDataCache {
             trading_days: self.trading_days.clone(),
             benchmark_data: self.benchmark_data.clone(),
             daily_bars: self.daily_bars.clone(),
+            market_data_snapshots: self.market_data_snapshots.clone(),
             trading_profiles: self.trading_profiles.clone(),
         }
     }
@@ -153,6 +200,7 @@ impl BacktestDataCache {
             trading_days: snapshot.trading_days.clone(),
             benchmark_data: snapshot.benchmark_data.clone(),
             daily_bars: snapshot.daily_bars.clone(),
+            market_data_snapshots: snapshot.market_data_snapshots.clone(),
             trading_profiles: snapshot.trading_profiles.clone(),
             stats: BacktestDataCacheStats::default(),
         }
@@ -292,6 +340,14 @@ impl BacktestDataCache {
                 self.cached_daily_bar_records_from_covering_window(&symbol, start, end)
             {
                 self.stats.daily_bar_symbol_hits += 1;
+                self.stats.daily_bar_covering_window_hits += 1;
+                merge_daily_bar_records(&mut cached, &records);
+                reusable_records.push((symbol, records));
+            } else if let Some(records) =
+                self.cached_daily_bar_records_from_market_data_snapshot(&symbol, start, end)
+            {
+                self.stats.daily_bar_symbol_hits += 1;
+                self.stats.daily_bar_snapshot_hits += 1;
                 merge_daily_bar_records(&mut cached, &records);
                 reusable_records.push((symbol, records));
             } else {
@@ -333,6 +389,37 @@ impl BacktestDataCache {
             })
     }
 
+    fn cached_daily_bar_records_from_market_data_snapshot(
+        &self,
+        symbol: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Option<Vec<DailyBarRecord>> {
+        self.market_data_snapshots
+            .values()
+            .filter(|snapshot| {
+                snapshot.key.start_date <= start
+                    && snapshot.key.end_date >= end
+                    && snapshot.daily_bars.contains_key(symbol)
+            })
+            .min_by_key(|snapshot| {
+                snapshot
+                    .key
+                    .end_date
+                    .signed_duration_since(snapshot.key.start_date)
+                    .num_days()
+            })
+            .and_then(|snapshot| snapshot.daily_bars.get(symbol))
+            .map(|records| {
+                records
+                    .as_ref()
+                    .iter()
+                    .filter(|record| record.trade_date >= start && record.trade_date <= end)
+                    .cloned()
+                    .collect()
+            })
+    }
+
     fn insert_daily_bar_rows(
         &mut self,
         start: NaiveDate,
@@ -360,6 +447,62 @@ impl BacktestDataCache {
         }
 
         inserted
+    }
+
+    #[cfg(test)]
+    fn insert_market_data_snapshot(
+        &mut self,
+        key: BacktestMarketDataSnapshotKey,
+        daily_bars: DailyBarsByDate,
+    ) {
+        let mut by_symbol: HashMap<String, Vec<DailyBarRecord>> = HashMap::new();
+        for (trade_date, day) in daily_bars {
+            for (symbol, (open, close, pre_close, amount)) in day {
+                by_symbol
+                    .entry(symbol.clone())
+                    .or_default()
+                    .push(DailyBarRecord {
+                        trade_date,
+                        symbol,
+                        open,
+                        close,
+                        pre_close,
+                        amount,
+                    });
+            }
+        }
+        let daily_bars = by_symbol
+            .into_iter()
+            .map(|(symbol, mut records)| {
+                records.sort_by_key(|record| record.trade_date);
+                (symbol, Arc::new(records))
+            })
+            .collect();
+        self.market_data_snapshots.insert(
+            key.clone(),
+            Arc::new(BacktestMarketDataSnapshot { key, daily_bars }),
+        );
+    }
+
+    fn insert_market_data_snapshot_from_cache(
+        &mut self,
+        key: BacktestMarketDataSnapshotKey,
+        symbols: &[String],
+        start: NaiveDate,
+        end: NaiveDate,
+    ) {
+        let mut daily_bars = HashMap::new();
+        if let Some(bucket) = self.daily_bars.get(&(start, end)) {
+            for symbol in normalized_symbol_key(symbols) {
+                if let Some(records) = bucket.get(&symbol) {
+                    daily_bars.insert(symbol, Arc::clone(records));
+                }
+            }
+        }
+        self.market_data_snapshots.insert(
+            key.clone(),
+            Arc::new(BacktestMarketDataSnapshot { key, daily_bars }),
+        );
     }
 
     fn cached_trading_profiles(
@@ -430,6 +573,13 @@ fn normalized_symbol_key(symbols: &[String]) -> Vec<String> {
     symbols
 }
 
+fn symbol_universe_hash(symbols: &[String]) -> String {
+    let symbols = normalized_symbol_key(symbols);
+    let mut hasher = DefaultHasher::new();
+    symbols.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 fn merge_daily_bars(target: &mut DailyBarsByDate, source: DailyBarsByDate) {
     for (date, day) in source {
         target.entry(date).or_default().extend(day);
@@ -488,12 +638,15 @@ impl BacktestRunner {
     pub async fn prewarm_market_data_cache(
         &self,
         cache: &mut BacktestDataCache,
+        data_version_id: &str,
         benchmark: &str,
         symbols: &[String],
         start: NaiveDate,
         end: NaiveDate,
     ) -> Result<BacktestMarketDataPrewarmReport, sqlx::Error> {
         let symbols = normalized_symbol_key(symbols);
+        let snapshot_key =
+            BacktestMarketDataSnapshotKey::new(data_version_id, benchmark, start, end, &symbols);
         let before = cache.stats();
         let _ = self.load_trading_days_cached(cache, start, end).await?;
         let _ = self
@@ -503,11 +656,18 @@ impl BacktestRunner {
             let _ = self
                 .load_daily_bars_cached(cache, &symbols, start, end)
                 .await?;
+            cache.insert_market_data_snapshot_from_cache(
+                snapshot_key.clone(),
+                &symbols,
+                start,
+                end,
+            );
             let _ = self.load_trading_profiles_cached(cache, &symbols).await?;
         }
         let after = cache.stats();
 
         Ok(BacktestMarketDataPrewarmReport {
+            snapshot_key,
             start_date: start,
             end_date: end,
             benchmark: benchmark.to_string(),
@@ -1393,6 +1553,69 @@ mod tests {
         );
         let stats = cache.stats();
         assert_eq!(stats.daily_bar_symbol_hits, 1);
+        assert_eq!(stats.daily_bar_covering_window_hits, 1);
+        assert_eq!(stats.daily_bar_snapshot_hits, 0);
+        assert_eq!(stats.daily_bar_symbol_misses, 0);
+    }
+
+    #[test]
+    fn backtest_market_data_snapshot_reuses_subset_window_daily_bars() {
+        let wide_start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let narrow_start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let narrow_end = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let wide_end = NaiveDate::from_ymd_opt(2024, 1, 4).unwrap();
+        let mut cache = BacktestDataCache::default();
+        let symbols = vec!["000001.SZ".to_string(), "000002.SZ".to_string()];
+        let key = BacktestMarketDataSnapshotKey::new(
+            "full-market-2016-v1",
+            "000300.SH",
+            wide_start,
+            wide_end,
+            &symbols,
+        );
+        let mut snapshot_bars = DailyBarsByDate::new();
+        for (date, close_a, close_b) in [
+            (wide_start, Decimal::new(102, 1), Decimal::new(202, 1)),
+            (narrow_start, Decimal::new(112, 1), Decimal::new(212, 1)),
+            (narrow_end, Decimal::new(122, 1), Decimal::new(222, 1)),
+            (wide_end, Decimal::new(132, 1), Decimal::new(232, 1)),
+        ] {
+            snapshot_bars.entry(date).or_default().insert(
+                "000001.SZ".to_string(),
+                (close_a, close_a, close_a, Decimal::new(1000, 0)),
+            );
+            snapshot_bars.entry(date).or_default().insert(
+                "000002.SZ".to_string(),
+                (close_b, close_b, close_b, Decimal::new(2000, 0)),
+            );
+        }
+        cache.insert_market_data_snapshot(key, snapshot_bars);
+
+        let (missing, cached) =
+            cache.cached_daily_bar_symbols(&["000002.SZ".to_string()], narrow_start, narrow_end);
+
+        assert!(missing.is_empty());
+        assert_eq!(cached.len(), 2);
+        assert!(!cached.contains_key(&wide_start));
+        assert!(!cached.contains_key(&wide_end));
+        assert_eq!(
+            cached
+                .get(&narrow_start)
+                .and_then(|day| day.get("000002.SZ"))
+                .map(|(_, close, _, _)| *close),
+            Some(Decimal::new(212, 1))
+        );
+        assert_eq!(
+            cached
+                .get(&narrow_end)
+                .and_then(|day| day.get("000002.SZ"))
+                .map(|(_, close, _, _)| *close),
+            Some(Decimal::new(222, 1))
+        );
+        let stats = cache.stats();
+        assert_eq!(stats.daily_bar_symbol_hits, 1);
+        assert_eq!(stats.daily_bar_covering_window_hits, 0);
+        assert_eq!(stats.daily_bar_snapshot_hits, 1);
         assert_eq!(stats.daily_bar_symbol_misses, 0);
     }
 

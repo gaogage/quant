@@ -6,7 +6,7 @@
 //! Strategy: rank all stocks by combo score each rebalance day, pick top-N,
 //! assign equal weight.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{Duration, NaiveDate};
@@ -446,9 +446,17 @@ pub struct SignalDataCacheStats {
     pub trading_day_hits: usize,
     pub trading_day_misses: usize,
     pub return_history_hits: usize,
+    pub return_history_covering_window_hits: usize,
+    pub return_history_snapshot_hits: usize,
     pub return_history_misses: usize,
     pub average_amount_hits: usize,
+    pub average_amount_symbol_hits: usize,
+    pub average_amount_history_hits: usize,
+    pub average_amount_history_covering_window_hits: usize,
+    pub average_amount_history_snapshot_hits: usize,
     pub average_amount_misses: usize,
+    pub average_amount_symbol_misses: usize,
+    pub average_amount_history_misses: usize,
     pub prediction_score_hits: usize,
     pub prediction_score_misses: usize,
     pub industry_classification_hits: usize,
@@ -476,6 +484,100 @@ pub struct MarketFeaturePrewarmReport {
     pub symbol_count: usize,
     pub lookback_days: usize,
     pub cache_delta: SignalDataCacheStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorSignalFeaturePrewarmSpec {
+    pub data_version_id: String,
+    pub train_start: NaiveDate,
+    pub train_end: NaiveDate,
+    pub test_start: NaiveDate,
+    pub test_end: NaiveDate,
+    pub feature_start: NaiveDate,
+    pub feature_end: NaiveDate,
+    pub config: SignalConfig,
+    pub regime_policy: Option<MarketRegimePolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactorSignalBatchPrewarmReport {
+    pub requested_specs: usize,
+    pub candidate_specs: usize,
+    pub skipped_empty_specs: usize,
+    pub unique_feature_groups: usize,
+    pub total_symbol_count: usize,
+    pub cache_delta: SignalDataCacheStats,
+    pub groups: Vec<MarketFeaturePrewarmReport>,
+}
+
+#[derive(Debug, Clone)]
+struct FactorSignalFeaturePrewarmCandidate {
+    data_version_id: String,
+    train_start: NaiveDate,
+    train_end: NaiveDate,
+    test_start: NaiveDate,
+    test_end: NaiveDate,
+    feature_start: NaiveDate,
+    feature_end: NaiveDate,
+    lookback_days: usize,
+    symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FactorSignalFeaturePrewarmGroupKey {
+    data_version_id: String,
+    train_start: NaiveDate,
+    train_end: NaiveDate,
+    test_start: NaiveDate,
+    test_end: NaiveDate,
+    feature_start: NaiveDate,
+    feature_end: NaiveDate,
+    lookback_days: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FactorSignalFeaturePrewarmGroup {
+    key: FactorSignalFeaturePrewarmGroupKey,
+    symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketFeatureSnapshotScope {
+    pub data_version_id: String,
+    pub train_start: NaiveDate,
+    pub train_end: NaiveDate,
+    pub test_start: NaiveDate,
+    pub test_end: NaiveDate,
+}
+
+impl MarketFeatureSnapshotScope {
+    pub fn new(
+        data_version_id: impl AsRef<str>,
+        train_start: NaiveDate,
+        train_end: NaiveDate,
+        test_start: NaiveDate,
+        test_end: NaiveDate,
+    ) -> Self {
+        Self {
+            data_version_id: data_version_id.as_ref().trim().to_string(),
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+        }
+    }
+
+    fn snapshot_key(&self, lookback_days: usize, symbols: &[String]) -> MarketFeatureSnapshotKey {
+        MarketFeatureSnapshotKey::new(
+            &self.data_version_id,
+            self.train_start,
+            self.train_end,
+            self.test_start,
+            self.test_end,
+            lookback_days,
+            symbols,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -560,15 +662,39 @@ pub fn signal_cache_stats_delta(
         return_history_hits: after
             .return_history_hits
             .saturating_sub(before.return_history_hits),
+        return_history_covering_window_hits: after
+            .return_history_covering_window_hits
+            .saturating_sub(before.return_history_covering_window_hits),
+        return_history_snapshot_hits: after
+            .return_history_snapshot_hits
+            .saturating_sub(before.return_history_snapshot_hits),
         return_history_misses: after
             .return_history_misses
             .saturating_sub(before.return_history_misses),
         average_amount_hits: after
             .average_amount_hits
             .saturating_sub(before.average_amount_hits),
+        average_amount_symbol_hits: after
+            .average_amount_symbol_hits
+            .saturating_sub(before.average_amount_symbol_hits),
+        average_amount_history_hits: after
+            .average_amount_history_hits
+            .saturating_sub(before.average_amount_history_hits),
+        average_amount_history_covering_window_hits: after
+            .average_amount_history_covering_window_hits
+            .saturating_sub(before.average_amount_history_covering_window_hits),
+        average_amount_history_snapshot_hits: after
+            .average_amount_history_snapshot_hits
+            .saturating_sub(before.average_amount_history_snapshot_hits),
         average_amount_misses: after
             .average_amount_misses
             .saturating_sub(before.average_amount_misses),
+        average_amount_symbol_misses: after
+            .average_amount_symbol_misses
+            .saturating_sub(before.average_amount_symbol_misses),
+        average_amount_history_misses: after
+            .average_amount_history_misses
+            .saturating_sub(before.average_amount_history_misses),
         prediction_score_hits: after
             .prediction_score_hits
             .saturating_sub(before.prediction_score_hits),
@@ -652,6 +778,190 @@ pub async fn prewarm_market_feature_cache(
         lookback_days,
         cache_delta: signal_cache_stats_delta(before, after),
     })
+}
+
+pub async fn prewarm_factor_signal_batch_feature_cache(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    specs: &[FactorSignalFeaturePrewarmSpec],
+) -> Result<FactorSignalBatchPrewarmReport, String> {
+    let before = cache.stats();
+    let mut candidates = Vec::with_capacity(specs.len());
+    for spec in specs {
+        candidates.push(load_factor_signal_feature_prewarm_candidate(pool, cache, spec).await?);
+    }
+    let candidate_specs = candidates
+        .iter()
+        .filter(|candidate| !candidate.symbols.is_empty())
+        .count();
+    let skipped_empty_specs = specs.len().saturating_sub(candidate_specs);
+    let groups = merge_factor_signal_feature_prewarm_groups(candidates);
+    let mut reports = Vec::with_capacity(groups.len());
+    for group in groups {
+        let key = group.key;
+        reports.push(
+            prewarm_market_feature_cache(
+                pool,
+                cache,
+                &key.data_version_id,
+                key.train_start,
+                key.train_end,
+                key.test_start,
+                key.test_end,
+                key.feature_start,
+                key.feature_end,
+                key.lookback_days,
+                &group.symbols,
+            )
+            .await?,
+        );
+    }
+    let after = cache.stats();
+    let total_symbol_count = reports.iter().map(|report| report.symbol_count).sum();
+
+    Ok(FactorSignalBatchPrewarmReport {
+        requested_specs: specs.len(),
+        candidate_specs,
+        skipped_empty_specs,
+        unique_feature_groups: reports.len(),
+        total_symbol_count,
+        cache_delta: signal_cache_stats_delta(before, after),
+        groups: reports,
+    })
+}
+
+async fn load_factor_signal_feature_prewarm_candidate(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    spec: &FactorSignalFeaturePrewarmSpec,
+) -> Result<FactorSignalFeaturePrewarmCandidate, String> {
+    let trading_days =
+        load_open_trading_days_cached(pool, cache, spec.feature_start, spec.feature_end).await?;
+    let portfolio_config = PortfolioConstructionConfig::from(&spec.config);
+    let (symbols, lookback_days) = if let Some(policy) = spec.regime_policy.as_ref() {
+        let max_lookback =
+            portfolio_history_lookback_days(&portfolio_config).max(policy.lookback_days);
+        let benchmark_returns = load_benchmark_return_history_cached(
+            pool,
+            cache,
+            &policy.benchmark,
+            spec.feature_start,
+            spec.feature_end,
+            max_lookback,
+        )
+        .await?;
+        let score_days = rebalance_score_days(trading_days.as_ref(), &spec.config, |day, base| {
+            let returns =
+                trailing_market_returns(benchmark_returns.as_ref(), day, policy.lookback_days);
+            let regime = classify_market_regime(&returns, policy);
+            policy.apply(base, regime)
+        });
+        let score_source_configs = regime_score_source_configs(&spec.config, policy);
+        let mut score_sources: HashMap<FactorScoreSourceKey, FactorScoresByDate> = HashMap::new();
+        for source_config in score_source_configs {
+            let key = FactorScoreSourceKey::from_config(&source_config);
+            if score_sources.contains_key(&key) {
+                continue;
+            }
+            let scores =
+                load_regime_base_scores_for_dates_cached(pool, cache, &source_config, &score_days)
+                    .await?;
+            score_sources.insert(key, scores);
+        }
+        if let Some(event_gate) = spec
+            .config
+            .event_gate
+            .as_ref()
+            .filter(|gate| !gate.active_regimes.is_empty())
+        {
+            let event_scores =
+                load_event_gate_scores_for_dates_cached(pool, cache, event_gate, &score_days)
+                    .await?;
+            for scores in score_sources.values_mut() {
+                apply_event_gate_scores_for_regime(
+                    scores,
+                    event_scores.as_ref(),
+                    event_gate,
+                    |day| {
+                        let returns = trailing_market_returns(
+                            benchmark_returns.as_ref(),
+                            day,
+                            policy.lookback_days,
+                        );
+                        classify_market_regime(&returns, policy)
+                    },
+                );
+            }
+        }
+        let symbols = score_sources
+            .values()
+            .flat_map(|scores_by_date| symbols_from_factor_scores(scores_by_date))
+            .collect::<Vec<_>>();
+        (symbols, max_lookback)
+    } else {
+        let score_days = rebalance_score_days(trading_days.as_ref(), &spec.config, |_day, base| {
+            base.clone()
+        });
+        let scores =
+            load_regime_base_scores_for_dates_cached(pool, cache, &spec.config, &score_days)
+                .await?;
+        let lookback_days = portfolio_history_lookback_days(&portfolio_config);
+        (symbols_from_factor_scores(&scores), lookback_days)
+    };
+
+    Ok(FactorSignalFeaturePrewarmCandidate {
+        data_version_id: spec.data_version_id.clone(),
+        train_start: spec.train_start,
+        train_end: spec.train_end,
+        test_start: spec.test_start,
+        test_end: spec.test_end,
+        feature_start: spec.feature_start,
+        feature_end: spec.feature_end,
+        lookback_days,
+        symbols,
+    })
+}
+
+fn symbols_from_factor_scores(scores: &FactorScoresByDate) -> Vec<String> {
+    let symbols = scores
+        .values()
+        .flat_map(|rows| rows.iter().map(|(symbol, _)| symbol.clone()))
+        .collect::<Vec<_>>();
+    normalized_symbol_key(&symbols)
+}
+
+fn merge_factor_signal_feature_prewarm_groups(
+    candidates: Vec<FactorSignalFeaturePrewarmCandidate>,
+) -> Vec<FactorSignalFeaturePrewarmGroup> {
+    let mut groups: BTreeMap<FactorSignalFeaturePrewarmGroupKey, BTreeSet<String>> =
+        BTreeMap::new();
+    for candidate in candidates {
+        if candidate.symbols.is_empty() {
+            continue;
+        }
+        let key = FactorSignalFeaturePrewarmGroupKey {
+            data_version_id: candidate.data_version_id,
+            train_start: candidate.train_start,
+            train_end: candidate.train_end,
+            test_start: candidate.test_start,
+            test_end: candidate.test_end,
+            feature_start: candidate.feature_start,
+            feature_end: candidate.feature_end,
+            lookback_days: candidate.lookback_days.max(1),
+        };
+        groups
+            .entry(key)
+            .or_default()
+            .extend(candidate.symbols.into_iter());
+    }
+
+    groups
+        .into_iter()
+        .map(|(key, symbols)| FactorSignalFeaturePrewarmGroup {
+            key,
+            symbols: symbols.into_iter().collect(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Default)]
@@ -839,6 +1149,63 @@ impl SignalDataCache {
         );
     }
 
+    fn insert_market_feature_snapshot_from_cached_histories(
+        &mut self,
+        key: MarketFeatureSnapshotKey,
+        return_lookback_days: usize,
+        amount_lookback_days: usize,
+        symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) {
+        let mut return_history = HashMap::new();
+        let mut average_amount_history = HashMap::new();
+
+        for symbol in normalized_symbol_key(symbols) {
+            let return_key = SignalDataCacheKey::return_history_symbol(
+                &symbol,
+                start_date,
+                end_date,
+                return_lookback_days,
+            );
+            if let Some(rows) = self
+                .return_history
+                .get(&return_key)
+                .and_then(|history| history.get(&symbol))
+                .cloned()
+            {
+                return_history.insert(symbol.clone(), rows);
+            }
+
+            let amount_key = SignalDataCacheKey::average_amount_history_symbol(
+                &symbol,
+                start_date,
+                end_date,
+                amount_lookback_days,
+            );
+            if let Some(rows) = self
+                .average_amount_history
+                .get(&amount_key)
+                .and_then(|history| history.get(&symbol))
+                .cloned()
+            {
+                average_amount_history.insert(symbol, rows);
+            }
+        }
+
+        if return_history.is_empty() && average_amount_history.is_empty() {
+            return;
+        }
+
+        self.insert_market_feature_snapshot(
+            key,
+            return_lookback_days,
+            amount_lookback_days,
+            return_history,
+            average_amount_history,
+        );
+    }
+
     fn cached_return_history_symbols(
         &mut self,
         symbols: &[String],
@@ -869,6 +1236,7 @@ impl SignalDataCache {
                         lookback_days,
                     ) {
                         self.stats.return_history_hits += 1;
+                        self.stats.return_history_covering_window_hits += 1;
                         result.insert(symbol, rows);
                     } else if let Some(rows) = self
                         .cached_return_history_from_market_feature_snapshot(
@@ -879,6 +1247,7 @@ impl SignalDataCache {
                         )
                     {
                         self.stats.return_history_hits += 1;
+                        self.stats.return_history_snapshot_hits += 1;
                         result.insert(symbol, rows);
                     } else {
                         self.stats.return_history_misses += 1;
@@ -1016,12 +1385,14 @@ impl SignalDataCache {
             match self.average_amounts.get(&key) {
                 Some(value) => {
                     self.stats.average_amount_hits += 1;
+                    self.stats.average_amount_symbol_hits += 1;
                     if let Some(amount) = value.as_ref().get(&symbol).copied() {
                         result.insert(symbol, amount);
                     }
                 }
                 None => {
                     self.stats.average_amount_misses += 1;
+                    self.stats.average_amount_symbol_misses += 1;
                     missing_symbols.push(symbol);
                 }
             }
@@ -1071,6 +1442,7 @@ impl SignalDataCache {
             match self.average_amount_history.get(&key) {
                 Some(value) => {
                     self.stats.average_amount_hits += 1;
+                    self.stats.average_amount_history_hits += 1;
                     let rows = value.as_ref().get(&symbol).cloned().unwrap_or_default();
                     result.insert(symbol, rows);
                 }
@@ -1082,6 +1454,8 @@ impl SignalDataCache {
                         lookback_days,
                     ) {
                         self.stats.average_amount_hits += 1;
+                        self.stats.average_amount_history_hits += 1;
+                        self.stats.average_amount_history_covering_window_hits += 1;
                         result.insert(symbol, rows);
                     } else if let Some(rows) = self
                         .cached_average_amount_history_from_market_feature_snapshot(
@@ -1092,9 +1466,12 @@ impl SignalDataCache {
                         )
                     {
                         self.stats.average_amount_hits += 1;
+                        self.stats.average_amount_history_hits += 1;
+                        self.stats.average_amount_history_snapshot_hits += 1;
                         result.insert(symbol, rows);
                     } else {
                         self.stats.average_amount_misses += 1;
+                        self.stats.average_amount_history_misses += 1;
                         missing_symbols.push(symbol);
                     }
                 }
@@ -4725,6 +5102,36 @@ pub async fn generate_signals_with_cache(
     end_date: NaiveDate,
     cache: &mut SignalDataCache,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
+    generate_signals_with_cache_internal(pool, config, start_date, end_date, cache, None).await
+}
+
+pub async fn generate_signals_with_cache_and_market_feature_snapshot(
+    pool: &PgPool,
+    config: &SignalConfig,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    cache: &mut SignalDataCache,
+    snapshot_scope: &MarketFeatureSnapshotScope,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
+    generate_signals_with_cache_internal(
+        pool,
+        config,
+        start_date,
+        end_date,
+        cache,
+        Some(snapshot_scope),
+    )
+    .await
+}
+
+async fn generate_signals_with_cache_internal(
+    pool: &PgPool,
+    config: &SignalConfig,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    cache: &mut SignalDataCache,
+    snapshot_scope: Option<&MarketFeatureSnapshotScope>,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
     let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
     let score_days = rebalance_score_days(trading_days.as_ref(), config, |_day, base| base.clone());
     let score_cache = load_combo_scores_for_dates_cached(pool, cache, config, &score_days).await?;
@@ -4779,13 +5186,14 @@ pub async fn generate_signals_with_cache(
         .into_iter()
         .collect();
     let portfolio_config = PortfolioConstructionConfig::from(config);
+    let return_lookback_days = portfolio_history_lookback_days(&portfolio_config);
     let return_history = load_symbol_return_history_cached(
         pool,
         cache,
         &all_symbols,
         start_date,
         end_date,
-        portfolio_history_lookback_days(&portfolio_config),
+        return_lookback_days,
     )
     .await?;
     let average_amounts = load_portfolio_capacity_inputs_cached(
@@ -4798,6 +5206,16 @@ pub async fn generate_signals_with_cache(
         &portfolio_config,
     )
     .await?;
+    if let Some(snapshot_scope) = snapshot_scope {
+        cache.insert_market_feature_snapshot_from_cached_histories(
+            snapshot_scope.snapshot_key(return_lookback_days, &all_symbols),
+            return_lookback_days,
+            PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+            &all_symbols,
+            start_date,
+            end_date,
+        );
+    }
     let industry_by_symbol =
         load_portfolio_industry_inputs_cached(pool, cache, &all_symbols, &portfolio_config).await?;
 
@@ -4832,6 +5250,42 @@ pub async fn generate_regime_signals_with_cache(
     start_date: NaiveDate,
     end_date: NaiveDate,
     cache: &mut SignalDataCache,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
+    generate_regime_signals_with_cache_internal(
+        pool, config, policy, start_date, end_date, cache, None,
+    )
+    .await
+}
+
+pub async fn generate_regime_signals_with_cache_and_market_feature_snapshot(
+    pool: &PgPool,
+    config: &SignalConfig,
+    policy: &MarketRegimePolicy,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    cache: &mut SignalDataCache,
+    snapshot_scope: &MarketFeatureSnapshotScope,
+) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
+    generate_regime_signals_with_cache_internal(
+        pool,
+        config,
+        policy,
+        start_date,
+        end_date,
+        cache,
+        Some(snapshot_scope),
+    )
+    .await
+}
+
+async fn generate_regime_signals_with_cache_internal(
+    pool: &PgPool,
+    config: &SignalConfig,
+    policy: &MarketRegimePolicy,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    cache: &mut SignalDataCache,
+    snapshot_scope: Option<&MarketFeatureSnapshotScope>,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
     let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
     let portfolio_config = PortfolioConstructionConfig::from(config);
@@ -4907,6 +5361,16 @@ pub async fn generate_regime_signals_with_cache(
         &portfolio_config,
     )
     .await?;
+    if let Some(snapshot_scope) = snapshot_scope {
+        cache.insert_market_feature_snapshot_from_cached_histories(
+            snapshot_scope.snapshot_key(max_lookback, &all_symbols),
+            max_lookback,
+            PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+            &all_symbols,
+            start_date,
+            end_date,
+        );
+    }
     let industry_by_symbol =
         load_portfolio_industry_inputs_cached(pool, cache, &all_symbols, &portfolio_config).await?;
 
@@ -10544,6 +11008,7 @@ mod tests {
         assert_eq!(base.stats().return_history_hits, 0);
         assert_eq!(fork.stats().return_history_hits, 1);
         assert_eq!(fork.stats().average_amount_hits, 1);
+        assert_eq!(fork.stats().average_amount_history_hits, 1);
     }
 
     #[test]
@@ -10587,6 +11052,8 @@ mod tests {
             vec![(before_request, 0.01), (inside_request, 0.02)]
         );
         assert_eq!(cache.stats().return_history_hits, 1);
+        assert_eq!(cache.stats().return_history_covering_window_hits, 1);
+        assert_eq!(cache.stats().return_history_snapshot_hits, 0);
         assert_eq!(cache.stats().return_history_misses, 0);
     }
 
@@ -10631,6 +11098,10 @@ mod tests {
             vec![(before_request, 100.0), (inside_request, 200.0)]
         );
         assert_eq!(cache.stats().average_amount_hits, 1);
+        assert_eq!(cache.stats().average_amount_history_hits, 1);
+        assert_eq!(cache.stats().average_amount_history_covering_window_hits, 1);
+        assert_eq!(cache.stats().average_amount_history_snapshot_hits, 0);
+        assert_eq!(cache.stats().average_amount_history_misses, 0);
         assert_eq!(cache.stats().average_amount_misses, 0);
     }
 
@@ -10717,8 +11188,180 @@ mod tests {
         );
         assert_eq!(cache.stats().return_history_hits, 1);
         assert_eq!(cache.stats().average_amount_hits, 1);
+        assert_eq!(cache.stats().average_amount_history_hits, 1);
+        assert_eq!(cache.stats().return_history_covering_window_hits, 0);
+        assert_eq!(cache.stats().return_history_snapshot_hits, 1);
+        assert_eq!(cache.stats().average_amount_history_covering_window_hits, 0);
+        assert_eq!(cache.stats().average_amount_history_snapshot_hits, 1);
         assert_eq!(cache.stats().return_history_misses, 0);
+        assert_eq!(cache.stats().average_amount_history_misses, 0);
         assert_eq!(cache.stats().average_amount_misses, 0);
+    }
+
+    #[test]
+    fn market_feature_snapshot_registers_full_score_universe_from_cached_histories() {
+        let train_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let train_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let requested_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let requested_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let before_request = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let inside_request = NaiveDate::from_ymd_opt(2026, 2, 10).unwrap();
+        let after_request = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let full_universe = vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()];
+        let requested_symbols = vec!["BBB".to_string()];
+        let return_lookback_days = 60;
+        let amount_lookback_days = PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS;
+        let mut cache = SignalDataCache::default();
+        let key = MarketFeatureSnapshotKey::new(
+            "full-market-2016-v1",
+            train_start,
+            train_end,
+            train_start,
+            train_end,
+            return_lookback_days,
+            &full_universe,
+        );
+
+        cache.insert_return_history_symbols(
+            &full_universe,
+            train_start,
+            train_end,
+            return_lookback_days,
+            HashMap::from([
+                (
+                    "AAA".to_string(),
+                    vec![(before_request, 0.01), (inside_request, 0.02)],
+                ),
+                (
+                    "BBB".to_string(),
+                    vec![
+                        (before_request, -0.01),
+                        (inside_request, -0.02),
+                        (after_request, -0.03),
+                    ],
+                ),
+                (
+                    "CCC".to_string(),
+                    vec![(inside_request, 0.03), (after_request, 0.04)],
+                ),
+            ]),
+        );
+        cache.insert_average_amount_history_symbols(
+            &full_universe,
+            train_start,
+            train_end,
+            amount_lookback_days,
+            HashMap::from([
+                (
+                    "AAA".to_string(),
+                    vec![(before_request, 100.0), (inside_request, 110.0)],
+                ),
+                (
+                    "BBB".to_string(),
+                    vec![
+                        (before_request, 200.0),
+                        (inside_request, 210.0),
+                        (after_request, 220.0),
+                    ],
+                ),
+                (
+                    "CCC".to_string(),
+                    vec![(inside_request, 300.0), (after_request, 310.0)],
+                ),
+            ]),
+        );
+
+        cache.insert_market_feature_snapshot_from_cached_histories(
+            key,
+            return_lookback_days,
+            amount_lookback_days,
+            &full_universe,
+            train_start,
+            train_end,
+        );
+        let snapshot = cache.snapshot();
+        let mut fork = SignalDataCache {
+            market_feature_snapshots: snapshot.market_feature_snapshots.clone(),
+            ..Default::default()
+        };
+
+        let (missing_returns, return_history) = fork.cached_return_history_symbols(
+            &requested_symbols,
+            requested_start,
+            requested_end,
+            return_lookback_days,
+        );
+        let (missing_amounts, amount_history) = fork.cached_average_amount_history_symbols(
+            &requested_symbols,
+            requested_start,
+            requested_end,
+            amount_lookback_days,
+        );
+
+        assert!(missing_returns.is_empty());
+        assert!(missing_amounts.is_empty());
+        assert_eq!(
+            return_history["BBB"],
+            vec![(before_request, -0.01), (inside_request, -0.02)]
+        );
+        assert_eq!(
+            amount_history["BBB"],
+            vec![(before_request, 200.0), (inside_request, 210.0)]
+        );
+        assert_eq!(fork.stats().return_history_snapshot_hits, 1);
+        assert_eq!(fork.stats().average_amount_history_snapshot_hits, 1);
+    }
+
+    #[test]
+    fn factor_signal_prewarm_groups_union_symbols_by_exact_window_and_lookback() {
+        let train_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let train_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let candidates = vec![
+            FactorSignalFeaturePrewarmCandidate {
+                data_version_id: "full-market-2016-v1".to_string(),
+                train_start,
+                train_end,
+                test_start: train_start,
+                test_end: train_end,
+                feature_start: train_start,
+                feature_end: train_end,
+                lookback_days: 60,
+                symbols: vec!["BBB".to_string(), "AAA".to_string()],
+            },
+            FactorSignalFeaturePrewarmCandidate {
+                data_version_id: "full-market-2016-v1".to_string(),
+                train_start,
+                train_end,
+                test_start: train_start,
+                test_end: train_end,
+                feature_start: train_start,
+                feature_end: train_end,
+                lookback_days: 60,
+                symbols: vec!["CCC".to_string(), "AAA".to_string()],
+            },
+            FactorSignalFeaturePrewarmCandidate {
+                data_version_id: "full-market-2016-v1".to_string(),
+                train_start,
+                train_end,
+                test_start: train_start,
+                test_end: train_end,
+                feature_start: train_start,
+                feature_end: train_end,
+                lookback_days: 120,
+                symbols: vec!["AAA".to_string()],
+            },
+        ];
+
+        let groups = merge_factor_signal_feature_prewarm_groups(candidates);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].key.lookback_days, 60);
+        assert_eq!(
+            groups[0].symbols,
+            vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()]
+        );
+        assert_eq!(groups[1].key.lookback_days, 120);
+        assert_eq!(groups[1].symbols, vec!["AAA".to_string()]);
     }
 
     #[test]
@@ -10748,7 +11391,11 @@ mod tests {
         assert_eq!(cached_amounts["AAA"], 5_000.0);
         assert_eq!(cached_amounts["BBB"], 3_000.0);
         assert_eq!(cache.stats().average_amount_hits, 2);
+        assert_eq!(cache.stats().average_amount_symbol_hits, 2);
+        assert_eq!(cache.stats().average_amount_history_hits, 0);
         assert_eq!(cache.stats().average_amount_misses, 1);
+        assert_eq!(cache.stats().average_amount_symbol_misses, 1);
+        assert_eq!(cache.stats().average_amount_history_misses, 0);
 
         cache.insert_average_amount_symbols(&missing, start, end, HashMap::new());
         let (missing_again, cached_again) =
@@ -10757,7 +11404,9 @@ mod tests {
         assert!(missing_again.is_empty());
         assert!(!cached_again.contains_key("CCC"));
         assert_eq!(cache.stats().average_amount_hits, 5);
+        assert_eq!(cache.stats().average_amount_symbol_hits, 5);
         assert_eq!(cache.stats().average_amount_misses, 1);
+        assert_eq!(cache.stats().average_amount_symbol_misses, 1);
     }
 
     #[test]
