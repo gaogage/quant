@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -73,13 +74,64 @@ pub struct BacktestDataCacheStats {
     pub trading_profile_symbol_misses: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BacktestMarketDataPrewarmReport {
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub benchmark: String,
+    pub symbol_count: usize,
+    pub cache_delta: BacktestDataCacheStats,
+}
+
+pub fn backtest_cache_stats_delta(
+    before: BacktestDataCacheStats,
+    after: BacktestDataCacheStats,
+) -> BacktestDataCacheStats {
+    BacktestDataCacheStats {
+        trading_day_hits: after
+            .trading_day_hits
+            .saturating_sub(before.trading_day_hits),
+        trading_day_misses: after
+            .trading_day_misses
+            .saturating_sub(before.trading_day_misses),
+        benchmark_data_hits: after
+            .benchmark_data_hits
+            .saturating_sub(before.benchmark_data_hits),
+        benchmark_data_misses: after
+            .benchmark_data_misses
+            .saturating_sub(before.benchmark_data_misses),
+        daily_bar_symbol_hits: after
+            .daily_bar_symbol_hits
+            .saturating_sub(before.daily_bar_symbol_hits),
+        daily_bar_symbol_misses: after
+            .daily_bar_symbol_misses
+            .saturating_sub(before.daily_bar_symbol_misses),
+        trading_profile_symbol_hits: after
+            .trading_profile_symbol_hits
+            .saturating_sub(before.trading_profile_symbol_hits),
+        trading_profile_symbol_misses: after
+            .trading_profile_symbol_misses
+            .saturating_sub(before.trading_profile_symbol_misses),
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct BacktestDataCache {
-    trading_days: HashMap<(NaiveDate, NaiveDate), Vec<NaiveDate>>,
-    benchmark_data: HashMap<(String, NaiveDate, NaiveDate), HashMap<NaiveDate, (Decimal, Decimal)>>,
-    daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Vec<DailyBarRecord>>>,
-    trading_profiles: HashMap<String, Option<TradingProfile>>,
+    trading_days: HashMap<(NaiveDate, NaiveDate), Arc<Vec<NaiveDate>>>,
+    benchmark_data:
+        HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
+    daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
     stats: BacktestDataCacheStats,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BacktestDataCacheSnapshot {
+    trading_days: HashMap<(NaiveDate, NaiveDate), Arc<Vec<NaiveDate>>>,
+    benchmark_data:
+        HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
+    daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
 }
 
 impl BacktestDataCache {
@@ -87,16 +139,36 @@ impl BacktestDataCache {
         self.stats
     }
 
+    pub fn snapshot(&self) -> BacktestDataCacheSnapshot {
+        BacktestDataCacheSnapshot {
+            trading_days: self.trading_days.clone(),
+            benchmark_data: self.benchmark_data.clone(),
+            daily_bars: self.daily_bars.clone(),
+            trading_profiles: self.trading_profiles.clone(),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &BacktestDataCacheSnapshot) -> Self {
+        Self {
+            trading_days: snapshot.trading_days.clone(),
+            benchmark_data: snapshot.benchmark_data.clone(),
+            daily_bars: snapshot.daily_bars.clone(),
+            trading_profiles: snapshot.trading_profiles.clone(),
+            stats: BacktestDataCacheStats::default(),
+        }
+    }
+
     fn cached_trading_days(&mut self, start: NaiveDate, end: NaiveDate) -> Option<Vec<NaiveDate>> {
         match self.trading_days.get(&(start, end)) {
             Some(days) => {
                 self.stats.trading_day_hits += 1;
-                Some(days.clone())
+                Some(days.as_ref().clone())
             }
             None => {
                 if let Some(days) = self.cached_trading_days_from_covering_window(start, end) {
                     self.stats.trading_day_hits += 1;
-                    self.trading_days.insert((start, end), days.clone());
+                    self.trading_days
+                        .insert((start, end), Arc::new(days.clone()));
                     Some(days)
                 } else {
                     self.stats.trading_day_misses += 1;
@@ -116,7 +188,8 @@ impl BacktestDataCache {
             .filter(|((cached_start, cached_end), _)| *cached_start <= start && *cached_end >= end)
             .min_by_key(|((cached_start, cached_end), _)| (*cached_end - *cached_start).num_days())
             .map(|(_, days)| {
-                days.iter()
+                days.as_ref()
+                    .iter()
                     .copied()
                     .filter(|day| *day >= start && *day <= end)
                     .collect()
@@ -129,7 +202,8 @@ impl BacktestDataCache {
         end: NaiveDate,
         days: Vec<NaiveDate>,
     ) -> Vec<NaiveDate> {
-        self.trading_days.insert((start, end), days.clone());
+        self.trading_days
+            .insert((start, end), Arc::new(days.clone()));
         days
     }
 
@@ -143,14 +217,14 @@ impl BacktestDataCache {
         match self.benchmark_data.get(&key) {
             Some(data) => {
                 self.stats.benchmark_data_hits += 1;
-                Some(data.clone())
+                Some(data.as_ref().clone())
             }
             None => {
                 if let Some(data) =
                     self.cached_benchmark_data_from_covering_window(benchmark, start, end)
                 {
                     self.stats.benchmark_data_hits += 1;
-                    self.benchmark_data.insert(key, data.clone());
+                    self.benchmark_data.insert(key, Arc::new(data.clone()));
                     Some(data)
                 } else {
                     self.stats.benchmark_data_misses += 1;
@@ -175,7 +249,8 @@ impl BacktestDataCache {
                 (*cached_end - *cached_start).num_days()
             })
             .map(|(_, data)| {
-                data.iter()
+                data.as_ref()
+                    .iter()
                     .filter(|(day, _)| **day >= start && **day <= end)
                     .map(|(day, values)| (*day, *values))
                     .collect()
@@ -190,7 +265,7 @@ impl BacktestDataCache {
         data: HashMap<NaiveDate, (Decimal, Decimal)>,
     ) -> HashMap<NaiveDate, (Decimal, Decimal)> {
         self.benchmark_data
-            .insert((benchmark.to_string(), start, end), data.clone());
+            .insert((benchmark.to_string(), start, end), Arc::new(data.clone()));
         data
     }
 
@@ -212,7 +287,7 @@ impl BacktestDataCache {
                 .and_then(|bucket| bucket.get(&symbol))
             {
                 self.stats.daily_bar_symbol_hits += 1;
-                merge_daily_bar_records(&mut cached, records);
+                merge_daily_bar_records(&mut cached, records.as_ref());
             } else if let Some(records) =
                 self.cached_daily_bar_records_from_covering_window(&symbol, start, end)
             {
@@ -228,7 +303,7 @@ impl BacktestDataCache {
         if !reusable_records.is_empty() {
             let bucket = self.daily_bars.entry((start, end)).or_default();
             for (symbol, records) in reusable_records {
-                bucket.insert(symbol, records);
+                bucket.insert(symbol, Arc::new(records));
             }
         }
 
@@ -250,6 +325,7 @@ impl BacktestDataCache {
             .and_then(|(_, bucket)| bucket.get(symbol))
             .map(|records| {
                 records
+                    .as_ref()
                     .iter()
                     .filter(|record| record.trade_date >= start && record.trade_date <= end)
                     .cloned()
@@ -280,7 +356,7 @@ impl BacktestDataCache {
             let mut records = by_symbol.remove(&symbol).unwrap_or_default();
             records.sort_by_key(|record| record.trade_date);
             merge_daily_bar_records(&mut inserted, &records);
-            bucket.insert(symbol, records);
+            bucket.insert(symbol, Arc::new(records));
         }
 
         inserted
@@ -294,7 +370,7 @@ impl BacktestDataCache {
         let mut cached = HashMap::new();
 
         for symbol in normalized_symbol_key(symbols) {
-            match self.trading_profiles.get(&symbol) {
+            match self.trading_profiles.get(&symbol).map(Arc::as_ref) {
                 Some(Some(profile)) => {
                     self.stats.trading_profile_symbol_hits += 1;
                     cached.insert(symbol, profile.clone());
@@ -340,7 +416,7 @@ impl BacktestDataCache {
             if let Some(profile) = profile.as_ref() {
                 inserted.insert(symbol.clone(), profile.clone());
             }
-            self.trading_profiles.insert(symbol, profile);
+            self.trading_profiles.insert(symbol, Arc::new(profile));
         }
 
         inserted
@@ -409,6 +485,37 @@ impl BacktestRunner {
         self.run_with_cache(task_id, config, signals, None).await
     }
 
+    pub async fn prewarm_market_data_cache(
+        &self,
+        cache: &mut BacktestDataCache,
+        benchmark: &str,
+        symbols: &[String],
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Result<BacktestMarketDataPrewarmReport, sqlx::Error> {
+        let symbols = normalized_symbol_key(symbols);
+        let before = cache.stats();
+        let _ = self.load_trading_days_cached(cache, start, end).await?;
+        let _ = self
+            .load_benchmark_data_cached(cache, benchmark, start, end)
+            .await?;
+        if !symbols.is_empty() {
+            let _ = self
+                .load_daily_bars_cached(cache, &symbols, start, end)
+                .await?;
+            let _ = self.load_trading_profiles_cached(cache, &symbols).await?;
+        }
+        let after = cache.stats();
+
+        Ok(BacktestMarketDataPrewarmReport {
+            start_date: start,
+            end_date: end,
+            benchmark: benchmark.to_string(),
+            symbol_count: symbols.len(),
+            cache_delta: backtest_cache_stats_delta(before, after),
+        })
+    }
+
     /// 执行回测，并在批量 trial 场景复用调用方持有的数据缓存。
     pub async fn run_with_cache(
         &self,
@@ -464,39 +571,33 @@ impl BacktestRunner {
             .into_iter()
             .collect();
 
-        if all_symbols.is_empty() {
-            warn!(task_id, "无股票数据");
-            return Ok(BacktestOutput {
-                config,
-                metrics: Default::default(),
-                equity_curve: vec![],
-                benchmark_curve: vec![],
-                trades: vec![],
-                daily_positions: vec![],
-                targets: vec![],
-                exposures: vec![],
-                attributions: vec![],
-                violations: vec![],
-                reproducibility_hash: None,
-            });
-        }
-
-        let daily_data = match data_cache.as_mut() {
-            Some(cache) => {
-                self.load_daily_bars_cached(cache, &all_symbols, config.start_date, config.end_date)
+        let (daily_data, trading_profiles) = if all_symbols.is_empty() {
+            warn!(task_id, "无股票持仓信号，按现金曲线完成回测");
+            (HashMap::new(), HashMap::new())
+        } else {
+            let daily_data = match data_cache.as_mut() {
+                Some(cache) => {
+                    self.load_daily_bars_cached(
+                        cache,
+                        &all_symbols,
+                        config.start_date,
+                        config.end_date,
+                    )
                     .await?
-            }
-            None => {
-                self.load_daily_bars(&all_symbols, config.start_date, config.end_date)
-                    .await?
-            }
-        };
-        let trading_profiles = match data_cache.as_mut() {
-            Some(cache) => {
-                self.load_trading_profiles_cached(cache, &all_symbols)
-                    .await?
-            }
-            None => self.load_trading_profiles(&all_symbols).await?,
+                }
+                None => {
+                    self.load_daily_bars(&all_symbols, config.start_date, config.end_date)
+                        .await?
+                }
+            };
+            let trading_profiles = match data_cache.as_mut() {
+                Some(cache) => {
+                    self.load_trading_profiles_cached(cache, &all_symbols)
+                        .await?
+                }
+                None => self.load_trading_profiles(&all_symbols).await?,
+            };
+            (daily_data, trading_profiles)
         };
         info!(
             task_id,

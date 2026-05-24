@@ -19,13 +19,13 @@ use quant_backtest::engine::{
     ExecutionScheduleProfile, ExecutionTiming, RiskControlConfig, StrategySignal,
 };
 use quant_backtest::portfolio::FeeConfig;
-use quant_backtest::runner::{BacktestDataCache, BacktestRunner};
+use quant_backtest::runner::{BacktestDataCache, BacktestMarketDataPrewarmReport, BacktestRunner};
 use quant_backtest::signal_generator::{
-    CandidateRankingProfile, CandidateRiskFilterProfile, CapacityRiskBudgetProfile,
-    CashUtilizationProfile, EventGateConfig, EventGateMode, ExecutionImpactBudgetProfile,
-    MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig,
-    RiskContributionControlProfile, ScoreDirection, SignalDataCache, StyleRiskBudgetProfile,
-    TradableUniverseProfile,
+    prewarm_market_feature_cache, CandidateRankingProfile, CandidateRiskFilterProfile,
+    CapacityRiskBudgetProfile, CashUtilizationProfile, EventGateConfig, EventGateMode,
+    ExecutionImpactBudgetProfile, MarketFeaturePrewarmReport, MarketRegime, MarketRegimePolicy,
+    PortfolioConstructionMethod, PredictionBlendConfig, RiskContributionControlProfile,
+    ScoreDirection, SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -997,6 +997,8 @@ pub(crate) struct FactorBacktestRunOutput {
     pub trades: usize,
     pub equity_points: usize,
     pub effective_coverage: Option<EffectiveCoverageRunSummary>,
+    pub market_data_prewarm_report: Option<BacktestMarketDataPrewarmReport>,
+    pub market_feature_prewarm_report: Option<MarketFeaturePrewarmReport>,
 }
 
 fn default_combo_version() -> String {
@@ -1879,8 +1881,8 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     db: &sqlx::PgPool,
     task_id: &str,
     req: RunFactorBacktestReq,
-    signal_cache: Option<&mut SignalDataCache>,
-    backtest_cache: Option<&mut BacktestDataCache>,
+    mut signal_cache: Option<&mut SignalDataCache>,
+    mut backtest_cache: Option<&mut BacktestDataCache>,
 ) -> Result<FactorBacktestRunOutput, String> {
     let start = parse_yyyymmdd(&req.start_date, "start_date")?;
     let end = parse_yyyymmdd(&req.end_date, "end_date")?;
@@ -2019,7 +2021,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     );
 
     let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
-    let signals = match (regime_policy.as_ref(), signal_cache) {
+    let signals = match (regime_policy.as_ref(), signal_cache.as_deref_mut()) {
         (Some(policy), Some(cache)) => {
             quant_backtest::signal_generator::generate_regime_signals_with_cache(
                 db,
@@ -2068,6 +2070,50 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         "Signals generated, running backtest"
     );
 
+    let all_symbols: Vec<String> = signals
+        .values()
+        .flat_map(|signal| signal.target_weights.keys().cloned())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let market_feature_prewarm_report = if let Some(cache) = signal_cache.as_deref_mut() {
+        let lookback_days = req
+            .correlation_lookback_days
+            .max(req.kelly_lookback_days)
+            .max(req.risk_budget_lookback_days)
+            .max(1);
+        Some(
+            prewarm_market_feature_cache(
+                db,
+                cache,
+                &req.data_version_id,
+                effective_start,
+                end,
+                effective_start,
+                end,
+                effective_start,
+                end,
+                lookback_days,
+                &all_symbols,
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let runner = BacktestRunner::new(db.clone());
+    let market_data_prewarm_report = if let Some(cache) = backtest_cache.as_deref_mut() {
+        Some(
+            runner
+                .prewarm_market_data_cache(cache, &benchmark, &all_symbols, effective_start, end)
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+
     let mode = match req.mode.as_deref() {
         Some("fast") => BacktestMode::Fast,
         Some("audit") => BacktestMode::Audit,
@@ -2089,12 +2135,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         feature_set_version_id: req.feature_set_version_id.clone(),
         prediction_set_id: req.prediction_set_id.clone(),
         portfolio_policy_id: req.portfolio_policy_id.clone(),
-        symbols: signals
-            .values()
-            .flat_map(|signal| signal.target_weights.keys().cloned())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect(),
+        symbols: all_symbols,
         rebalance_frequency: req.rebalance.clone(),
         execution_timing,
         execution_price,
@@ -2107,7 +2148,6 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         risk_control: build_portfolio_risk_control(&req)?,
     };
 
-    let runner = BacktestRunner::new(db.clone());
     match runner
         .run_with_cache(task_id, config, &signals, backtest_cache)
         .await
@@ -2118,6 +2158,8 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             equity_points: output.equity_curve.len(),
             metrics: output.metrics,
             effective_coverage,
+            market_data_prewarm_report,
+            market_feature_prewarm_report,
         }),
         Err(e) => Err(e.to_string()),
     }
@@ -2292,6 +2334,8 @@ pub(crate) async fn execute_prediction_backtest(
             equity_points: output.equity_curve.len(),
             metrics: output.metrics,
             effective_coverage: None,
+            market_data_prewarm_report: None,
+            market_feature_prewarm_report: None,
         })
         .map_err(|error| error.to_string())
 }

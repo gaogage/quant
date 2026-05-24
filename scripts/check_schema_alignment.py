@@ -90,6 +90,21 @@ if phase7_metadata_sql.exists():
 else:
     failed.append(("Phase 7 metadata seed must exist for local DB rebuilds", "sql/phase7_professional_metadata.sql", ["missing file"]))
 
+phase7_perf_indexes_sql = ROOT / "sql/phase7_discovery_perf_indexes.sql"
+if phase7_perf_indexes_sql.exists():
+    phase7_perf_indexes_text = phase7_perf_indexes_sql.read_text(encoding="utf-8")
+    for required in [
+        "idx_multi_factor_value_combo_date_score_symbol",
+        "ON public.multi_factor_value (combo_name, version, trade_date DESC, raw_score, symbol)",
+        "idx_market_stock_daily_date_symbol_cover",
+        "ON public.market_stock_daily_bar (trade_date, symbol)",
+        "INCLUDE (open, close, pre_close, amount)",
+    ]:
+        if required not in phase7_perf_indexes_text:
+            failed.append(("Phase 7 discovery perf indexes must cover OOS/WFA hot queries", str(phase7_perf_indexes_sql.relative_to(ROOT)), [required]))
+else:
+    failed.append(("Phase 7 discovery perf indexes must exist for strict OOS/WFA scaling", "sql/phase7_discovery_perf_indexes.sql", ["missing file"]))
+
 schema_sql = ROOT.parent / "docs/projects/quant/tasks/quant/sql/001_initial_schema.sql"
 if schema_sql.exists():
     schema_text = schema_sql.read_text(encoding="utf-8")
@@ -125,6 +140,8 @@ if schema_sql.exists():
         "CREATE TABLE IF NOT EXISTS public.multi_factor_value",
         "available_at DATE NULL",
         "idx_multi_factor_value_combo_date",
+        "idx_multi_factor_value_combo_date_score_symbol",
+        "idx_market_stock_daily_date_symbol_cover",
         "CREATE TABLE IF NOT EXISTS public.strategy_parameter_candidate",
         "UNIQUE (optimization_task_id, trial_id, target_strategy_version)",
         "fk_strategy_parameter_candidate_trial",

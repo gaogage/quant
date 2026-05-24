@@ -14,6 +14,8 @@ use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use tracing::info;
 
 use crate::engine::StrategySignal;
@@ -455,6 +457,203 @@ pub struct SignalDataCacheStats {
     pub benchmark_return_misses: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MarketFeatureSnapshotKey {
+    pub data_version_id: String,
+    pub train_start: NaiveDate,
+    pub train_end: NaiveDate,
+    pub test_start: NaiveDate,
+    pub test_end: NaiveDate,
+    pub lookback_days: usize,
+    pub universe_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketFeaturePrewarmReport {
+    pub snapshot_key: MarketFeatureSnapshotKey,
+    pub feature_start: NaiveDate,
+    pub feature_end: NaiveDate,
+    pub symbol_count: usize,
+    pub lookback_days: usize,
+    pub cache_delta: SignalDataCacheStats,
+}
+
+#[derive(Debug, Clone)]
+struct MarketFeatureSnapshot {
+    key: MarketFeatureSnapshotKey,
+    return_lookback_days: usize,
+    amount_lookback_days: usize,
+    return_history: Arc<SymbolReturnHistory>,
+    average_amount_history: Arc<AverageAmountHistory>,
+}
+
+impl MarketFeatureSnapshot {
+    fn return_feature_start(&self) -> NaiveDate {
+        return_history_query_start(self.key.train_start, self.return_lookback_days)
+    }
+
+    fn amount_feature_start(&self) -> NaiveDate {
+        average_amount_history_query_start(self.key.train_start, self.amount_lookback_days)
+    }
+
+    fn feature_end(&self) -> NaiveDate {
+        self.key.feature_end()
+    }
+}
+
+impl MarketFeatureSnapshotKey {
+    pub fn new(
+        data_version_id: impl AsRef<str>,
+        train_start: NaiveDate,
+        train_end: NaiveDate,
+        test_start: NaiveDate,
+        test_end: NaiveDate,
+        lookback_days: usize,
+        symbols: &[String],
+    ) -> Self {
+        Self {
+            data_version_id: data_version_id.as_ref().trim().to_string(),
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+            lookback_days: lookback_days.max(1),
+            universe_hash: symbol_universe_hash(symbols),
+        }
+    }
+
+    pub fn feature_start(&self) -> NaiveDate {
+        return_history_query_start(self.train_start, self.lookback_days).min(
+            average_amount_history_query_start(self.train_start, self.lookback_days),
+        )
+    }
+
+    pub fn feature_end(&self) -> NaiveDate {
+        self.test_end
+    }
+}
+
+pub fn symbol_universe_hash(symbols: &[String]) -> String {
+    let symbols = normalized_symbol_key(symbols);
+    let mut hasher = DefaultHasher::new();
+    symbols.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+pub fn signal_cache_stats_delta(
+    before: SignalDataCacheStats,
+    after: SignalDataCacheStats,
+) -> SignalDataCacheStats {
+    SignalDataCacheStats {
+        combo_score_hits: after
+            .combo_score_hits
+            .saturating_sub(before.combo_score_hits),
+        combo_score_misses: after
+            .combo_score_misses
+            .saturating_sub(before.combo_score_misses),
+        trading_day_hits: after
+            .trading_day_hits
+            .saturating_sub(before.trading_day_hits),
+        trading_day_misses: after
+            .trading_day_misses
+            .saturating_sub(before.trading_day_misses),
+        return_history_hits: after
+            .return_history_hits
+            .saturating_sub(before.return_history_hits),
+        return_history_misses: after
+            .return_history_misses
+            .saturating_sub(before.return_history_misses),
+        average_amount_hits: after
+            .average_amount_hits
+            .saturating_sub(before.average_amount_hits),
+        average_amount_misses: after
+            .average_amount_misses
+            .saturating_sub(before.average_amount_misses),
+        prediction_score_hits: after
+            .prediction_score_hits
+            .saturating_sub(before.prediction_score_hits),
+        prediction_score_misses: after
+            .prediction_score_misses
+            .saturating_sub(before.prediction_score_misses),
+        industry_classification_hits: after
+            .industry_classification_hits
+            .saturating_sub(before.industry_classification_hits),
+        industry_classification_misses: after
+            .industry_classification_misses
+            .saturating_sub(before.industry_classification_misses),
+        benchmark_return_hits: after
+            .benchmark_return_hits
+            .saturating_sub(before.benchmark_return_hits),
+        benchmark_return_misses: after
+            .benchmark_return_misses
+            .saturating_sub(before.benchmark_return_misses),
+    }
+}
+
+pub async fn prewarm_market_feature_cache(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    data_version_id: &str,
+    train_start: NaiveDate,
+    train_end: NaiveDate,
+    test_start: NaiveDate,
+    test_end: NaiveDate,
+    feature_start: NaiveDate,
+    feature_end: NaiveDate,
+    lookback_days: usize,
+    symbols: &[String],
+) -> Result<MarketFeaturePrewarmReport, String> {
+    let symbols = normalized_symbol_key(symbols);
+    let lookback_days = lookback_days.max(1);
+    let snapshot_key = MarketFeatureSnapshotKey::new(
+        data_version_id,
+        train_start,
+        train_end,
+        test_start,
+        test_end,
+        lookback_days,
+        &symbols,
+    );
+    let before = cache.stats();
+    let _ = load_open_trading_days_cached(pool, cache, feature_start, feature_end).await?;
+    let return_history = load_symbol_return_history_cached(
+        pool,
+        cache,
+        &symbols,
+        feature_start,
+        feature_end,
+        lookback_days,
+    )
+    .await?;
+    let average_amount_history = load_average_amount_history_cached(
+        pool,
+        cache,
+        &symbols,
+        feature_start,
+        feature_end,
+        PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+    )
+    .await?;
+    let _ = load_average_amounts_cached(pool, cache, &symbols, feature_start, feature_end).await?;
+    cache.insert_market_feature_snapshot(
+        snapshot_key.clone(),
+        lookback_days,
+        PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS,
+        return_history.as_ref().clone(),
+        average_amount_history.as_ref().clone(),
+    );
+    let after = cache.stats();
+
+    Ok(MarketFeaturePrewarmReport {
+        snapshot_key,
+        feature_start,
+        feature_end,
+        symbol_count: symbols.len(),
+        lookback_days,
+        cache_delta: signal_cache_stats_delta(before, after),
+    })
+}
+
 #[derive(Debug, Default)]
 pub struct SignalDataCache {
     combo_scores: HashMap<SignalDataCacheKey, Arc<FactorScoresByDate>>,
@@ -462,15 +661,58 @@ pub struct SignalDataCache {
     return_history: HashMap<SignalDataCacheKey, Arc<SymbolReturnHistory>>,
     average_amounts: HashMap<SignalDataCacheKey, Arc<AverageAmounts>>,
     average_amount_history: HashMap<SignalDataCacheKey, Arc<AverageAmountHistory>>,
+    market_feature_snapshots: HashMap<MarketFeatureSnapshotKey, Arc<MarketFeatureSnapshot>>,
     prediction_scores: HashMap<SignalDataCacheKey, Arc<PredictionScoresByDate>>,
     industry_classifications: HashMap<SignalDataCacheKey, Arc<IndustryMap>>,
     benchmark_returns: HashMap<SignalDataCacheKey, Arc<BenchmarkReturns>>,
     stats: SignalDataCacheStats,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SignalDataCacheSnapshot {
+    combo_scores: HashMap<SignalDataCacheKey, Arc<FactorScoresByDate>>,
+    trading_days: HashMap<SignalDataCacheKey, Arc<Vec<NaiveDate>>>,
+    return_history: HashMap<SignalDataCacheKey, Arc<SymbolReturnHistory>>,
+    average_amounts: HashMap<SignalDataCacheKey, Arc<AverageAmounts>>,
+    average_amount_history: HashMap<SignalDataCacheKey, Arc<AverageAmountHistory>>,
+    market_feature_snapshots: HashMap<MarketFeatureSnapshotKey, Arc<MarketFeatureSnapshot>>,
+    prediction_scores: HashMap<SignalDataCacheKey, Arc<PredictionScoresByDate>>,
+    industry_classifications: HashMap<SignalDataCacheKey, Arc<IndustryMap>>,
+    benchmark_returns: HashMap<SignalDataCacheKey, Arc<BenchmarkReturns>>,
+}
+
 impl SignalDataCache {
     pub fn stats(&self) -> SignalDataCacheStats {
         self.stats
+    }
+
+    pub fn snapshot(&self) -> SignalDataCacheSnapshot {
+        SignalDataCacheSnapshot {
+            combo_scores: self.combo_scores.clone(),
+            trading_days: self.trading_days.clone(),
+            return_history: self.return_history.clone(),
+            average_amounts: self.average_amounts.clone(),
+            average_amount_history: self.average_amount_history.clone(),
+            market_feature_snapshots: self.market_feature_snapshots.clone(),
+            prediction_scores: self.prediction_scores.clone(),
+            industry_classifications: self.industry_classifications.clone(),
+            benchmark_returns: self.benchmark_returns.clone(),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &SignalDataCacheSnapshot) -> Self {
+        Self {
+            combo_scores: snapshot.combo_scores.clone(),
+            trading_days: snapshot.trading_days.clone(),
+            return_history: snapshot.return_history.clone(),
+            average_amounts: snapshot.average_amounts.clone(),
+            average_amount_history: snapshot.average_amount_history.clone(),
+            market_feature_snapshots: snapshot.market_feature_snapshots.clone(),
+            prediction_scores: snapshot.prediction_scores.clone(),
+            industry_classifications: snapshot.industry_classifications.clone(),
+            benchmark_returns: snapshot.benchmark_returns.clone(),
+            stats: SignalDataCacheStats::default(),
+        }
     }
 
     pub(crate) fn cached_combo_scores(
@@ -490,30 +732,54 @@ impl SignalDataCache {
         &mut self,
         key: &SignalDataCacheKey,
     ) -> Option<Arc<FactorScoresByDate>> {
-        let Some((reuse_plan, source_scores)) =
-            self.combo_scores
-                .iter()
-                .find_map(|(candidate_key, scores)| {
-                    reusable_combo_candidate_pool(candidate_key, key)
-                        .map(|reuse_plan| (reuse_plan, Arc::clone(scores)))
-                })
+        let Some((reuse_plan, source_scores)) = self
+            .combo_scores
+            .iter()
+            .filter_map(|(candidate_key, scores)| {
+                reusable_combo_candidate_pool(candidate_key, key)
+                    .map(|reuse_plan| (reuse_plan, Arc::clone(scores)))
+            })
+            .min_by_key(|(reuse_plan, _)| reuse_plan.source_span_days())
         else {
             self.stats.combo_score_misses += 1;
             return None;
         };
 
         let pruned = match reuse_plan {
-            ComboScoreReusePlan::RankedPool { requested_size } => {
-                prune_factor_scores_by_date(source_scores.as_ref(), requested_size)
+            ComboScoreReusePlan::RankedPool {
+                requested_size,
+                requested_start,
+                requested_end,
+                ..
+            } => {
+                let windowed = filter_factor_scores_by_date(
+                    source_scores.as_ref(),
+                    requested_start,
+                    requested_end,
+                );
+                prune_factor_scores_by_date(&windowed, requested_size)
             }
             ComboScoreReusePlan::UnboundedPool {
                 requested_size,
                 score_direction,
-            } => rank_and_prune_factor_scores_by_date(
-                source_scores.as_ref(),
-                requested_size,
-                score_direction,
-            ),
+                requested_start,
+                requested_end,
+                ..
+            } => {
+                let windowed = filter_factor_scores_by_date(
+                    source_scores.as_ref(),
+                    requested_start,
+                    requested_end,
+                );
+                rank_and_prune_factor_scores_by_date(&windowed, requested_size, score_direction)
+            }
+            ComboScoreReusePlan::FullPool {
+                requested_start,
+                requested_end,
+                ..
+            } => {
+                filter_factor_scores_by_date(source_scores.as_ref(), requested_start, requested_end)
+            }
         };
         let pruned = self.insert_combo_scores(key.clone(), pruned);
         self.stats.combo_score_hits += 1;
@@ -553,6 +819,26 @@ impl SignalDataCache {
         value
     }
 
+    fn insert_market_feature_snapshot(
+        &mut self,
+        key: MarketFeatureSnapshotKey,
+        return_lookback_days: usize,
+        amount_lookback_days: usize,
+        return_history: SymbolReturnHistory,
+        average_amount_history: AverageAmountHistory,
+    ) {
+        self.market_feature_snapshots.insert(
+            key.clone(),
+            Arc::new(MarketFeatureSnapshot {
+                key,
+                return_lookback_days: return_lookback_days.max(1),
+                amount_lookback_days: amount_lookback_days.max(1),
+                return_history: Arc::new(return_history),
+                average_amount_history: Arc::new(average_amount_history),
+            }),
+        );
+    }
+
     fn cached_return_history_symbols(
         &mut self,
         symbols: &[String],
@@ -576,12 +862,120 @@ impl SignalDataCache {
                     result.insert(symbol, rows);
                 }
                 None => {
-                    self.stats.return_history_misses += 1;
-                    missing_symbols.push(symbol);
+                    if let Some(rows) = self.cached_return_history_from_covering_window(
+                        &symbol,
+                        start_date,
+                        end_date,
+                        lookback_days,
+                    ) {
+                        self.stats.return_history_hits += 1;
+                        result.insert(symbol, rows);
+                    } else if let Some(rows) = self
+                        .cached_return_history_from_market_feature_snapshot(
+                            &symbol,
+                            start_date,
+                            end_date,
+                            lookback_days,
+                        )
+                    {
+                        self.stats.return_history_hits += 1;
+                        result.insert(symbol, rows);
+                    } else {
+                        self.stats.return_history_misses += 1;
+                        missing_symbols.push(symbol);
+                    }
                 }
             }
         }
         (missing_symbols, result)
+    }
+
+    fn cached_return_history_from_covering_window(
+        &mut self,
+        symbol: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> Option<Vec<(NaiveDate, f64)>> {
+        let source = self
+            .return_history
+            .iter()
+            .filter_map(|(candidate_key, history)| {
+                let SignalDataCacheKey::ReturnHistorySymbol {
+                    symbol: candidate_symbol,
+                    start_date: candidate_start,
+                    end_date: candidate_end,
+                    lookback_days: candidate_lookback_days,
+                } = candidate_key
+                else {
+                    return None;
+                };
+                if candidate_symbol == symbol
+                    && *candidate_lookback_days == lookback_days
+                    && *candidate_start <= start_date
+                    && *candidate_end >= end_date
+                {
+                    let span_days = candidate_end
+                        .signed_duration_since(*candidate_start)
+                        .num_days();
+                    Some((span_days, Arc::clone(history)))
+                } else {
+                    None
+                }
+            })
+            .min_by_key(|(span_days, _)| *span_days)
+            .map(|(_, history)| history)?;
+
+        let query_start = return_history_query_start(start_date, lookback_days);
+        let rows = source
+            .as_ref()
+            .get(symbol)
+            .map(|rows| filter_dated_values(rows, query_start, end_date))
+            .unwrap_or_default();
+        let mut symbol_history = HashMap::new();
+        symbol_history.insert(symbol.to_string(), rows.clone());
+        let key =
+            SignalDataCacheKey::return_history_symbol(symbol, start_date, end_date, lookback_days);
+        self.return_history.insert(key, Arc::new(symbol_history));
+        Some(rows)
+    }
+
+    fn cached_return_history_from_market_feature_snapshot(
+        &mut self,
+        symbol: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> Option<Vec<(NaiveDate, f64)>> {
+        let query_start = return_history_query_start(start_date, lookback_days);
+        let source = self
+            .market_feature_snapshots
+            .values()
+            .filter(|snapshot| {
+                snapshot.return_lookback_days == lookback_days
+                    && snapshot.return_feature_start() <= query_start
+                    && snapshot.feature_end() >= end_date
+                    && snapshot.return_history.contains_key(symbol)
+            })
+            .min_by_key(|snapshot| {
+                snapshot
+                    .feature_end()
+                    .signed_duration_since(snapshot.return_feature_start())
+                    .num_days()
+            })
+            .cloned()?;
+
+        let rows = source
+            .return_history
+            .get(symbol)
+            .map(|rows| filter_dated_values(rows, query_start, end_date))
+            .unwrap_or_default();
+        let mut symbol_history = HashMap::new();
+        symbol_history.insert(symbol.to_string(), rows.clone());
+        let key =
+            SignalDataCacheKey::return_history_symbol(symbol, start_date, end_date, lookback_days);
+        self.return_history.insert(key, Arc::new(symbol_history));
+        Some(rows)
     }
 
     fn insert_return_history_symbols(
@@ -681,12 +1075,130 @@ impl SignalDataCache {
                     result.insert(symbol, rows);
                 }
                 None => {
-                    self.stats.average_amount_misses += 1;
-                    missing_symbols.push(symbol);
+                    if let Some(rows) = self.cached_average_amount_history_from_covering_window(
+                        &symbol,
+                        start_date,
+                        end_date,
+                        lookback_days,
+                    ) {
+                        self.stats.average_amount_hits += 1;
+                        result.insert(symbol, rows);
+                    } else if let Some(rows) = self
+                        .cached_average_amount_history_from_market_feature_snapshot(
+                            &symbol,
+                            start_date,
+                            end_date,
+                            lookback_days,
+                        )
+                    {
+                        self.stats.average_amount_hits += 1;
+                        result.insert(symbol, rows);
+                    } else {
+                        self.stats.average_amount_misses += 1;
+                        missing_symbols.push(symbol);
+                    }
                 }
             }
         }
         (missing_symbols, result)
+    }
+
+    fn cached_average_amount_history_from_covering_window(
+        &mut self,
+        symbol: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> Option<Vec<(NaiveDate, f64)>> {
+        let source = self
+            .average_amount_history
+            .iter()
+            .filter_map(|(candidate_key, history)| {
+                let SignalDataCacheKey::AverageAmountHistorySymbol {
+                    symbol: candidate_symbol,
+                    start_date: candidate_start,
+                    end_date: candidate_end,
+                    lookback_days: candidate_lookback_days,
+                } = candidate_key
+                else {
+                    return None;
+                };
+                if candidate_symbol == symbol
+                    && *candidate_lookback_days == lookback_days
+                    && *candidate_start <= start_date
+                    && *candidate_end >= end_date
+                {
+                    let span_days = candidate_end
+                        .signed_duration_since(*candidate_start)
+                        .num_days();
+                    Some((span_days, Arc::clone(history)))
+                } else {
+                    None
+                }
+            })
+            .min_by_key(|(span_days, _)| *span_days)
+            .map(|(_, history)| history)?;
+
+        let query_start = average_amount_history_query_start(start_date, lookback_days);
+        let rows = source
+            .as_ref()
+            .get(symbol)
+            .map(|rows| filter_dated_values(rows, query_start, end_date))
+            .unwrap_or_default();
+        let mut symbol_history = HashMap::new();
+        symbol_history.insert(symbol.to_string(), rows.clone());
+        let key = SignalDataCacheKey::average_amount_history_symbol(
+            symbol,
+            start_date,
+            end_date,
+            lookback_days,
+        );
+        self.average_amount_history
+            .insert(key, Arc::new(symbol_history));
+        Some(rows)
+    }
+
+    fn cached_average_amount_history_from_market_feature_snapshot(
+        &mut self,
+        symbol: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        lookback_days: usize,
+    ) -> Option<Vec<(NaiveDate, f64)>> {
+        let query_start = average_amount_history_query_start(start_date, lookback_days);
+        let source = self
+            .market_feature_snapshots
+            .values()
+            .filter(|snapshot| {
+                snapshot.amount_lookback_days == lookback_days
+                    && snapshot.amount_feature_start() <= query_start
+                    && snapshot.feature_end() >= end_date
+                    && snapshot.average_amount_history.contains_key(symbol)
+            })
+            .min_by_key(|snapshot| {
+                snapshot
+                    .feature_end()
+                    .signed_duration_since(snapshot.amount_feature_start())
+                    .num_days()
+            })
+            .cloned()?;
+
+        let rows = source
+            .average_amount_history
+            .get(symbol)
+            .map(|rows| filter_dated_values(rows, query_start, end_date))
+            .unwrap_or_default();
+        let mut symbol_history = HashMap::new();
+        symbol_history.insert(symbol.to_string(), rows.clone());
+        let key = SignalDataCacheKey::average_amount_history_symbol(
+            symbol,
+            start_date,
+            end_date,
+            lookback_days,
+        );
+        self.average_amount_history
+            .insert(key, Arc::new(symbol_history));
+        Some(rows)
     }
 
     fn insert_average_amount_history_symbols(
@@ -813,11 +1325,38 @@ impl SignalDataCache {
 enum ComboScoreReusePlan {
     RankedPool {
         requested_size: usize,
+        requested_start: NaiveDate,
+        requested_end: NaiveDate,
+        source_span_days: i64,
     },
     UnboundedPool {
         requested_size: usize,
         score_direction: ScoreDirection,
+        requested_start: NaiveDate,
+        requested_end: NaiveDate,
+        source_span_days: i64,
     },
+    FullPool {
+        requested_start: NaiveDate,
+        requested_end: NaiveDate,
+        source_span_days: i64,
+    },
+}
+
+impl ComboScoreReusePlan {
+    fn source_span_days(self) -> i64 {
+        match self {
+            Self::RankedPool {
+                source_span_days, ..
+            }
+            | Self::UnboundedPool {
+                source_span_days, ..
+            }
+            | Self::FullPool {
+                source_span_days, ..
+            } => source_span_days,
+        }
+    }
 }
 
 fn reusable_combo_candidate_pool(
@@ -840,7 +1379,7 @@ fn reusable_combo_candidate_pool(
             start_date: requested_start_date,
             end_date: requested_end_date,
             score_direction: requested_score_direction,
-            score_candidate_pool_size: Some(requested_pool_size),
+            score_candidate_pool_size: requested_pool_size,
             universe_profile: requested_universe_profile,
         },
     ) = (candidate, requested)
@@ -848,14 +1387,32 @@ fn reusable_combo_candidate_pool(
         return None;
     };
 
-    let same_score_window = candidate_combo_name == requested_combo_name
+    let same_score_source = candidate_combo_name == requested_combo_name
         && candidate_version == requested_version
-        && candidate_start_date == requested_start_date
-        && candidate_end_date == requested_end_date
         && candidate_universe_profile == requested_universe_profile;
-    if !same_score_window {
+    if !same_score_source {
         return None;
     }
+
+    let covers_requested_window =
+        candidate_start_date <= requested_start_date && candidate_end_date >= requested_end_date;
+    if !covers_requested_window {
+        return None;
+    }
+    let source_span_days = candidate_end_date
+        .signed_duration_since(*candidate_start_date)
+        .num_days();
+
+    let Some(requested_pool_size) = requested_pool_size else {
+        if candidate_pool_size.is_none() {
+            return Some(ComboScoreReusePlan::FullPool {
+                requested_start: *requested_start_date,
+                requested_end: *requested_end_date,
+                source_span_days,
+            });
+        }
+        return None;
+    };
 
     if let Some(candidate_pool_size) = candidate_pool_size {
         if candidate_score_direction == requested_score_direction
@@ -863,6 +1420,9 @@ fn reusable_combo_candidate_pool(
         {
             return Some(ComboScoreReusePlan::RankedPool {
                 requested_size: *requested_pool_size,
+                requested_start: *requested_start_date,
+                requested_end: *requested_end_date,
+                source_span_days,
             });
         }
     }
@@ -872,11 +1432,31 @@ fn reusable_combo_candidate_pool(
             return Some(ComboScoreReusePlan::UnboundedPool {
                 requested_size: *requested_pool_size,
                 score_direction: *score_direction,
+                requested_start: *requested_start_date,
+                requested_end: *requested_end_date,
+                source_span_days,
             });
         }
     }
 
     None
+}
+
+fn filter_factor_scores_by_date(
+    scores_by_date: &FactorScoresByDate,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> FactorScoresByDate {
+    scores_by_date
+        .iter()
+        .filter_map(|(date, rows)| {
+            if *date >= start_date && *date <= end_date {
+                Some((*date, rows.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn prune_factor_scores_by_date(
@@ -4145,7 +4725,9 @@ pub async fn generate_signals_with_cache(
     end_date: NaiveDate,
     cache: &mut SignalDataCache,
 ) -> Result<HashMap<NaiveDate, StrategySignal>, String> {
-    let score_cache = load_combo_scores_cached(pool, cache, config, start_date, end_date).await?;
+    let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
+    let score_days = rebalance_score_days(trading_days.as_ref(), config, |_day, base| base.clone());
+    let score_cache = load_combo_scores_for_dates_cached(pool, cache, config, &score_days).await?;
     let mut adjusted_scores;
     let scores_by_date: &FactorScoresByDate = if config.min_daily_amount_cny.is_some()
         || config.prediction_blend.is_some()
@@ -4181,7 +4763,7 @@ pub async fn generate_signals_with_cache(
         }
         if let Some(event_gate) = config.event_gate.as_ref() {
             let event_scores =
-                load_event_gate_scores_cached(pool, cache, event_gate, start_date, end_date)
+                load_event_gate_scores_for_dates_cached(pool, cache, event_gate, &score_days)
                     .await?;
             apply_event_gate_scores(&mut adjusted_scores, event_scores.as_ref(), event_gate);
         }
@@ -4189,8 +4771,6 @@ pub async fn generate_signals_with_cache(
     } else {
         score_cache.as_ref()
     };
-
-    let trading_days = load_open_trading_days_cached(pool, cache, start_date, end_date).await?;
 
     let all_symbols: Vec<String> = scores_by_date
         .values()
@@ -4214,7 +4794,7 @@ pub async fn generate_signals_with_cache(
         &all_symbols,
         start_date,
         end_date,
-        trading_days.as_ref(),
+        &score_days,
         &portfolio_config,
     )
     .await?;
@@ -4266,6 +4846,12 @@ pub async fn generate_regime_signals_with_cache(
     )
     .await?;
 
+    let score_days = rebalance_score_days(trading_days.as_ref(), config, |day, base| {
+        let returns =
+            trailing_market_returns(benchmark_returns.as_ref(), day, policy.lookback_days);
+        let regime = classify_market_regime(&returns, policy);
+        policy.apply(base, regime)
+    });
     let score_source_configs = regime_score_source_configs(config, policy);
     let mut score_sources: HashMap<FactorScoreSourceKey, FactorScoresByDate> = HashMap::new();
     for source_config in score_source_configs {
@@ -4274,7 +4860,7 @@ pub async fn generate_regime_signals_with_cache(
             continue;
         }
         let scores =
-            load_regime_base_scores_cached(pool, cache, &source_config, start_date, end_date)
+            load_regime_base_scores_for_dates_cached(pool, cache, &source_config, &score_days)
                 .await?;
         score_sources.insert(key, scores);
     }
@@ -4285,7 +4871,7 @@ pub async fn generate_regime_signals_with_cache(
         .filter(|gate| !gate.active_regimes.is_empty())
     {
         let event_scores =
-            load_event_gate_scores_cached(pool, cache, event_gate, start_date, end_date).await?;
+            load_event_gate_scores_for_dates_cached(pool, cache, event_gate, &score_days).await?;
         for scores in score_sources.values_mut() {
             apply_event_gate_scores_for_regime(scores, event_scores.as_ref(), event_gate, |day| {
                 let returns =
@@ -4317,7 +4903,7 @@ pub async fn generate_regime_signals_with_cache(
         &all_symbols,
         start_date,
         end_date,
-        trading_days.as_ref(),
+        &score_days,
         &portfolio_config,
     )
     .await?;
@@ -4488,42 +5074,46 @@ fn oriented_standard_score(value: f64, stats: (f64, f64), direction: ScoreDirect
     }
 }
 
-async fn load_regime_base_scores_cached(
+async fn load_regime_base_scores_for_dates_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
     config: &SignalConfig,
-    start_date: NaiveDate,
-    end_date: NaiveDate,
+    score_days: &[NaiveDate],
 ) -> Result<FactorScoresByDate, String> {
-    let score_cache = load_combo_scores_cached(pool, cache, config, start_date, end_date).await?;
+    let score_cache = load_combo_scores_for_dates_cached(pool, cache, config, score_days).await?;
     let mut adjusted_scores = score_cache.as_ref().clone();
+    let score_span = date_span(score_days);
 
     if config.min_daily_amount_cny.is_some() {
-        apply_factor_liquidity_filter(
-            pool,
-            cache,
-            &mut adjusted_scores,
-            config,
-            start_date,
-            end_date,
-        )
-        .await?;
+        if let Some((start_date, end_date)) = score_span {
+            apply_factor_liquidity_filter(
+                pool,
+                cache,
+                &mut adjusted_scores,
+                config,
+                start_date,
+                end_date,
+            )
+            .await?;
+        }
     }
     if let Some(blend) = config.prediction_blend.as_ref() {
-        let prediction_scores = load_prediction_scores_by_date_cached(
-            pool,
-            cache,
-            &blend.prediction_set_id,
-            start_date,
-            end_date,
-        )
-        .await?;
-        blend_factor_prediction_scores(
-            &mut adjusted_scores,
-            prediction_scores.as_ref(),
-            blend,
-            config.score_direction,
-        );
+        if let Some((start_date, end_date)) = score_span {
+            let prediction_scores = load_prediction_scores_by_date_cached(
+                pool,
+                cache,
+                &blend.prediction_set_id,
+                start_date,
+                end_date,
+            )
+            .await?;
+            blend_factor_prediction_scores(
+                &mut adjusted_scores,
+                prediction_scores.as_ref(),
+                blend,
+                config.score_direction,
+            );
+        }
     }
     if let Some(event_gate) = config
         .event_gate
@@ -4531,7 +5121,7 @@ async fn load_regime_base_scores_cached(
         .filter(|gate| gate.active_regimes.is_empty())
     {
         let event_scores =
-            load_event_gate_scores_cached(pool, cache, event_gate, start_date, end_date).await?;
+            load_event_gate_scores_for_dates_cached(pool, cache, event_gate, score_days).await?;
         apply_event_gate_scores(&mut adjusted_scores, event_scores.as_ref(), event_gate);
     }
 
@@ -4803,12 +5393,11 @@ fn blend_factor_prediction_scores(
     });
 }
 
-async fn load_event_gate_scores_cached(
+async fn load_event_gate_scores_for_dates_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
     event_gate: &EventGateConfig,
-    start_date: NaiveDate,
-    end_date: NaiveDate,
+    score_days: &[NaiveDate],
 ) -> Result<Arc<FactorScoresByDate>, String> {
     let mut gate_config = SignalConfig {
         combo_name: event_gate.combo_name.clone(),
@@ -4821,7 +5410,7 @@ async fn load_event_gate_scores_cached(
         ..Default::default()
     };
     gate_config.min_daily_amount_cny = None;
-    load_combo_scores_cached(pool, cache, &gate_config, start_date, end_date).await
+    load_combo_scores_for_dates_cached(pool, cache, &gate_config, score_days).await
 }
 
 fn apply_event_gate_scores(
@@ -4948,50 +5537,90 @@ fn standard_score(value: f64, (mean, std_dev): (f64, f64)) -> f64 {
     (value - mean) / std_dev
 }
 
-async fn load_combo_scores_cached(
+async fn load_combo_scores_for_dates_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
     config: &SignalConfig,
-    start_date: NaiveDate,
-    end_date: NaiveDate,
+    score_days: &[NaiveDate],
 ) -> Result<Arc<FactorScoresByDate>, String> {
+    let score_days = normalized_dates(score_days);
+    if score_days.is_empty() {
+        return Ok(Arc::new(HashMap::new()));
+    }
+
     let score_candidate_pool_size =
         normalize_score_candidate_pool_size(config.score_candidate_pool_size);
-    let key = SignalDataCacheKey::combo_scores(
-        &config.combo_name,
-        &config.version,
-        start_date,
-        end_date,
-        config.score_direction,
-        score_candidate_pool_size,
-        config.universe_profile,
-    );
-    if let Some(scores) = cache.cached_combo_scores(&key) {
-        return Ok(scores);
+    let mut scores_by_date: FactorScoresByDate = HashMap::new();
+    let mut missing_days = Vec::new();
+    for day in &score_days {
+        let key = SignalDataCacheKey::combo_scores(
+            &config.combo_name,
+            &config.version,
+            *day,
+            *day,
+            config.score_direction,
+            score_candidate_pool_size,
+            config.universe_profile,
+        );
+        if let Some(cached) = cache.cached_combo_scores(&key) {
+            scores_by_date.extend(cached.as_ref().clone());
+        } else {
+            missing_days.push(*day);
+        }
     }
 
-    let sql = combo_score_load_sql(
-        config.score_direction,
-        score_candidate_pool_size,
-        config.universe_profile,
-    );
-    let mut query = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(&sql)
-        .bind(&config.combo_name)
-        .bind(&config.version)
-        .bind(start_date)
-        .bind(end_date);
-    if let Some(limit) = score_candidate_pool_size {
-        query = query.bind(limit as i64);
-    }
-    let rows = query
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to load combo scores: {}", e))?;
+    if !missing_days.is_empty() {
+        let sql = combo_score_load_dates_sql(
+            config.score_direction,
+            score_candidate_pool_size,
+            config.universe_profile,
+        );
+        let mut query = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(&sql)
+            .bind(&config.combo_name)
+            .bind(&config.version)
+            .bind(&missing_days);
+        if let Some(limit) = score_candidate_pool_size {
+            query = query.bind(limit as i64);
+        }
+        let rows = query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Failed to load combo scores for sparse dates: {}", e))?;
+        let loaded_scores = factor_scores_by_date_from_rows(rows);
 
-    if rows.is_empty() {
+        for day in missing_days {
+            let day_scores = loaded_scores.get(&day).cloned().unwrap_or_default();
+            let day_map = if day_scores.is_empty() {
+                HashMap::new()
+            } else {
+                HashMap::from([(day, day_scores.clone())])
+            };
+            let key = SignalDataCacheKey::combo_scores(
+                &config.combo_name,
+                &config.version,
+                day,
+                day,
+                config.score_direction,
+                score_candidate_pool_size,
+                config.universe_profile,
+            );
+            cache.insert_combo_scores(key, day_map);
+            if !day_scores.is_empty() {
+                scores_by_date.insert(day, day_scores);
+            }
+        }
+    }
+
+    if scores_by_date.is_empty() {
         return Err("No combo scores found".into());
     }
 
+    Ok(Arc::new(scores_by_date))
+}
+
+fn factor_scores_by_date_from_rows(
+    rows: Vec<(String, NaiveDate, Option<f64>)>,
+) -> FactorScoresByDate {
     let mut scores_by_date: FactorScoresByDate = HashMap::new();
     for (sym, date, score) in rows {
         let val = score.unwrap_or(0.0);
@@ -4999,14 +5628,14 @@ async fn load_combo_scores_cached(
             scores_by_date.entry(date).or_default().push((sym, val));
         }
     }
-
-    Ok(cache.insert_combo_scores(key, scores_by_date))
+    scores_by_date
 }
 
 fn normalize_score_candidate_pool_size(value: Option<usize>) -> Option<usize> {
     value.filter(|size| *size > 0)
 }
 
+#[cfg(test)]
 fn combo_score_load_sql(
     score_direction: ScoreDirection,
     score_candidate_pool_size: Option<usize>,
@@ -5045,6 +5674,48 @@ fn combo_score_load_sql(
                AND (mfv.available_at IS NULL OR mfv.available_at <= mfv.trade_date){universe_filter}
          ) ranked
          WHERE score_rank <= $5
+         ORDER BY trade_date, score_rank, symbol"
+    )
+}
+
+fn combo_score_load_dates_sql(
+    score_direction: ScoreDirection,
+    score_candidate_pool_size: Option<usize>,
+    universe_profile: TradableUniverseProfile,
+) -> String {
+    let universe_join = tradable_universe_join_sql(universe_profile);
+    let universe_filter = tradable_universe_filter_sql(universe_profile)
+        .map(|filter| format!("\n           AND {filter}"))
+        .unwrap_or_default();
+    let Some(_) = normalize_score_candidate_pool_size(score_candidate_pool_size) else {
+        return format!(
+            "SELECT mfv.symbol, mfv.trade_date, mfv.raw_score
+         FROM multi_factor_value mfv{universe_join}
+         WHERE mfv.combo_name = $1 AND mfv.version = $2
+           AND mfv.trade_date = ANY($3)
+           AND (mfv.available_at IS NULL OR mfv.available_at <= mfv.trade_date){universe_filter}
+         ORDER BY mfv.trade_date, mfv.symbol"
+        );
+    };
+
+    let score_order = match score_direction {
+        ScoreDirection::Descending => "COALESCE(mfv.raw_score, 0.0) DESC",
+        ScoreDirection::Ascending => "COALESCE(mfv.raw_score, 0.0) ASC",
+    };
+    format!(
+        "SELECT symbol, trade_date, raw_score
+         FROM (
+             SELECT mfv.symbol, mfv.trade_date, mfv.raw_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY mfv.trade_date
+                        ORDER BY {score_order}, mfv.symbol ASC
+                    ) AS score_rank
+             FROM multi_factor_value mfv{universe_join}
+             WHERE mfv.combo_name = $1 AND mfv.version = $2
+               AND mfv.trade_date = ANY($3)
+               AND (mfv.available_at IS NULL OR mfv.available_at <= mfv.trade_date){universe_filter}
+         ) ranked
+         WHERE score_rank <= $4
          ORDER BY trade_date, score_rank, symbol"
     )
 }
@@ -5198,6 +5869,18 @@ fn build_pit_average_amounts_by_date(
     amounts_by_date
 }
 
+fn normalized_dates(dates: &[NaiveDate]) -> Vec<NaiveDate> {
+    let mut dates = dates.to_vec();
+    dates.sort_unstable();
+    dates.dedup();
+    dates
+}
+
+fn date_span(dates: &[NaiveDate]) -> Option<(NaiveDate, NaiveDate)> {
+    let dates = normalized_dates(dates);
+    Some((*dates.first()?, *dates.last()?))
+}
+
 fn average_amounts_for_score_day(
     average_amounts_by_date: &AverageAmountsByDate,
     score_day: NaiveDate,
@@ -5253,7 +5936,7 @@ where
         if i < min_idx {
             continue;
         }
-        if i % active_config.rebalance_freq_days.max(1) != 0 {
+        if (i - min_idx) % active_config.rebalance_freq_days.max(1) != 0 {
             continue;
         }
 
@@ -5614,7 +6297,7 @@ fn build_rebalance_prediction_signals(
     let mut previous_target_weights: Option<HashMap<String, Decimal>> = None;
 
     for (i, &day) in trading_days.iter().enumerate() {
-        if i < min_idx || i % config.rebalance_freq_days != 0 {
+        if i < min_idx || (i - min_idx) % config.rebalance_freq_days.max(1) != 0 {
             continue;
         }
         let score_day = match prediction_score_day_for_signal(trading_days, i, config) {
@@ -5919,12 +6602,56 @@ fn prediction_score_day_for_signal(
     trading_days.get(score_idx).copied()
 }
 
+fn rebalance_score_days<F>(
+    trading_days: &[NaiveDate],
+    base_config: &SignalConfig,
+    active_config_for_day: F,
+) -> Vec<NaiveDate>
+where
+    F: Fn(NaiveDate, &SignalConfig) -> SignalConfig,
+{
+    let mut score_days = Vec::new();
+    for (i, &day) in trading_days.iter().enumerate() {
+        let active_config = active_config_for_day(day, base_config);
+        let min_idx = 1 + active_config.entry_delay_days;
+        if i < min_idx {
+            continue;
+        }
+        if (i - min_idx) % active_config.rebalance_freq_days.max(1) != 0 {
+            continue;
+        }
+        if let Some(score_day) = score_day_for_signal(trading_days, i, &active_config) {
+            score_days.push(score_day);
+        }
+    }
+    normalized_dates(&score_days)
+}
+
 fn portfolio_history_lookback_days(config: &PortfolioConstructionConfig) -> usize {
     config
         .correlation_lookback_days
         .max(config.kelly_lookback_days)
         .max(config.risk_budget_lookback_days)
         .max(1)
+}
+
+fn return_history_query_start(start_date: NaiveDate, lookback_days: usize) -> NaiveDate {
+    start_date - Duration::days((lookback_days as i64).saturating_mul(3))
+}
+
+fn average_amount_history_query_start(start_date: NaiveDate, lookback_days: usize) -> NaiveDate {
+    start_date - Duration::days((lookback_days as i64).saturating_mul(3).max(1))
+}
+
+fn filter_dated_values(
+    rows: &[(NaiveDate, f64)],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Vec<(NaiveDate, f64)> {
+    rows.iter()
+        .copied()
+        .filter(|(date, _)| *date >= start_date && *date <= end_date)
+        .collect()
 }
 
 async fn load_symbol_return_history(
@@ -5938,7 +6665,7 @@ async fn load_symbol_return_history(
         return Ok(HashMap::new());
     }
 
-    let query_start = start_date - Duration::days((lookback_days as i64).saturating_mul(3));
+    let query_start = return_history_query_start(start_date, lookback_days);
     let rows: Vec<(String, NaiveDate, Decimal, Option<Decimal>)> = sqlx::query_as(
         "SELECT symbol, trade_date, close, pre_close
          FROM market_stock_daily_bar
@@ -6087,7 +6814,7 @@ async fn load_average_amount_history(
         return Ok(HashMap::new());
     }
 
-    let query_start = start_date - Duration::days((lookback_days as i64).saturating_mul(3).max(1));
+    let query_start = average_amount_history_query_start(start_date, lookback_days);
     let rows: Vec<(String, NaiveDate, Option<Decimal>)> = sqlx::query_as(
         "SELECT symbol, trade_date, amount
          FROM market_stock_daily_bar
@@ -7962,6 +8689,47 @@ mod tests {
     }
 
     #[test]
+    fn factor_signals_emit_first_available_rebalance_inside_short_oos_window() {
+        let trading_days = vec![
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(),
+        ];
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let scores_by_date = HashMap::from([(
+            score_day,
+            vec![
+                ("AAA".to_string(), 3.0),
+                ("BBB".to_string(), 2.0),
+                ("CCC".to_string(), 1.0),
+            ],
+        )]);
+        let config = SignalConfig {
+            top_n: 1,
+            rebalance_freq_days: 60,
+            max_position_pct: Decimal::ONE,
+            ..Default::default()
+        };
+
+        let signals = build_rebalance_factor_signals(
+            &trading_days,
+            &scores_by_date,
+            &config,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            |_day, base| base.clone(),
+        )
+        .expect("factor signals");
+
+        let first_signal_day = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let signal = signals
+            .get(&first_signal_day)
+            .expect("first eligible rebalance should not wait 60 trading days");
+        assert_eq!(signal.target_weights.get("AAA"), Some(&Decimal::ONE));
+    }
+
+    #[test]
     fn prediction_signals_use_previous_day_ranked_predictions() {
         let trading_days = vec![
             NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(),
@@ -8009,6 +8777,85 @@ mod tests {
             signal.target_weights["000001.SZ"],
             Decimal::from_f64(0.2).unwrap()
         );
+    }
+
+    #[test]
+    fn prediction_signals_emit_first_available_rebalance_inside_short_oos_window() {
+        let trading_days = vec![
+            NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(),
+        ];
+        let score_day = trading_days[0];
+        let mut scores_by_date = HashMap::new();
+        scores_by_date.insert(
+            score_day,
+            vec![
+                ("000001.SZ".to_string(), 1.0, Some(1)),
+                ("000002.SZ".to_string(), 0.9, Some(2)),
+                ("000003.SZ".to_string(), 0.8, Some(3)),
+                ("000004.SZ".to_string(), 0.7, Some(4)),
+                ("000005.SZ".to_string(), 0.6, Some(5)),
+            ],
+        );
+        sort_prediction_scores(&mut scores_by_date, ScoreDirection::Descending);
+
+        let signals = build_rebalance_prediction_signals(
+            &trading_days,
+            &scores_by_date,
+            &PredictionSignalConfig {
+                prediction_set_id: "pred-v1".into(),
+                top_n: 5,
+                rebalance_freq_days: 60,
+                entry_delay_days: 0,
+                max_position_pct: Decimal::new(20, 2),
+                ..Default::default()
+            },
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("prediction signals");
+
+        let signal = signals
+            .get(&NaiveDate::from_ymd_opt(2025, 1, 10).unwrap())
+            .expect("first eligible rebalance should not wait 60 trading days");
+        assert_eq!(signal.target_weights.len(), 5);
+    }
+
+    #[test]
+    fn factor_sparse_score_days_follow_actual_rebalance_schedule() {
+        let trading_days = vec![
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(),
+        ];
+        let config = SignalConfig {
+            rebalance_freq_days: 60,
+            entry_delay_days: 0,
+            ..Default::default()
+        };
+
+        let score_days = rebalance_score_days(&trading_days, &config, |_day, base| base.clone());
+
+        assert_eq!(
+            score_days,
+            vec![NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()]
+        );
+    }
+
+    #[test]
+    fn combo_score_dates_query_filters_to_requested_score_days() {
+        let sql = combo_score_load_dates_sql(
+            ScoreDirection::Descending,
+            Some(200),
+            TradableUniverseProfile::All,
+        );
+
+        assert!(sql.contains("mfv.trade_date = ANY($3)"));
+        assert!(sql.contains("ROW_NUMBER() OVER"));
+        assert!(sql.contains("score_rank <= $4"));
+        assert!(!sql.contains("mfv.trade_date >= $3"));
     }
 
     #[test]
@@ -9570,6 +10417,52 @@ mod tests {
     }
 
     #[test]
+    fn market_feature_snapshot_key_is_window_data_and_universe_scoped() {
+        let train_start = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        let train_end = NaiveDate::from_ymd_opt(2022, 12, 31).unwrap();
+        let test_start = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+        let test_end = NaiveDate::from_ymd_opt(2023, 12, 31).unwrap();
+        let symbols = vec![
+            "000002.SZ".to_string(),
+            "000001.SZ".to_string(),
+            "000001.SZ".to_string(),
+        ];
+
+        let key = MarketFeatureSnapshotKey::new(
+            "full-market-2016-v1",
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+            120,
+            &symbols,
+        );
+        let reordered = MarketFeatureSnapshotKey::new(
+            "full-market-2016-v1",
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+            120,
+            &["000001.SZ".to_string(), "000002.SZ".to_string()],
+        );
+        let different_data = MarketFeatureSnapshotKey::new(
+            "full-market-2016-v2",
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+            120,
+            &symbols,
+        );
+
+        assert_eq!(key.universe_hash, reordered.universe_hash);
+        assert_ne!(key, different_data);
+        assert!(key.feature_start() < train_start);
+        assert_eq!(key.feature_end(), test_end);
+    }
+
+    #[test]
     fn return_history_cache_reuses_overlapping_symbols_incrementally() {
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
@@ -9615,6 +10508,220 @@ mod tests {
     }
 
     #[test]
+    fn signal_data_cache_snapshot_forks_prewarmed_market_features_without_copying_stats() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let lookback_days = 60;
+        let trade_date = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let symbols = vec!["AAA".to_string()];
+        let mut base = SignalDataCache::default();
+        base.insert_return_history_symbols(
+            &symbols,
+            start,
+            end,
+            lookback_days,
+            HashMap::from([("AAA".to_string(), vec![(trade_date, 0.01)])]),
+        );
+        base.insert_average_amount_history_symbols(
+            &symbols,
+            start,
+            end,
+            lookback_days,
+            HashMap::from([("AAA".to_string(), vec![(trade_date, 1_000.0)])]),
+        );
+
+        let snapshot = base.snapshot();
+        let mut fork = SignalDataCache::from_snapshot(&snapshot);
+        let (missing_returns, returns) =
+            fork.cached_return_history_symbols(&symbols, start, end, lookback_days);
+        let (missing_amounts, amounts) =
+            fork.cached_average_amount_history_symbols(&symbols, start, end, lookback_days);
+
+        assert!(missing_returns.is_empty());
+        assert!(missing_amounts.is_empty());
+        assert_eq!(returns["AAA"], vec![(trade_date, 0.01)]);
+        assert_eq!(amounts["AAA"], vec![(trade_date, 1_000.0)]);
+        assert_eq!(base.stats().return_history_hits, 0);
+        assert_eq!(fork.stats().return_history_hits, 1);
+        assert_eq!(fork.stats().average_amount_hits, 1);
+    }
+
+    #[test]
+    fn return_history_cache_reuses_covering_symbol_window() {
+        let cached_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let cached_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let requested_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let requested_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let before_request = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let inside_request = NaiveDate::from_ymd_opt(2026, 2, 10).unwrap();
+        let after_request = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let lookback_days = 60;
+        let mut cache = SignalDataCache::default();
+        let cached_symbols = vec!["AAA".to_string()];
+
+        cache.insert_return_history_symbols(
+            &cached_symbols,
+            cached_start,
+            cached_end,
+            lookback_days,
+            HashMap::from([(
+                "AAA".to_string(),
+                vec![
+                    (before_request, 0.01),
+                    (inside_request, 0.02),
+                    (after_request, 0.03),
+                ],
+            )]),
+        );
+
+        let (missing, cached_history) = cache.cached_return_history_symbols(
+            &cached_symbols,
+            requested_start,
+            requested_end,
+            lookback_days,
+        );
+
+        assert!(missing.is_empty());
+        assert_eq!(
+            cached_history["AAA"],
+            vec![(before_request, 0.01), (inside_request, 0.02)]
+        );
+        assert_eq!(cache.stats().return_history_hits, 1);
+        assert_eq!(cache.stats().return_history_misses, 0);
+    }
+
+    #[test]
+    fn average_amount_history_cache_reuses_covering_symbol_window() {
+        let cached_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let cached_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let requested_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let requested_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let before_request = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let inside_request = NaiveDate::from_ymd_opt(2026, 2, 10).unwrap();
+        let after_request = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let lookback_days = 60;
+        let mut cache = SignalDataCache::default();
+        let cached_symbols = vec!["AAA".to_string()];
+
+        cache.insert_average_amount_history_symbols(
+            &cached_symbols,
+            cached_start,
+            cached_end,
+            lookback_days,
+            HashMap::from([(
+                "AAA".to_string(),
+                vec![
+                    (before_request, 100.0),
+                    (inside_request, 200.0),
+                    (after_request, 300.0),
+                ],
+            )]),
+        );
+
+        let (missing, cached_history) = cache.cached_average_amount_history_symbols(
+            &cached_symbols,
+            requested_start,
+            requested_end,
+            lookback_days,
+        );
+
+        assert!(missing.is_empty());
+        assert_eq!(
+            cached_history["AAA"],
+            vec![(before_request, 100.0), (inside_request, 200.0)]
+        );
+        assert_eq!(cache.stats().average_amount_hits, 1);
+        assert_eq!(cache.stats().average_amount_misses, 0);
+    }
+
+    #[test]
+    fn market_feature_snapshot_reuses_subset_windows_for_return_and_capacity_history() {
+        let train_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let train_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let requested_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let requested_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let before_request = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let inside_request = NaiveDate::from_ymd_opt(2026, 2, 10).unwrap();
+        let after_request = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let symbols = vec!["AAA".to_string(), "BBB".to_string()];
+        let requested_symbols = vec!["BBB".to_string()];
+        let return_lookback_days = 60;
+        let amount_lookback_days = PIT_CAPACITY_AVERAGE_AMOUNT_LOOKBACK_DAYS;
+        let mut cache = SignalDataCache::default();
+        let key = MarketFeatureSnapshotKey::new(
+            "full-market-2016-v1",
+            train_start,
+            train_end,
+            train_start,
+            train_end,
+            return_lookback_days,
+            &symbols,
+        );
+
+        cache.insert_market_feature_snapshot(
+            key,
+            return_lookback_days,
+            amount_lookback_days,
+            HashMap::from([
+                (
+                    "AAA".to_string(),
+                    vec![(before_request, 0.01), (inside_request, 0.02)],
+                ),
+                (
+                    "BBB".to_string(),
+                    vec![
+                        (before_request, -0.01),
+                        (inside_request, -0.02),
+                        (after_request, -0.03),
+                    ],
+                ),
+            ]),
+            HashMap::from([
+                (
+                    "AAA".to_string(),
+                    vec![(before_request, 100.0), (inside_request, 110.0)],
+                ),
+                (
+                    "BBB".to_string(),
+                    vec![
+                        (before_request, 200.0),
+                        (inside_request, 210.0),
+                        (after_request, 220.0),
+                    ],
+                ),
+            ]),
+        );
+
+        let (missing_returns, return_history) = cache.cached_return_history_symbols(
+            &requested_symbols,
+            requested_start,
+            requested_end,
+            return_lookback_days,
+        );
+        let (missing_amounts, amount_history) = cache.cached_average_amount_history_symbols(
+            &requested_symbols,
+            requested_start,
+            requested_end,
+            amount_lookback_days,
+        );
+
+        assert!(missing_returns.is_empty());
+        assert!(missing_amounts.is_empty());
+        assert_eq!(
+            return_history["BBB"],
+            vec![(before_request, -0.01), (inside_request, -0.02)]
+        );
+        assert_eq!(
+            amount_history["BBB"],
+            vec![(before_request, 200.0), (inside_request, 210.0)]
+        );
+        assert_eq!(cache.stats().return_history_hits, 1);
+        assert_eq!(cache.stats().average_amount_hits, 1);
+        assert_eq!(cache.stats().return_history_misses, 0);
+        assert_eq!(cache.stats().average_amount_misses, 0);
+    }
+
+    #[test]
     fn average_amount_cache_reuses_overlapping_symbols_incrementally() {
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
@@ -9650,6 +10757,31 @@ mod tests {
         assert!(missing_again.is_empty());
         assert!(!cached_again.contains_key("CCC"));
         assert_eq!(cache.stats().average_amount_hits, 5);
+        assert_eq!(cache.stats().average_amount_misses, 1);
+    }
+
+    #[test]
+    fn average_amount_cache_does_not_reuse_covering_aggregate_window() {
+        let cached_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let cached_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let requested_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let requested_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let mut cache = SignalDataCache::default();
+        let cached_symbols = vec!["AAA".to_string()];
+
+        cache.insert_average_amount_symbols(
+            &cached_symbols,
+            cached_start,
+            cached_end,
+            HashMap::from([("AAA".to_string(), 5_000.0)]),
+        );
+
+        let (missing, cached_amounts) =
+            cache.cached_average_amount_symbols(&cached_symbols, requested_start, requested_end);
+
+        assert_eq!(missing, vec!["AAA".to_string()]);
+        assert!(cached_amounts.is_empty());
+        assert_eq!(cache.stats().average_amount_hits, 0);
         assert_eq!(cache.stats().average_amount_misses, 1);
     }
 
@@ -9831,6 +10963,108 @@ mod tests {
         assert_eq!(
             reused.get(&start).unwrap(),
             &vec![("AAA".to_string(), 0.9), ("BBB".to_string(), 0.8)]
+        );
+        assert_eq!(cache.stats().combo_score_hits, 1);
+        assert_eq!(cache.stats().combo_score_misses, 0);
+    }
+
+    #[test]
+    fn signal_data_cache_reuses_covering_combo_score_window() {
+        let wide_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let wide_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let narrow_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let narrow_day = NaiveDate::from_ymd_opt(2026, 2, 10).unwrap();
+        let narrow_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let outside_day = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let cached_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            wide_start,
+            wide_end,
+            ScoreDirection::Descending,
+            Some(3),
+            TradableUniverseProfile::ListedNonSt,
+        );
+        let requested_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            narrow_start,
+            narrow_end,
+            ScoreDirection::Descending,
+            Some(2),
+            TradableUniverseProfile::ListedNonSt,
+        );
+        let scores = HashMap::from([
+            (
+                narrow_day,
+                vec![
+                    ("AAA".to_string(), 0.9),
+                    ("BBB".to_string(), 0.8),
+                    ("CCC".to_string(), 0.7),
+                ],
+            ),
+            (outside_day, vec![("DDD".to_string(), 0.6)]),
+        ]);
+        let mut cache = SignalDataCache::default();
+        cache.store_combo_scores_for_test(cached_key, scores);
+
+        let reused = cache
+            .cached_combo_scores(&requested_key)
+            .expect("wider combo score window should satisfy narrower request");
+
+        assert_eq!(reused.len(), 1);
+        assert_eq!(
+            reused.get(&narrow_day).unwrap(),
+            &vec![("AAA".to_string(), 0.9), ("BBB".to_string(), 0.8)]
+        );
+        assert!(!reused.contains_key(&outside_day));
+        assert_eq!(cache.stats().combo_score_hits, 1);
+        assert_eq!(cache.stats().combo_score_misses, 0);
+    }
+
+    #[test]
+    fn signal_data_cache_ranks_unbounded_covering_combo_window_for_directional_request() {
+        let wide_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let wide_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let narrow_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let narrow_day = NaiveDate::from_ymd_opt(2026, 2, 10).unwrap();
+        let narrow_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let cached_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            wide_start,
+            wide_end,
+            ScoreDirection::Descending,
+            None,
+            TradableUniverseProfile::ListedNonSt,
+        );
+        let requested_key = SignalDataCacheKey::combo_scores(
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            narrow_start,
+            narrow_end,
+            ScoreDirection::Ascending,
+            Some(2),
+            TradableUniverseProfile::ListedNonSt,
+        );
+        let scores = HashMap::from([(
+            narrow_day,
+            vec![
+                ("AAA".to_string(), 0.9),
+                ("BBB".to_string(), 0.7),
+                ("CCC".to_string(), 0.8),
+            ],
+        )]);
+        let mut cache = SignalDataCache::default();
+        cache.store_combo_scores_for_test(cached_key, scores);
+
+        let reused = cache
+            .cached_combo_scores(&requested_key)
+            .expect("unbounded covering window should be ranked for requested direction");
+
+        assert_eq!(
+            reused.get(&narrow_day).unwrap(),
+            &vec![("BBB".to_string(), 0.7), ("CCC".to_string(), 0.8)]
         );
         assert_eq!(cache.stats().combo_score_hits, 1);
         assert_eq!(cache.stats().combo_score_misses, 0);

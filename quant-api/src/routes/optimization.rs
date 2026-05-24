@@ -25,8 +25,12 @@ use crate::routes::backtest::{
     RunFactorBacktestReq, RunPredictionBacktestReq,
 };
 use crate::AppState;
-use quant_backtest::runner::{BacktestDataCache, BacktestDataCacheStats};
-use quant_backtest::signal_generator::{SignalDataCache, SignalDataCacheStats};
+use quant_backtest::runner::{
+    BacktestDataCache, BacktestDataCacheSnapshot, BacktestDataCacheStats,
+};
+use quant_backtest::signal_generator::{
+    signal_cache_stats_delta, SignalDataCache, SignalDataCacheSnapshot, SignalDataCacheStats,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateOptimizationRequest {
@@ -194,56 +198,6 @@ struct RobustnessEvaluation {
     gates: Value,
 }
 
-fn signal_cache_stats_delta(
-    before: SignalDataCacheStats,
-    after: SignalDataCacheStats,
-) -> SignalDataCacheStats {
-    SignalDataCacheStats {
-        combo_score_hits: after
-            .combo_score_hits
-            .saturating_sub(before.combo_score_hits),
-        combo_score_misses: after
-            .combo_score_misses
-            .saturating_sub(before.combo_score_misses),
-        trading_day_hits: after
-            .trading_day_hits
-            .saturating_sub(before.trading_day_hits),
-        trading_day_misses: after
-            .trading_day_misses
-            .saturating_sub(before.trading_day_misses),
-        return_history_hits: after
-            .return_history_hits
-            .saturating_sub(before.return_history_hits),
-        return_history_misses: after
-            .return_history_misses
-            .saturating_sub(before.return_history_misses),
-        average_amount_hits: after
-            .average_amount_hits
-            .saturating_sub(before.average_amount_hits),
-        average_amount_misses: after
-            .average_amount_misses
-            .saturating_sub(before.average_amount_misses),
-        prediction_score_hits: after
-            .prediction_score_hits
-            .saturating_sub(before.prediction_score_hits),
-        prediction_score_misses: after
-            .prediction_score_misses
-            .saturating_sub(before.prediction_score_misses),
-        industry_classification_hits: after
-            .industry_classification_hits
-            .saturating_sub(before.industry_classification_hits),
-        industry_classification_misses: after
-            .industry_classification_misses
-            .saturating_sub(before.industry_classification_misses),
-        benchmark_return_hits: after
-            .benchmark_return_hits
-            .saturating_sub(before.benchmark_return_hits),
-        benchmark_return_misses: after
-            .benchmark_return_misses
-            .saturating_sub(before.benchmark_return_misses),
-    }
-}
-
 fn backtest_cache_stats_delta(
     before: BacktestDataCacheStats,
     after: BacktestDataCacheStats,
@@ -396,6 +350,8 @@ struct TrialExecutionOutcome {
     failed: i64,
     signal_cache_stats: SignalDataCacheStats,
     backtest_cache_stats: BacktestDataCacheStats,
+    signal_cache_snapshot: Option<SignalDataCacheSnapshot>,
+    backtest_cache_snapshot: Option<BacktestDataCacheSnapshot>,
 }
 
 struct RobustnessOverlayPersistenceFields {
@@ -2526,6 +2482,7 @@ fn normalize_oos_train_cache_mode(mode: Option<&str>) -> Result<&'static str, St
         .unwrap_or("shared_window")
     {
         "shared_window" | "shared" | "window_shared" | "reuse" => Ok("shared_window"),
+        "shared_run" | "run_shared" => Ok("shared_run"),
         "per_trial_isolated" | "isolated" | "parallel_isolated" => Ok("per_trial_isolated"),
         "auto" | "adaptive" | "resource_adaptive" => Ok("auto"),
         other => Err(format!("unsupported train_cache_mode: {}", other)),
@@ -2540,6 +2497,7 @@ fn resolve_oos_train_execution_policy(
     let requested_trial_concurrency = normalized_trial_concurrency(req.trial_concurrency);
     let (cache_mode, trial_concurrency) = match requested_cache_mode {
         "shared_window" => ("shared_window", 1),
+        "shared_run" => ("shared_run", 1),
         "per_trial_isolated" => ("per_trial_isolated", requested_trial_concurrency),
         "auto" => {
             let planned_trials = req
@@ -2667,19 +2625,52 @@ async fn execute_phase7_oos_walk_forward_discovery(
     let mut stitched_points = Vec::new();
     let mut oos_signal_cache = SignalDataCache::default();
     let mut oos_backtest_cache = BacktestDataCache::default();
+    let train_execution_policy =
+        resolve_oos_train_execution_policy(&req, &LocalResourcePlan::local_mac())?;
+    let shared_run_train_cache = train_execution_policy.cache_mode == "shared_run";
+    let mut shared_train_signal_cache = if shared_run_train_cache {
+        Some(SignalDataCache::default())
+    } else {
+        None
+    };
+    let mut shared_train_backtest_cache = if shared_run_train_cache {
+        Some(BacktestDataCache::default())
+    } else {
+        None
+    };
     let train_gate_policy = resolve_oos_train_selection_gate_policy(&req);
     let final_promotion_gate_policy =
         resolve_oos_final_promotion_gate_policy(&req, &plan.validation_mode);
     let oos_top_n = req.oos_top_n.unwrap_or(1).clamp(1, 20);
 
     for window in &plan.windows {
+        let mut local_train_signal_cache = SignalDataCache::default();
+        let mut local_train_backtest_cache = BacktestDataCache::default();
+        let (train_signal_cache, train_backtest_cache) = if shared_run_train_cache {
+            (
+                shared_train_signal_cache
+                    .as_mut()
+                    .expect("shared_run train signal cache"),
+                shared_train_backtest_cache
+                    .as_mut()
+                    .expect("shared_run train backtest cache"),
+            )
+        } else {
+            (
+                &mut local_train_signal_cache,
+                &mut local_train_backtest_cache,
+            )
+        };
         let execution = execute_oos_discovery_window(
             db,
             &req,
+            &train_execution_policy,
             window,
             oos_top_n,
             &train_gate_policy,
             &final_promotion_gate_policy,
+            train_signal_cache,
+            train_backtest_cache,
             &mut oos_signal_cache,
             &mut oos_backtest_cache,
         )
@@ -2765,10 +2756,13 @@ async fn execute_phase7_oos_walk_forward_discovery(
 async fn execute_oos_discovery_window(
     db: &sqlx::PgPool,
     req: &Phase7OosWalkForwardDiscoveryRequest,
+    train_execution_policy: &OosTrainExecutionPolicy,
     window: &OosDiscoveryWindow,
     oos_top_n: usize,
     train_gate_policy: &Value,
     final_promotion_gate_policy: &Value,
+    train_signal_cache: &mut SignalDataCache,
+    train_backtest_cache: &mut BacktestDataCache,
     oos_signal_cache: &mut SignalDataCache,
     oos_backtest_cache: &mut BacktestDataCache,
 ) -> Result<OosWindowExecution, String> {
@@ -2818,24 +2812,23 @@ async fn execute_oos_discovery_window(
         planned.div_ceil(batch)
     });
     let max_batches = max_batches.clamp(1, 100_000);
-    let mut train_signal_cache = SignalDataCache::default();
-    let mut train_backtest_cache = BacktestDataCache::default();
     let mut train_batches = Vec::new();
-    let train_execution_policy =
-        resolve_oos_train_execution_policy(req, &LocalResourcePlan::local_mac())?;
     for _ in 0..max_batches {
         let batch = execute_pending_trials_with_caches_and_concurrency(
             db,
             &train_task_id,
             trial_batch_limit,
             None,
-            &mut train_signal_cache,
-            &mut train_backtest_cache,
+            &mut *train_signal_cache,
+            &mut *train_backtest_cache,
             train_execution_policy.trial_concurrency,
         )
         .await?;
         let executed = batch["executed"].as_i64().unwrap_or(0);
-        train_batches.push(batch);
+        train_batches.push(annotate_oos_train_batch_cache_mode(
+            batch,
+            train_execution_policy,
+        ));
         if executed == 0 {
             break;
         }
@@ -2853,8 +2846,8 @@ async fn execute_oos_discovery_window(
             train_gate_policy,
             require_train_approval,
             window.window_index,
-            &mut train_signal_cache,
-            &mut train_backtest_cache,
+            &mut *train_signal_cache,
+            &mut *train_backtest_cache,
         )
         .await?;
 
@@ -2893,7 +2886,7 @@ async fn execute_oos_discovery_window(
     Ok(OosWindowExecution {
         window: window.clone(),
         train_optimization_task_id: train_task_id,
-        train_execution_policy,
+        train_execution_policy: train_execution_policy.clone(),
         train_batches,
         selected_candidate,
         train_robustness,
@@ -2927,8 +2920,8 @@ async fn execute_oos_cost_capacity_perturbations(
             test_template.clone(),
             &perturbed_parameters,
             &backtest_task_id,
-            signal_cache,
-            backtest_cache,
+            &mut *signal_cache,
+            &mut *backtest_cache,
         )
         .await?;
         let passed =
@@ -2971,8 +2964,8 @@ async fn execute_train_cost_capacity_perturbations(
             train_template.clone(),
             &perturbed_parameters,
             &backtest_task_id,
-            signal_cache,
-            backtest_cache,
+            &mut *signal_cache,
+            &mut *backtest_cache,
         )
         .await?;
         let passed = cost_capacity_perturbation_passed_with_thresholds(
@@ -3015,14 +3008,18 @@ async fn execute_oos_candidate_backtest(
     };
     match build_optimization_trial_request(&task, parameters)? {
         OptimizationTrialBacktestRequest::Factor(request) => {
-            execute_factor_backtest_with_caches(
+            let output = execute_factor_backtest_with_caches(
                 db,
                 backtest_task_id,
                 request,
                 Some(signal_cache),
                 Some(backtest_cache),
             )
-            .await
+            .await?;
+            if let Some(report) = output.market_data_prewarm_report.as_ref() {
+                let _ = report;
+            }
+            Ok(output)
         }
         OptimizationTrialBacktestRequest::Prediction(request) => {
             execute_prediction_backtest(db, backtest_task_id, request).await
@@ -4764,6 +4761,8 @@ fn oos_window_execution_json(execution: &OosWindowExecution, train_gate_policy: 
         "train_stress_score_profile": train_stress_score_profile,
         "train_stress_adjusted_score": train_stress_adjusted_score,
         "oos_backtest_task_id": execution.oos_backtest_task_id,
+        "oos_market_data_prewarm_report": execution.oos_output.market_data_prewarm_report,
+        "oos_market_feature_prewarm_report": execution.oos_output.market_feature_prewarm_report,
         "oos_metrics": {
             "annual_return_pct": execution.oos_output.metrics.annual_return_pct,
             "excess_return_pct": execution.oos_output.metrics.excess_return_pct,
@@ -4786,6 +4785,38 @@ fn oos_window_execution_json(execution: &OosWindowExecution, train_gate_policy: 
         "oos_point_count": execution.oos_points.len(),
         "cost_capacity_perturbations": execution.cost_capacity_perturbations.iter().map(oos_cost_capacity_perturbation_result_json).collect::<Vec<_>>(),
     })
+}
+
+fn annotate_oos_train_batch_cache_mode(
+    mut batch: Value,
+    train_execution_policy: &OosTrainExecutionPolicy,
+) -> Value {
+    let cache_scope = match train_execution_policy.cache_mode {
+        "shared_run" => "run",
+        "shared_window" => "window",
+        "per_trial_isolated" => "trial",
+        other => other,
+    };
+    if let Some(object) = batch.as_object_mut() {
+        object.insert(
+            "requested_cache_mode".to_string(),
+            json!(train_execution_policy.requested_cache_mode),
+        );
+        object.insert(
+            "cache_mode".to_string(),
+            json!(train_execution_policy.cache_mode),
+        );
+        object.insert("cache_scope".to_string(), json!(cache_scope));
+        object.insert(
+            "requested_trial_concurrency".to_string(),
+            json!(train_execution_policy.requested_trial_concurrency),
+        );
+        object.insert(
+            "trial_concurrency".to_string(),
+            json!(train_execution_policy.trial_concurrency),
+        );
+    }
+    batch
 }
 
 fn cost_capacity_perturbation_summary_json(summary: &CostCapacityPerturbationSummary) -> Value {
@@ -5033,7 +5064,7 @@ fn oos_walk_forward_experiment_config(
         "exhaustive_search": req.exhaustive_search.unwrap_or(false),
         "trial_batch_limit": req.trial_batch_limit,
         "requested_trial_concurrency": train_execution_policy.requested_trial_concurrency,
-        "trial_concurrency": train_execution_policy.requested_trial_concurrency,
+        "trial_concurrency": train_execution_policy.trial_concurrency,
         "requested_train_cache_mode": train_execution_policy.requested_cache_mode,
         "train_trial_concurrency": train_execution_policy.trial_concurrency,
         "train_cache_mode": train_execution_policy.cache_mode,
@@ -5374,6 +5405,8 @@ async fn execute_pending_trials_with_caches_and_concurrency(
 
     let trial_concurrency = trial_concurrency.clamp(1, pending_trials.len().max(1));
     if trial_concurrency > 1 {
+        let signal_cache_snapshot = signal_cache.snapshot();
+        let backtest_cache_snapshot = backtest_cache.snapshot();
         return execute_loaded_pending_trials_concurrently(
             db,
             task_id,
@@ -5383,6 +5416,8 @@ async fn execute_pending_trials_with_caches_and_concurrency(
             &gate_policy,
             started,
             trial_concurrency,
+            Some(signal_cache_snapshot),
+            Some(backtest_cache_snapshot),
         )
         .await;
     }
@@ -5504,6 +5539,8 @@ async fn execute_loaded_pending_trials_concurrently(
     gate_policy: &OptimizationPerformanceGatePolicy,
     started: Instant,
     trial_concurrency: usize,
+    signal_cache_snapshot: Option<SignalDataCacheSnapshot>,
+    backtest_cache_snapshot: Option<BacktestDataCacheSnapshot>,
 ) -> Result<Value, String> {
     let pending_count = pending_trials.len();
     let mut join_set = tokio::task::JoinSet::new();
@@ -5511,6 +5548,28 @@ async fn execute_loaded_pending_trials_concurrently(
     let mut failed = 0;
     let mut signal_cache_stats = SignalDataCacheStats::default();
     let mut backtest_cache_stats = BacktestDataCacheStats::default();
+    let mut signal_cache_snapshot = signal_cache_snapshot;
+    let mut backtest_cache_snapshot = backtest_cache_snapshot;
+
+    let mut pending_trials = pending_trials.into_iter();
+    if let Some((trial_id, _trial_index, params)) = pending_trials.next() {
+        let outcome = execute_single_pending_trial(
+            db.clone(),
+            task_id.to_string(),
+            task.clone(),
+            trial_id,
+            params,
+            signal_cache_snapshot.clone(),
+            backtest_cache_snapshot.clone(),
+        )
+        .await;
+        completed += outcome.completed;
+        failed += outcome.failed;
+        add_signal_cache_stats(&mut signal_cache_stats, outcome.signal_cache_stats);
+        add_backtest_cache_stats(&mut backtest_cache_stats, outcome.backtest_cache_stats);
+        signal_cache_snapshot = outcome.signal_cache_snapshot;
+        backtest_cache_snapshot = outcome.backtest_cache_snapshot;
+    }
 
     for (trial_id, _trial_index, params) in pending_trials {
         while join_set.len() >= trial_concurrency {
@@ -5528,8 +5587,19 @@ async fn execute_loaded_pending_trials_concurrently(
         let db = db.clone();
         let task_id = task_id.to_string();
         let task = task.clone();
+        let signal_cache_snapshot = signal_cache_snapshot.clone();
+        let backtest_cache_snapshot = backtest_cache_snapshot.clone();
         join_set.spawn(async move {
-            execute_single_pending_trial(db, task_id, task, trial_id, params).await
+            execute_single_pending_trial(
+                db,
+                task_id,
+                task,
+                trial_id,
+                params,
+                signal_cache_snapshot,
+                backtest_cache_snapshot,
+            )
+            .await
         });
     }
 
@@ -5616,9 +5686,17 @@ async fn execute_single_pending_trial(
     task: OptimizationTaskExecutionContext,
     trial_id: String,
     params: Value,
+    signal_cache_snapshot: Option<SignalDataCacheSnapshot>,
+    backtest_cache_snapshot: Option<BacktestDataCacheSnapshot>,
 ) -> TrialExecutionOutcome {
-    let mut signal_cache = SignalDataCache::default();
-    let mut backtest_cache = BacktestDataCache::default();
+    let mut signal_cache = signal_cache_snapshot
+        .as_ref()
+        .map(SignalDataCache::from_snapshot)
+        .unwrap_or_default();
+    let mut backtest_cache = backtest_cache_snapshot
+        .as_ref()
+        .map(BacktestDataCache::from_snapshot)
+        .unwrap_or_default();
     let mut completed = 0;
     let mut failed = 0;
     let backtest_task_id = format!("optbt-{}", Uuid::new_v4());
@@ -5666,6 +5744,8 @@ async fn execute_single_pending_trial(
         failed,
         signal_cache_stats: signal_cache.stats(),
         backtest_cache_stats: backtest_cache.stats(),
+        signal_cache_snapshot: Some(signal_cache.snapshot()),
+        backtest_cache_snapshot: Some(backtest_cache.snapshot()),
     }
 }
 
@@ -9949,6 +10029,87 @@ mod tests {
         assert_eq!(policy.cache_mode, "per_trial_isolated");
         assert_eq!(policy.trial_concurrency, 8);
         assert_eq!(policy.requested_cache_mode, "auto");
+    }
+
+    #[test]
+    fn oos_train_execution_accepts_explicit_shared_run_cache() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: Some(8),
+            search_profile: None,
+            trial_batch_limit: None,
+            trial_concurrency: Some(4),
+            train_cache_mode: Some("shared_run".to_string()),
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+        let resource_plan = LocalResourcePlan::for_machine(10, 32);
+
+        assert_eq!(
+            normalize_oos_train_cache_mode(Some("run_shared")).unwrap(),
+            "shared_run"
+        );
+        let policy = resolve_oos_train_execution_policy(&req, &resource_plan).unwrap();
+
+        assert_eq!(policy.requested_cache_mode, "shared_run");
+        assert_eq!(policy.cache_mode, "shared_run");
+        assert_eq!(policy.trial_concurrency, 1);
+
+        let config =
+            oos_walk_forward_experiment_config(&req, &json!({"validation_mode": "walk_forward"}));
+        assert_eq!(config["requested_trial_concurrency"], json!(4));
+        assert_eq!(config["trial_concurrency"], json!(1));
+        assert_eq!(config["train_trial_concurrency"], json!(1));
+        assert_eq!(config["train_cache_mode"], json!("shared_run"));
+    }
+
+    #[test]
+    fn oos_train_batch_summary_labels_shared_run_cache_scope() {
+        let policy = OosTrainExecutionPolicy {
+            requested_cache_mode: "shared_run",
+            cache_mode: "shared_run",
+            requested_trial_concurrency: 4,
+            trial_concurrency: 1,
+        };
+        let batch = annotate_oos_train_batch_cache_mode(
+            json!({
+                "executed": 2,
+                "trial_concurrency": 1,
+                "cache_mode": "shared_window",
+            }),
+            &policy,
+        );
+
+        assert_eq!(batch["cache_mode"], json!("shared_run"));
+        assert_eq!(batch["cache_scope"], json!("run"));
+        assert_eq!(batch["requested_cache_mode"], json!("shared_run"));
     }
 
     #[test]
@@ -17233,6 +17394,22 @@ mod tests {
     }
 
     #[test]
+    fn parallel_trial_cache_forks_start_from_shared_snapshot_without_parent_stats() {
+        let parent_signal_cache = SignalDataCache::default();
+        let parent_backtest_cache = BacktestDataCache::default();
+        let signal_snapshot = parent_signal_cache.snapshot();
+        let backtest_snapshot = parent_backtest_cache.snapshot();
+
+        let signal_fork = SignalDataCache::from_snapshot(&signal_snapshot);
+        let backtest_fork = BacktestDataCache::from_snapshot(&backtest_snapshot);
+
+        assert_eq!(parent_signal_cache.stats().return_history_hits, 0);
+        assert_eq!(parent_backtest_cache.stats().daily_bar_symbol_hits, 0);
+        assert_eq!(signal_fork.stats().return_history_hits, 0);
+        assert_eq!(backtest_fork.stats().daily_bar_symbol_hits, 0);
+    }
+
+    #[test]
     fn elite_validation_plateau_scores_stable_parameter_neighbors() {
         let candidate = report_trial(
             "candidate",
@@ -18020,6 +18197,8 @@ mod tests {
                 version: "1.0.0".to_string(),
                 universe_profile: Some("listed_non_st".to_string()),
             }),
+            market_data_prewarm_report: None,
+            market_feature_prewarm_report: None,
         };
 
         let scored = score_trial_with_output(
@@ -18049,6 +18228,82 @@ mod tests {
             .unwrap()
             .iter()
             .any(|gate| { gate["gate"] == "effective_coverage_start" && gate["passed"] == true }));
+    }
+
+    #[test]
+    fn oos_window_execution_json_includes_market_data_prewarm_report() {
+        let execution = OosWindowExecution {
+            window: OosDiscoveryWindow {
+                window_index: 1,
+                validation_mode: "walk_forward".to_string(),
+                train_start: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                train_end: NaiveDate::from_ymd_opt(2022, 12, 31).unwrap(),
+                test_start: NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+                test_end: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+            },
+            train_optimization_task_id: "train-task-1".to_string(),
+            train_execution_policy: OosTrainExecutionPolicy {
+                requested_cache_mode: "shared_window",
+                cache_mode: "shared_window",
+                requested_trial_concurrency: 1,
+                trial_concurrency: 1,
+            },
+            train_batches: Vec::new(),
+            selected_candidate: DiscoveryCandidate {
+                trial_id: "trial-1".to_string(),
+                backtest_task_id: None,
+                score: None,
+                candidate_type: CandidateType::Professional,
+                professional_gap_score: Decimal::ZERO,
+                metrics: CandidateMetrics::default(),
+                parameters: json!({}),
+            },
+            train_robustness: None,
+            train_cost_capacity_perturbations: Vec::new(),
+            oos_backtest_task_id: "oos-task-1".to_string(),
+            oos_output: FactorBacktestRunOutput {
+                signals_count: 0,
+                metrics: quant_backtest::metrics::BacktestMetrics::default(),
+                trades: 0,
+                equity_points: 0,
+                effective_coverage: None,
+                market_data_prewarm_report: Some(
+                    quant_backtest::runner::BacktestMarketDataPrewarmReport {
+                        start_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+                        benchmark: "000300.SH".to_string(),
+                        symbol_count: 2,
+                        cache_delta: Default::default(),
+                    },
+                ),
+                market_feature_prewarm_report: Some(
+                    quant_backtest::signal_generator::MarketFeaturePrewarmReport {
+                        snapshot_key:
+                            quant_backtest::signal_generator::MarketFeatureSnapshotKey::new(
+                                "full-market-2016-v1",
+                                NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                                NaiveDate::from_ymd_opt(2022, 12, 31).unwrap(),
+                                NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+                                NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+                                60,
+                                &["AAA".to_string(), "BBB".to_string()],
+                            ),
+                        feature_start: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                        feature_end: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+                        symbol_count: 2,
+                        lookback_days: 60,
+                        cache_delta: Default::default(),
+                    },
+                ),
+            },
+            oos_points: Vec::new(),
+            cost_capacity_perturbations: Vec::new(),
+        };
+
+        let json = oos_window_execution_json(&execution, &json!({}));
+
+        assert!(json.get("oos_market_data_prewarm_report").is_some());
+        assert!(json.get("oos_market_feature_prewarm_report").is_some());
     }
 
     #[test]
