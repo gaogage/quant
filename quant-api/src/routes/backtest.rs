@@ -2155,6 +2155,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
                 end,
                 lookback_days,
                 &all_symbols,
+                &[],
             )
             .await
             .map_err(|error| error.to_string())?,

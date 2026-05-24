@@ -105,6 +105,23 @@ if phase7_perf_indexes_sql.exists():
 else:
     failed.append(("Phase 7 discovery perf indexes must exist for strict OOS/WFA scaling", "sql/phase7_discovery_perf_indexes.sql", ["missing file"]))
 
+phase7_market_feature_cache_sql = ROOT / "sql/phase7_market_feature_cache.sql"
+if phase7_market_feature_cache_sql.exists():
+    phase7_market_feature_cache_text = phase7_market_feature_cache_sql.read_text(encoding="utf-8")
+    for required in [
+        "return_risk_feature_matrix",
+        "CREATE TABLE IF NOT EXISTS public.market_feature_cache_return_risk_matrix_row",
+        "score_day DATE NOT NULL",
+        "returns DOUBLE PRECISION[] NOT NULL",
+        "array_position(returns, NULL) IS NULL",
+        "PRIMARY KEY (cache_key, score_day, symbol)",
+        "idx_market_feature_cache_return_risk_matrix_symbol_day",
+    ]:
+        if required not in phase7_market_feature_cache_text:
+            failed.append(("Phase 7 market feature cache must support return/risk matrix rows", str(phase7_market_feature_cache_sql.relative_to(ROOT)), [required]))
+else:
+    failed.append(("Phase 7 market feature cache SQL must exist", "sql/phase7_market_feature_cache.sql", ["missing file"]))
+
 schema_sql = ROOT.parent / "docs/projects/quant/tasks/quant/sql/001_initial_schema.sql"
 if schema_sql.exists():
     schema_text = schema_sql.read_text(encoding="utf-8")
