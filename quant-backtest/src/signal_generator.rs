@@ -469,10 +469,17 @@ pub struct SignalDataCacheStats {
     pub persistent_return_risk_feature_matrix_hits: usize,
     pub persistent_return_risk_feature_matrix_misses: usize,
     pub persistent_return_risk_feature_matrix_writes: usize,
+    pub persistent_return_risk_stats_feature_matrix_hits: usize,
+    pub persistent_return_risk_stats_feature_matrix_misses: usize,
+    pub persistent_return_risk_stats_feature_matrix_writes: usize,
     pub persistent_return_risk_feature_matrix_rows_loaded: usize,
     pub persistent_return_risk_feature_matrix_return_values_loaded: usize,
     pub persistent_return_risk_feature_matrix_rows_written: usize,
     pub persistent_return_risk_feature_matrix_return_values_written: usize,
+    pub persistent_return_risk_stats_feature_matrix_stats_rows_loaded: usize,
+    pub persistent_return_risk_stats_feature_matrix_pair_rows_loaded: usize,
+    pub persistent_return_risk_stats_feature_matrix_stats_rows_written: usize,
+    pub persistent_return_risk_stats_feature_matrix_pair_rows_written: usize,
     pub prediction_score_hits: usize,
     pub prediction_score_misses: usize,
     pub industry_classification_hits: usize,
@@ -498,6 +505,7 @@ pub enum PersistentMarketFeatureKind {
     AverageAmountHistory,
     PitAverageAmountMatrix,
     ReturnRiskFeatureMatrix,
+    ReturnRiskStatsFeatureMatrix,
 }
 
 impl PersistentMarketFeatureKind {
@@ -507,6 +515,7 @@ impl PersistentMarketFeatureKind {
             Self::AverageAmountHistory => "average_amount_history",
             Self::PitAverageAmountMatrix => "pit_average_amount_matrix",
             Self::ReturnRiskFeatureMatrix => "return_risk_feature_matrix",
+            Self::ReturnRiskStatsFeatureMatrix => "return_risk_stats_feature_matrix",
         }
     }
 }
@@ -1328,6 +1337,15 @@ pub fn signal_cache_stats_delta(
         persistent_return_risk_feature_matrix_writes: after
             .persistent_return_risk_feature_matrix_writes
             .saturating_sub(before.persistent_return_risk_feature_matrix_writes),
+        persistent_return_risk_stats_feature_matrix_hits: after
+            .persistent_return_risk_stats_feature_matrix_hits
+            .saturating_sub(before.persistent_return_risk_stats_feature_matrix_hits),
+        persistent_return_risk_stats_feature_matrix_misses: after
+            .persistent_return_risk_stats_feature_matrix_misses
+            .saturating_sub(before.persistent_return_risk_stats_feature_matrix_misses),
+        persistent_return_risk_stats_feature_matrix_writes: after
+            .persistent_return_risk_stats_feature_matrix_writes
+            .saturating_sub(before.persistent_return_risk_stats_feature_matrix_writes),
         persistent_return_risk_feature_matrix_rows_loaded: after
             .persistent_return_risk_feature_matrix_rows_loaded
             .saturating_sub(before.persistent_return_risk_feature_matrix_rows_loaded),
@@ -1340,6 +1358,18 @@ pub fn signal_cache_stats_delta(
         persistent_return_risk_feature_matrix_return_values_written: after
             .persistent_return_risk_feature_matrix_return_values_written
             .saturating_sub(before.persistent_return_risk_feature_matrix_return_values_written),
+        persistent_return_risk_stats_feature_matrix_stats_rows_loaded: after
+            .persistent_return_risk_stats_feature_matrix_stats_rows_loaded
+            .saturating_sub(before.persistent_return_risk_stats_feature_matrix_stats_rows_loaded),
+        persistent_return_risk_stats_feature_matrix_pair_rows_loaded: after
+            .persistent_return_risk_stats_feature_matrix_pair_rows_loaded
+            .saturating_sub(before.persistent_return_risk_stats_feature_matrix_pair_rows_loaded),
+        persistent_return_risk_stats_feature_matrix_stats_rows_written: after
+            .persistent_return_risk_stats_feature_matrix_stats_rows_written
+            .saturating_sub(before.persistent_return_risk_stats_feature_matrix_stats_rows_written),
+        persistent_return_risk_stats_feature_matrix_pair_rows_written: after
+            .persistent_return_risk_stats_feature_matrix_pair_rows_written
+            .saturating_sub(before.persistent_return_risk_stats_feature_matrix_pair_rows_written),
         prediction_score_hits: after
             .prediction_score_hits
             .saturating_sub(before.prediction_score_hits),
@@ -1772,6 +1802,9 @@ impl SignalDataCache {
             PersistentMarketFeatureKind::ReturnRiskFeatureMatrix => {
                 self.stats.persistent_return_risk_feature_matrix_hits += 1;
             }
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix => {
+                self.stats.persistent_return_risk_stats_feature_matrix_hits += 1;
+            }
         }
     }
 
@@ -1789,6 +1822,10 @@ impl SignalDataCache {
             PersistentMarketFeatureKind::ReturnRiskFeatureMatrix => {
                 self.stats.persistent_return_risk_feature_matrix_misses += 1;
             }
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix => {
+                self.stats
+                    .persistent_return_risk_stats_feature_matrix_misses += 1;
+            }
         }
     }
 
@@ -1805,6 +1842,10 @@ impl SignalDataCache {
             }
             PersistentMarketFeatureKind::ReturnRiskFeatureMatrix => {
                 self.stats.persistent_return_risk_feature_matrix_writes += 1;
+            }
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix => {
+                self.stats
+                    .persistent_return_risk_stats_feature_matrix_writes += 1;
             }
         }
     }
@@ -1828,6 +1869,30 @@ impl SignalDataCache {
             .persistent_return_risk_feature_matrix_rows_written += rows;
         self.stats
             .persistent_return_risk_feature_matrix_return_values_written += return_values;
+    }
+
+    #[allow(dead_code)]
+    fn record_persistent_return_risk_stats_feature_matrix_payload_loaded(
+        &mut self,
+        stats_rows: usize,
+        pair_rows: usize,
+    ) {
+        self.stats
+            .persistent_return_risk_stats_feature_matrix_stats_rows_loaded += stats_rows;
+        self.stats
+            .persistent_return_risk_stats_feature_matrix_pair_rows_loaded += pair_rows;
+    }
+
+    #[allow(dead_code)]
+    fn record_persistent_return_risk_stats_feature_matrix_payload_written(
+        &mut self,
+        stats_rows: usize,
+        pair_rows: usize,
+    ) {
+        self.stats
+            .persistent_return_risk_stats_feature_matrix_stats_rows_written += stats_rows;
+        self.stats
+            .persistent_return_risk_stats_feature_matrix_pair_rows_written += pair_rows;
     }
 
     pub(crate) fn cached_combo_scores(
@@ -11239,6 +11304,27 @@ struct ReturnRiskFeatureMatrixRow {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+struct ReturnRiskStatsFeatureMatrixRow {
+    score_day: NaiveDate,
+    symbol: String,
+    return_count: usize,
+    total_return: Option<f64>,
+    sample_volatility: Option<f64>,
+    kelly_mean: Option<f64>,
+    kelly_population_variance: Option<f64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+struct ReturnRiskPairwiseCorrelationRow {
+    score_day: NaiveDate,
+    left_symbol: String,
+    right_symbol: String,
+    correlation: f64,
+}
+
+#[allow(dead_code)]
 impl ScoreDateReturnRiskMatrix {
     fn row_count(&self) -> usize {
         self.returns_by_score_symbol.len()
@@ -11600,6 +11686,136 @@ fn return_risk_feature_matrix_from_rows(
 }
 
 #[allow(dead_code)]
+fn return_risk_stats_feature_matrix_to_rows(
+    matrix: &ScoreDateReturnRiskStatsMatrix,
+) -> (
+    Vec<ReturnRiskStatsFeatureMatrixRow>,
+    Vec<ReturnRiskPairwiseCorrelationRow>,
+) {
+    let mut stats_rows = matrix
+        .stats_by_score_symbol
+        .iter()
+        .map(
+            |((score_day, symbol), stats)| ReturnRiskStatsFeatureMatrixRow {
+                score_day: *score_day,
+                symbol: symbol.clone(),
+                return_count: stats.return_count,
+                total_return: stats.total_return,
+                sample_volatility: stats.sample_volatility,
+                kelly_mean: stats.kelly_mean,
+                kelly_population_variance: stats.kelly_population_variance,
+            },
+        )
+        .collect::<Vec<_>>();
+    stats_rows.sort_by(|left, right| {
+        left.score_day
+            .cmp(&right.score_day)
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+
+    let mut pair_rows = matrix
+        .pairwise_correlations
+        .iter()
+        .map(|((score_day, left_symbol, right_symbol), correlation)| {
+            ReturnRiskPairwiseCorrelationRow {
+                score_day: *score_day,
+                left_symbol: left_symbol.clone(),
+                right_symbol: right_symbol.clone(),
+                correlation: *correlation,
+            }
+        })
+        .collect::<Vec<_>>();
+    pair_rows.sort_by(|left, right| {
+        left.score_day
+            .cmp(&right.score_day)
+            .then_with(|| left.left_symbol.cmp(&right.left_symbol))
+            .then_with(|| left.right_symbol.cmp(&right.right_symbol))
+    });
+
+    (stats_rows, pair_rows)
+}
+
+fn option_f64_is_finite(value: Option<f64>) -> bool {
+    value.map(|value| value.is_finite()).unwrap_or(true)
+}
+
+#[allow(dead_code)]
+fn return_risk_stats_feature_matrix_from_rows(
+    score_days: &[NaiveDate],
+    symbols: &[String],
+    stats_rows: Vec<ReturnRiskStatsFeatureMatrixRow>,
+    pair_rows: Vec<ReturnRiskPairwiseCorrelationRow>,
+) -> Option<ScoreDateReturnRiskStatsMatrix> {
+    let score_days = normalized_dates(score_days);
+    let symbols = normalized_symbol_key(symbols);
+    let symbol_set = symbols.iter().cloned().collect::<HashSet<_>>();
+    let expected_stats_keys = score_days
+        .iter()
+        .flat_map(|score_day| {
+            symbols
+                .iter()
+                .map(move |symbol| (*score_day, symbol.clone()))
+        })
+        .collect::<HashSet<_>>();
+
+    let mut stats_by_score_symbol = HashMap::with_capacity(expected_stats_keys.len());
+    for row in stats_rows {
+        if !option_f64_is_finite(row.total_return)
+            || !option_f64_is_finite(row.sample_volatility)
+            || !option_f64_is_finite(row.kelly_mean)
+            || !option_f64_is_finite(row.kelly_population_variance)
+        {
+            return None;
+        }
+        let key = (row.score_day, row.symbol);
+        if !expected_stats_keys.contains(&key) || stats_by_score_symbol.contains_key(&key) {
+            return None;
+        }
+        stats_by_score_symbol.insert(
+            key,
+            ReturnRiskSingleSymbolStats {
+                return_count: row.return_count,
+                total_return: row.total_return,
+                sample_volatility: row.sample_volatility,
+                kelly_mean: row.kelly_mean,
+                kelly_population_variance: row.kelly_population_variance,
+            },
+        );
+    }
+
+    if stats_by_score_symbol.len() != expected_stats_keys.len() {
+        return None;
+    }
+
+    let score_day_set = score_days.iter().copied().collect::<HashSet<_>>();
+    let mut pairwise_correlations = HashMap::new();
+    for row in pair_rows {
+        if !score_day_set.contains(&row.score_day)
+            || !symbol_set.contains(&row.left_symbol)
+            || !symbol_set.contains(&row.right_symbol)
+            || row.left_symbol >= row.right_symbol
+            || !row.correlation.is_finite()
+            || row.correlation < -1.0 - 1e-12
+            || row.correlation > 1.0 + 1e-12
+        {
+            return None;
+        }
+        let key = (row.score_day, row.left_symbol, row.right_symbol);
+        if pairwise_correlations
+            .insert(key, row.correlation.clamp(-1.0, 1.0))
+            .is_some()
+        {
+            return None;
+        }
+    }
+
+    Some(ScoreDateReturnRiskStatsMatrix {
+        stats_by_score_symbol,
+        pairwise_correlations,
+    })
+}
+
+#[allow(dead_code)]
 fn persistent_return_risk_feature_matrix_rows_to_matrix(
     score_days: &[NaiveDate],
     symbols: &[String],
@@ -11618,6 +11834,70 @@ fn persistent_return_risk_feature_matrix_rows_to_matrix(
         })
         .collect::<Vec<_>>();
     return_risk_feature_matrix_from_rows(score_days, symbols, rows)
+}
+
+#[allow(dead_code)]
+fn persistent_return_risk_stats_feature_matrix_rows_to_matrix(
+    score_days: &[NaiveDate],
+    symbols: &[String],
+    stats_row_count: i64,
+    pair_row_count: i64,
+    stats_rows: Vec<(
+        NaiveDate,
+        String,
+        i64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    )>,
+    pair_rows: Vec<(NaiveDate, String, String, f64)>,
+) -> Option<ScoreDateReturnRiskStatsMatrix> {
+    if stats_row_count < 0
+        || pair_row_count < 0
+        || stats_rows.len() as i64 != stats_row_count
+        || pair_rows.len() as i64 != pair_row_count
+    {
+        return None;
+    }
+
+    let stats_rows = stats_rows
+        .into_iter()
+        .map(
+            |(
+                score_day,
+                symbol,
+                return_count,
+                total_return,
+                sample_volatility,
+                kelly_mean,
+                kelly_population_variance,
+            )| {
+                Some(ReturnRiskStatsFeatureMatrixRow {
+                    score_day,
+                    symbol,
+                    return_count: usize::try_from(return_count).ok()?,
+                    total_return,
+                    sample_volatility,
+                    kelly_mean,
+                    kelly_population_variance,
+                })
+            },
+        )
+        .collect::<Option<Vec<_>>>()?;
+    let pair_rows = pair_rows
+        .into_iter()
+        .map(|(score_day, left_symbol, right_symbol, correlation)| {
+            ReturnRiskPairwiseCorrelationRow {
+                score_day,
+                left_symbol,
+                right_symbol,
+                correlation,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    return_risk_stats_feature_matrix_from_rows(score_days, symbols, stats_rows, pair_rows)
 }
 
 #[allow(dead_code)]
@@ -11900,6 +12180,389 @@ async fn insert_persistent_return_risk_feature_matrix_row_chunk(
     let result = builder.build().execute(pool).await.map_err(|error| {
         format!(
             "Failed to store persistent return/risk feature matrix rows {}: {}",
+            cache_key, error
+        )
+    })?;
+    Ok(result.rows_affected() as i64)
+}
+
+#[allow(dead_code)]
+async fn load_persistent_return_risk_stats_feature_matrix_cache(
+    pool: &PgPool,
+    key: &PersistentMarketFeatureCacheKey,
+    requested_symbols: &[String],
+    score_days: &[NaiveDate],
+) -> Result<Option<ScoreDateReturnRiskStatsMatrix>, String> {
+    let requested_symbols = normalized_symbol_key(requested_symbols);
+    let score_days = normalized_dates(score_days);
+    if requested_symbols.is_empty() || score_days.is_empty() {
+        return Ok(Some(ScoreDateReturnRiskStatsMatrix::default()));
+    }
+
+    let manifest: Option<(String, i32, i64, i64)> = match sqlx::query_as(
+        "SELECT status,
+                symbol_count,
+                row_count,
+                COALESCE((metadata->>'pair_row_count')::BIGINT, -1) AS pair_row_count
+         FROM market_feature_cache_manifest
+         WHERE cache_key = $1
+           AND feature_kind = $2
+           AND data_version_id = $3
+           AND start_date = $4
+           AND end_date = $5
+           AND lookback_days = $6
+           AND universe_hash = $7
+           AND symbol_count = $8",
+    )
+    .bind(&key.cache_key)
+    .bind(PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix.as_str())
+    .bind(&key.data_version_id)
+    .bind(key.start_date)
+    .bind(key.end_date)
+    .bind(key.lookback_days as i32)
+    .bind(&key.universe_hash)
+    .bind(key.symbol_count as i32)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) if is_missing_persistent_market_feature_cache_table(&error) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to load persistent return/risk stats feature matrix manifest {}: {}",
+                key.cache_key, error
+            ));
+        }
+    };
+
+    let Some((status, symbol_count, stats_row_count, pair_row_count)) = manifest else {
+        return Ok(None);
+    };
+
+    let cached_symbols: Vec<(String,)> =
+        sqlx::query_as("SELECT symbol FROM market_feature_cache_symbol WHERE cache_key = $1")
+            .bind(&key.cache_key)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to load persistent return/risk stats feature matrix symbols {}: {}",
+                    key.cache_key, error
+                )
+            })?;
+    let cached_symbols = cached_symbols
+        .into_iter()
+        .map(|(symbol,)| symbol)
+        .collect::<Vec<_>>();
+    if !persistent_market_feature_manifest_is_usable(
+        &status,
+        symbol_count,
+        &cached_symbols,
+        &requested_symbols,
+    ) {
+        return Ok(None);
+    }
+
+    let stats_rows: Vec<(
+        NaiveDate,
+        String,
+        i64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    )> = match sqlx::query_as(
+        "SELECT score_day,
+                symbol,
+                return_count,
+                total_return,
+                sample_volatility,
+                kelly_mean,
+                kelly_population_variance
+         FROM market_feature_cache_return_risk_stats_row
+         WHERE cache_key = $1
+         ORDER BY score_day, symbol",
+    )
+    .bind(&key.cache_key)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) if is_missing_persistent_market_feature_cache_table(&error) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to load persistent return/risk stats feature matrix rows {}: {}",
+                key.cache_key, error
+            ));
+        }
+    };
+
+    let pair_rows: Vec<(NaiveDate, String, String, f64)> = match sqlx::query_as(
+        "SELECT score_day, left_symbol, right_symbol, correlation
+         FROM market_feature_cache_return_risk_pairwise_row
+         WHERE cache_key = $1
+         ORDER BY score_day, left_symbol, right_symbol",
+    )
+    .bind(&key.cache_key)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) if is_missing_persistent_market_feature_cache_table(&error) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to load persistent return/risk pairwise correlation rows {}: {}",
+                key.cache_key, error
+            ));
+        }
+    };
+
+    Ok(persistent_return_risk_stats_feature_matrix_rows_to_matrix(
+        &score_days,
+        &requested_symbols,
+        stats_row_count,
+        pair_row_count,
+        stats_rows,
+        pair_rows,
+    ))
+}
+
+#[allow(dead_code)]
+async fn store_persistent_return_risk_stats_feature_matrix_cache(
+    pool: &PgPool,
+    key: &PersistentMarketFeatureCacheKey,
+    requested_symbols: &[String],
+    score_days: &[NaiveDate],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
+) -> Result<bool, String> {
+    let requested_symbols = normalized_symbol_key(requested_symbols);
+    let score_days = normalized_dates(score_days);
+    if requested_symbols.is_empty() || score_days.is_empty() {
+        return Ok(false);
+    }
+
+    let (stats_rows, pair_rows) = return_risk_stats_feature_matrix_to_rows(matrix);
+    if return_risk_stats_feature_matrix_from_rows(
+        &score_days,
+        &requested_symbols,
+        stats_rows.clone(),
+        pair_rows.clone(),
+    )
+    .is_none()
+    {
+        return Err(format!(
+            "Refusing to persist incomplete return/risk stats feature matrix {}",
+            key.cache_key
+        ));
+    }
+    let pair_row_count = pair_rows.len() as i64;
+
+    let manifest_result = sqlx::query(
+        "INSERT INTO market_feature_cache_manifest (
+             cache_key, feature_kind, data_version_id, start_date, end_date,
+             lookback_days, universe_hash, symbol_count, row_count, status, metadata
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 'building',
+                 jsonb_build_object(
+                     'writer', 'quant-backtest',
+                     'payload', 'return_risk_stats_feature_matrix',
+                     'pair_row_count', $9::BIGINT
+                 ))
+         ON CONFLICT (cache_key) DO UPDATE SET
+             feature_kind = EXCLUDED.feature_kind,
+             data_version_id = EXCLUDED.data_version_id,
+             start_date = EXCLUDED.start_date,
+             end_date = EXCLUDED.end_date,
+             lookback_days = EXCLUDED.lookback_days,
+             universe_hash = EXCLUDED.universe_hash,
+             symbol_count = EXCLUDED.symbol_count,
+             row_count = 0,
+             status = 'building',
+             metadata = EXCLUDED.metadata,
+             updated_at = now()",
+    )
+    .bind(&key.cache_key)
+    .bind(PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix.as_str())
+    .bind(&key.data_version_id)
+    .bind(key.start_date)
+    .bind(key.end_date)
+    .bind(key.lookback_days as i32)
+    .bind(&key.universe_hash)
+    .bind(key.symbol_count as i32)
+    .bind(pair_row_count)
+    .execute(pool)
+    .await;
+
+    match manifest_result {
+        Ok(_) => {}
+        Err(error) if is_missing_persistent_market_feature_cache_table(&error) => {
+            return Ok(false);
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to upsert persistent return/risk stats feature matrix manifest {}: {}",
+                key.cache_key, error
+            ));
+        }
+    }
+
+    for (table_name, description) in [
+        (
+            "market_feature_cache_return_risk_stats_row",
+            "stats feature matrix rows",
+        ),
+        (
+            "market_feature_cache_return_risk_pairwise_row",
+            "pairwise correlation rows",
+        ),
+        ("market_feature_cache_value", "stale scalar cache values"),
+        (
+            "market_feature_cache_symbol",
+            "stats feature matrix symbols",
+        ),
+    ] {
+        let clear_sql = format!("DELETE FROM {table_name} WHERE cache_key = $1");
+        let clear_result = sqlx::query(&clear_sql)
+            .bind(&key.cache_key)
+            .execute(pool)
+            .await;
+        match clear_result {
+            Ok(_) => {}
+            Err(error) if is_missing_persistent_market_feature_cache_table(&error) => {
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to clear persistent return/risk {} {}: {}",
+                    description, key.cache_key, error
+                ));
+            }
+        }
+    }
+
+    for chunk in requested_symbols.chunks(5_000) {
+        let chunk_symbols = chunk.to_vec();
+        sqlx::query(
+            "INSERT INTO market_feature_cache_symbol (cache_key, symbol)
+             SELECT $1, symbol
+             FROM UNNEST($2::TEXT[]) AS t(symbol)
+             ON CONFLICT (cache_key, symbol) DO NOTHING",
+        )
+        .bind(&key.cache_key)
+        .bind(&chunk_symbols)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to store persistent return/risk stats feature matrix symbols {}: {}",
+                key.cache_key, error
+            )
+        })?;
+    }
+
+    let mut stats_row_count = 0_i64;
+    for chunk in stats_rows.chunks(1_000) {
+        stats_row_count += insert_persistent_return_risk_stats_feature_matrix_row_chunk(
+            pool,
+            &key.cache_key,
+            chunk,
+        )
+        .await?;
+    }
+
+    let mut inserted_pair_row_count = 0_i64;
+    for chunk in pair_rows.chunks(1_000) {
+        inserted_pair_row_count +=
+            insert_persistent_return_risk_pairwise_row_chunk(pool, &key.cache_key, chunk).await?;
+    }
+
+    sqlx::query(
+        "UPDATE market_feature_cache_manifest
+         SET row_count = $2,
+             status = 'ready',
+             metadata = jsonb_set(metadata, '{pair_row_count}', to_jsonb($3::BIGINT), true),
+             updated_at = now()
+         WHERE cache_key = $1",
+    )
+    .bind(&key.cache_key)
+    .bind(stats_row_count)
+    .bind(inserted_pair_row_count)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to mark persistent return/risk stats feature matrix ready {}: {}",
+            key.cache_key, error
+        )
+    })?;
+
+    Ok(true)
+}
+
+#[allow(dead_code)]
+async fn insert_persistent_return_risk_stats_feature_matrix_row_chunk(
+    pool: &PgPool,
+    cache_key: &str,
+    rows: &[ReturnRiskStatsFeatureMatrixRow],
+) -> Result<i64, String> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO market_feature_cache_return_risk_stats_row \
+         (cache_key, score_day, symbol, return_count, total_return, sample_volatility, \
+          kelly_mean, kelly_population_variance) ",
+    );
+    builder.push_values(rows, |mut row_builder, row| {
+        row_builder
+            .push_bind(cache_key)
+            .push_bind(row.score_day)
+            .push_bind(&row.symbol)
+            .push_bind(row.return_count as i64)
+            .push_bind(row.total_return)
+            .push_bind(row.sample_volatility)
+            .push_bind(row.kelly_mean)
+            .push_bind(row.kelly_population_variance);
+    });
+    builder.push(
+        " ON CONFLICT (cache_key, score_day, symbol) DO UPDATE SET \
+          return_count = EXCLUDED.return_count, \
+          total_return = EXCLUDED.total_return, \
+          sample_volatility = EXCLUDED.sample_volatility, \
+          kelly_mean = EXCLUDED.kelly_mean, \
+          kelly_population_variance = EXCLUDED.kelly_population_variance",
+    );
+    let result = builder.build().execute(pool).await.map_err(|error| {
+        format!(
+            "Failed to store persistent return/risk stats feature matrix rows {}: {}",
+            cache_key, error
+        )
+    })?;
+    Ok(result.rows_affected() as i64)
+}
+
+#[allow(dead_code)]
+async fn insert_persistent_return_risk_pairwise_row_chunk(
+    pool: &PgPool,
+    cache_key: &str,
+    rows: &[ReturnRiskPairwiseCorrelationRow],
+) -> Result<i64, String> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO market_feature_cache_return_risk_pairwise_row \
+         (cache_key, score_day, left_symbol, right_symbol, correlation) ",
+    );
+    builder.push_values(rows, |mut row_builder, row| {
+        row_builder
+            .push_bind(cache_key)
+            .push_bind(row.score_day)
+            .push_bind(&row.left_symbol)
+            .push_bind(&row.right_symbol)
+            .push_bind(row.correlation);
+    });
+    builder.push(
+        " ON CONFLICT (cache_key, score_day, left_symbol, right_symbol) DO UPDATE SET \
+          correlation = EXCLUDED.correlation",
+    );
+    let result = builder.build().execute(pool).await.map_err(|error| {
+        format!(
+            "Failed to store persistent return/risk pairwise correlation rows {}: {}",
             cache_key, error
         )
     })?;
@@ -13659,6 +14322,328 @@ mod tests {
     }
 
     #[test]
+    fn return_risk_stats_matrix_rows_round_trip_single_and_pairwise_stats() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let symbols = vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()];
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[0.010, -0.020, 0.030, -0.010, 0.020]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[0.011, -0.019, 0.029, -0.011, 0.021]),
+            ),
+            (
+                "CCC".to_string(),
+                dated_returns(&[-0.020, 0.010, -0.015, 0.020, -0.010]),
+            ),
+        ]);
+        let matrix =
+            build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 5);
+        let (stats_rows, pair_rows) = return_risk_stats_feature_matrix_to_rows(&matrix);
+
+        assert_eq!(stats_rows.len(), symbols.len());
+        assert_eq!(pair_rows.len(), 3);
+
+        let restored = return_risk_stats_feature_matrix_from_rows(
+            &[score_day],
+            &symbols,
+            stats_rows,
+            pair_rows,
+        )
+        .expect("restored stats matrix");
+
+        assert_eq!(
+            restored.total_return(score_day, "AAA"),
+            matrix.total_return(score_day, "AAA")
+        );
+        assert_eq!(
+            restored.sample_volatility(score_day, "AAA"),
+            matrix.sample_volatility(score_day, "AAA")
+        );
+        assert_eq!(
+            restored.fractional_kelly_weight(score_day, "AAA", 0.30),
+            matrix.fractional_kelly_weight(score_day, "AAA", 0.30)
+        );
+        assert_eq!(
+            restored.pearson_correlation(score_day, "AAA", "BBB"),
+            matrix.pearson_correlation(score_day, "AAA", "BBB")
+        );
+        assert_eq!(
+            restored.average_abs_correlation_to_reference(score_day, "AAA", &symbols),
+            matrix.average_abs_correlation_to_reference(score_day, "AAA", &symbols)
+        );
+    }
+
+    #[test]
+    fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let future_day = NaiveDate::from_ymd_opt(2026, 1, 9).unwrap();
+        let candidates = vec![
+            ("AAA".to_string(), 6.0),
+            ("BBB".to_string(), 5.0),
+            ("CCC".to_string(), 4.0),
+            ("DDD".to_string(), 3.0),
+        ];
+        let symbols = candidates
+            .iter()
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.030),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), -0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), 0.015),
+                    (future_day, 0.750),
+                ],
+            ),
+            (
+                "BBB".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.012),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.018),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.028),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), -0.009),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.022),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), 0.014),
+                    (future_day, -0.700),
+                ],
+            ),
+            (
+                "CCC".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), -0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), 0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), -0.015),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), -0.010),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), 0.005),
+                    (future_day, 0.600),
+                ],
+            ),
+            (
+                "DDD".to_string(),
+                vec![
+                    (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.040),
+                    (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.035),
+                    (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.030),
+                    (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), -0.025),
+                    (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.020),
+                    (NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(), -0.015),
+                    (future_day, -0.500),
+                ],
+            ),
+        ]);
+        let average_amounts = HashMap::from([
+            ("AAA".to_string(), 900_000_000.0),
+            ("BBB".to_string(), 800_000_000.0),
+            ("CCC".to_string(), 600_000_000.0),
+            ("DDD".to_string(), 400_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_pairwise_correlation: Some(0.80),
+            correlation_lookback_days: 5,
+            risk_budget_lookback_days: 5,
+            kelly_fraction: 0.30,
+            kelly_lookback_days: 5,
+            capacity_penalty_strength: 0.25,
+            candidate_risk_filter_profile:
+                CandidateRiskFilterProfile::SoftLowVolatilityLowCorrelationV1,
+            ..Default::default()
+        };
+        let raw_matrix =
+            build_score_date_return_risk_matrix(&return_history, &[score_day], &symbols, 5);
+        let stats_matrix =
+            build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 5);
+        let (stats_rows, pair_rows) = return_risk_stats_feature_matrix_to_rows(&stats_matrix);
+        let db_stats_rows = stats_rows
+            .iter()
+            .map(|row| {
+                (
+                    row.score_day,
+                    row.symbol.clone(),
+                    row.return_count as i64,
+                    row.total_return,
+                    row.sample_volatility,
+                    row.kelly_mean,
+                    row.kelly_population_variance,
+                )
+            })
+            .collect::<Vec<_>>();
+        let db_pair_rows = pair_rows
+            .iter()
+            .map(|row| {
+                (
+                    row.score_day,
+                    row.left_symbol.clone(),
+                    row.right_symbol.clone(),
+                    row.correlation,
+                )
+            })
+            .collect::<Vec<_>>();
+        let restored = persistent_return_risk_stats_feature_matrix_rows_to_matrix(
+            &[score_day],
+            &symbols,
+            stats_rows.len() as i64,
+            pair_rows.len() as i64,
+            db_stats_rows,
+            db_pair_rows,
+        )
+        .expect("stats matrix should restore from DB-shaped rows");
+
+        assert_eq!(
+            relative_strength_rank_scores_from_stats_matrix(&candidates, &restored, score_day),
+            relative_strength_rank_scores_from_matrix(&candidates, &raw_matrix, score_day)
+        );
+        assert_eq!(
+            filter_candidate_risk_pool_from_stats_matrix(
+                score_day,
+                &candidates,
+                &restored,
+                &average_amounts,
+                &config,
+            ),
+            filter_candidate_risk_pool_from_matrix(
+                score_day,
+                &candidates,
+                &raw_matrix,
+                &average_amounts,
+                &config,
+            )
+        );
+        assert_eq!(
+            select_uncorrelated_candidates_from_stats_matrix(
+                score_day,
+                &candidates,
+                &restored,
+                &config,
+                5,
+            ),
+            select_uncorrelated_candidates_from_matrix(
+                score_day,
+                &candidates,
+                &raw_matrix,
+                &config,
+                5,
+            )
+        );
+        assert_eq!(
+            build_kelly_raw_weights_from_stats_matrix(score_day, &symbols, &restored, &config),
+            build_kelly_raw_weights_from_matrix(score_day, &symbols, &raw_matrix, &config)
+        );
+        assert_eq!(
+            build_risk_budget_raw_weights_from_stats_matrix(
+                score_day,
+                &symbols,
+                &restored,
+                &average_amounts,
+                &config,
+            ),
+            build_risk_budget_raw_weights_from_matrix(
+                score_day,
+                &symbols,
+                &raw_matrix,
+                &average_amounts,
+                &config,
+            )
+        );
+        assert_eq!(
+            build_min_variance_raw_weights_from_stats_matrix(
+                score_day,
+                &symbols,
+                &restored,
+                &average_amounts,
+                &config,
+            ),
+            build_min_variance_raw_weights_from_matrix(
+                score_day,
+                &symbols,
+                &raw_matrix,
+                &average_amounts,
+                &config,
+            )
+        );
+    }
+
+    #[test]
+    fn return_risk_stats_matrix_rows_reject_incomplete_or_corrupt_payloads() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let symbols = vec!["AAA".to_string(), "BBB".to_string()];
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[0.010, -0.020, 0.030, -0.010, 0.020]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[0.011, -0.019, 0.029, -0.011, 0.021]),
+            ),
+        ]);
+        let matrix =
+            build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 5);
+        let (stats_rows, pair_rows) = return_risk_stats_feature_matrix_to_rows(&matrix);
+
+        assert!(return_risk_stats_feature_matrix_from_rows(
+            &[score_day],
+            &symbols,
+            stats_rows[..1].to_vec(),
+            pair_rows.clone(),
+        )
+        .is_none());
+
+        let mut duplicate_stats = stats_rows.clone();
+        duplicate_stats.push(stats_rows[0].clone());
+        assert!(return_risk_stats_feature_matrix_from_rows(
+            &[score_day],
+            &symbols,
+            duplicate_stats,
+            pair_rows.clone(),
+        )
+        .is_none());
+
+        let mut corrupt_stats = stats_rows.clone();
+        corrupt_stats[0].sample_volatility = Some(f64::NAN);
+        assert!(return_risk_stats_feature_matrix_from_rows(
+            &[score_day],
+            &symbols,
+            corrupt_stats,
+            pair_rows.clone(),
+        )
+        .is_none());
+
+        let mut reversed_pair = pair_rows.clone();
+        reversed_pair[0] = ReturnRiskPairwiseCorrelationRow {
+            left_symbol: "BBB".to_string(),
+            right_symbol: "AAA".to_string(),
+            ..reversed_pair[0].clone()
+        };
+        assert!(return_risk_stats_feature_matrix_from_rows(
+            &[score_day],
+            &symbols,
+            stats_rows.clone(),
+            reversed_pair,
+        )
+        .is_none());
+
+        let mut corrupt_pair = pair_rows;
+        corrupt_pair[0].correlation = f64::INFINITY;
+        assert!(return_risk_stats_feature_matrix_from_rows(
+            &[score_day],
+            &symbols,
+            stats_rows,
+            corrupt_pair,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn build_portfolio_weights_uses_score_date_return_risk_matrix_consumers() {
         let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
         let candidates = vec![
@@ -14898,6 +15883,9 @@ mod tests {
             persistent_return_risk_feature_matrix_hits: 10,
             persistent_return_risk_feature_matrix_misses: 11,
             persistent_return_risk_feature_matrix_writes: 12,
+            persistent_return_risk_stats_feature_matrix_hits: 13,
+            persistent_return_risk_stats_feature_matrix_misses: 14,
+            persistent_return_risk_stats_feature_matrix_writes: 15,
             ..SignalDataCacheStats::default()
         };
         let after = SignalDataCacheStats {
@@ -14913,6 +15901,9 @@ mod tests {
             persistent_return_risk_feature_matrix_hits: 110,
             persistent_return_risk_feature_matrix_misses: 121,
             persistent_return_risk_feature_matrix_writes: 132,
+            persistent_return_risk_stats_feature_matrix_hits: 143,
+            persistent_return_risk_stats_feature_matrix_misses: 154,
+            persistent_return_risk_stats_feature_matrix_writes: 165,
             ..SignalDataCacheStats::default()
         };
 
@@ -14930,6 +15921,15 @@ mod tests {
         assert_eq!(delta.persistent_return_risk_feature_matrix_hits, 100);
         assert_eq!(delta.persistent_return_risk_feature_matrix_misses, 110);
         assert_eq!(delta.persistent_return_risk_feature_matrix_writes, 120);
+        assert_eq!(delta.persistent_return_risk_stats_feature_matrix_hits, 130);
+        assert_eq!(
+            delta.persistent_return_risk_stats_feature_matrix_misses,
+            140
+        );
+        assert_eq!(
+            delta.persistent_return_risk_stats_feature_matrix_writes,
+            150
+        );
     }
 
     #[test]
@@ -14966,6 +15966,15 @@ mod tests {
         cache.record_persistent_market_feature_write(
             PersistentMarketFeatureKind::ReturnRiskFeatureMatrix,
         );
+        cache.record_persistent_market_feature_hit(
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+        );
+        cache.record_persistent_market_feature_miss(
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+        );
+        cache.record_persistent_market_feature_write(
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+        );
 
         let stats = cache.stats();
         assert_eq!(stats.persistent_return_history_hits, 1);
@@ -14980,6 +15989,9 @@ mod tests {
         assert_eq!(stats.persistent_return_risk_feature_matrix_hits, 1);
         assert_eq!(stats.persistent_return_risk_feature_matrix_misses, 1);
         assert_eq!(stats.persistent_return_risk_feature_matrix_writes, 1);
+        assert_eq!(stats.persistent_return_risk_stats_feature_matrix_hits, 1);
+        assert_eq!(stats.persistent_return_risk_stats_feature_matrix_misses, 1);
+        assert_eq!(stats.persistent_return_risk_stats_feature_matrix_writes, 1);
     }
 
     #[test]
@@ -15014,6 +16026,43 @@ mod tests {
     }
 
     #[test]
+    fn signal_cache_stats_delta_tracks_return_risk_stats_matrix_payload_volume() {
+        let before = SignalDataCacheStats {
+            persistent_return_risk_stats_feature_matrix_stats_rows_loaded: 10,
+            persistent_return_risk_stats_feature_matrix_pair_rows_loaded: 100,
+            persistent_return_risk_stats_feature_matrix_stats_rows_written: 20,
+            persistent_return_risk_stats_feature_matrix_pair_rows_written: 200,
+            ..SignalDataCacheStats::default()
+        };
+        let after = SignalDataCacheStats {
+            persistent_return_risk_stats_feature_matrix_stats_rows_loaded: 70,
+            persistent_return_risk_stats_feature_matrix_pair_rows_loaded: 850,
+            persistent_return_risk_stats_feature_matrix_stats_rows_written: 95,
+            persistent_return_risk_stats_feature_matrix_pair_rows_written: 1_250,
+            ..SignalDataCacheStats::default()
+        };
+
+        let delta = signal_cache_stats_delta(before, after);
+
+        assert_eq!(
+            delta.persistent_return_risk_stats_feature_matrix_stats_rows_loaded,
+            60
+        );
+        assert_eq!(
+            delta.persistent_return_risk_stats_feature_matrix_pair_rows_loaded,
+            750
+        );
+        assert_eq!(
+            delta.persistent_return_risk_stats_feature_matrix_stats_rows_written,
+            75
+        );
+        assert_eq!(
+            delta.persistent_return_risk_stats_feature_matrix_pair_rows_written,
+            1_050
+        );
+    }
+
+    #[test]
     fn signal_data_cache_records_return_risk_matrix_payload_volume() {
         let mut cache = SignalDataCache::default();
 
@@ -15031,6 +16080,33 @@ mod tests {
         assert_eq!(
             stats.persistent_return_risk_feature_matrix_return_values_written,
             270
+        );
+    }
+
+    #[test]
+    fn signal_data_cache_records_return_risk_stats_matrix_payload_volume() {
+        let mut cache = SignalDataCache::default();
+
+        cache.record_persistent_return_risk_stats_feature_matrix_payload_loaded(3, 30);
+        cache.record_persistent_return_risk_stats_feature_matrix_payload_loaded(2, 20);
+        cache.record_persistent_return_risk_stats_feature_matrix_payload_written(5, 50);
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.persistent_return_risk_stats_feature_matrix_stats_rows_loaded,
+            5
+        );
+        assert_eq!(
+            stats.persistent_return_risk_stats_feature_matrix_pair_rows_loaded,
+            50
+        );
+        assert_eq!(
+            stats.persistent_return_risk_stats_feature_matrix_stats_rows_written,
+            5
+        );
+        assert_eq!(
+            stats.persistent_return_risk_stats_feature_matrix_pair_rows_written,
+            50
         );
     }
 
@@ -15626,6 +16702,140 @@ mod tests {
             PersistentMarketFeatureKind::ReturnRiskFeatureMatrix.as_str(),
             "return_risk_feature_matrix"
         );
+    }
+
+    #[test]
+    fn return_risk_stats_feature_matrix_cache_key_is_universe_and_score_date_scoped() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let dates = vec![
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 2, 6).unwrap(),
+        ];
+        let reordered_dates = vec![dates[1], dates[0]];
+        let different_dates = vec![
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 3, 6).unwrap(),
+        ];
+        let symbols = vec!["BBB".to_string(), "AAA".to_string()];
+        let reordered_symbols = vec!["AAA".to_string(), "BBB".to_string()];
+
+        let first = PersistentMarketFeatureCacheKey::new_for_dates(
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+            "full-market-2016-v1",
+            start,
+            end,
+            60,
+            &symbols,
+            &dates,
+        );
+        let reordered = PersistentMarketFeatureCacheKey::new_for_dates(
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+            "full-market-2016-v1",
+            start,
+            end,
+            60,
+            &reordered_symbols,
+            &reordered_dates,
+        );
+        let different = PersistentMarketFeatureCacheKey::new_for_dates(
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+            "full-market-2016-v1",
+            start,
+            end,
+            60,
+            &symbols,
+            &different_dates,
+        );
+
+        assert_eq!(first.cache_key, reordered.cache_key);
+        assert_ne!(first.cache_key, different.cache_key);
+        assert!(first.cache_key.contains("return_risk_stats_feature_matrix"));
+        assert!(first.cache_key.contains("dates:"));
+        assert_eq!(
+            PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix.as_str(),
+            "return_risk_stats_feature_matrix"
+        );
+    }
+
+    #[test]
+    fn persistent_return_risk_stats_feature_matrix_rows_reconstruct_guarded_payload() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let symbols = vec!["BBB".to_string(), "AAA".to_string()];
+        let stats_rows = vec![
+            (
+                score_day,
+                "BBB".to_string(),
+                3_i64,
+                Some(0.01),
+                Some(0.03),
+                Some(0.004),
+                Some(0.0002),
+            ),
+            (
+                score_day,
+                "AAA".to_string(),
+                3_i64,
+                Some(0.06),
+                Some(0.02),
+                Some(0.02),
+                Some(0.0001),
+            ),
+        ];
+        let pair_rows = vec![(score_day, "AAA".to_string(), "BBB".to_string(), 0.25)];
+
+        let restored = persistent_return_risk_stats_feature_matrix_rows_to_matrix(
+            &[score_day],
+            &symbols,
+            2,
+            1,
+            stats_rows.clone(),
+            pair_rows.clone(),
+        )
+        .expect("stats payload should restore");
+
+        assert_eq!(restored.return_count(score_day, "AAA"), 3);
+        assert_eq!(restored.total_return(score_day, "AAA"), Some(0.06));
+        assert_eq!(restored.sample_volatility(score_day, "BBB"), Some(0.03));
+        assert_eq!(
+            restored.pearson_correlation(score_day, "BBB", "AAA"),
+            Some(0.25)
+        );
+        assert_eq!(
+            restored.covariance_concentration_penalty(score_day, "AAA", &symbols),
+            1.25
+        );
+
+        assert!(persistent_return_risk_stats_feature_matrix_rows_to_matrix(
+            &[score_day],
+            &symbols,
+            1,
+            1,
+            stats_rows.clone(),
+            pair_rows.clone(),
+        )
+        .is_none());
+        assert!(persistent_return_risk_stats_feature_matrix_rows_to_matrix(
+            &[score_day],
+            &symbols,
+            2,
+            0,
+            stats_rows.clone(),
+            pair_rows.clone(),
+        )
+        .is_none());
+
+        let mut negative_count = stats_rows;
+        negative_count[0].2 = -1;
+        assert!(persistent_return_risk_stats_feature_matrix_rows_to_matrix(
+            &[score_day],
+            &symbols,
+            2,
+            1,
+            negative_count,
+            pair_rows,
+        )
+        .is_none());
     }
 
     #[test]

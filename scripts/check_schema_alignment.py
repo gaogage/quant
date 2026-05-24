@@ -110,12 +110,22 @@ if phase7_market_feature_cache_sql.exists():
     phase7_market_feature_cache_text = phase7_market_feature_cache_sql.read_text(encoding="utf-8")
     for required in [
         "return_risk_feature_matrix",
+        "return_risk_stats_feature_matrix",
         "CREATE TABLE IF NOT EXISTS public.market_feature_cache_return_risk_matrix_row",
         "score_day DATE NOT NULL",
         "returns DOUBLE PRECISION[] NOT NULL",
         "array_position(returns, NULL) IS NULL",
         "PRIMARY KEY (cache_key, score_day, symbol)",
         "idx_market_feature_cache_return_risk_matrix_symbol_day",
+        "CREATE TABLE IF NOT EXISTS public.market_feature_cache_return_risk_stats_row",
+        "return_count BIGINT NOT NULL CHECK (return_count >= 0)",
+        "kelly_population_variance DOUBLE PRECISION NULL",
+        "CREATE TABLE IF NOT EXISTS public.market_feature_cache_return_risk_pairwise_row",
+        "left_symbol TEXT NOT NULL",
+        "right_symbol TEXT NOT NULL",
+        "CHECK (left_symbol < right_symbol)",
+        "CHECK (correlation BETWEEN -1.000000000001 AND 1.000000000001)",
+        "idx_market_feature_cache_return_risk_pairwise_left_day",
     ]:
         if required not in phase7_market_feature_cache_text:
             failed.append(("Phase 7 market feature cache must support return/risk matrix rows", str(phase7_market_feature_cache_sql.relative_to(ROOT)), [required]))
