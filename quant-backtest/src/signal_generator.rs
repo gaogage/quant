@@ -440,6 +440,7 @@ fn normalized_symbol_key(symbols: &[String]) -> Vec<String> {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SignalDataCacheStats {
     pub combo_score_hits: usize,
     pub combo_score_misses: usize,
@@ -486,6 +487,142 @@ pub struct SignalDataCacheStats {
     pub industry_classification_misses: usize,
     pub benchmark_return_hits: usize,
     pub benchmark_return_misses: usize,
+}
+
+pub const DEFAULT_RETURN_RISK_STATS_PAYLOAD_PREFERENCE_RATIO: f64 = 0.80;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReturnRiskCacheEconomicsRecommendation {
+    PreferStatsMatrix,
+    PreferRawMatrix,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReturnRiskCacheEconomicsProfile {
+    pub recommendation: ReturnRiskCacheEconomicsRecommendation,
+    pub reason: String,
+    pub raw_matrix_hits: usize,
+    pub stats_matrix_hits: usize,
+    pub stats_matrix_steady_state: bool,
+    pub stats_matrix_raw_fallback_hits: usize,
+    pub raw_matrix_rows_loaded: usize,
+    pub raw_matrix_return_values_loaded: usize,
+    pub stats_matrix_raw_fallback_return_values_loaded: usize,
+    pub stats_matrix_stats_rows_loaded: usize,
+    pub stats_matrix_pair_rows_loaded: usize,
+    pub stats_matrix_payload_rows_loaded: usize,
+    pub stats_matrix_adjusted_payload_rows_loaded: usize,
+    pub stats_to_raw_return_value_ratio: Option<f64>,
+    pub stats_adjusted_to_raw_return_value_ratio: Option<f64>,
+    pub stats_pair_to_stats_row_ratio: Option<f64>,
+}
+
+pub fn compare_return_risk_cache_economics(
+    raw_matrix_stats: SignalDataCacheStats,
+    stats_matrix_stats: SignalDataCacheStats,
+) -> ReturnRiskCacheEconomicsProfile {
+    let raw_return_values =
+        raw_matrix_stats.persistent_return_risk_feature_matrix_return_values_loaded;
+    let stats_payload_rows = stats_matrix_stats
+        .persistent_return_risk_stats_feature_matrix_stats_rows_loaded
+        .saturating_add(
+            stats_matrix_stats.persistent_return_risk_stats_feature_matrix_pair_rows_loaded,
+        );
+    let stats_raw_fallback_return_values =
+        stats_matrix_stats.persistent_return_risk_feature_matrix_return_values_loaded;
+    let stats_adjusted_payload_rows =
+        stats_payload_rows.saturating_add(stats_raw_fallback_return_values);
+    let stats_to_raw_return_value_ratio = ratio(stats_payload_rows, raw_return_values);
+    let stats_adjusted_to_raw_return_value_ratio =
+        ratio(stats_adjusted_payload_rows, raw_return_values);
+    let stats_pair_to_stats_row_ratio = ratio(
+        stats_matrix_stats.persistent_return_risk_stats_feature_matrix_pair_rows_loaded,
+        stats_matrix_stats.persistent_return_risk_stats_feature_matrix_stats_rows_loaded,
+    );
+    let stats_matrix_steady_state =
+        stats_matrix_stats.persistent_return_risk_stats_feature_matrix_hits > 0
+            && stats_matrix_stats.persistent_return_risk_stats_feature_matrix_misses == 0
+            && stats_matrix_stats.persistent_return_risk_stats_feature_matrix_writes == 0;
+
+    let (recommendation, reason) = if raw_matrix_stats.persistent_return_risk_feature_matrix_hits
+        == 0
+        || raw_return_values == 0
+    {
+        (
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive,
+            "raw_matrix_payload_missing",
+        )
+    } else if stats_matrix_stats.persistent_return_risk_stats_feature_matrix_hits == 0 {
+        (
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive,
+            "stats_matrix_hits_missing",
+        )
+    } else if !stats_matrix_steady_state {
+        (
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive,
+            "stats_matrix_warmup_not_steady_state",
+        )
+    } else if stats_payload_rows == 0 {
+        (
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive,
+            "stats_matrix_payload_missing",
+        )
+    } else if stats_matrix_stats.persistent_return_risk_feature_matrix_hits > 0
+        || stats_raw_fallback_return_values > 0
+    {
+        (
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive,
+            "stats_matrix_raw_fallback_present",
+        )
+    } else if stats_to_raw_return_value_ratio
+        .map(|ratio| ratio <= DEFAULT_RETURN_RISK_STATS_PAYLOAD_PREFERENCE_RATIO)
+        .unwrap_or(false)
+    {
+        (
+            ReturnRiskCacheEconomicsRecommendation::PreferStatsMatrix,
+            "stats_payload_below_raw_return_values",
+        )
+    } else if stats_to_raw_return_value_ratio
+        .map(|ratio| ratio >= 1.0)
+        .unwrap_or(false)
+    {
+        (
+            ReturnRiskCacheEconomicsRecommendation::PreferRawMatrix,
+            "stats_payload_not_smaller_than_raw_return_values",
+        )
+    } else {
+        (
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive,
+            "stats_payload_savings_too_small",
+        )
+    };
+
+    ReturnRiskCacheEconomicsProfile {
+        recommendation,
+        reason: reason.to_string(),
+        raw_matrix_hits: raw_matrix_stats.persistent_return_risk_feature_matrix_hits,
+        stats_matrix_hits: stats_matrix_stats.persistent_return_risk_stats_feature_matrix_hits,
+        stats_matrix_steady_state,
+        stats_matrix_raw_fallback_hits: stats_matrix_stats
+            .persistent_return_risk_feature_matrix_hits,
+        raw_matrix_rows_loaded: raw_matrix_stats.persistent_return_risk_feature_matrix_rows_loaded,
+        raw_matrix_return_values_loaded: raw_return_values,
+        stats_matrix_raw_fallback_return_values_loaded: stats_raw_fallback_return_values,
+        stats_matrix_stats_rows_loaded: stats_matrix_stats
+            .persistent_return_risk_stats_feature_matrix_stats_rows_loaded,
+        stats_matrix_pair_rows_loaded: stats_matrix_stats
+            .persistent_return_risk_stats_feature_matrix_pair_rows_loaded,
+        stats_matrix_payload_rows_loaded: stats_payload_rows,
+        stats_matrix_adjusted_payload_rows_loaded: stats_adjusted_payload_rows,
+        stats_to_raw_return_value_ratio,
+        stats_adjusted_to_raw_return_value_ratio,
+        stats_pair_to_stats_row_ratio,
+    }
+}
+
+fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
+    (denominator > 0).then(|| numerator as f64 / denominator as f64)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -667,6 +804,7 @@ pub struct MarketFeaturePrewarmReport {
     pub feature_end: NaiveDate,
     pub symbol_count: usize,
     pub lookback_days: usize,
+    pub return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode,
     pub cache_delta: SignalDataCacheStats,
 }
 
@@ -681,6 +819,7 @@ pub struct FactorSignalFeaturePrewarmSpec {
     pub feature_end: NaiveDate,
     pub config: SignalConfig,
     pub regime_policy: Option<MarketRegimePolicy>,
+    pub return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -704,6 +843,7 @@ struct FactorSignalFeaturePrewarmCandidate {
     feature_start: NaiveDate,
     feature_end: NaiveDate,
     lookback_days: usize,
+    return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode,
     symbols: Vec<String>,
     score_days: Vec<NaiveDate>,
 }
@@ -718,6 +858,7 @@ struct FactorSignalFeaturePrewarmGroupKey {
     feature_start: NaiveDate,
     feature_end: NaiveDate,
     lookback_days: usize,
+    return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -727,6 +868,19 @@ struct FactorSignalFeaturePrewarmGroup {
     score_days: Vec<NaiveDate>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnRiskFeatureCacheMode {
+    RawMatrix,
+    StatsMatrixExperimental,
+}
+
+impl Default for ReturnRiskFeatureCacheMode {
+    fn default() -> Self {
+        Self::RawMatrix
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MarketFeatureSnapshotScope {
     pub data_version_id: String,
@@ -734,6 +888,7 @@ pub struct MarketFeatureSnapshotScope {
     pub train_end: NaiveDate,
     pub test_start: NaiveDate,
     pub test_end: NaiveDate,
+    return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode,
 }
 
 impl MarketFeatureSnapshotScope {
@@ -750,7 +905,26 @@ impl MarketFeatureSnapshotScope {
             train_end,
             test_start,
             test_end,
+            return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
         }
+    }
+
+    pub fn with_return_risk_feature_cache_mode(mut self, mode: ReturnRiskFeatureCacheMode) -> Self {
+        self.return_risk_feature_cache_mode = mode;
+        self
+    }
+
+    pub fn with_return_risk_stats_cache_experiment(self) -> Self {
+        self.with_return_risk_feature_cache_mode(
+            ReturnRiskFeatureCacheMode::StatsMatrixExperimental,
+        )
+    }
+
+    pub fn prefer_return_risk_stats_cache(&self) -> bool {
+        matches!(
+            self.return_risk_feature_cache_mode,
+            ReturnRiskFeatureCacheMode::StatsMatrixExperimental
+        )
     }
 
     fn snapshot_key(&self, lookback_days: usize, symbols: &[String]) -> MarketFeatureSnapshotKey {
@@ -1404,6 +1578,7 @@ pub async fn prewarm_market_feature_cache(
     lookback_days: usize,
     symbols: &[String],
     score_days: &[NaiveDate],
+    return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode,
 ) -> Result<MarketFeaturePrewarmReport, String> {
     let symbols = normalized_symbol_key(symbols);
     let lookback_days = lookback_days.max(1);
@@ -1428,7 +1603,8 @@ pub async fn prewarm_market_feature_cache(
         lookback_days,
     )
     .await?;
-    if !score_days.is_empty() {
+    if should_prewarm_raw_return_risk_matrix(return_risk_feature_cache_mode, !score_days.is_empty())
+    {
         let _ = load_return_risk_feature_matrix_persistent_cached(
             pool,
             cache,
@@ -1483,6 +1659,7 @@ pub async fn prewarm_market_feature_cache(
         feature_end,
         symbol_count: symbols.len(),
         lookback_days,
+        return_risk_feature_cache_mode,
         cache_delta: signal_cache_stats_delta(before, after),
     })
 }
@@ -1520,6 +1697,7 @@ pub async fn prewarm_factor_signal_batch_feature_cache(
                 key.lookback_days,
                 &group.symbols,
                 &group.score_days,
+                key.return_risk_feature_cache_mode,
             )
             .await?,
         );
@@ -1630,6 +1808,7 @@ async fn load_factor_signal_feature_prewarm_candidate(
         feature_start: spec.feature_start,
         feature_end: spec.feature_end,
         lookback_days,
+        return_risk_feature_cache_mode: spec.return_risk_feature_cache_mode,
         symbols,
         score_days,
     })
@@ -1663,6 +1842,7 @@ fn merge_factor_signal_feature_prewarm_groups(
             feature_start: candidate.feature_start,
             feature_end: candidate.feature_end,
             lookback_days: candidate.lookback_days.max(1),
+            return_risk_feature_cache_mode: candidate.return_risk_feature_cache_mode,
         };
         let group = groups.entry(key).or_default();
         group.0.extend(candidate.symbols.into_iter());
@@ -6079,7 +6259,39 @@ async fn generate_signals_with_cache_internal(
         )
         .await?
     };
-    let return_risk_matrices = if let Some(snapshot_scope) = snapshot_scope {
+    let prefer_return_risk_stats_matrices = snapshot_scope
+        .map(MarketFeatureSnapshotScope::prefer_return_risk_stats_cache)
+        .unwrap_or(false);
+    let return_risk_stats_matrices = if let Some(snapshot_scope) =
+        snapshot_scope.filter(|_| prefer_return_risk_stats_matrices)
+    {
+        load_portfolio_return_risk_stats_feature_matrices_cached(
+            pool,
+            cache,
+            Some(snapshot_scope.data_version_id.as_str()),
+            &all_symbols,
+            start_date,
+            end_date,
+            &score_days,
+            &portfolio_config,
+            return_history.as_ref(),
+            scores_by_date,
+            config,
+        )
+        .await?
+    } else {
+        HashMap::new()
+    };
+    let return_risk_stats_matrices_loaded = return_risk_stats_matrices_cover_required_lookbacks(
+        &return_risk_stats_matrices,
+        &portfolio_config,
+    );
+    let return_risk_matrices = if snapshot_scope.is_some()
+        && should_load_raw_return_risk_matrices(
+            prefer_return_risk_stats_matrices,
+            return_risk_stats_matrices_loaded,
+        ) {
+        let snapshot_scope = snapshot_scope.expect("snapshot scope checked");
         load_portfolio_return_risk_feature_matrices_cached(
             pool,
             cache,
@@ -6119,14 +6331,16 @@ async fn generate_signals_with_cache_internal(
     let industry_by_symbol =
         load_portfolio_industry_inputs_cached(pool, cache, &all_symbols, &portfolio_config).await?;
 
-    build_rebalance_factor_signals_with_return_risk_matrices(
+    build_rebalance_factor_signals_with_score_selector_and_return_risk_matrices(
         trading_days.as_ref(),
-        scores_by_date,
         config,
         return_history.as_ref(),
         average_amounts.as_ref(),
         industry_by_symbol.as_ref(),
         &return_risk_matrices,
+        &return_risk_stats_matrices,
+        prefer_return_risk_stats_matrices,
+        |score_day, _active_config| scores_by_date.get(&score_day).cloned(),
         |_day, base| base.clone(),
     )
 }
@@ -6265,7 +6479,53 @@ async fn generate_regime_signals_with_cache_internal(
         )
         .await?
     };
-    let return_risk_matrices = if let Some(snapshot_scope) = snapshot_scope {
+    let scores_by_score_day: FactorScoresByDate = score_days
+        .iter()
+        .filter_map(|score_day| {
+            let returns = trailing_market_returns(
+                benchmark_returns.as_ref(),
+                *score_day,
+                policy.lookback_days,
+            );
+            let regime = classify_market_regime(&returns, policy);
+            let active_config = policy.apply(config, regime);
+            score_rows_for_active_config(&score_sources, *score_day, &active_config)
+                .map(|scores| (*score_day, scores))
+        })
+        .collect();
+    let prefer_return_risk_stats_matrices = snapshot_scope
+        .map(MarketFeatureSnapshotScope::prefer_return_risk_stats_cache)
+        .unwrap_or(false);
+    let return_risk_stats_matrices = if let Some(snapshot_scope) =
+        snapshot_scope.filter(|_| prefer_return_risk_stats_matrices)
+    {
+        load_portfolio_return_risk_stats_feature_matrices_cached(
+            pool,
+            cache,
+            Some(snapshot_scope.data_version_id.as_str()),
+            &all_symbols,
+            start_date,
+            end_date,
+            &score_days,
+            &portfolio_config,
+            return_history.as_ref(),
+            &scores_by_score_day,
+            config,
+        )
+        .await?
+    } else {
+        HashMap::new()
+    };
+    let return_risk_stats_matrices_loaded = return_risk_stats_matrices_cover_required_lookbacks(
+        &return_risk_stats_matrices,
+        &portfolio_config,
+    );
+    let return_risk_matrices = if snapshot_scope.is_some()
+        && should_load_raw_return_risk_matrices(
+            prefer_return_risk_stats_matrices,
+            return_risk_stats_matrices_loaded,
+        ) {
+        let snapshot_scope = snapshot_scope.expect("snapshot scope checked");
         load_portfolio_return_risk_feature_matrices_cached(
             pool,
             cache,
@@ -6312,8 +6572,8 @@ async fn generate_regime_signals_with_cache_internal(
         average_amounts.as_ref(),
         industry_by_symbol.as_ref(),
         &return_risk_matrices,
-        &HashMap::new(),
-        false,
+        &return_risk_stats_matrices,
+        prefer_return_risk_stats_matrices,
         |score_day, active_config| {
             score_rows_for_active_config(&score_sources, score_day, active_config)
         },
@@ -7314,6 +7574,7 @@ where
     )
 }
 
+#[cfg(test)]
 fn build_rebalance_factor_signals_with_return_risk_matrices<F>(
     trading_days: &[NaiveDate],
     scores_by_date: &HashMap<NaiveDate, Vec<(String, f64)>>,
@@ -7569,28 +7830,31 @@ where
 
     let portfolio_config = PortfolioConstructionConfig::from(config);
     let target_weights = if prefer_return_risk_stats_matrices {
-        preloaded_return_risk_stats_matrix(return_risk_stats_matrices, &portfolio_config)
-            .map(|matrix| {
-                build_portfolio_weights_with_return_risk_stats_matrix(
-                    score_day,
-                    &candidates,
-                    matrix.as_ref(),
-                    average_amounts,
-                    industry_by_symbol,
-                    &portfolio_config,
-                )
-            })
-            .unwrap_or_else(|| {
-                build_portfolio_weights_with_return_risk_matrices(
-                    score_day,
-                    &candidates,
-                    return_history,
-                    average_amounts,
-                    industry_by_symbol,
-                    &portfolio_config,
-                    Some(return_risk_matrices),
-                )
-            })
+        return_risk_stats_matrices_cover_required_lookbacks(
+            return_risk_stats_matrices,
+            &portfolio_config,
+        )
+        .then(|| {
+            build_portfolio_weights_with_return_risk_stats_matrices(
+                score_day,
+                &candidates,
+                return_risk_stats_matrices,
+                average_amounts,
+                industry_by_symbol,
+                &portfolio_config,
+            )
+        })
+        .unwrap_or_else(|| {
+            build_portfolio_weights_with_return_risk_matrices(
+                score_day,
+                &candidates,
+                return_history,
+                average_amounts,
+                industry_by_symbol,
+                &portfolio_config,
+                Some(return_risk_matrices),
+            )
+        })
     } else {
         build_portfolio_weights_with_return_risk_matrices(
             score_day,
@@ -8554,6 +8818,172 @@ async fn load_portfolio_return_risk_feature_matrices_cached(
     Ok(matrices)
 }
 
+fn should_load_raw_return_risk_matrices(
+    prefer_return_risk_stats_matrices: bool,
+    return_risk_stats_matrices_loaded: bool,
+) -> bool {
+    !prefer_return_risk_stats_matrices || !return_risk_stats_matrices_loaded
+}
+
+fn should_prewarm_raw_return_risk_matrix(
+    return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode,
+    has_score_days: bool,
+) -> bool {
+    has_score_days
+        && matches!(
+            return_risk_feature_cache_mode,
+            ReturnRiskFeatureCacheMode::RawMatrix
+        )
+}
+
+async fn load_return_risk_stats_feature_matrix_persistent_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    data_version_id: Option<&str>,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    lookback_days: usize,
+    return_history: &SymbolReturnHistory,
+    pairwise_scope: &ReturnRiskStatsPairwiseScopePlan,
+) -> Result<Arc<ScoreDateReturnRiskStatsMatrix>, String> {
+    let symbols = normalized_symbol_key(symbols);
+    let score_days = normalized_dates(&pairwise_scope.score_days);
+    if symbols.is_empty() || score_days.is_empty() {
+        return Ok(Arc::new(ScoreDateReturnRiskStatsMatrix::default()));
+    }
+
+    let persistent_key = data_version_id.map(|data_version_id| {
+        persistent_return_risk_stats_feature_matrix_cache_key(
+            data_version_id,
+            start_date,
+            end_date,
+            lookback_days,
+            &symbols,
+            pairwise_scope,
+        )
+    });
+
+    if let Some(persistent_key) = persistent_key.as_ref() {
+        match load_persistent_return_risk_stats_feature_matrix_cache(
+            pool,
+            persistent_key,
+            &symbols,
+            &score_days,
+        )
+        .await
+        {
+            Ok(Some(matrix)) => {
+                cache.record_persistent_market_feature_hit(
+                    PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+                );
+                cache.record_persistent_return_risk_stats_feature_matrix_payload_loaded(
+                    matrix.row_count(),
+                    matrix.pair_row_count(),
+                );
+                return Ok(Arc::new(matrix));
+            }
+            Ok(None) => {
+                cache.record_persistent_market_feature_miss(
+                    PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+                );
+            }
+            Err(error) => {
+                warn!(
+                    cache_key = persistent_key.cache_key,
+                    error = %error,
+                    "persistent return/risk stats feature matrix cache read failed; falling back to return history"
+                );
+            }
+        }
+    }
+
+    let matrix = build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+        return_history,
+        &score_days,
+        &symbols,
+        lookback_days,
+        pairwise_scope,
+    );
+
+    if let Some(persistent_key) = persistent_key.as_ref() {
+        match store_persistent_return_risk_stats_feature_matrix_cache(
+            pool,
+            persistent_key,
+            &symbols,
+            &score_days,
+            &matrix,
+        )
+        .await
+        {
+            Ok(true) => {
+                cache.record_persistent_market_feature_write(
+                    PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+                );
+                cache.record_persistent_return_risk_stats_feature_matrix_payload_written(
+                    matrix.row_count(),
+                    matrix.pair_row_count(),
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    cache_key = persistent_key.cache_key,
+                    error = %error,
+                    "persistent return/risk stats feature matrix cache write failed"
+                );
+            }
+        }
+    }
+
+    Ok(Arc::new(matrix))
+}
+
+async fn load_portfolio_return_risk_stats_feature_matrices_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    data_version_id: Option<&str>,
+    symbols: &[String],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    score_days: &[NaiveDate],
+    config: &PortfolioConstructionConfig,
+    return_history: &SymbolReturnHistory,
+    scores_by_date: &FactorScoresByDate,
+    signal_config: &SignalConfig,
+) -> Result<HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>, String> {
+    let lookbacks = portfolio_return_risk_matrix_lookback_days(config);
+    if lookbacks.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let Some(pairwise_scope) = return_risk_stats_pairwise_scope_for_factor_scores(
+        score_days,
+        symbols,
+        scores_by_date,
+        signal_config,
+        DEFAULT_RETURN_RISK_STATS_PAIRWISE_ROW_LIMIT,
+    ) else {
+        return Ok(HashMap::new());
+    };
+    let mut matrices = HashMap::new();
+    for lookback_days in lookbacks {
+        let matrix = load_return_risk_stats_feature_matrix_persistent_cached(
+            pool,
+            cache,
+            data_version_id,
+            symbols,
+            start_date,
+            end_date,
+            lookback_days,
+            return_history,
+            &pairwise_scope,
+        )
+        .await?;
+        matrices.insert(lookback_days, matrix);
+    }
+    Ok(matrices)
+}
+
 async fn load_average_amounts(
     pool: &PgPool,
     symbols: &[String],
@@ -9055,15 +9485,22 @@ fn preloaded_return_risk_matrix(
         .cloned()
 }
 
-fn preloaded_return_risk_stats_matrix(
+fn preloaded_return_risk_stats_matrix_for_lookback(
+    return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
+    lookback_days: usize,
+) -> Option<Arc<ScoreDateReturnRiskStatsMatrix>> {
+    return_risk_stats_matrices
+        .get(&lookback_days.max(1))
+        .cloned()
+}
+
+fn return_risk_stats_matrices_cover_required_lookbacks(
     return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
     config: &PortfolioConstructionConfig,
-) -> Option<Arc<ScoreDateReturnRiskStatsMatrix>> {
-    let lookbacks = portfolio_return_risk_matrix_lookback_days(config);
-    let [lookback_days] = lookbacks.as_slice() else {
-        return None;
-    };
-    return_risk_stats_matrices.get(lookback_days).cloned()
+) -> bool {
+    portfolio_return_risk_matrix_lookback_days(config)
+        .into_iter()
+        .all(|lookback_days| return_risk_stats_matrices.contains_key(&lookback_days.max(1)))
 }
 
 fn build_portfolio_weights(
@@ -9327,57 +9764,155 @@ fn build_portfolio_weights_with_return_risk_matrices(
 }
 
 #[allow(dead_code)]
-fn build_portfolio_weights_with_return_risk_stats_matrix(
+fn build_portfolio_weights_with_return_risk_stats_matrices(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    return_risk_stats_matrices: &HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>>,
     average_amounts: &HashMap<String, f64>,
     industry_by_symbol: &HashMap<String, String>,
     config: &PortfolioConstructionConfig,
 ) -> HashMap<String, Decimal> {
-    let ranked_candidates = rank_candidates_for_capacity_from_stats_matrix(
-        score_day,
-        candidates,
-        matrix,
-        average_amounts,
-        config.candidate_ranking_profile,
-    );
-    let risk_filtered_candidates = filter_candidate_risk_pool_from_stats_matrix(
-        score_day,
-        &ranked_candidates,
-        matrix,
-        average_amounts,
-        config,
-    );
+    let uses_risk_matrix =
+        candidate_ranking_uses_relative_strength(config.candidate_ranking_profile)
+            || config.candidate_risk_filter_profile.params().is_some()
+            || config.style_risk_budget_profile.params().is_some()
+            || config.risk_contribution_control_profile.params().is_some()
+            || matches!(
+                config.portfolio_method,
+                PortfolioConstructionMethod::RiskBudget | PortfolioConstructionMethod::MinVariance
+            );
+    let uses_correlation_matrix = config.max_pairwise_correlation.is_some();
+    let uses_kelly_matrix = matches!(
+        config.portfolio_method,
+        PortfolioConstructionMethod::Heuristic
+    ) && config.kelly_fraction > 0.0;
+
+    let risk_matrix = if uses_risk_matrix {
+        let Some(matrix) = preloaded_return_risk_stats_matrix_for_lookback(
+            return_risk_stats_matrices,
+            config.risk_budget_lookback_days,
+        ) else {
+            return HashMap::new();
+        };
+        Some(matrix)
+    } else {
+        None
+    };
+    let correlation_matrix = if uses_correlation_matrix
+        && (config.correlation_lookback_days != config.risk_budget_lookback_days
+            || risk_matrix.is_none())
+    {
+        let Some(matrix) = preloaded_return_risk_stats_matrix_for_lookback(
+            return_risk_stats_matrices,
+            config.correlation_lookback_days,
+        ) else {
+            return HashMap::new();
+        };
+        Some(matrix)
+    } else {
+        None
+    };
+    let kelly_matrix = if uses_kelly_matrix
+        && (config.kelly_lookback_days != config.risk_budget_lookback_days || risk_matrix.is_none())
+        && (config.kelly_lookback_days != config.correlation_lookback_days
+            || correlation_matrix.is_none())
+    {
+        let Some(matrix) = preloaded_return_risk_stats_matrix_for_lookback(
+            return_risk_stats_matrices,
+            config.kelly_lookback_days,
+        ) else {
+            return HashMap::new();
+        };
+        Some(matrix)
+    } else {
+        None
+    };
+
+    let ranked_candidates = if let Some(matrix) = risk_matrix.as_deref() {
+        rank_candidates_for_capacity_from_stats_matrix(
+            score_day,
+            candidates,
+            matrix,
+            average_amounts,
+            config.candidate_ranking_profile,
+        )
+    } else {
+        candidates.to_vec()
+    };
+    let risk_filtered_candidates = if let Some(matrix) = risk_matrix.as_deref() {
+        filter_candidate_risk_pool_from_stats_matrix(
+            score_day,
+            &ranked_candidates,
+            matrix,
+            average_amounts,
+            config,
+        )
+    } else {
+        ranked_candidates
+    };
     let selection_limit =
         cash_utilization_selection_limit(&risk_filtered_candidates, average_amounts, config);
-    let selected = select_uncorrelated_candidates_from_stats_matrix(
-        score_day,
-        &risk_filtered_candidates,
-        matrix,
-        config,
-        selection_limit,
-    );
+    let correlation_matrix_ref = correlation_matrix.as_ref().or_else(|| {
+        (config.correlation_lookback_days == config.risk_budget_lookback_days)
+            .then(|| risk_matrix.as_ref())
+            .flatten()
+    });
+    let selected = if let Some(matrix) = correlation_matrix_ref {
+        select_uncorrelated_candidates_from_stats_matrix(
+            score_day,
+            &risk_filtered_candidates,
+            matrix,
+            config,
+            selection_limit,
+        )
+    } else {
+        risk_filtered_candidates
+            .iter()
+            .take(selection_limit)
+            .map(|(symbol, _)| symbol.clone())
+            .collect()
+    };
     if selected.is_empty() {
         return HashMap::new();
     }
 
+    let kelly_matrix_ref = kelly_matrix.as_ref().or_else(|| {
+        (config.kelly_lookback_days == config.risk_budget_lookback_days)
+            .then(|| risk_matrix.as_ref())
+            .flatten()
+            .or_else(|| {
+                (config.kelly_lookback_days == config.correlation_lookback_days)
+                    .then(|| correlation_matrix.as_ref())
+                    .flatten()
+            })
+    });
     let raw_weights = match config.portfolio_method {
         PortfolioConstructionMethod::Heuristic => {
             if config.kelly_fraction > 0.0 {
+                let Some(matrix) = kelly_matrix_ref else {
+                    return HashMap::new();
+                };
                 build_kelly_raw_weights_from_stats_matrix(score_day, &selected, matrix, config)
             } else {
                 vec![1.0; selected.len()]
             }
         }
-        PortfolioConstructionMethod::RiskBudget => build_risk_budget_raw_weights_from_stats_matrix(
-            score_day,
-            &selected,
-            matrix,
-            average_amounts,
-            config,
-        ),
+        PortfolioConstructionMethod::RiskBudget => {
+            let Some(matrix) = risk_matrix.as_deref() else {
+                return HashMap::new();
+            };
+            build_risk_budget_raw_weights_from_stats_matrix(
+                score_day,
+                &selected,
+                matrix,
+                average_amounts,
+                config,
+            )
+        }
         PortfolioConstructionMethod::MinVariance => {
+            let Some(matrix) = risk_matrix.as_deref() else {
+                return HashMap::new();
+            };
             build_min_variance_raw_weights_from_stats_matrix(
                 score_day,
                 &selected,
@@ -9390,16 +9925,41 @@ fn build_portfolio_weights_with_return_risk_stats_matrix(
 
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, average_amounts, config);
     apply_capacity_risk_budget(&mut weights, average_amounts, config);
-    apply_style_risk_budget_from_stats_matrix(
-        &mut weights,
-        matrix,
-        average_amounts,
-        score_day,
-        config,
-    );
+    if let Some(matrix) = risk_matrix.as_deref() {
+        apply_style_risk_budget_from_stats_matrix(
+            &mut weights,
+            matrix,
+            average_amounts,
+            score_day,
+            config,
+        );
+    }
     apply_industry_cap(&mut weights, industry_by_symbol, config);
-    apply_risk_contribution_control_from_stats_matrix(&mut weights, matrix, score_day, config);
+    if let Some(matrix) = risk_matrix.as_deref() {
+        apply_risk_contribution_control_from_stats_matrix(&mut weights, matrix, score_day, config);
+    }
     weights
+}
+
+#[allow(dead_code)]
+fn build_portfolio_weights_with_return_risk_stats_matrix(
+    score_day: NaiveDate,
+    candidates: &[(String, f64)],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
+    average_amounts: &HashMap<String, f64>,
+    industry_by_symbol: &HashMap<String, String>,
+    config: &PortfolioConstructionConfig,
+) -> HashMap<String, Decimal> {
+    let lookback_days = config.risk_budget_lookback_days.max(1);
+    let matrices = HashMap::from([(lookback_days, Arc::new(matrix.clone()))]);
+    build_portfolio_weights_with_return_risk_stats_matrices(
+        score_day,
+        candidates,
+        &matrices,
+        average_amounts,
+        industry_by_symbol,
+        config,
+    )
 }
 
 fn rank_candidates_for_capacity(
@@ -11846,6 +12406,14 @@ impl ReturnRiskSingleSymbolStats {
 
 #[allow(dead_code)]
 impl ScoreDateReturnRiskStatsMatrix {
+    fn row_count(&self) -> usize {
+        self.stats_by_score_symbol.len()
+    }
+
+    fn pair_row_count(&self) -> usize {
+        self.pairwise_correlations.len()
+    }
+
     fn stats(&self, score_day: NaiveDate, symbol: &str) -> Option<&ReturnRiskSingleSymbolStats> {
         self.stats_by_score_symbol
             .get(&(score_day, symbol.to_string()))
@@ -11993,6 +12561,135 @@ fn return_risk_stats_pairwise_scope_for_portfolio_candidate_pool(
         symbols,
         &[candidate_symbols.to_vec()],
     )
+}
+
+#[allow(dead_code)]
+fn return_risk_stats_pairwise_scope_for_factor_scores(
+    score_days: &[NaiveDate],
+    symbols: &[String],
+    scores_by_date: &FactorScoresByDate,
+    config: &SignalConfig,
+    max_pair_rows: usize,
+) -> Option<ReturnRiskStatsPairwiseScopePlan> {
+    let score_days = normalized_dates(score_days);
+    let symbols = normalized_symbol_key(symbols);
+    if score_days.is_empty() || symbols.is_empty() {
+        return Some(ReturnRiskStatsPairwiseScopePlan {
+            score_days,
+            symbols,
+            pair_keys: Vec::new(),
+        });
+    }
+
+    let symbol_scope = symbols.iter().cloned().collect::<HashSet<_>>();
+    let score_candidate_pool_size =
+        normalize_score_candidate_pool_size(config.score_candidate_pool_size);
+    let min_candidates = config.top_n.min(5).max(2);
+    let mut pair_keys = BTreeSet::new();
+
+    for score_day in &score_days {
+        let mut day_scores = scores_by_date.get(score_day).cloned().unwrap_or_default();
+        sort_factor_scores(&mut day_scores, config.score_direction);
+
+        let skip_count = if config.skip_top_pct > 0.0 {
+            (day_scores.len() as f64 * config.skip_top_pct).ceil() as usize
+        } else {
+            0
+        }
+        .min(day_scores.len());
+
+        let mut candidate_symbols = day_scores
+            .into_iter()
+            .skip(skip_count)
+            .map(|(symbol, _score)| symbol)
+            .filter(|symbol| symbol_scope.contains(symbol))
+            .collect::<Vec<_>>();
+        if let Some(limit) = score_candidate_pool_size {
+            candidate_symbols.truncate(limit);
+        }
+        let candidate_symbols = normalized_symbol_key(&candidate_symbols);
+        if candidate_symbols.len() < min_candidates {
+            continue;
+        }
+
+        for left_idx in 0..candidate_symbols.len() {
+            for right_idx in (left_idx + 1)..candidate_symbols.len() {
+                pair_keys.insert(pairwise_correlation_key(
+                    *score_day,
+                    &candidate_symbols[left_idx],
+                    &candidate_symbols[right_idx],
+                ));
+                if pair_keys.len() > max_pair_rows {
+                    return None;
+                }
+            }
+        }
+    }
+
+    Some(ReturnRiskStatsPairwiseScopePlan {
+        score_days,
+        symbols,
+        pair_keys: pair_keys.into_iter().collect(),
+    })
+}
+
+#[allow(dead_code)]
+fn persistent_return_risk_stats_feature_matrix_cache_key(
+    data_version_id: impl AsRef<str>,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    lookback_days: usize,
+    symbols: &[String],
+    pairwise_scope: &ReturnRiskStatsPairwiseScopePlan,
+) -> PersistentMarketFeatureCacheKey {
+    let mut key = PersistentMarketFeatureCacheKey::new_for_dates(
+        PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix,
+        data_version_id,
+        start_date,
+        end_date,
+        lookback_days,
+        symbols,
+        &pairwise_scope.score_days,
+    );
+    let pairwise_scope_hash =
+        persistent_return_risk_stats_pairwise_scope_hash(&pairwise_scope.pair_keys);
+    key.cache_key = format!(
+        "{}:pairs:{}:{}",
+        key.cache_key,
+        pairwise_scope_hash,
+        pairwise_scope.pair_count()
+    );
+    key
+}
+
+#[allow(dead_code)]
+fn persistent_return_risk_stats_pairwise_scope_hash(
+    pair_keys: &[(NaiveDate, String, String)],
+) -> String {
+    let mut keys = pair_keys.to_vec();
+    keys.sort();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for (score_day, left_symbol, right_symbol) in keys {
+        for byte in score_day.to_string().as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xfe;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in left_symbol.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xfd;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in right_symbol.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xfc;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[allow(dead_code)]
@@ -13260,6 +13957,8 @@ fn fractional_kelly_weight(returns: &[f64], fraction: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{BacktestConfig, BacktestEngine, BacktestOutput, MarketDay};
+    use crate::metrics::BacktestMetrics;
 
     #[test]
     fn score_day_uses_previous_trading_day_by_default() {
@@ -13595,6 +14294,353 @@ mod tests {
         assert!(signal.target_weights.contains_key("AAA"));
         assert!(signal.target_weights.contains_key("BBB"));
         assert!(!signal.target_weights.contains_key("CCC"));
+    }
+
+    #[test]
+    fn stats_matrix_signal_builder_completed_oos_smoke_has_no_metric_drift_from_raw_matrix_path() {
+        let smoke = completed_oos_no_drift_smoke_for_stats_matrix_signal_builder();
+
+        assert!(smoke.signal_count > 0);
+        assert_eq!(smoke.raw_equity_curve.len(), smoke.oos_day_count);
+        assert_eq!(smoke.stats_equity_curve.len(), smoke.oos_day_count);
+        assert_eq!(smoke.raw_signal_count, smoke.stats_signal_count);
+        assert_eq!(smoke.raw_equity_curve, smoke.stats_equity_curve);
+        assert_eq!(
+            smoke.raw_metrics.annual_return_pct,
+            smoke.stats_metrics.annual_return_pct
+        );
+        assert_eq!(
+            smoke.raw_metrics.sharpe_ratio,
+            smoke.stats_metrics.sharpe_ratio
+        );
+        assert_eq!(
+            smoke.raw_metrics.sortino_ratio,
+            smoke.stats_metrics.sortino_ratio
+        );
+        assert_eq!(
+            smoke.raw_metrics.calmar_ratio,
+            smoke.stats_metrics.calmar_ratio
+        );
+        assert_eq!(
+            smoke.raw_metrics.max_drawdown_pct,
+            smoke.stats_metrics.max_drawdown_pct
+        );
+        assert_eq!(
+            smoke.raw_metrics.final_execution_fill_ratio,
+            smoke.stats_metrics.final_execution_fill_ratio
+        );
+    }
+
+    #[test]
+    fn market_feature_snapshot_scope_only_uses_stats_return_risk_cache_when_opted_in() {
+        let scope = MarketFeatureSnapshotScope::new(
+            "data-v1",
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 31).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 2, 28).unwrap(),
+        );
+
+        assert!(!scope.prefer_return_risk_stats_cache());
+        assert!(scope
+            .clone()
+            .with_return_risk_stats_cache_experiment()
+            .prefer_return_risk_stats_cache());
+    }
+
+    #[test]
+    fn return_risk_stats_pairwise_scope_for_factor_scores_is_score_day_specific_and_budgeted() {
+        let day1 = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let symbols = vec![
+            "AAA".to_string(),
+            "BBB".to_string(),
+            "CCC".to_string(),
+            "DDD".to_string(),
+        ];
+        let scores_by_date = HashMap::from([
+            (
+                day1,
+                vec![("AAA".to_string(), 2.0), ("BBB".to_string(), 1.0)],
+            ),
+            (
+                day2,
+                vec![("CCC".to_string(), 2.0), ("DDD".to_string(), 1.0)],
+            ),
+        ]);
+        let config = SignalConfig {
+            top_n: 2,
+            ..Default::default()
+        };
+
+        let plan = return_risk_stats_pairwise_scope_for_factor_scores(
+            &[day1, day2],
+            &symbols,
+            &scores_by_date,
+            &config,
+            2,
+        )
+        .expect("pairwise scope within budget");
+
+        assert_eq!(plan.pair_count(), 2);
+        assert!(plan.contains(day1, "AAA", "BBB"));
+        assert!(plan.contains(day2, "CCC", "DDD"));
+        assert!(!plan.contains(day1, "CCC", "DDD"));
+        assert!(!plan.contains(day2, "AAA", "BBB"));
+        assert!(return_risk_stats_pairwise_scope_for_factor_scores(
+            &[day1, day2],
+            &symbols,
+            &scores_by_date,
+            &config,
+            1,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn raw_return_risk_matrix_load_is_skipped_when_stats_cache_is_loaded() {
+        assert!(!should_load_raw_return_risk_matrices(true, true));
+        assert!(should_load_raw_return_risk_matrices(true, false));
+        assert!(should_load_raw_return_risk_matrices(false, false));
+        assert!(should_load_raw_return_risk_matrices(false, true));
+    }
+
+    #[test]
+    fn stats_return_risk_mode_does_not_prewarm_raw_return_risk_matrix() {
+        assert!(should_prewarm_raw_return_risk_matrix(
+            ReturnRiskFeatureCacheMode::RawMatrix,
+            true
+        ));
+        assert!(!should_prewarm_raw_return_risk_matrix(
+            ReturnRiskFeatureCacheMode::RawMatrix,
+            false
+        ));
+        assert!(!should_prewarm_raw_return_risk_matrix(
+            ReturnRiskFeatureCacheMode::StatsMatrixExperimental,
+            true
+        ));
+    }
+
+    struct StatsMatrixSignalBuilderOosNoDriftSmoke {
+        oos_day_count: usize,
+        signal_count: usize,
+        raw_signal_count: usize,
+        stats_signal_count: usize,
+        raw_equity_curve: Vec<(NaiveDate, Decimal)>,
+        stats_equity_curve: Vec<(NaiveDate, Decimal)>,
+        raw_metrics: BacktestMetrics,
+        stats_metrics: BacktestMetrics,
+    }
+
+    fn completed_oos_no_drift_smoke_for_stats_matrix_signal_builder(
+    ) -> StatsMatrixSignalBuilderOosNoDriftSmoke {
+        let trading_days = (0..8)
+            .map(|idx| NaiveDate::from_ymd_opt(2026, 1, 7).unwrap() + Duration::days(idx))
+            .collect::<Vec<_>>();
+        let symbols = vec![
+            "AAA".to_string(),
+            "BBB".to_string(),
+            "CCC".to_string(),
+            "DDD".to_string(),
+            "EEE".to_string(),
+        ];
+        let config = SignalConfig {
+            top_n: 3,
+            rebalance_freq_days: 1,
+            max_position_pct: Decimal::new(40, 2),
+            max_pairwise_correlation: Some(0.99),
+            correlation_lookback_days: 5,
+            portfolio_method: PortfolioConstructionMethod::RiskBudget,
+            risk_budget_lookback_days: 5,
+            candidate_risk_filter_profile: CandidateRiskFilterProfile::LowVolatilityV1,
+            ..Default::default()
+        };
+        let score_days = rebalance_score_days(&trading_days, &config, |_day, base| base.clone());
+        let scores_by_date = score_days
+            .iter()
+            .map(|score_day| {
+                (
+                    *score_day,
+                    vec![
+                        ("AAA".to_string(), 5.0),
+                        ("BBB".to_string(), 4.0),
+                        ("CCC".to_string(), 3.0),
+                        ("DDD".to_string(), 2.0),
+                        ("EEE".to_string(), 1.0),
+                    ],
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[
+                    0.010, -0.010, 0.015, -0.005, 0.020, 0.011, -0.006, 0.014, 0.008, -0.003,
+                    0.012, 0.004,
+                ]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[
+                    0.006, 0.004, 0.005, 0.007, 0.006, 0.005, 0.004, 0.006, 0.005, 0.007, 0.006,
+                    0.005,
+                ]),
+            ),
+            (
+                "CCC".to_string(),
+                dated_returns(&[
+                    -0.012, 0.009, -0.010, 0.011, -0.008, 0.010, -0.006, 0.009, -0.005, 0.008,
+                    -0.004, 0.007,
+                ]),
+            ),
+            (
+                "DDD".to_string(),
+                dated_returns(&[
+                    0.080, -0.070, 0.090, -0.085, 0.075, -0.065, 0.070, -0.060, 0.065, -0.055,
+                    0.060, -0.050,
+                ]),
+            ),
+            (
+                "EEE".to_string(),
+                dated_returns(&[
+                    0.004, 0.006, 0.005, 0.004, 0.006, 0.005, 0.006, 0.004, 0.005, 0.006, 0.004,
+                    0.005,
+                ]),
+            ),
+        ]);
+        let raw_matrices = HashMap::from([(
+            5,
+            Arc::new(build_score_date_return_risk_matrix(
+                &return_history,
+                &score_days,
+                &symbols,
+                5,
+            )),
+        )]);
+        let pairwise_scope =
+            return_risk_stats_pairwise_scope_from_symbols(&score_days, &symbols, &symbols);
+        let stats_matrices = HashMap::from([(
+            5,
+            Arc::new(
+                build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+                    &return_history,
+                    &score_days,
+                    &symbols,
+                    5,
+                    &pairwise_scope,
+                ),
+            ),
+        )]);
+
+        let raw_signals = build_rebalance_factor_signals_with_return_risk_matrices(
+            &trading_days,
+            &scores_by_date,
+            &config,
+            &return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &raw_matrices,
+            |_day, base| base.clone(),
+        )
+        .expect("raw matrix signals");
+        let stats_signals = build_rebalance_factor_signals_with_return_risk_stats_matrices(
+            &trading_days,
+            &scores_by_date,
+            &config,
+            &return_history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &stats_matrices,
+            |_day, base| base.clone(),
+        )
+        .expect("stats matrix signals");
+        assert_eq!(raw_signals.len(), stats_signals.len());
+        for (signal_day, raw_signal) in &raw_signals {
+            let stats_signal = stats_signals
+                .get(signal_day)
+                .expect("stats signal for raw signal day");
+            assert_eq!(raw_signal.target_weights, stats_signal.target_weights);
+        }
+
+        let raw_output = run_synthetic_oos_backtest(&trading_days, &symbols, &raw_signals);
+        let stats_output = run_synthetic_oos_backtest(&trading_days, &symbols, &stats_signals);
+
+        StatsMatrixSignalBuilderOosNoDriftSmoke {
+            oos_day_count: trading_days.len(),
+            signal_count: raw_signals.len(),
+            raw_signal_count: raw_signals.len(),
+            stats_signal_count: stats_signals.len(),
+            raw_equity_curve: raw_output.equity_curve,
+            stats_equity_curve: stats_output.equity_curve,
+            raw_metrics: raw_output.metrics,
+            stats_metrics: stats_output.metrics,
+        }
+    }
+
+    fn run_synthetic_oos_backtest(
+        trading_days: &[NaiveDate],
+        symbols: &[String],
+        signals: &HashMap<NaiveDate, StrategySignal>,
+    ) -> BacktestOutput {
+        let mut engine = BacktestEngine::new(BacktestConfig {
+            start_date: *trading_days.first().expect("start date"),
+            end_date: *trading_days.last().expect("end date"),
+            symbols: symbols.to_vec(),
+            max_position_pct: Decimal::ONE,
+            ..Default::default()
+        });
+        for (day_idx, day) in trading_days.iter().enumerate() {
+            let market = synthetic_oos_market_day(*day, day_idx, symbols);
+            engine.process_day(&market, signals.get(day));
+        }
+        engine.finalize()
+    }
+
+    fn synthetic_oos_market_day(day: NaiveDate, day_idx: usize, symbols: &[String]) -> MarketDay {
+        let mut open = HashMap::new();
+        let mut close = HashMap::new();
+        let mut pre_close = HashMap::new();
+        let mut amount = HashMap::new();
+        let mut up_limit = HashMap::new();
+        let mut down_limit = HashMap::new();
+
+        for (symbol_idx, symbol) in symbols.iter().enumerate() {
+            let close_cents =
+                1_000 + (symbol_idx as i64 * 75) + (day_idx as i64 * 4) + (day_idx % 3) as i64;
+            let pre_close_cents = if day_idx == 0 {
+                close_cents
+            } else {
+                close_cents - 4
+            };
+            let close_price = Decimal::new(close_cents, 2);
+            let pre_close_price = Decimal::new(pre_close_cents.max(1), 2);
+            open.insert(symbol.clone(), close_price);
+            close.insert(symbol.clone(), close_price);
+            pre_close.insert(symbol.clone(), pre_close_price);
+            amount.insert(symbol.clone(), Decimal::new(1_000_000_000, 0));
+            up_limit.insert(symbol.clone(), pre_close_price * Decimal::new(13, 1));
+            down_limit.insert(symbol.clone(), pre_close_price * Decimal::new(7, 1));
+        }
+
+        let benchmark_close = Decimal::new(300_000 + day_idx as i64 * 10, 2);
+        let benchmark_pre_close = if day_idx == 0 {
+            benchmark_close
+        } else {
+            Decimal::new(300_000 + (day_idx as i64 - 1) * 10, 2)
+        };
+
+        MarketDay {
+            date: day,
+            open,
+            close,
+            pre_close,
+            amount,
+            suspended: HashSet::new(),
+            up_limit,
+            down_limit,
+            benchmark_close,
+            benchmark_pre_close,
+        }
     }
 
     #[test]
@@ -15485,6 +16531,114 @@ mod tests {
     }
 
     #[test]
+    fn portfolio_construction_matches_raw_with_multi_lookback_stats_matrices() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("AAA".to_string(), 6.0),
+            ("BBB".to_string(), 5.0),
+            ("CCC".to_string(), 4.0),
+            ("DDD".to_string(), 3.0),
+            ("EEE".to_string(), 2.0),
+        ];
+        let candidate_symbols = candidates
+            .iter()
+            .map(|(symbol, _)| symbol.clone())
+            .collect::<Vec<_>>();
+        let return_history = HashMap::from([
+            (
+                "AAA".to_string(),
+                dated_returns(&[0.010, -0.010, 0.015, -0.005, 0.020, 0.011]),
+            ),
+            (
+                "BBB".to_string(),
+                dated_returns(&[0.011, -0.011, 0.016, -0.006, 0.021, 0.010]),
+            ),
+            (
+                "CCC".to_string(),
+                dated_returns(&[-0.020, 0.010, -0.015, 0.020, -0.010, 0.004]),
+            ),
+            (
+                "DDD".to_string(),
+                dated_returns(&[0.050, -0.045, 0.040, -0.035, 0.030, -0.025]),
+            ),
+            (
+                "EEE".to_string(),
+                dated_returns(&[0.004, 0.006, 0.005, 0.007, 0.006, 0.005]),
+            ),
+        ]);
+        let average_amounts = HashMap::from([
+            ("AAA".to_string(), 900_000_000.0),
+            ("BBB".to_string(), 800_000_000.0),
+            ("CCC".to_string(), 500_000_000.0),
+            ("DDD".to_string(), 300_000_000.0),
+            ("EEE".to_string(), 700_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_pairwise_correlation: Some(0.80),
+            correlation_lookback_days: 3,
+            portfolio_method: PortfolioConstructionMethod::RiskBudget,
+            risk_budget_lookback_days: 5,
+            capacity_penalty_strength: 0.25,
+            candidate_ranking_profile: CandidateRankingProfile::RelativeStrengthAlphaLiquidityV1,
+            candidate_risk_filter_profile:
+                CandidateRiskFilterProfile::SoftLowVolatilityLowCorrelationV1,
+            ..Default::default()
+        };
+        let pairwise_scope = return_risk_stats_pairwise_scope_for_portfolio_candidate_pool(
+            score_day,
+            &candidate_symbols,
+            &candidate_symbols,
+        );
+        let stats_matrices = HashMap::from([
+            (
+                3,
+                Arc::new(
+                    build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+                        &return_history,
+                        &[score_day],
+                        &candidate_symbols,
+                        3,
+                        &pairwise_scope,
+                    ),
+                ),
+            ),
+            (
+                5,
+                Arc::new(
+                    build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+                        &return_history,
+                        &[score_day],
+                        &candidate_symbols,
+                        5,
+                        &pairwise_scope,
+                    ),
+                ),
+            ),
+        ]);
+
+        let raw_weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let stats_weights = build_portfolio_weights_with_return_risk_stats_matrices(
+            score_day,
+            &candidates,
+            &stats_matrices,
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+
+        assert!(!raw_weights.is_empty());
+        assert_eq!(stats_weights, raw_weights);
+    }
+
+    #[test]
     fn return_risk_stats_payload_profile_flags_dense_full_market_pairwise_cache() {
         let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
         let symbols = (0..2_000)
@@ -17072,6 +18226,134 @@ mod tests {
     }
 
     #[test]
+    fn return_risk_cache_economics_prefers_steady_state_stats_payload_savings() {
+        let raw = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 2,
+            persistent_return_risk_feature_matrix_rows_loaded: 4_256,
+            persistent_return_risk_feature_matrix_return_values_loaded: 500_482,
+            ..SignalDataCacheStats::default()
+        };
+        let stats = SignalDataCacheStats {
+            persistent_return_risk_stats_feature_matrix_hits: 4,
+            persistent_return_risk_stats_feature_matrix_misses: 0,
+            persistent_return_risk_stats_feature_matrix_writes: 0,
+            persistent_return_risk_stats_feature_matrix_stats_rows_loaded: 8_512,
+            persistent_return_risk_stats_feature_matrix_pair_rows_loaded: 191_580,
+            ..SignalDataCacheStats::default()
+        };
+
+        let profile = compare_return_risk_cache_economics(raw, stats);
+
+        assert_eq!(
+            profile.recommendation,
+            ReturnRiskCacheEconomicsRecommendation::PreferStatsMatrix
+        );
+        assert_eq!(profile.reason, "stats_payload_below_raw_return_values");
+        assert!(profile.stats_matrix_steady_state);
+        assert_eq!(profile.stats_matrix_payload_rows_loaded, 200_092);
+        assert_eq!(
+            profile.stats_to_raw_return_value_ratio,
+            Some(200_092.0 / 500_482.0)
+        );
+    }
+
+    #[test]
+    fn return_risk_cache_economics_rejects_stats_warmup_as_inconclusive() {
+        let raw = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 2,
+            persistent_return_risk_feature_matrix_return_values_loaded: 500_482,
+            ..SignalDataCacheStats::default()
+        };
+        let stats = SignalDataCacheStats {
+            persistent_return_risk_stats_feature_matrix_hits: 2,
+            persistent_return_risk_stats_feature_matrix_misses: 2,
+            persistent_return_risk_stats_feature_matrix_writes: 2,
+            persistent_return_risk_stats_feature_matrix_stats_rows_loaded: 4_256,
+            persistent_return_risk_stats_feature_matrix_pair_rows_loaded: 95_790,
+            ..SignalDataCacheStats::default()
+        };
+
+        let profile = compare_return_risk_cache_economics(raw, stats);
+
+        assert_eq!(
+            profile.recommendation,
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive
+        );
+        assert_eq!(profile.reason, "stats_matrix_warmup_not_steady_state");
+        assert!(!profile.stats_matrix_steady_state);
+    }
+
+    #[test]
+    fn return_risk_cache_economics_rejects_stats_raw_matrix_fallback_as_inconclusive() {
+        let raw = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 4,
+            persistent_return_risk_feature_matrix_return_values_loaded: 8_939_638,
+            ..SignalDataCacheStats::default()
+        };
+        let stats = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 1,
+            persistent_return_risk_feature_matrix_return_values_loaded: 4_155_042,
+            persistent_return_risk_stats_feature_matrix_hits: 12,
+            persistent_return_risk_stats_feature_matrix_misses: 0,
+            persistent_return_risk_stats_feature_matrix_writes: 0,
+            persistent_return_risk_stats_feature_matrix_stats_rows_loaded: 218_348,
+            persistent_return_risk_stats_feature_matrix_pair_rows_loaded: 3_031_004,
+            ..SignalDataCacheStats::default()
+        };
+
+        let profile = compare_return_risk_cache_economics(raw, stats);
+
+        assert_eq!(
+            profile.recommendation,
+            ReturnRiskCacheEconomicsRecommendation::Inconclusive
+        );
+        assert_eq!(profile.reason, "stats_matrix_raw_fallback_present");
+        assert_eq!(profile.stats_matrix_raw_fallback_hits, 1);
+        assert_eq!(
+            profile.stats_matrix_raw_fallback_return_values_loaded,
+            4_155_042
+        );
+        assert_eq!(profile.stats_matrix_payload_rows_loaded, 3_249_352);
+        assert_eq!(profile.stats_matrix_adjusted_payload_rows_loaded, 7_404_394);
+        assert_eq!(
+            profile.stats_adjusted_to_raw_return_value_ratio,
+            Some(7_404_394.0 / 8_939_638.0)
+        );
+    }
+
+    #[test]
+    fn return_risk_cache_economics_prefers_raw_when_stats_payload_is_larger() {
+        let raw = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 2,
+            persistent_return_risk_feature_matrix_rows_loaded: 5_000,
+            persistent_return_risk_feature_matrix_return_values_loaded: 100_000,
+            ..SignalDataCacheStats::default()
+        };
+        let stats = SignalDataCacheStats {
+            persistent_return_risk_stats_feature_matrix_hits: 4,
+            persistent_return_risk_stats_feature_matrix_misses: 0,
+            persistent_return_risk_stats_feature_matrix_writes: 0,
+            persistent_return_risk_stats_feature_matrix_stats_rows_loaded: 5_000,
+            persistent_return_risk_stats_feature_matrix_pair_rows_loaded: 120_000,
+            ..SignalDataCacheStats::default()
+        };
+
+        let profile = compare_return_risk_cache_economics(raw, stats);
+
+        assert_eq!(
+            profile.recommendation,
+            ReturnRiskCacheEconomicsRecommendation::PreferRawMatrix
+        );
+        assert_eq!(
+            profile.reason,
+            "stats_payload_not_smaller_than_raw_return_values"
+        );
+        assert_eq!(profile.stats_matrix_payload_rows_loaded, 125_000);
+        assert_eq!(profile.stats_to_raw_return_value_ratio, Some(1.25));
+        assert_eq!(profile.stats_pair_to_stats_row_ratio, Some(24.0));
+    }
+
+    #[test]
     fn return_history_cache_reuses_covering_symbol_window() {
         let cached_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let cached_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
@@ -17386,6 +18668,7 @@ mod tests {
                 feature_start: train_start,
                 feature_end: train_end,
                 lookback_days: 60,
+                return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
                 symbols: vec!["BBB".to_string(), "AAA".to_string()],
                 score_days: vec![train_start],
             },
@@ -17398,6 +18681,7 @@ mod tests {
                 feature_start: train_start,
                 feature_end: train_end,
                 lookback_days: 60,
+                return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
                 symbols: vec!["CCC".to_string(), "AAA".to_string()],
                 score_days: vec![train_end, train_start],
             },
@@ -17410,6 +18694,7 @@ mod tests {
                 feature_start: train_start,
                 feature_end: train_end,
                 lookback_days: 120,
+                return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
                 symbols: vec!["AAA".to_string()],
                 score_days: vec![train_end],
             },
@@ -17427,6 +18712,44 @@ mod tests {
         assert_eq!(groups[1].key.lookback_days, 120);
         assert_eq!(groups[1].symbols, vec!["AAA".to_string()]);
         assert_eq!(groups[1].score_days, vec![train_end]);
+    }
+
+    #[test]
+    fn factor_signal_prewarm_groups_keep_return_risk_cache_modes_separate() {
+        let train_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let train_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let base = FactorSignalFeaturePrewarmCandidate {
+            data_version_id: "full-market-2016-v1".to_string(),
+            train_start,
+            train_end,
+            test_start: train_start,
+            test_end: train_end,
+            feature_start: train_start,
+            feature_end: train_end,
+            lookback_days: 60,
+            return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
+            symbols: vec!["AAA".to_string()],
+            score_days: vec![train_start],
+        };
+        let stats = FactorSignalFeaturePrewarmCandidate {
+            return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::StatsMatrixExperimental,
+            symbols: vec!["BBB".to_string()],
+            ..base.clone()
+        };
+
+        let groups = merge_factor_signal_feature_prewarm_groups(vec![base, stats]);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0].key.return_risk_feature_cache_mode,
+            ReturnRiskFeatureCacheMode::RawMatrix
+        );
+        assert_eq!(groups[0].symbols, vec!["AAA".to_string()]);
+        assert_eq!(
+            groups[1].key.return_risk_feature_cache_mode,
+            ReturnRiskFeatureCacheMode::StatsMatrixExperimental
+        );
+        assert_eq!(groups[1].symbols, vec!["BBB".to_string()]);
     }
 
     #[test]
@@ -17717,6 +19040,64 @@ mod tests {
             PersistentMarketFeatureKind::ReturnRiskStatsFeatureMatrix.as_str(),
             "return_risk_stats_feature_matrix"
         );
+    }
+
+    #[test]
+    fn return_risk_stats_feature_matrix_cache_key_includes_pairwise_scope() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let day1 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 2, 6).unwrap();
+        let symbols = vec![
+            "AAA".to_string(),
+            "BBB".to_string(),
+            "CCC".to_string(),
+            "DDD".to_string(),
+        ];
+        let scope_ab = ReturnRiskStatsPairwiseScopePlan {
+            score_days: vec![day1, day2],
+            symbols: symbols.clone(),
+            pair_keys: vec![pairwise_correlation_key(day1, "AAA", "BBB")],
+        };
+        let reordered_scope_ab = ReturnRiskStatsPairwiseScopePlan {
+            score_days: vec![day2, day1],
+            symbols: symbols.clone(),
+            pair_keys: vec![pairwise_correlation_key(day1, "BBB", "AAA")],
+        };
+        let scope_cd = ReturnRiskStatsPairwiseScopePlan {
+            score_days: vec![day1, day2],
+            symbols: symbols.clone(),
+            pair_keys: vec![pairwise_correlation_key(day2, "CCC", "DDD")],
+        };
+
+        let first = persistent_return_risk_stats_feature_matrix_cache_key(
+            "full-market-2016-v1",
+            start,
+            end,
+            60,
+            &symbols,
+            &scope_ab,
+        );
+        let reordered = persistent_return_risk_stats_feature_matrix_cache_key(
+            "full-market-2016-v1",
+            start,
+            end,
+            60,
+            &symbols,
+            &reordered_scope_ab,
+        );
+        let different_pair_scope = persistent_return_risk_stats_feature_matrix_cache_key(
+            "full-market-2016-v1",
+            start,
+            end,
+            60,
+            &symbols,
+            &scope_cd,
+        );
+
+        assert_eq!(first.cache_key, reordered.cache_key);
+        assert_ne!(first.cache_key, different_pair_scope.cache_key);
+        assert!(first.cache_key.contains("pairs:"));
     }
 
     #[test]

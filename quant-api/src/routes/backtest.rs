@@ -26,8 +26,8 @@ use quant_backtest::signal_generator::{
     CashUtilizationProfile, EventGateConfig, EventGateMode, ExecutionImpactBudgetProfile,
     FactorSignalBatchPrewarmReport, FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport,
     MarketFeatureSnapshotScope, MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod,
-    PredictionBlendConfig, RiskContributionControlProfile, ScoreDirection, SignalConfig,
-    SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
+    PredictionBlendConfig, ReturnRiskFeatureCacheMode, RiskContributionControlProfile,
+    ScoreDirection, SignalConfig, SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -920,6 +920,7 @@ pub struct RunFactorBacktestReq {
     pub initial_capital: f64,
     pub mode: Option<String>,
     pub persistence_mode: Option<String>,
+    pub return_risk_feature_cache_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1360,6 +1361,42 @@ fn build_factor_signal_config(
         score_overlay: None,
         portfolio_sleeve: None,
     })
+}
+
+fn build_market_feature_snapshot_scope(
+    req: &RunFactorBacktestReq,
+    effective_start: NaiveDate,
+    end: NaiveDate,
+) -> Result<MarketFeatureSnapshotScope, String> {
+    let mode = parse_return_risk_feature_cache_mode(req)?;
+    Ok(MarketFeatureSnapshotScope::new(
+        &req.data_version_id,
+        effective_start,
+        end,
+        effective_start,
+        end,
+    )
+    .with_return_risk_feature_cache_mode(mode))
+}
+
+fn parse_return_risk_feature_cache_mode(
+    req: &RunFactorBacktestReq,
+) -> Result<ReturnRiskFeatureCacheMode, String> {
+    match req
+        .return_risk_feature_cache_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some("raw_matrix") | Some("raw-matrix") => Ok(ReturnRiskFeatureCacheMode::RawMatrix),
+        Some("stats_matrix_experimental") | Some("stats-matrix-experimental") => Ok(
+            ReturnRiskFeatureCacheMode::StatsMatrixExperimental,
+        ),
+        Some(value) => Err(format!(
+            "return_risk_feature_cache_mode must be raw_matrix or stats_matrix_experimental, got {}",
+            value
+        )),
+    }
 }
 
 fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskControlConfig, String> {
@@ -1987,6 +2024,7 @@ pub(crate) async fn prewarm_factor_signal_cache_for_requests(
         let config = build_factor_signal_config(req, rebalance_freq_days, max_participation_rate)?;
         let benchmark = req.benchmark.clone().unwrap_or_else(|| "000300.SH".into());
         let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
+        let return_risk_feature_cache_mode = parse_return_risk_feature_cache_mode(req)?;
         specs.push(FactorSignalFeaturePrewarmSpec {
             data_version_id: req.data_version_id.clone(),
             train_start: effective_start,
@@ -1997,6 +2035,7 @@ pub(crate) async fn prewarm_factor_signal_cache_for_requests(
             feature_end: end,
             config,
             regime_policy,
+            return_risk_feature_cache_mode,
         });
     }
 
@@ -2072,13 +2111,10 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     );
 
     let regime_policy = build_market_regime_policy(req.market_regime.as_ref(), &benchmark)?;
-    let snapshot_scope = MarketFeatureSnapshotScope::new(
-        &req.data_version_id,
-        effective_start,
-        end,
-        effective_start,
-        end,
-    );
+    let snapshot_scope = match build_market_feature_snapshot_scope(&req, effective_start, end) {
+        Ok(value) => value,
+        Err(message) => return Err(message),
+    };
     let signals = match (regime_policy.as_ref(), signal_cache.as_deref_mut()) {
         (Some(policy), Some(cache)) => {
             quant_backtest::signal_generator::generate_regime_signals_with_cache_and_market_feature_snapshot(
@@ -2156,6 +2192,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
                 lookback_days,
                 &all_symbols,
                 &[],
+                parse_return_risk_feature_cache_mode(&req)?,
             )
             .await
             .map_err(|error| error.to_string())?,
@@ -3334,6 +3371,41 @@ mod tests {
         assert_eq!(risk_control.reentry_cooldown_days, Some(10));
     }
 
+    #[test]
+    fn market_feature_snapshot_scope_defaults_to_raw_return_risk_matrix_cache() {
+        let req = factor_risk_control_request_template(None, None, None, None, None);
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+
+        let scope = build_market_feature_snapshot_scope(&req, start, end).expect("scope");
+
+        assert!(!scope.prefer_return_risk_stats_cache());
+    }
+
+    #[test]
+    fn market_feature_snapshot_scope_can_opt_into_stats_return_risk_cache_experiment() {
+        let mut req = factor_risk_control_request_template(None, None, None, None, None);
+        req.return_risk_feature_cache_mode = Some("stats_matrix_experimental".to_string());
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+
+        let scope = build_market_feature_snapshot_scope(&req, start, end).expect("scope");
+
+        assert!(scope.prefer_return_risk_stats_cache());
+    }
+
+    #[test]
+    fn market_feature_snapshot_scope_rejects_unknown_return_risk_cache_mode() {
+        let mut req = factor_risk_control_request_template(None, None, None, None, None);
+        req.return_risk_feature_cache_mode = Some("stats_matrix".to_string());
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+
+        let error = build_market_feature_snapshot_scope(&req, start, end).unwrap_err();
+
+        assert!(error.contains("return_risk_feature_cache_mode"));
+    }
+
     fn factor_risk_control_request_template(
         event_gate_combo_name: Option<&str>,
         event_gate_mode: Option<&str>,
@@ -3402,6 +3474,7 @@ mod tests {
             initial_capital: 1_000_000.0,
             mode: Some("standard".to_string()),
             persistence_mode: None,
+            return_risk_feature_cache_mode: None,
             portfolio_drawdown_reduce_start_pct: Some(0.05),
             portfolio_drawdown_reduce_full_pct: Some(0.15),
             portfolio_drawdown_min_exposure: Some(0.4),

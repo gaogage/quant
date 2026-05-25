@@ -30,7 +30,8 @@ use quant_backtest::runner::{
     BacktestDataCache, BacktestDataCacheSnapshot, BacktestDataCacheStats,
 };
 use quant_backtest::signal_generator::{
-    signal_cache_stats_delta, SignalDataCache, SignalDataCacheSnapshot, SignalDataCacheStats,
+    compare_return_risk_cache_economics, signal_cache_stats_delta, SignalDataCache,
+    SignalDataCacheSnapshot, SignalDataCacheStats,
 };
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +125,7 @@ pub struct Phase7OosWalkForwardDiscoveryRequest {
 pub struct Phase7OosProfileComparisonPlanRequest {
     pub base: Phase7OosWalkForwardDiscoveryRequest,
     pub profiles: Option<Vec<String>>,
+    pub return_risk_cache_comparison: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -177,6 +179,12 @@ pub struct EvaluateRobustnessRequest {
 pub struct EliteValidationReportRequest {
     pub top_n: Option<usize>,
     pub gate_policy: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReturnRiskCacheEconomicsReportRequest {
+    pub raw_experiment_run_id: String,
+    pub stats_experiment_run_id: String,
 }
 
 #[derive(Clone)]
@@ -660,6 +668,16 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "bull_sleeve_cash_recovery"
         | "phase7_execution_bull_sleeve_cash_recovery"
         | "phase7_eu"
+        | "professional_execution_return_first_fill_repair"
+        | "execution_return_first_fill_repair"
+        | "return_first_fill_repair"
+        | "phase7_execution_return_first_fill_repair"
+        | "phase7_ey"
+        | "professional_execution_pit_nonlinear_alpha_regime_rebuild"
+        | "execution_pit_nonlinear_alpha_regime_rebuild"
+        | "pit_nonlinear_alpha_regime_rebuild"
+        | "phase7_execution_pit_nonlinear_alpha_regime_rebuild"
+        | "phase7_ez"
         | "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
         | "oos_regime_alpha_rebuild"
@@ -1613,6 +1631,22 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_execution_bull_sleeve_cash_recovery".to_string(),
             LayeredSearchConfig::professional_execution_bull_sleeve_cash_recovery_default(),
         ),
+        "professional_execution_return_first_fill_repair"
+        | "execution_return_first_fill_repair"
+        | "return_first_fill_repair"
+        | "phase7_execution_return_first_fill_repair"
+        | "phase7_ey" => (
+            "professional_execution_return_first_fill_repair".to_string(),
+            LayeredSearchConfig::professional_execution_return_first_fill_repair_default(),
+        ),
+        "professional_execution_pit_nonlinear_alpha_regime_rebuild"
+        | "execution_pit_nonlinear_alpha_regime_rebuild"
+        | "pit_nonlinear_alpha_regime_rebuild"
+        | "phase7_execution_pit_nonlinear_alpha_regime_rebuild"
+        | "phase7_ez" => (
+            "professional_execution_pit_nonlinear_alpha_regime_rebuild".to_string(),
+            LayeredSearchConfig::professional_execution_pit_nonlinear_alpha_regime_rebuild_default(),
+        ),
         "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
         | "oos_regime_alpha_rebuild"
@@ -2253,7 +2287,11 @@ pub async fn run_phase7_oos_walk_forward_discovery(
 pub async fn plan_phase7_oos_profile_comparison(
     Json(req): Json<Phase7OosProfileComparisonPlanRequest>,
 ) -> impl IntoResponse {
-    match build_phase7_oos_profile_comparison_plan(&req.base, req.profiles) {
+    match build_phase7_oos_profile_comparison_plan(
+        &req.base,
+        req.profiles,
+        req.return_risk_cache_comparison,
+    ) {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -2338,6 +2376,16 @@ pub async fn promote_optimization_trial(
     Json(req): Json<PromoteOptimizationRequest>,
 ) -> impl IntoResponse {
     match promote_trial(&state.db, &task_id, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn report_return_risk_cache_economics(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ReturnRiskCacheEconomicsReportRequest>,
+) -> impl IntoResponse {
+    match build_return_risk_cache_economics_report(&state.db, &req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -2591,18 +2639,26 @@ async fn start_phase7_oos_profile_comparison_smoke(
     db: &sqlx::PgPool,
     req: Phase7OosProfileComparisonPlanRequest,
 ) -> Result<Value, String> {
-    let launch_requests =
-        build_phase7_oos_profile_comparison_launch_requests(&req.base, req.profiles)?;
+    let return_risk_cache_comparison =
+        return_risk_cache_comparison_enabled(req.return_risk_cache_comparison);
+    let launch_requests = build_phase7_oos_profile_comparison_launch_requests(
+        &req.base,
+        req.profiles,
+        req.return_risk_cache_comparison,
+    )?;
     let mut launches = Vec::new();
     for launch_req in launch_requests {
         let search_profile = launch_req
             .search_profile
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
+        let return_risk_feature_cache_mode = request_return_risk_feature_cache_mode(&launch_req)
+            .unwrap_or_else(|| "inherited".into());
         let request = oos_request_plan_json(&launch_req);
         let launched = start_phase7_oos_walk_forward_discovery_background(db, launch_req).await?;
         launches.push(json!({
             "search_profile": search_profile,
+            "return_risk_feature_cache_mode": return_risk_feature_cache_mode,
             "experiment_run_id": launched["experiment_run_id"],
             "status": launched["status"],
             "poll_url": launched["poll_url"],
@@ -2610,11 +2666,20 @@ async fn start_phase7_oos_profile_comparison_smoke(
             "plan": launched["plan"],
         }));
     }
+    let profile_count = launches
+        .iter()
+        .filter_map(|launch| launch.get("search_profile").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let cache_economics_report_plan =
+        cache_economics_report_launch_plan(return_risk_cache_comparison, &launches);
 
     Ok(json!({
         "search_method": "phase7_oos_profile_comparison_smoke",
         "execution_mode": "background",
-        "profile_count": launches.len(),
+        "profile_count": profile_count,
+        "launch_count": launches.len(),
+        "return_risk_cache_comparison": cache_economics_report_plan,
         "launches": launches,
     }))
 }
@@ -2703,6 +2768,7 @@ async fn execute_phase7_oos_walk_forward_discovery(
                 &plan,
                 &window_results,
                 &stitched_summary,
+                &oos_cache_report(&oos_signal_cache, &oos_backtest_cache),
             )
             .await?;
         }
@@ -2720,6 +2786,7 @@ async fn execute_phase7_oos_walk_forward_discovery(
         &stitched_summary,
         &final_promotion_gate_policy,
     );
+    let cache_report = oos_cache_report(&oos_signal_cache, &oos_backtest_cache);
     let experiment_run_id = match experiment_run_id {
         Some(existing_experiment_run_id) => {
             complete_oos_walk_forward_experiment(
@@ -2730,6 +2797,7 @@ async fn execute_phase7_oos_walk_forward_discovery(
                 &window_results,
                 &stitched_summary,
                 &gate_report,
+                &cache_report,
             )
             .await?;
             existing_experiment_run_id
@@ -2742,6 +2810,7 @@ async fn execute_phase7_oos_walk_forward_discovery(
                 &window_results,
                 &stitched_summary,
                 &gate_report,
+                &cache_report,
             )
             .await?
         }
@@ -2760,10 +2829,7 @@ async fn execute_phase7_oos_walk_forward_discovery(
             "gates": gate_report,
             "status": oos_gate_status(&gate_report),
         },
-        "cache": {
-            "oos_signal_cache": signal_cache_stats_delta(SignalDataCacheStats::default(), oos_signal_cache.stats()),
-            "oos_backtest_cache": backtest_cache_stats_delta(BacktestDataCacheStats::default(), oos_backtest_cache.stats()),
-        }
+        "cache": cache_report
     }))
 }
 
@@ -4019,10 +4085,85 @@ fn build_oos_discovery_plan(
 
 fn default_phase7_oos_comparison_profiles() -> Vec<String> {
     vec![
+        "phase7_ec".to_string(),
+        "phase7_eu".to_string(),
         "phase7_ev".to_string(),
-        "phase7_ew".to_string(),
-        "phase7_ex".to_string(),
     ]
+}
+
+const RETURN_RISK_CACHE_ECONOMICS_REPORT_ENDPOINT: &str =
+    "/api/v1/quant/experiments/return-risk-cache-economics/report";
+
+fn return_risk_cache_comparison_enabled(value: Option<bool>) -> bool {
+    value.unwrap_or(false)
+}
+
+fn normalize_profile_comparison_profiles(
+    profiles: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let profiles = profiles.unwrap_or_else(default_phase7_oos_comparison_profiles);
+    if profiles.is_empty() {
+        return Err("profile comparison requires at least one search_profile".to_string());
+    }
+    profiles
+        .into_iter()
+        .map(|profile| {
+            let profile = profile.trim().to_string();
+            if profile.is_empty() {
+                Err("profile comparison search_profile must not be empty".to_string())
+            } else {
+                Ok(profile)
+            }
+        })
+        .collect()
+}
+
+fn profile_comparison_return_risk_cache_modes(enabled: bool) -> Vec<Option<&'static str>> {
+    if enabled {
+        vec![Some("raw_matrix"), Some("stats_matrix_experimental")]
+    } else {
+        vec![None]
+    }
+}
+
+fn normalize_return_risk_feature_cache_mode(value: &str) -> Result<&'static str, String> {
+    match value.trim() {
+        "raw_matrix" | "raw-matrix" => Ok("raw_matrix"),
+        "stats_matrix_experimental" | "stats-matrix-experimental" => {
+            Ok("stats_matrix_experimental")
+        }
+        other => Err(format!(
+            "return_risk_feature_cache_mode must be raw_matrix or stats_matrix_experimental, got {}",
+            other
+        )),
+    }
+}
+
+fn set_request_return_risk_feature_cache_mode(
+    req: &mut Phase7OosWalkForwardDiscoveryRequest,
+    mode: &str,
+) -> Result<(), String> {
+    let mode = normalize_return_risk_feature_cache_mode(mode)?;
+    let mut template = req
+        .backtest_template
+        .clone()
+        .unwrap_or_else(default_phase7_backtest_template);
+    let object = template
+        .as_object_mut()
+        .ok_or_else(|| "backtest_template must be a JSON object".to_string())?;
+    object.insert("return_risk_feature_cache_mode".to_string(), json!(mode));
+    req.backtest_template = Some(template);
+    Ok(())
+}
+
+fn request_return_risk_feature_cache_mode(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+) -> Option<String> {
+    req.backtest_template
+        .as_ref()
+        .and_then(|template| template.get("return_risk_feature_cache_mode"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn profile_comparison_request(
@@ -4039,6 +4180,18 @@ fn profile_comparison_request(
             .unwrap_or_else(|| "auto".to_string()),
     );
     req
+}
+
+fn profile_comparison_request_for_cache_mode(
+    base: &Phase7OosWalkForwardDiscoveryRequest,
+    search_profile: &str,
+    cache_mode: Option<&str>,
+) -> Result<Phase7OosWalkForwardDiscoveryRequest, String> {
+    let mut req = profile_comparison_request(base, search_profile);
+    if let Some(cache_mode) = cache_mode {
+        set_request_return_risk_feature_cache_mode(&mut req, cache_mode)?;
+    }
+    Ok(req)
 }
 
 fn oos_request_plan_json(req: &Phase7OosWalkForwardDiscoveryRequest) -> Value {
@@ -4060,39 +4213,51 @@ fn oos_request_plan_json(req: &Phase7OosWalkForwardDiscoveryRequest) -> Value {
         "execution_mode": req.execution_mode,
         "oos_top_n": req.oos_top_n,
         "enable_cost_capacity_perturbation_gate": req.enable_cost_capacity_perturbation_gate,
+        "return_risk_feature_cache_mode": request_return_risk_feature_cache_mode(req),
     })
 }
 
 fn build_phase7_oos_profile_comparison_plan(
     base: &Phase7OosWalkForwardDiscoveryRequest,
     profiles: Option<Vec<String>>,
+    return_risk_cache_comparison: Option<bool>,
 ) -> Result<Value, String> {
-    let profiles = profiles.unwrap_or_else(default_phase7_oos_comparison_profiles);
-    if profiles.is_empty() {
-        return Err("profile comparison requires at least one search_profile".to_string());
-    }
+    let profiles = normalize_profile_comparison_profiles(profiles)?;
+    let return_risk_cache_comparison =
+        return_risk_cache_comparison_enabled(return_risk_cache_comparison);
+    let cache_modes = profile_comparison_return_risk_cache_modes(return_risk_cache_comparison);
 
     let mut profile_plans = Vec::new();
-    for profile in profiles {
-        let profile = profile.trim();
-        if profile.is_empty() {
-            return Err("profile comparison search_profile must not be empty".to_string());
+    for profile in &profiles {
+        for cache_mode in &cache_modes {
+            let req = profile_comparison_request_for_cache_mode(base, profile, *cache_mode)?;
+            let plan = build_oos_discovery_plan(&req)?;
+            let plan_json = oos_discovery_plan_json(&plan);
+            let config = oos_walk_forward_experiment_config(&req, &plan_json);
+            let return_risk_feature_cache_mode = request_return_risk_feature_cache_mode(&req);
+            profile_plans.push(json!({
+                "search_profile": profile,
+                "return_risk_feature_cache_mode": return_risk_feature_cache_mode,
+                "cache_pair_key": if return_risk_cache_comparison {
+                    json!(format!("{}:return_risk_cache", profile))
+                } else {
+                    Value::Null
+                },
+                "request": oos_request_plan_json(&req),
+                "plan": plan_json,
+                "config": config,
+            }));
         }
-        let req = profile_comparison_request(base, profile);
-        let plan = build_oos_discovery_plan(&req)?;
-        let plan_json = oos_discovery_plan_json(&plan);
-        let config = oos_walk_forward_experiment_config(&req, &plan_json);
-        profile_plans.push(json!({
-            "search_profile": profile,
-            "request": oos_request_plan_json(&req),
-            "plan": plan_json,
-            "config": config,
-        }));
     }
 
     Ok(json!({
         "search_method": "phase7_oos_profile_comparison_plan",
-        "profile_count": profile_plans.len(),
+        "profile_count": profiles.len(),
+        "launch_count": profile_plans.len(),
+        "return_risk_cache_comparison": return_risk_cache_comparison_plan(
+            return_risk_cache_comparison,
+            profiles.len()
+        ),
         "profiles": profile_plans,
     }))
 }
@@ -4100,7 +4265,7 @@ fn build_phase7_oos_profile_comparison_plan(
 fn bounded_profile_comparison_smoke_request(
     base: &Phase7OosWalkForwardDiscoveryRequest,
     search_profile: &str,
-) -> Phase7OosWalkForwardDiscoveryRequest {
+) -> Result<Phase7OosWalkForwardDiscoveryRequest, String> {
     let mut req = profile_comparison_request(base, search_profile);
     req.plan_only = Some(false);
     req.execution_mode = Some("background".to_string());
@@ -4113,29 +4278,108 @@ fn bounded_profile_comparison_smoke_request(
     req.trial_batch_limit = Some(req.trial_batch_limit.unwrap_or(8).clamp(1, 8));
     req.max_batches_per_window = Some(req.max_batches_per_window.unwrap_or(1).clamp(1, 1));
     req.oos_top_n = Some(req.oos_top_n.unwrap_or(3).clamp(1, 3));
-    req
+    Ok(req)
 }
 
 fn build_phase7_oos_profile_comparison_launch_requests(
     base: &Phase7OosWalkForwardDiscoveryRequest,
     profiles: Option<Vec<String>>,
+    return_risk_cache_comparison: Option<bool>,
 ) -> Result<Vec<Phase7OosWalkForwardDiscoveryRequest>, String> {
-    let profiles = profiles.unwrap_or_else(default_phase7_oos_comparison_profiles);
-    if profiles.is_empty() {
-        return Err("profile comparison launch requires at least one search_profile".to_string());
+    let profiles = normalize_profile_comparison_profiles(profiles)
+        .map_err(|message| message.replace("requires", "launch requires"))?;
+    let return_risk_cache_comparison =
+        return_risk_cache_comparison_enabled(return_risk_cache_comparison);
+    let cache_modes = profile_comparison_return_risk_cache_modes(return_risk_cache_comparison);
+
+    let mut requests = Vec::new();
+    for profile in &profiles {
+        for cache_mode in &cache_modes {
+            let mut req = bounded_profile_comparison_smoke_request(base, profile)?;
+            if let Some(cache_mode) = cache_mode {
+                set_request_return_risk_feature_cache_mode(&mut req, cache_mode)?;
+            }
+            requests.push(req);
+        }
+    }
+    Ok(requests)
+}
+
+fn return_risk_cache_comparison_plan(enabled: bool, pair_count: usize) -> Value {
+    json!({
+        "enabled": enabled,
+        "pair_count": if enabled { pair_count } else { 0 },
+        "modes": if enabled {
+            json!(["raw_matrix", "stats_matrix_experimental"])
+        } else {
+            json!([])
+        },
+        "report_endpoint": if enabled {
+            json!(RETURN_RISK_CACHE_ECONOMICS_REPORT_ENDPOINT)
+        } else {
+            Value::Null
+        },
+        "pairing_rule": if enabled {
+            json!("same search_profile, windows, gates, search budget, and training data; only backtest_template.return_risk_feature_cache_mode differs")
+        } else {
+            Value::Null
+        },
+    })
+}
+
+fn cache_economics_report_launch_plan(enabled: bool, launches: &[Value]) -> Value {
+    if !enabled {
+        return return_risk_cache_comparison_plan(false, 0);
     }
 
-    profiles
-        .iter()
-        .map(|profile| {
-            let profile = profile.trim();
-            if profile.is_empty() {
-                Err("profile comparison search_profile must not be empty".to_string())
-            } else {
-                Ok(bounded_profile_comparison_smoke_request(base, profile))
-            }
+    let mut pairs: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    for launch in launches {
+        let Some(profile) = launch.get("search_profile").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(mode) = launch
+            .get("return_risk_feature_cache_mode")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(experiment_run_id) = launch.get("experiment_run_id").and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let entry = pairs.entry(profile.to_string()).or_default();
+        match mode {
+            "raw_matrix" => entry.0 = Some(experiment_run_id.to_string()),
+            "stats_matrix_experimental" => entry.1 = Some(experiment_run_id.to_string()),
+            _ => {}
+        }
+    }
+
+    let report_pairs = pairs
+        .into_iter()
+        .map(|(profile, (raw_id, stats_id))| {
+            json!({
+                "search_profile": profile,
+                "raw_experiment_run_id": raw_id,
+                "stats_experiment_run_id": stats_id,
+                "ready_when": "both experiments are completed",
+                "report_endpoint": RETURN_RISK_CACHE_ECONOMICS_REPORT_ENDPOINT,
+                "report_request": {
+                    "raw_experiment_run_id": raw_id,
+                    "stats_experiment_run_id": stats_id,
+                }
+            })
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    json!({
+        "enabled": true,
+        "pair_count": report_pairs.len(),
+        "modes": ["raw_matrix", "stats_matrix_experimental"],
+        "report_endpoint": RETURN_RISK_CACHE_ECONOMICS_REPORT_ENDPOINT,
+        "ready_when": "call report endpoint only after each raw/stats pair reaches completed status",
+        "pairs": report_pairs,
+    })
 }
 
 fn build_holdout_oos_windows(
@@ -4889,6 +5133,7 @@ async fn persist_oos_walk_forward_experiment(
     windows: &[Value],
     stitched_summary: &Value,
     gates: &Value,
+    cache_report: &Value,
 ) -> Result<String, String> {
     let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let config = oos_walk_forward_experiment_config(req, plan);
@@ -4898,7 +5143,8 @@ async fn persist_oos_walk_forward_experiment(
             "metrics": stitched_summary,
             "gates": gates,
             "status": oos_gate_status(gates),
-        }
+        },
+        "cache": cache_report,
     });
     sqlx::query(
         "INSERT INTO experiment_run
@@ -4933,6 +5179,7 @@ async fn create_running_oos_walk_forward_experiment(
         plan["window_count"].as_u64().unwrap_or(0) as usize,
         &[],
         &json!({}),
+        &json!({}),
     );
     sqlx::query(
         "INSERT INTO experiment_run
@@ -4962,8 +5209,14 @@ async fn update_oos_walk_forward_experiment_progress(
     plan: &OosDiscoveryPlan,
     windows: &[Value],
     stitched_summary: &Value,
+    cache_report: &Value,
 ) -> Result<(), String> {
-    let metrics = oos_walk_forward_progress_metrics(plan.windows.len(), windows, stitched_summary);
+    let metrics = oos_walk_forward_progress_metrics(
+        plan.windows.len(),
+        windows,
+        stitched_summary,
+        cache_report,
+    );
     sqlx::query(
         "UPDATE experiment_run
          SET metrics = $2,
@@ -4991,6 +5244,7 @@ async fn complete_oos_walk_forward_experiment(
     windows: &[Value],
     stitched_summary: &Value,
     gates: &Value,
+    cache_report: &Value,
 ) -> Result<(), String> {
     let config = oos_walk_forward_experiment_config(req, plan);
     let metrics = json!({
@@ -4999,7 +5253,8 @@ async fn complete_oos_walk_forward_experiment(
             "metrics": stitched_summary,
             "gates": gates,
             "status": oos_gate_status(gates),
-        }
+        },
+        "cache": cache_report,
     });
     sqlx::query(
         "UPDATE experiment_run
@@ -5082,6 +5337,7 @@ fn oos_walk_forward_experiment_config(
         "requested_train_cache_mode": train_execution_policy.requested_cache_mode,
         "train_trial_concurrency": train_execution_policy.trial_concurrency,
         "train_cache_mode": train_execution_policy.cache_mode,
+        "return_risk_feature_cache_mode": request_return_risk_feature_cache_mode(req),
         "max_batches_per_window": req.max_batches_per_window,
         "require_train_robustness_approval": req.require_train_robustness_approval.unwrap_or(true),
         "train_selection_gate_policy": train_selection_gate_policy,
@@ -5123,6 +5379,7 @@ fn oos_walk_forward_progress_metrics(
     total_windows: usize,
     windows: &[Value],
     stitched_summary: &Value,
+    cache_report: &Value,
 ) -> Value {
     let completed_windows = windows.len();
     let progress_pct = if total_windows == 0 {
@@ -5139,8 +5396,199 @@ fn oos_walk_forward_progress_metrics(
         "windows": windows,
         "stitched_oos": {
             "metrics": stitched_summary,
-        }
+        },
+        "cache": cache_report,
     })
+}
+
+fn oos_cache_report(signal_cache: &SignalDataCache, backtest_cache: &BacktestDataCache) -> Value {
+    json!({
+        "oos_signal_cache": signal_cache_stats_delta(
+            SignalDataCacheStats::default(),
+            signal_cache.stats()
+        ),
+        "oos_backtest_cache": backtest_cache_stats_delta(
+            BacktestDataCacheStats::default(),
+            backtest_cache.stats()
+        ),
+    })
+}
+
+async fn build_return_risk_cache_economics_report(
+    db: &sqlx::PgPool,
+    req: &ReturnRiskCacheEconomicsReportRequest,
+) -> Result<Value, String> {
+    let raw_run = load_experiment_run_metrics(db, &req.raw_experiment_run_id).await?;
+    let stats_run = load_experiment_run_metrics(db, &req.stats_experiment_run_id).await?;
+    ensure_completed_cache_economics_input(&req.raw_experiment_run_id, "raw", &raw_run.status)?;
+    ensure_completed_cache_economics_input(
+        &req.stats_experiment_run_id,
+        "stats",
+        &stats_run.status,
+    )?;
+    let raw_signal_cache = aggregate_signal_cache_stats_from_experiment_metrics(&raw_run.metrics);
+    let stats_signal_cache =
+        aggregate_signal_cache_stats_from_experiment_metrics(&stats_run.metrics);
+    let report = return_risk_cache_economics_report_json(
+        &req.raw_experiment_run_id,
+        raw_signal_cache,
+        &req.stats_experiment_run_id,
+        stats_signal_cache,
+    );
+    let report_experiment_run_id = persist_return_risk_cache_economics_report(
+        db,
+        &req.raw_experiment_run_id,
+        &req.stats_experiment_run_id,
+        &report,
+    )
+    .await?;
+
+    Ok(json!({
+        "experiment_run_id": report_experiment_run_id,
+        "report": report,
+    }))
+}
+
+#[derive(Debug, Clone)]
+struct ExperimentRunMetrics {
+    metrics: Value,
+    status: String,
+}
+
+async fn load_experiment_run_metrics(
+    db: &sqlx::PgPool,
+    experiment_run_id: &str,
+) -> Result<ExperimentRunMetrics, String> {
+    let row = sqlx::query_as::<_, (Option<Value>, String)>(
+        "SELECT metrics, status
+         FROM experiment_run
+         WHERE experiment_run_id = $1",
+    )
+    .bind(experiment_run_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("Failed to load experiment_run metrics: {}", error))?
+    .ok_or_else(|| format!("experiment_run not found: {}", experiment_run_id))?;
+    Ok(ExperimentRunMetrics {
+        metrics: row.0.unwrap_or_else(|| json!({})),
+        status: row.1,
+    })
+}
+
+fn ensure_completed_cache_economics_input(
+    experiment_run_id: &str,
+    role: &str,
+    status: &str,
+) -> Result<(), String> {
+    if status == "completed" {
+        return Ok(());
+    }
+    Err(format!(
+        "return-risk cache economics report requires completed {} experiment {}; status={}",
+        role, experiment_run_id, status
+    ))
+}
+
+async fn persist_return_risk_cache_economics_report(
+    db: &sqlx::PgPool,
+    raw_experiment_run_id: &str,
+    stats_experiment_run_id: &str,
+    report: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let config = json!({
+        "raw_experiment_run_id": raw_experiment_run_id,
+        "stats_experiment_run_id": stats_experiment_run_id,
+        "comparison": "return_risk_cache_economics",
+    });
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'return_risk_cache_economics_report', 'experiment_pair', $2,
+                 $3, $4, 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(raw_experiment_run_id)
+    .bind(&config)
+    .bind(report)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to insert return/risk cache economics experiment_run: {}",
+            error
+        )
+    })?;
+    Ok(experiment_run_id)
+}
+
+fn return_risk_cache_economics_report_json(
+    raw_experiment_run_id: &str,
+    raw_signal_cache: SignalDataCacheStats,
+    stats_experiment_run_id: &str,
+    stats_signal_cache: SignalDataCacheStats,
+) -> Value {
+    let economics = compare_return_risk_cache_economics(raw_signal_cache, stats_signal_cache);
+    json!({
+        "raw_experiment_run_id": raw_experiment_run_id,
+        "stats_experiment_run_id": stats_experiment_run_id,
+        "raw_signal_cache": raw_signal_cache,
+        "stats_signal_cache": stats_signal_cache,
+        "cache_economics": economics,
+    })
+}
+
+fn aggregate_signal_cache_stats_from_experiment_metrics(metrics: &Value) -> SignalDataCacheStats {
+    let mut total = SignalDataCacheStats::default();
+    add_signal_cache_stats_from_value(&mut total, metrics.get("signal_cache"));
+    let has_oos_signal_cache = add_signal_cache_stats_from_value(
+        &mut total,
+        metrics
+            .get("cache")
+            .and_then(|cache| cache.get("oos_signal_cache")),
+    );
+
+    if let Some(windows) = metrics.get("windows").and_then(Value::as_array) {
+        for window in windows {
+            if let Some(train_batches) = window.get("train_batches").and_then(Value::as_array) {
+                for batch in train_batches {
+                    let has_batch_signal_cache =
+                        add_signal_cache_stats_from_value(&mut total, batch.get("signal_cache"));
+                    if !has_batch_signal_cache {
+                        add_signal_cache_stats_from_value(
+                            &mut total,
+                            batch.pointer("/signal_batch_prewarm/report/cache_delta"),
+                        );
+                    }
+                }
+            }
+            if !has_oos_signal_cache {
+                add_signal_cache_stats_from_value(
+                    &mut total,
+                    window.pointer("/oos_market_feature_prewarm_report/cache_delta"),
+                );
+            }
+        }
+    }
+
+    total
+}
+
+fn add_signal_cache_stats_from_value(
+    total: &mut SignalDataCacheStats,
+    value: Option<&Value>,
+) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    match serde_json::from_value::<SignalDataCacheStats>(value.clone()) {
+        Ok(stats) => {
+            add_signal_cache_stats(total, stats);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 async fn evaluate_discovery_candidates(
@@ -5834,6 +6282,9 @@ fn add_signal_cache_stats(total: &mut SignalDataCacheStats, value: SignalDataCac
     total.return_history_covering_window_hits += value.return_history_covering_window_hits;
     total.return_history_snapshot_hits += value.return_history_snapshot_hits;
     total.return_history_misses += value.return_history_misses;
+    total.persistent_return_history_hits += value.persistent_return_history_hits;
+    total.persistent_return_history_misses += value.persistent_return_history_misses;
+    total.persistent_return_history_writes += value.persistent_return_history_writes;
     total.average_amount_hits += value.average_amount_hits;
     total.average_amount_symbol_hits += value.average_amount_symbol_hits;
     total.average_amount_history_hits += value.average_amount_history_hits;
@@ -5843,6 +6294,45 @@ fn add_signal_cache_stats(total: &mut SignalDataCacheStats, value: SignalDataCac
     total.average_amount_misses += value.average_amount_misses;
     total.average_amount_symbol_misses += value.average_amount_symbol_misses;
     total.average_amount_history_misses += value.average_amount_history_misses;
+    total.persistent_average_amount_history_hits += value.persistent_average_amount_history_hits;
+    total.persistent_average_amount_history_misses +=
+        value.persistent_average_amount_history_misses;
+    total.persistent_average_amount_history_writes +=
+        value.persistent_average_amount_history_writes;
+    total.persistent_pit_average_amount_matrix_hits +=
+        value.persistent_pit_average_amount_matrix_hits;
+    total.persistent_pit_average_amount_matrix_misses +=
+        value.persistent_pit_average_amount_matrix_misses;
+    total.persistent_pit_average_amount_matrix_writes +=
+        value.persistent_pit_average_amount_matrix_writes;
+    total.persistent_return_risk_feature_matrix_hits +=
+        value.persistent_return_risk_feature_matrix_hits;
+    total.persistent_return_risk_feature_matrix_misses +=
+        value.persistent_return_risk_feature_matrix_misses;
+    total.persistent_return_risk_feature_matrix_writes +=
+        value.persistent_return_risk_feature_matrix_writes;
+    total.persistent_return_risk_stats_feature_matrix_hits +=
+        value.persistent_return_risk_stats_feature_matrix_hits;
+    total.persistent_return_risk_stats_feature_matrix_misses +=
+        value.persistent_return_risk_stats_feature_matrix_misses;
+    total.persistent_return_risk_stats_feature_matrix_writes +=
+        value.persistent_return_risk_stats_feature_matrix_writes;
+    total.persistent_return_risk_feature_matrix_rows_loaded +=
+        value.persistent_return_risk_feature_matrix_rows_loaded;
+    total.persistent_return_risk_feature_matrix_return_values_loaded +=
+        value.persistent_return_risk_feature_matrix_return_values_loaded;
+    total.persistent_return_risk_feature_matrix_rows_written +=
+        value.persistent_return_risk_feature_matrix_rows_written;
+    total.persistent_return_risk_feature_matrix_return_values_written +=
+        value.persistent_return_risk_feature_matrix_return_values_written;
+    total.persistent_return_risk_stats_feature_matrix_stats_rows_loaded +=
+        value.persistent_return_risk_stats_feature_matrix_stats_rows_loaded;
+    total.persistent_return_risk_stats_feature_matrix_pair_rows_loaded +=
+        value.persistent_return_risk_stats_feature_matrix_pair_rows_loaded;
+    total.persistent_return_risk_stats_feature_matrix_stats_rows_written +=
+        value.persistent_return_risk_stats_feature_matrix_stats_rows_written;
+    total.persistent_return_risk_stats_feature_matrix_pair_rows_written +=
+        value.persistent_return_risk_stats_feature_matrix_pair_rows_written;
     total.prediction_score_hits += value.prediction_score_hits;
     total.prediction_score_misses += value.prediction_score_misses;
     total.industry_classification_hits += value.industry_classification_hits;
@@ -7771,6 +8261,7 @@ fn build_factor_trial_request(
         mode: optional_string("mode")?.or_else(|| Some("standard".into())),
         persistence_mode: optional_string("persistence_mode")?
             .or_else(|| Some("summary_only".into())),
+        return_risk_feature_cache_mode: optional_string("return_risk_feature_cache_mode")?,
     })
 }
 
@@ -10200,7 +10691,7 @@ mod tests {
     }
 
     #[test]
-    fn phase7_oos_profile_comparison_plan_defaults_to_ev_ew_ex_with_auto_cache() {
+    fn phase7_oos_profile_comparison_plan_defaults_to_ec_eu_ev_with_auto_cache() {
         let req = Phase7OosWalkForwardDiscoveryRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
             data_version_id: "full-market-2016-v1".to_string(),
@@ -10243,13 +10734,14 @@ mod tests {
             max_perturbed_oos_drawdown_pct: None,
         };
 
-        let plan = build_phase7_oos_profile_comparison_plan(&req, None).expect("comparison plan");
+        let plan =
+            build_phase7_oos_profile_comparison_plan(&req, None, None).expect("comparison plan");
 
         let profiles = plan["profiles"].as_array().expect("profiles");
         assert_eq!(profiles.len(), 3);
-        assert_eq!(profiles[0]["search_profile"], json!("phase7_ev"));
-        assert_eq!(profiles[1]["search_profile"], json!("phase7_ew"));
-        assert_eq!(profiles[2]["search_profile"], json!("phase7_ex"));
+        assert_eq!(profiles[0]["search_profile"], json!("phase7_ec"));
+        assert_eq!(profiles[1]["search_profile"], json!("phase7_eu"));
+        assert_eq!(profiles[2]["search_profile"], json!("phase7_ev"));
         assert!(profiles.iter().all(|profile| {
             profile["request"]["plan_only"] == json!(true)
                 && profile["request"]["execution_mode"] == json!("inline")
@@ -10303,13 +10795,13 @@ mod tests {
             max_perturbed_oos_drawdown_pct: None,
         };
 
-        let requests =
-            build_phase7_oos_profile_comparison_launch_requests(&req, None).expect("launch reqs");
+        let requests = build_phase7_oos_profile_comparison_launch_requests(&req, None, None)
+            .expect("launch reqs");
 
         assert_eq!(requests.len(), 3);
-        assert_eq!(requests[0].search_profile.as_deref(), Some("phase7_ev"));
-        assert_eq!(requests[1].search_profile.as_deref(), Some("phase7_ew"));
-        assert_eq!(requests[2].search_profile.as_deref(), Some("phase7_ex"));
+        assert_eq!(requests[0].search_profile.as_deref(), Some("phase7_ec"));
+        assert_eq!(requests[1].search_profile.as_deref(), Some("phase7_eu"));
+        assert_eq!(requests[2].search_profile.as_deref(), Some("phase7_ev"));
         assert!(requests.iter().all(|request| {
             request.plan_only == Some(false)
                 && request.execution_mode.as_deref() == Some("background")
@@ -10319,6 +10811,155 @@ mod tests {
                 && request.max_batches_per_window == Some(1)
                 && request.oos_top_n == Some(3)
         }));
+    }
+
+    #[test]
+    fn phase7_oos_profile_comparison_plan_can_build_raw_stats_cache_pairs() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20200101",
+                "end_date": "20250101",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials_per_window: Some(64),
+            search_profile: None,
+            trial_batch_limit: Some(64),
+            trial_concurrency: Some(8),
+            train_cache_mode: None,
+            max_batches_per_window: Some(16),
+            train_window_days: Some(365 * 3),
+            test_window_days: Some(365),
+            step_days: Some(365),
+            validation_mode: Some("walk_forward".to_string()),
+            in_sample_ratio: None,
+            include_partial_last_window: Some(false),
+            plan_only: Some(true),
+            execution_mode: Some("inline".to_string()),
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: Some(20),
+            enable_cost_capacity_perturbation_gate: Some(true),
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let plan = build_phase7_oos_profile_comparison_plan(
+            &req,
+            Some(vec!["phase7_er".to_string()]),
+            Some(true),
+        )
+        .expect("paired comparison plan");
+
+        let profiles = plan["profiles"].as_array().expect("profiles");
+        assert_eq!(plan["profile_count"], json!(1));
+        assert_eq!(plan["launch_count"], json!(2));
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            plan["return_risk_cache_comparison"]["report_endpoint"],
+            json!("/api/v1/quant/experiments/return-risk-cache-economics/report")
+        );
+        assert_eq!(profiles[0]["search_profile"], json!("phase7_er"));
+        assert_eq!(
+            profiles[0]["return_risk_feature_cache_mode"],
+            json!("raw_matrix")
+        );
+        assert_eq!(
+            profiles[0]["request"]["return_risk_feature_cache_mode"],
+            json!("raw_matrix")
+        );
+        assert_eq!(
+            profiles[1]["return_risk_feature_cache_mode"],
+            json!("stats_matrix_experimental")
+        );
+        assert_eq!(
+            profiles[1]["request"]["return_risk_feature_cache_mode"],
+            json!("stats_matrix_experimental")
+        );
+    }
+
+    #[test]
+    fn phase7_oos_profile_comparison_launch_requests_can_build_raw_stats_cache_pairs() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20200101",
+                "end_date": "20250101",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials_per_window: Some(64),
+            search_profile: None,
+            trial_batch_limit: Some(64),
+            trial_concurrency: Some(8),
+            train_cache_mode: None,
+            max_batches_per_window: Some(16),
+            train_window_days: Some(365 * 3),
+            test_window_days: Some(365),
+            step_days: Some(365),
+            validation_mode: Some("walk_forward".to_string()),
+            in_sample_ratio: None,
+            include_partial_last_window: Some(false),
+            plan_only: Some(true),
+            execution_mode: Some("inline".to_string()),
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: Some(20),
+            enable_cost_capacity_perturbation_gate: Some(true),
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let requests = build_phase7_oos_profile_comparison_launch_requests(
+            &req,
+            Some(vec!["phase7_er".to_string()]),
+            Some(true),
+        )
+        .expect("paired launch reqs");
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].search_profile.as_deref(), Some("phase7_er"));
+        assert_eq!(requests[0].plan_only, Some(false));
+        assert_eq!(requests[0].execution_mode.as_deref(), Some("background"));
+        assert_eq!(
+            requests[0]
+                .backtest_template
+                .as_ref()
+                .and_then(|template| template.get("return_risk_feature_cache_mode")),
+            Some(&json!("raw_matrix"))
+        );
+        assert_eq!(
+            requests[1]
+                .backtest_template
+                .as_ref()
+                .and_then(|template| template.get("return_risk_feature_cache_mode")),
+            Some(&json!("stats_matrix_experimental"))
+        );
     }
 
     #[test]
@@ -11109,6 +11750,7 @@ mod tests {
         });
         params["execution_schedule_profile"] = json!("twap_5d_v1");
         params["execution_carry_policy"] = json!("roll_forward_v1");
+        params["return_risk_feature_cache_mode"] = json!("stats_matrix_experimental");
 
         let req = build_factor_trial_request(&task, &params).expect("factor request");
 
@@ -11201,6 +11843,10 @@ mod tests {
         assert_eq!(req.time_stop_days, Some(120));
         assert_eq!(req.reentry_cooldown_days, Some(10));
         assert_eq!(req.persistence_mode.as_deref(), Some("summary_only"));
+        assert_eq!(
+            req.return_risk_feature_cache_mode.as_deref(),
+            Some("stats_matrix_experimental")
+        );
         let coverage = req
             .effective_coverage
             .as_ref()
@@ -17082,6 +17728,72 @@ mod tests {
     }
 
     #[test]
+    fn phase7_layered_request_accepts_return_first_fill_repair_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_ey".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_return_first_fill_repair"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_ey"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_ey should seed return-first fill repair first");
+        assert_eq!(
+            first_trial.parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["market_regime"],
+            "quality_bear_window_guard_v2"
+        );
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "capacity_aware_alpha_liquidity_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["cash_utilization"],
+            "stress_fill_gross_98_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["execution_schedule_profile"],
+            "twap_10d_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["return_first_fill_repair_profile"],
+            "return_first_fill_anchor1_top60_stress_fill"
+        );
+    }
+
+    #[test]
     fn phase7_layered_request_accepts_oos_regime_alpha_rebuild_profile() {
         let req = Phase7LayeredOptimizationRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
@@ -17517,6 +18229,94 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_signal_cache_stats_collects_oos_cache_and_train_batches_without_double_counting() {
+        let train_signal = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 2,
+            persistent_return_risk_feature_matrix_return_values_loaded: 500_482,
+            ..Default::default()
+        };
+        let train_prewarm = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_return_values_loaded: 999_999,
+            ..Default::default()
+        };
+        let oos_signal = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 1,
+            persistent_return_risk_feature_matrix_return_values_loaded: 250_000,
+            ..Default::default()
+        };
+        let oos_prewarm = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_return_values_loaded: 888_888,
+            ..Default::default()
+        };
+        let metrics = json!({
+            "cache": {
+                "oos_signal_cache": oos_signal,
+            },
+            "windows": [{
+                "train_batches": [{
+                    "signal_cache": train_signal,
+                    "signal_batch_prewarm": {
+                        "report": {
+                            "cache_delta": train_prewarm,
+                        }
+                    }
+                }],
+                "oos_market_feature_prewarm_report": {
+                    "cache_delta": oos_prewarm,
+                }
+            }]
+        });
+
+        let stats = aggregate_signal_cache_stats_from_experiment_metrics(&metrics);
+
+        assert_eq!(stats.persistent_return_risk_feature_matrix_hits, 3);
+        assert_eq!(
+            stats.persistent_return_risk_feature_matrix_return_values_loaded,
+            750_482
+        );
+    }
+
+    #[test]
+    fn return_risk_cache_economics_report_json_prefers_stats_for_steady_state_pair() {
+        let raw = SignalDataCacheStats {
+            persistent_return_risk_feature_matrix_hits: 2,
+            persistent_return_risk_feature_matrix_return_values_loaded: 500_482,
+            ..Default::default()
+        };
+        let stats = SignalDataCacheStats {
+            persistent_return_risk_stats_feature_matrix_hits: 4,
+            persistent_return_risk_stats_feature_matrix_misses: 0,
+            persistent_return_risk_stats_feature_matrix_writes: 0,
+            persistent_return_risk_stats_feature_matrix_stats_rows_loaded: 8_512,
+            persistent_return_risk_stats_feature_matrix_pair_rows_loaded: 191_580,
+            ..Default::default()
+        };
+
+        let report = return_risk_cache_economics_report_json("exp-raw", raw, "exp-stats", stats);
+
+        assert_eq!(report["raw_experiment_run_id"], "exp-raw");
+        assert_eq!(report["stats_experiment_run_id"], "exp-stats");
+        assert_eq!(
+            report["cache_economics"]["recommendation"],
+            "PreferStatsMatrix"
+        );
+        assert_eq!(
+            report["cache_economics"]["reason"],
+            "stats_payload_below_raw_return_values"
+        );
+    }
+
+    #[test]
+    fn return_risk_cache_economics_report_rejects_non_completed_inputs() {
+        assert!(ensure_completed_cache_economics_input("exp-ok", "raw", "completed").is_ok());
+
+        let error = ensure_completed_cache_economics_input("exp-failed", "stats", "failed")
+            .expect_err("failed experiment should not be reportable");
+        assert!(error.contains("requires completed stats experiment exp-failed"));
+        assert!(error.contains("status=failed"));
+    }
+
+    #[test]
     fn factor_batch_signal_prewarm_plan_extracts_only_valid_factor_requests() {
         let task = OptimizationTaskExecutionContext {
             strategy_version_id: "phase7-professional-v1".into(),
@@ -17529,7 +18329,8 @@ mod tests {
                 "benchmark": "000300.SH",
                 "top_n": 20,
                 "rebalance": "20",
-                "max_position_pct": 0.08
+                "max_position_pct": 0.08,
+                "return_risk_feature_cache_mode": "stats_matrix_experimental"
             }),
             objective: json!({"type": "professional_candidate"}),
             constraints: None,
@@ -17577,6 +18378,18 @@ mod tests {
         );
         assert_eq!(plan.factor_requests[1].rebalance, "60");
         assert_eq!(plan.factor_requests[1].score_candidate_pool_size, Some(600));
+        assert_eq!(
+            plan.factor_requests[0]
+                .return_risk_feature_cache_mode
+                .as_deref(),
+            Some("stats_matrix_experimental")
+        );
+        assert_eq!(
+            plan.factor_requests[1]
+                .return_risk_feature_cache_mode
+                .as_deref(),
+            Some("stats_matrix_experimental")
+        );
     }
 
     #[test]
@@ -18485,6 +19298,8 @@ mod tests {
                         feature_end: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
                         symbol_count: 2,
                         lookback_days: 60,
+                        return_risk_feature_cache_mode:
+                            quant_backtest::signal_generator::ReturnRiskFeatureCacheMode::RawMatrix,
                         cache_delta: Default::default(),
                     },
                 ),

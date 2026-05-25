@@ -325,6 +325,10 @@ async fn main() {
             post(routes::optimization::launch_phase7_oos_profile_comparison_smoke),
         )
         .route(
+            "/api/v1/quant/experiments/return-risk-cache-economics/report",
+            post(routes::optimization::report_return_risk_cache_economics),
+        )
+        .route(
             "/api/v1/quant/experiments/{experiment_run_id}",
             get(routes::optimization::get_experiment_run),
         )
