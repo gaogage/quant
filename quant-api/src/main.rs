@@ -143,6 +143,18 @@ async fn main() {
             get(routes::sync::phase7_feasibility_audit),
         )
         .route(
+            "/api/v1/quant/data/phase7-optional-source-coverage-sync",
+            post(routes::sync::phase7_optional_source_coverage_sync),
+        )
+        .route(
+            "/api/v1/quant/data/phase7-optional-source-coverage-batches",
+            post(routes::sync::phase7_optional_source_coverage_batches),
+        )
+        .route(
+            "/api/v1/quant/data/phase7-coverage-expansion-runner",
+            post(routes::sync::phase7_coverage_expansion_runner),
+        )
+        .route(
             "/api/v1/quant/data/tushare/permission-smoke",
             post(routes::sync::tushare_permission_smoke),
         )

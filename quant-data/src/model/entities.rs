@@ -135,6 +135,53 @@ pub struct MarketStockDisclosureDate {
     pub raw_payload: Value,
 }
 
+/// 现金流量表 (market_stock_cashflow)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockCashflow {
+    pub symbol: String,
+    pub ann_date: NaiveDate,
+    pub f_ann_date: Option<NaiveDate>,
+    pub end_date: NaiveDate,
+    pub available_at: NaiveDate,
+    pub net_profit: Option<Decimal>,
+    pub n_cashflow_act: Option<Decimal>,
+    pub c_cash_equ_end_period: Option<Decimal>,
+    pub raw_payload: Value,
+}
+
+/// 分红送股 (market_stock_dividend)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockDividend {
+    pub symbol: String,
+    pub end_date: NaiveDate,
+    pub ann_date: NaiveDate,
+    pub div_proc: String,
+    pub available_at: NaiveDate,
+    pub cash_div: Option<Decimal>,
+    pub cash_div_tax: Option<Decimal>,
+    pub record_date: Option<NaiveDate>,
+    pub ex_date: Option<NaiveDate>,
+    pub pay_date: Option<NaiveDate>,
+    pub imp_ann_date: Option<NaiveDate>,
+    pub raw_payload: Value,
+}
+
+/// 股票回购 (market_stock_repurchase)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockRepurchase {
+    pub symbol: String,
+    pub ann_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub proc: String,
+    pub available_at: NaiveDate,
+    pub exp_date: Option<NaiveDate>,
+    pub vol: Option<Decimal>,
+    pub amount: Option<Decimal>,
+    pub high_limit: Option<Decimal>,
+    pub low_limit: Option<Decimal>,
+    pub raw_payload: Value,
+}
+
 /// 指数日线 (market_index_daily_bar)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketIndexDailyBar {

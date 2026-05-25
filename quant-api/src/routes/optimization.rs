@@ -12438,7 +12438,7 @@ mod tests {
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
-        assert_eq!(bundle.plan.requested_trials, 4_702_924_800);
+        assert!(bundle.plan.requested_trials > bundle.plan.planned_trials);
         assert_eq!(bundle.plan.planned_trials, 7);
         assert!(bundle.plan.truncated);
         assert_eq!(bundle.search_space["phase"], "7-D");

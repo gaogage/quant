@@ -8,9 +8,10 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::model::entities::{
-    MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockDailyBar,
-    MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockExpress, MarketStockForecast,
-    MarketStockMoneyflow, MarketTradeCalendar,
+    MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
+    MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
+    MarketStockExpress, MarketStockForecast, MarketStockMoneyflow, MarketStockRepurchase,
+    MarketTradeCalendar,
 };
 use crate::repository;
 use crate::tushare::client::TushareClient;
@@ -72,6 +73,10 @@ fn list_or_stock_symbols<'a>(symbols: &'a [String], fallback: &'a [String]) -> &
     } else {
         symbols
     }
+}
+
+fn date_in_range(date: NaiveDate, start: NaiveDate, end: NaiveDate) -> bool {
+    date >= start && date <= end
 }
 
 // ─── sync_stock_basic ────────────────────────────────────────────
@@ -1862,6 +1867,408 @@ pub async fn sync_disclosure_date(
     Ok(total_rows)
 }
 
+// ─── sync_cashflow ──────────────────────────────────────────────
+
+fn cashflow_row_from_map(item: &Map<String, Value>) -> Option<MarketStockCashflow> {
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    let f_ann_date = to_date(&get_str(item, "f_ann_date"));
+    Some(MarketStockCashflow {
+        symbol: get_str(item, "ts_code"),
+        ann_date,
+        f_ann_date,
+        end_date,
+        available_at: f_ann_date.unwrap_or(ann_date),
+        net_profit: to_opt_decimal(get_f64(item, "net_profit")),
+        n_cashflow_act: to_opt_decimal(get_f64(item, "n_cashflow_act")),
+        c_cash_equ_end_period: to_opt_decimal(get_f64(item, "c_cash_equ_end_period")),
+        raw_payload: raw_payload(item),
+    })
+}
+
+pub async fn sync_cashflow(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "cashflow",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "cashflow statement sync",
+        "tushare",
+        &["market_stock_cashflow"],
+        s,
+        e,
+    )
+    .await?;
+
+    let fallback_symbols = repository::list_listed_stock_symbols(pool).await?;
+    let symbols = list_or_stock_symbols(symbols, &fallback_symbols);
+    let total = symbols.len();
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    let mut total_rows = 0usize;
+    let page_limit = 2000usize;
+
+    for symbol in symbols {
+        let mut offset = 0usize;
+        let mut symbol_failed = false;
+        loop {
+            match client
+                .cashflow(
+                    symbol,
+                    Some(start),
+                    Some(end),
+                    Some(page_limit),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    let row_count = maps.len();
+                    let rows: Vec<MarketStockCashflow> =
+                        maps.iter().filter_map(cashflow_row_from_map).collect();
+                    if !rows.is_empty() {
+                        total_rows +=
+                            repository::upsert_cashflow_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                    }
+                    if row_count < page_limit {
+                        break;
+                    }
+                    offset += page_limit;
+                }
+                Err(error) => {
+                    warn!("{} cashflow failed: {}", symbol, error);
+                    failed += 1;
+                    symbol_failed = true;
+                    break;
+                }
+            }
+        }
+        if !symbol_failed {
+            ok += 1;
+        }
+        if ok % 100 == 0 {
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                total as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        total as i32,
+        ok as i32,
+        failed as i32,
+    )
+    .await?;
+    info!(
+        "cashflow 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
+}
+
+// ─── sync_dividend ──────────────────────────────────────────────
+
+fn dividend_row_from_map(item: &Map<String, Value>) -> Option<MarketStockDividend> {
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    let imp_ann_date = to_date(&get_str(item, "imp_ann_date"));
+    Some(MarketStockDividend {
+        symbol: get_str(item, "ts_code"),
+        end_date,
+        ann_date,
+        div_proc: get_str(item, "div_proc"),
+        available_at: imp_ann_date.unwrap_or(ann_date),
+        cash_div: to_opt_decimal(get_f64(item, "cash_div")),
+        cash_div_tax: to_opt_decimal(get_f64(item, "cash_div_tax")),
+        record_date: to_date(&get_str(item, "record_date")),
+        ex_date: to_date(&get_str(item, "ex_date")),
+        pay_date: to_date(&get_str(item, "pay_date")),
+        imp_ann_date,
+        raw_payload: raw_payload(item),
+    })
+}
+
+pub async fn sync_dividend(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "dividend",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "dividend sync",
+        "tushare",
+        &["market_stock_dividend"],
+        s,
+        e,
+    )
+    .await?;
+
+    let fallback_symbols = repository::list_listed_stock_symbols(pool).await?;
+    let symbols = list_or_stock_symbols(symbols, &fallback_symbols);
+    let total = symbols.len();
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    let mut total_rows = 0usize;
+    let page_limit = 2000usize;
+
+    for symbol in symbols {
+        let mut offset = 0usize;
+        let mut symbol_failed = false;
+        loop {
+            match client
+                .dividend(
+                    symbol,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(page_limit),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    let row_count = maps.len();
+                    let rows: Vec<MarketStockDividend> = maps
+                        .iter()
+                        .filter_map(dividend_row_from_map)
+                        .filter(|row| date_in_range(row.available_at, s, e))
+                        .collect();
+                    if !rows.is_empty() {
+                        total_rows +=
+                            repository::upsert_dividend_batch(pool, &rows, dv_id, "tushare")
+                                .await?;
+                    }
+                    if row_count < page_limit {
+                        break;
+                    }
+                    offset += page_limit;
+                }
+                Err(error) => {
+                    warn!("{} dividend failed: {}", symbol, error);
+                    failed += 1;
+                    symbol_failed = true;
+                    break;
+                }
+            }
+        }
+        if !symbol_failed {
+            ok += 1;
+        }
+        if ok % 100 == 0 {
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                total as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        total as i32,
+        ok as i32,
+        failed as i32,
+    )
+    .await?;
+    info!(
+        "dividend 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
+}
+
+// ─── sync_repurchase ────────────────────────────────────────────
+
+fn repurchase_row_from_map(item: &Map<String, Value>) -> Option<MarketStockRepurchase> {
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let end_date = to_date(&get_str(item, "end_date")).unwrap_or(ann_date);
+    Some(MarketStockRepurchase {
+        symbol: get_str(item, "ts_code"),
+        ann_date,
+        end_date,
+        proc: get_str(item, "proc"),
+        available_at: ann_date,
+        exp_date: to_date(&get_str(item, "exp_date")),
+        vol: to_opt_decimal(get_f64(item, "vol")),
+        amount: to_opt_decimal(get_f64(item, "amount")),
+        high_limit: to_opt_decimal(get_f64(item, "high_limit")),
+        low_limit: to_opt_decimal(get_f64(item, "low_limit")),
+        raw_payload: raw_payload(item),
+    })
+}
+
+pub async fn sync_repurchase(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "repurchase",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "repurchase sync",
+        "tushare",
+        &["market_stock_repurchase"],
+        s,
+        e,
+    )
+    .await?;
+
+    let symbol_filter = if symbols.is_empty() {
+        None
+    } else {
+        Some(
+            symbols
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+    let mut failed = 0usize;
+    let mut total_rows = 0usize;
+    let page_limit = 2000usize;
+    let mut offset = 0usize;
+
+    loop {
+        match client
+            .repurchase(None, Some(start), Some(end), Some(page_limit), Some(offset))
+            .await
+        {
+            Ok(resp) => {
+                let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                let row_count = maps.len();
+                let rows: Vec<MarketStockRepurchase> = maps
+                    .iter()
+                    .filter_map(repurchase_row_from_map)
+                    .filter(|row| {
+                        symbol_filter
+                            .as_ref()
+                            .map(|filter| filter.contains(&row.symbol))
+                            .unwrap_or(true)
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    total_rows +=
+                        repository::upsert_repurchase_batch(pool, &rows, dv_id, "tushare").await?;
+                }
+                if row_count < page_limit {
+                    break;
+                }
+                offset += page_limit;
+            }
+            Err(error) => {
+                warn!("repurchase {}..{} failed: {}", start, end, error);
+                failed += 1;
+                break;
+            }
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        1,
+        if failed > 0 { 0 } else { 1 },
+        failed as i32,
+    )
+    .await?;
+    info!(
+        "repurchase 同步完成: rows={}, failed={}",
+        total_rows, failed
+    );
+    Ok(total_rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1947,6 +2354,136 @@ mod tests {
         assert_eq!(row.buy_elg_amount, Decimal::from_f64_retain(789.0));
         assert_eq!(row.sell_elg_amount, Decimal::from_f64_retain(654.3));
         assert_eq!(row.net_mf_amount, Decimal::from_f64_retain(293.5));
+    }
+
+    #[test]
+    fn cashflow_row_maps_pit_available_at_from_f_ann_date() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000333.SZ"));
+        item.insert("ann_date".to_string(), json!("20260430"));
+        item.insert("f_ann_date".to_string(), json!("20260429"));
+        item.insert("end_date".to_string(), json!("20260331"));
+        item.insert("net_profit".to_string(), json!(12450000000.0));
+        item.insert("n_cashflow_act".to_string(), json!(14529165000.0));
+        item.insert("c_cash_equ_end_period".to_string(), json!(76253016000.0));
+
+        let row = cashflow_row_from_map(&item).expect("cashflow row");
+
+        assert_eq!(row.symbol, "000333.SZ");
+        assert_eq!(row.ann_date, NaiveDate::from_ymd_opt(2026, 4, 30).unwrap());
+        assert_eq!(
+            row.f_ann_date,
+            Some(NaiveDate::from_ymd_opt(2026, 4, 29).unwrap())
+        );
+        assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2026, 3, 31).unwrap());
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 4, 29).unwrap()
+        );
+        assert_eq!(row.net_profit, Decimal::from_f64_retain(12450000000.0));
+        assert_eq!(row.n_cashflow_act, Decimal::from_f64_retain(14529165000.0));
+        assert_eq!(
+            row.c_cash_equ_end_period,
+            Decimal::from_f64_retain(76253016000.0)
+        );
+        assert_eq!(row.raw_payload["ts_code"], json!("000333.SZ"));
+    }
+
+    #[test]
+    fn cashflow_row_falls_back_to_ann_date_when_f_ann_date_missing() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("ann_date".to_string(), json!("20260425"));
+        item.insert("end_date".to_string(), json!("20260331"));
+
+        let row = cashflow_row_from_map(&item).expect("cashflow row");
+
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 4, 25).unwrap()
+        );
+    }
+
+    #[test]
+    fn dividend_row_maps_pit_available_at_from_imp_ann_date() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000333.SZ"));
+        item.insert("end_date".to_string(), json!("20251231"));
+        item.insert("ann_date".to_string(), json!("20260331"));
+        item.insert("div_proc".to_string(), json!("实施"));
+        item.insert("cash_div".to_string(), json!(0.0));
+        item.insert("cash_div_tax".to_string(), json!(3.8));
+        item.insert("record_date".to_string(), json!("20260512"));
+        item.insert("ex_date".to_string(), json!("20260513"));
+        item.insert("pay_date".to_string(), json!("20260513"));
+        item.insert("imp_ann_date".to_string(), json!("20260506"));
+
+        let row = dividend_row_from_map(&item).expect("dividend row");
+
+        assert_eq!(row.symbol, "000333.SZ");
+        assert_eq!(row.div_proc, "实施");
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 5, 6).unwrap()
+        );
+        assert_eq!(row.cash_div_tax, Decimal::from_f64_retain(3.8));
+        assert_eq!(
+            row.ex_date,
+            Some(NaiveDate::from_ymd_opt(2026, 5, 13).unwrap())
+        );
+    }
+
+    #[test]
+    fn dividend_row_falls_back_to_ann_date_when_imp_ann_date_missing() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("600000.SH"));
+        item.insert("end_date".to_string(), json!("20251231"));
+        item.insert("ann_date".to_string(), json!("20260331"));
+        item.insert("div_proc".to_string(), json!("预案"));
+
+        let row = dividend_row_from_map(&item).expect("dividend row");
+
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()
+        );
+    }
+
+    #[test]
+    fn repurchase_row_maps_announcement_available_at() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("600010.SH"));
+        item.insert("ann_date".to_string(), json!("20260525"));
+        item.insert("end_date".to_string(), json!("20260521"));
+        item.insert("proc".to_string(), json!("完成"));
+        item.insert("vol".to_string(), json!(62586400.0));
+        item.insert("amount".to_string(), json!(152003311.0));
+        item.insert("high_limit".to_string(), json!(2.72));
+        item.insert("low_limit".to_string(), json!(1.79));
+
+        let row = repurchase_row_from_map(&item).expect("repurchase row");
+
+        assert_eq!(row.symbol, "600010.SH");
+        assert_eq!(row.proc, "完成");
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 5, 25).unwrap()
+        );
+        assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2026, 5, 21).unwrap());
+        assert_eq!(row.amount, Decimal::from_f64_retain(152003311.0));
+        assert_eq!(row.high_limit, Decimal::from_f64_retain(2.72));
+    }
+
+    #[test]
+    fn repurchase_row_falls_back_end_date_to_ann_date() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("ann_date".to_string(), json!("20260525"));
+        item.insert("proc".to_string(), json!("预案"));
+
+        let row = repurchase_row_from_map(&item).expect("repurchase row");
+
+        assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2026, 5, 25).unwrap());
     }
 
     #[test]

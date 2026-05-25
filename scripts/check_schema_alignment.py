@@ -64,6 +64,30 @@ if event_alpha_sql.exists():
 else:
     failed.append(("phase7_event_alpha.sql must exist for local incremental DDL", "sql/phase7_event_alpha.sql", ["missing file"]))
 
+optional_sources_sql = ROOT / "sql/phase7_optional_financial_sources.sql"
+if optional_sources_sql.exists():
+    optional_sources_text = optional_sources_sql.read_text(encoding="utf-8")
+    for required in [
+        "CREATE TABLE IF NOT EXISTS public.market_stock_cashflow",
+        "f_ann_date DATE NULL",
+        "available_at DATE NOT NULL",
+        "PRIMARY KEY (symbol, end_date, ann_date, available_at)",
+        "idx_market_stock_cashflow_symbol_date",
+        "fk_market_stock_cashflow_data_version",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_dividend",
+        "PRIMARY KEY (symbol, end_date, ann_date, div_proc, available_at)",
+        "idx_market_stock_dividend_symbol_date",
+        "fk_market_stock_dividend_data_version",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_repurchase",
+        "PRIMARY KEY (symbol, ann_date, end_date, proc, available_at)",
+        "idx_market_stock_repurchase_symbol_date",
+        "fk_market_stock_repurchase_data_version",
+    ]:
+        if required not in optional_sources_text:
+            failed.append(("phase7_optional_financial_sources.sql must define PIT cashflow schema", str(optional_sources_sql.relative_to(ROOT)), [required]))
+else:
+    failed.append(("Phase 7 optional financial source SQL must exist", "sql/phase7_optional_financial_sources.sql", ["missing file"]))
+
 phase7_metadata_sql = ROOT / "sql/phase7_professional_metadata.sql"
 if phase7_metadata_sql.exists():
     phase7_metadata_text = phase7_metadata_sql.read_text(encoding="utf-8")
@@ -144,16 +168,25 @@ if schema_sql.exists():
         "CREATE TABLE IF NOT EXISTS public.market_financial_indicator",
         "CREATE TABLE IF NOT EXISTS public.market_stock_daily_basic",
         "CREATE TABLE IF NOT EXISTS public.market_stock_moneyflow",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_cashflow",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_dividend",
+        "CREATE TABLE IF NOT EXISTS public.market_stock_repurchase",
         "CREATE TABLE IF NOT EXISTS public.market_stock_forecast",
         "CREATE TABLE IF NOT EXISTS public.market_stock_express",
         "CREATE TABLE IF NOT EXISTS public.market_stock_disclosure_date",
         "idx_market_stock_daily_basic_symbol_date",
         "idx_market_stock_moneyflow_symbol_date",
+        "idx_market_stock_cashflow_symbol_date",
+        "idx_market_stock_dividend_symbol_date",
+        "idx_market_stock_repurchase_symbol_date",
         "idx_market_stock_forecast_symbol_date",
         "idx_market_stock_express_symbol_date",
         "idx_market_stock_disclosure_date_symbol_date",
         "fk_market_stock_daily_basic_data_version",
         "fk_market_stock_moneyflow_data_version",
+        "fk_market_stock_cashflow_data_version",
+        "fk_market_stock_dividend_data_version",
+        "fk_market_stock_repurchase_data_version",
         "fk_market_stock_forecast_data_version",
         "fk_market_stock_express_data_version",
         "fk_market_stock_disclosure_date_data_version",
@@ -288,6 +321,8 @@ if main_routes.exists():
         '"/api/v1/quant/ml/training-tasks/linear"',
         '"/api/v1/quant/ml/prediction-sets/walk-forward-linear"',
         '"/api/v1/quant/ml/prediction-sets/evaluate"',
+        '"/api/v1/quant/data/phase7-optional-source-coverage-sync"',
+        '"/api/v1/quant/data/phase7-optional-source-coverage-batches"',
     ]:
         if required not in main_routes_text:
             failed.append(("factor_definition API routes must be mounted", str(main_routes.relative_to(ROOT)), [required]))
@@ -436,6 +471,25 @@ if sync_rs.exists():
     ]:
         if required not in sync_text:
             failed.append(("event sync path must exist", str(sync_rs.relative_to(ROOT)), [required]))
+    for required in [
+        "MarketStockCashflow",
+        "cashflow_row_from_map",
+        "sync_cashflow",
+        "market_stock_cashflow",
+        ".cashflow(",
+        "MarketStockDividend",
+        "dividend_row_from_map",
+        "sync_dividend",
+        "market_stock_dividend",
+        ".dividend(",
+        "MarketStockRepurchase",
+        "repurchase_row_from_map",
+        "sync_repurchase",
+        "market_stock_repurchase",
+        ".repurchase(",
+    ]:
+        if required not in sync_text:
+            failed.append(("optional financial/event sync path must exist", str(sync_rs.relative_to(ROOT)), [required]))
 
 tushare_client = ROOT / "quant-data/src/tushare/client.rs"
 if tushare_client.exists():
@@ -471,6 +525,23 @@ if tushare_client.exists():
     ]:
         if required not in client_text:
             failed.append(("Tushare event client must expose corporate-event fields", str(tushare_client.relative_to(ROOT)), [required]))
+    for required in [
+        "pub async fn cashflow(",
+        "\"cashflow\"",
+        "\"f_ann_date\"",
+        "\"n_cashflow_act\"",
+        "\"c_cash_equ_end_period\"",
+        "pub async fn dividend(",
+        "\"dividend\"",
+        "\"cash_div_tax\"",
+        "\"imp_ann_date\"",
+        "pub async fn repurchase(",
+        "\"repurchase\"",
+        "\"high_limit\"",
+        "\"low_limit\"",
+    ]:
+        if required not in client_text:
+            failed.append(("Tushare optional source client must expose PIT fields", str(tushare_client.relative_to(ROOT)), [required]))
 
 repository_rs = ROOT / "quant-data/src/repository.rs"
 if repository_rs.exists():
@@ -506,6 +577,19 @@ if repository_rs.exists():
     ]:
         if required not in repository_text:
             failed.append(("event repository upserts must exist", str(repository_rs.relative_to(ROOT)), [required]))
+    for required in [
+        "upsert_cashflow_batch",
+        "INSERT INTO market_stock_cashflow",
+        "ON CONFLICT (symbol, end_date, ann_date, available_at)",
+        "upsert_dividend_batch",
+        "INSERT INTO market_stock_dividend",
+        "ON CONFLICT (symbol, end_date, ann_date, div_proc, available_at)",
+        "upsert_repurchase_batch",
+        "INSERT INTO market_stock_repurchase",
+        "ON CONFLICT (symbol, ann_date, end_date, proc, available_at)",
+    ]:
+        if required not in repository_text:
+            failed.append(("optional financial/event repository upsert must exist", str(repository_rs.relative_to(ROOT)), [required]))
 
 sync_routes = ROOT / "quant-api/src/routes/sync.rs"
 if sync_routes.exists():
@@ -532,6 +616,27 @@ if sync_routes.exists():
     ]:
         if required not in sync_routes_text:
             failed.append(("event dataset must be routed", str(sync_routes.relative_to(ROOT)), [required]))
+    for required in [
+        '"cashflow" | "stock_cashflow"',
+        "sync_cashflow",
+        '"dividend" | "stock_dividend"',
+        "sync_dividend",
+        '"repurchase" | "stock_repurchase"',
+        "sync_repurchase",
+        'mode=full_market',
+        "phase7_optional_source_readiness",
+        "phase7_optional_source_coverage_sync",
+        "phase7_optional_source_coverage_batches",
+        "phase7_optional_source_sync_limit",
+        "phase7_optional_source_batch_size",
+        "bounded_symbols",
+        "sample_only_do_not_train",
+        "cashflow_quality_pit_features",
+        "dividend_stability_quality_pit_features",
+        "repurchase_event_capital_return_pit_features",
+    ]:
+        if required not in sync_routes_text:
+            failed.append(("optional financial/event dataset must be routed with explicit full-market guard and coverage audit", str(sync_routes.relative_to(ROOT)), [required]))
 
 combine_rs = ROOT / "quant-factor/src/combine.rs"
 if combine_rs.exists():
