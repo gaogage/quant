@@ -286,6 +286,15 @@ enum Phase7BackfillFactorKind {
         window_days: i32,
         decay_days: i32,
     },
+    EventPostReturnCurve {
+        source_table: &'static str,
+        event_filter_expression: &'static str,
+        higher_is_better: bool,
+        window_days: i32,
+        industry_relative: bool,
+        min_event_age_days: i32,
+        max_event_age_days: i32,
+    },
     FinancialAnnualChange {
         source_column: &'static str,
         mode: FinancialAnnualChangeMode,
@@ -850,6 +859,8 @@ impl Phase7EventWindowAlphaBackfillRequest {
         let combo_name = combo_name;
         let bundle_name = event_window_bundle_name(&combo_name);
         let phase = event_window_phase(&combo_name);
+        let dependencies = event_window_dependencies(&combo_name);
+        let combo_method = event_window_combo_method(&combo_name);
 
         Ok(Phase7EventWindowAlphaBackfillPlan {
             start_date,
@@ -863,13 +874,8 @@ impl Phase7EventWindowAlphaBackfillRequest {
             bundle_name,
             category: "event_alpha",
             phase,
-            dependencies: &[
-                "market_stock_forecast",
-                "market_stock_express",
-                "market_stock_disclosure_date",
-                "market_trade_calendar",
-            ],
-            combo_method: "weighted_event_window_earnings",
+            dependencies,
+            combo_method,
             experiment_type: "phase7_factor_backfill_profile",
             source_combos: Vec::new(),
         })
@@ -1083,7 +1089,13 @@ impl Phase7AlphaBlendProfilesBackfillRequest {
                     weight,
                 });
             }
-            let combo_method = if profile.combo_name == "phase7_quality_event_window_overlay_v1" {
+            let combo_method = if matches!(
+                profile.combo_name.as_str(),
+                "phase7_quality_event_window_overlay_v1"
+                    | "phase7_quality_event_post_return_curve_overlay_v1"
+                    | "phase7_quality_event_reaction_segments_overlay_v1"
+                    | "phase7_quality_event_reaction_reversal_overlay_v1"
+            ) {
                 "weighted_combo_optional_overlay"
             } else {
                 "weighted_combo_blend_profile"
@@ -1679,13 +1691,43 @@ fn phase7_event_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
 fn phase7_event_window_alpha_backfill_specs_for_plan(
     plan: &Phase7EventWindowAlphaBackfillPlan,
 ) -> Vec<Phase7BackfillFactorSpec> {
+    if is_event_reaction_segments_combo(&plan.combo_name) {
+        return phase7_event_reaction_segment_backfill_specs_for_days(event_window_days_for_combo(
+            &plan.combo_name,
+        ));
+    }
+    if is_event_reaction_reversal_combo(&plan.combo_name) {
+        return phase7_event_reaction_reversal_backfill_specs_for_days(
+            event_window_days_for_combo(&plan.combo_name),
+        );
+    }
+    if is_event_post_return_curve_combo(&plan.combo_name) {
+        return phase7_event_post_return_curve_backfill_specs_for_days(
+            event_window_days_for_combo(&plan.combo_name),
+        );
+    }
     phase7_event_window_alpha_backfill_specs_for_days(event_window_days_for_combo(&plan.combo_name))
+}
+
+fn is_event_post_return_curve_combo(combo_name: &str) -> bool {
+    matches!(combo_name, "phase7_event_post_return_curve_20d_v1")
+}
+
+fn is_event_reaction_segments_combo(combo_name: &str) -> bool {
+    matches!(combo_name, "phase7_event_reaction_segments_20d_v1")
+}
+
+fn is_event_reaction_reversal_combo(combo_name: &str) -> bool {
+    matches!(combo_name, "phase7_event_reaction_reversal_20d_v1")
 }
 
 fn event_window_days_for_combo(combo_name: &str) -> i32 {
     match combo_name {
         "phase7_event_window_earnings_10d_v1" => 10,
         "phase7_event_window_earnings_40d_v1" => 40,
+        "phase7_event_post_return_curve_20d_v1" => 20,
+        "phase7_event_reaction_segments_20d_v1" => 20,
+        "phase7_event_reaction_reversal_20d_v1" => 20,
         _ => 20,
     }
 }
@@ -1694,6 +1736,9 @@ fn event_window_bundle_name(combo_name: &str) -> &'static str {
     match combo_name {
         "phase7_event_window_earnings_10d_v1" => "phase7_event_window_earnings_10d_v1",
         "phase7_event_window_earnings_40d_v1" => "phase7_event_window_earnings_40d_v1",
+        "phase7_event_post_return_curve_20d_v1" => "phase7_event_post_return_curve_20d_v1",
+        "phase7_event_reaction_segments_20d_v1" => "phase7_event_reaction_segments_20d_v1",
+        "phase7_event_reaction_reversal_20d_v1" => "phase7_event_reaction_reversal_20d_v1",
         _ => "phase7_event_window_earnings_v1",
     }
 }
@@ -1702,7 +1747,43 @@ fn event_window_phase(combo_name: &str) -> &'static str {
     match combo_name {
         "phase7_event_window_earnings_10d_v1" => "7-AZ10",
         "phase7_event_window_earnings_40d_v1" => "7-AZ40",
+        "phase7_event_post_return_curve_20d_v1" => "7-FB",
+        "phase7_event_reaction_segments_20d_v1" => "7-FC",
+        "phase7_event_reaction_reversal_20d_v1" => "7-FC",
         _ => "7-Y2",
+    }
+}
+
+fn event_window_combo_method(combo_name: &str) -> &'static str {
+    if is_event_post_return_curve_combo(combo_name)
+        || is_event_reaction_segments_combo(combo_name)
+        || is_event_reaction_reversal_combo(combo_name)
+    {
+        "weighted_event_post_return_curve"
+    } else {
+        "weighted_event_window_earnings"
+    }
+}
+
+fn event_window_dependencies(combo_name: &str) -> &'static [&'static str] {
+    if is_event_post_return_curve_combo(combo_name)
+        || is_event_reaction_segments_combo(combo_name)
+        || is_event_reaction_reversal_combo(combo_name)
+    {
+        &[
+            "market_stock_forecast",
+            "market_stock_express",
+            "market_stock_daily_bar",
+            "market_stock",
+            "market_trade_calendar",
+        ]
+    } else {
+        &[
+            "market_stock_forecast",
+            "market_stock_express",
+            "market_stock_disclosure_date",
+            "market_trade_calendar",
+        ]
     }
 }
 
@@ -1780,6 +1861,134 @@ fn phase7_event_window_alpha_backfill_specs_for_days(
             weight: 0.20,
         },
     ]
+}
+
+fn phase7_event_post_return_curve_backfill_specs_for_days(
+    window_days: i32,
+) -> Vec<Phase7BackfillFactorSpec> {
+    let window_days = window_days.max(1);
+    let suffix = match window_days {
+        10 => "10d",
+        40 => "40d",
+        _ => "20d",
+    };
+    let forecast_code =
+        Box::leak(format!("event_post_return_forecast_{}_indrel_std", suffix).into_boxed_str());
+    let express_code =
+        Box::leak(format!("event_post_return_express_{}_indrel_std", suffix).into_boxed_str());
+
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: forecast_code,
+            name: "Phase 7 PIT forecast post-event industry-relative return curve rank",
+            period: window_days,
+            kind: Phase7BackfillFactorKind::EventPostReturnCurve {
+                source_table: "market_stock_forecast",
+                event_filter_expression: "event.p_change_min IS NOT NULL OR event.p_change_max IS NOT NULL OR event.net_profit_min IS NOT NULL OR event.net_profit_max IS NOT NULL",
+                higher_is_better: true,
+                window_days,
+                industry_relative: true,
+                min_event_age_days: 0,
+                max_event_age_days: window_days,
+            },
+            weight: 0.5,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: express_code,
+            name: "Phase 7 PIT express post-event industry-relative return curve rank",
+            period: window_days,
+            kind: Phase7BackfillFactorKind::EventPostReturnCurve {
+                source_table: "market_stock_express",
+                event_filter_expression: "event.diluted_roe IS NOT NULL OR event.yoy_sales IS NOT NULL OR event.n_income IS NOT NULL",
+                higher_is_better: true,
+                window_days,
+                industry_relative: true,
+                min_event_age_days: 0,
+                max_event_age_days: window_days,
+            },
+            weight: 0.5,
+        },
+    ]
+}
+
+fn phase7_event_reaction_segment_backfill_specs_for_days(
+    window_days: i32,
+) -> Vec<Phase7BackfillFactorSpec> {
+    phase7_event_reaction_backfill_specs_for_days(window_days, false)
+}
+
+fn phase7_event_reaction_reversal_backfill_specs_for_days(
+    window_days: i32,
+) -> Vec<Phase7BackfillFactorSpec> {
+    phase7_event_reaction_backfill_specs_for_days(window_days, true)
+}
+
+fn phase7_event_reaction_backfill_specs_for_days(
+    window_days: i32,
+    reversal: bool,
+) -> Vec<Phase7BackfillFactorSpec> {
+    let window_days = window_days.max(1);
+    let late_start = 6.min(window_days);
+    let segments = [
+        (1, 5.min(window_days), "1_5d"),
+        (late_start, window_days, "6_20d"),
+    ];
+    let prefix = if reversal {
+        "event_reaction_reversal"
+    } else {
+        "event_reaction"
+    };
+    let higher_is_better = !reversal;
+    let name_direction = if reversal {
+        "negative post-event reaction reversal"
+    } else {
+        "positive post-event reaction continuation"
+    };
+
+    let mut specs = Vec::with_capacity(segments.len() * 2);
+    for (min_event_age_days, max_event_age_days, suffix) in segments {
+        specs.push(Phase7BackfillFactorSpec {
+            factor_code: Box::leak(
+                format!("{prefix}_forecast_{suffix}_indrel_std").into_boxed_str(),
+            ),
+            name: Box::leak(
+                format!("Phase 7 PIT forecast {name_direction} industry-relative {suffix} rank")
+                    .into_boxed_str(),
+            ),
+            period: window_days,
+            kind: Phase7BackfillFactorKind::EventPostReturnCurve {
+                source_table: "market_stock_forecast",
+                event_filter_expression: "event.p_change_min IS NOT NULL OR event.p_change_max IS NOT NULL OR event.net_profit_min IS NOT NULL OR event.net_profit_max IS NOT NULL",
+                higher_is_better,
+                window_days,
+                industry_relative: true,
+                min_event_age_days,
+                max_event_age_days,
+            },
+            weight: 0.25,
+        });
+    }
+    for (min_event_age_days, max_event_age_days, suffix) in segments {
+        specs.push(Phase7BackfillFactorSpec {
+            factor_code: Box::leak(format!("{prefix}_express_{suffix}_indrel_std").into_boxed_str()),
+            name: Box::leak(
+                format!("Phase 7 PIT express {name_direction} industry-relative {suffix} rank")
+                    .into_boxed_str(),
+            ),
+            period: window_days,
+            kind: Phase7BackfillFactorKind::EventPostReturnCurve {
+                source_table: "market_stock_express",
+                event_filter_expression: "event.diluted_roe IS NOT NULL OR event.yoy_sales IS NOT NULL OR event.n_income IS NOT NULL",
+                higher_is_better,
+                window_days,
+                industry_relative: true,
+                min_event_age_days,
+                max_event_age_days,
+            },
+            weight: 0.25,
+        });
+    }
+    specs
 }
 
 fn phase7_event_surprise_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
@@ -5057,7 +5266,9 @@ fn phase7_combo_required_factor_count(
     plan: &SetBasedFactorBackfillPlan,
 ) -> i64 {
     match plan.combo_method {
-        "weighted_event_earnings" | "weighted_event_window_earnings" => 1,
+        "weighted_event_earnings"
+        | "weighted_event_window_earnings"
+        | "weighted_event_post_return_curve" => 1,
         _ => specs.len() as i64,
     }
 }
@@ -5369,6 +5580,23 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             higher_is_better,
             window_days,
             decay_days,
+        ),
+        Phase7BackfillFactorKind::EventPostReturnCurve {
+            source_table,
+            event_filter_expression,
+            higher_is_better,
+            window_days,
+            industry_relative,
+            min_event_age_days,
+            max_event_age_days,
+        } => phase7_event_post_return_curve_backfill_sql(
+            source_table,
+            event_filter_expression,
+            higher_is_better,
+            window_days,
+            industry_relative,
+            min_event_age_days,
+            max_event_age_days,
         ),
         Phase7BackfillFactorKind::FinancialAnnualChange {
             source_column,
@@ -6172,6 +6400,134 @@ fn phase7_event_window_backfill_sql(
                     ELSE percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order})
                 END AS normalized_value
             FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_event_post_return_curve_backfill_sql(
+    source_table: &'static str,
+    event_filter_expression: &'static str,
+    higher_is_better: bool,
+    window_days: i32,
+    industry_relative: bool,
+    min_event_age_days: i32,
+    max_event_age_days: i32,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+    let window_days = window_days.max(1);
+    let min_event_age_days = min_event_age_days.clamp(0, window_days);
+    let max_event_age_days = max_event_age_days.clamp(min_event_age_days, window_days);
+    let raw_value_expression = if industry_relative {
+        "raw_event_return - AVG(raw_event_return) OVER (PARTITION BY trade_date, industry)"
+    } else {
+        "raw_event_return"
+    };
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        events AS (
+            SELECT
+                event.symbol,
+                event.available_at,
+                event.end_date,
+                event.created_at
+            FROM {source_table} event
+            WHERE event.available_at <= $4
+              AND event.available_at >= $3 - INTERVAL '{window_days} days'
+              AND ({event_filter_expression})
+        ),
+        expanded AS (
+            SELECT
+                events.symbol,
+                td.trade_date,
+                events.available_at,
+                COALESCE(NULLIF(ms.industry, ''), 'UNKNOWN') AS industry,
+                (
+                    current_bar.close::double precision
+                    / NULLIF(anchor_bar.close::double precision, 0.0)
+                    - 1.0
+                )
+                * GREATEST(
+                    0.0,
+                    1.0 - ((td.trade_date - events.available_at)::double precision / {window_days}.0)
+                ) AS raw_event_return,
+                ROW_NUMBER() OVER (
+                    PARTITION BY events.symbol, td.trade_date
+                    ORDER BY events.available_at DESC, events.end_date DESC, events.created_at DESC
+                ) AS event_rank
+            FROM events
+            JOIN trade_days td
+              ON td.trade_date >= events.available_at + INTERVAL '{min_event_age_days} days'
+             AND td.trade_date <= events.available_at + INTERVAL '{max_event_age_days} days'
+            JOIN market_stock ms
+              ON ms.symbol = events.symbol
+            JOIN LATERAL (
+                SELECT close, trade_date
+                FROM market_stock_daily_bar anchor_bar
+                WHERE anchor_bar.symbol = events.symbol
+                  AND anchor_bar.trade_date <= events.available_at
+                  AND anchor_bar.close IS NOT NULL
+                  AND anchor_bar.close > 0
+                ORDER BY anchor_bar.trade_date DESC
+                LIMIT 1
+            ) anchor_bar ON true
+            JOIN market_stock_daily_bar current_bar
+              ON current_bar.symbol = events.symbol
+             AND current_bar.trade_date = td.trade_date
+             AND current_bar.close IS NOT NULL
+             AND current_bar.close > 0
+        ),
+        latest_event AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                industry,
+                raw_event_return
+            FROM expanded
+            WHERE event_rank = 1
+              AND raw_event_return IS NOT NULL
+        ),
+        residualized AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                {raw_value_expression} AS raw_value
+            FROM latest_event
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                COUNT(*) OVER (PARTITION BY trade_date) AS symbol_count,
+                CASE
+                    WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                    ELSE percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order})
+                END AS normalized_value
+            FROM residualized
             WHERE raw_value IS NOT NULL
         )
         INSERT INTO factor_value
@@ -7537,7 +7893,7 @@ mod tests {
             .map(|plan| plan.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(plans.len(), 13);
+        assert_eq!(plans.len(), 16);
         assert!(combo_names.contains("phase7_value_quality_growth_rel_v1"));
         assert!(combo_names.contains("phase7_blend_value_tilt_v1"));
         assert!(combo_names.contains("phase7_blend_quality_growth_v1"));
@@ -7547,13 +7903,22 @@ mod tests {
         assert!(combo_names.contains("phase7_quality_event_confirm_v1"));
         assert!(combo_names.contains("phase7_quality_event_surprise_confirm_v1"));
         assert!(combo_names.contains("phase7_quality_event_window_overlay_v1"));
+        assert!(combo_names.contains("phase7_quality_event_post_return_curve_overlay_v1"));
+        assert!(combo_names.contains("phase7_quality_event_reaction_segments_overlay_v1"));
+        assert!(combo_names.contains("phase7_quality_event_reaction_reversal_overlay_v1"));
         assert!(combo_names.contains("phase7_quality_residual_confirm_5pct_v1"));
         assert!(combo_names.contains("phase7_quality_residual_confirm_10pct_v1"));
         assert!(combo_names.contains("phase7_quality_value_recovery_confirm_v1"));
         assert!(combo_names.contains("phase7_quality_value_recovery_event_confirm_v1"));
         for plan in plans {
             assert_eq!(plan.task_type, "phase7_alpha_blend_profiles_backfill");
-            if plan.combo_name == "phase7_quality_event_window_overlay_v1" {
+            if matches!(
+                plan.combo_name.as_str(),
+                "phase7_quality_event_window_overlay_v1"
+                    | "phase7_quality_event_post_return_curve_overlay_v1"
+                    | "phase7_quality_event_reaction_segments_overlay_v1"
+                    | "phase7_quality_event_reaction_reversal_overlay_v1"
+            ) {
                 assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
             } else {
                 assert_eq!(plan.combo_method, "weighted_combo_blend_profile");
@@ -7858,6 +8223,165 @@ mod tests {
                 _ => panic!("expected event-window factor kind"),
             }
         }
+    }
+
+    #[test]
+    fn phase7_event_post_return_curve_plan_uses_pit_return_curve_metadata() {
+        let req = Phase7EventWindowAlphaBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-19".to_string()),
+            version: None,
+            combo_name: Some("phase7_event_post_return_curve_20d_v1".to_string()),
+            statement_timeout_ms: Some(300_000),
+        };
+
+        let plan = req.into_plan().expect("valid event post-return curve plan");
+        let specs = phase7_event_window_alpha_backfill_specs_for_plan(&plan);
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(plan.combo_name, "phase7_event_post_return_curve_20d_v1");
+        assert_eq!(plan.bundle_name, "phase7_event_post_return_curve_20d_v1");
+        assert_eq!(plan.combo_method, "weighted_event_post_return_curve");
+        assert_eq!(plan.phase, "7-FB");
+        assert_eq!(
+            codes,
+            vec![
+                "event_post_return_forecast_20d_indrel_std",
+                "event_post_return_express_20d_indrel_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        for spec in specs {
+            match spec.kind {
+                Phase7BackfillFactorKind::EventPostReturnCurve {
+                    window_days,
+                    industry_relative,
+                    ..
+                } => {
+                    assert_eq!(window_days, 20);
+                    assert!(industry_relative);
+                }
+                _ => panic!("expected event post-return curve factor kind"),
+            }
+        }
+    }
+
+    #[test]
+    fn phase7_event_post_return_curve_sql_uses_only_visible_event_and_price_history() {
+        let specs = phase7_event_post_return_curve_backfill_specs_for_days(20);
+        let forecast = specs
+            .iter()
+            .find(|spec| spec.factor_code == "event_post_return_forecast_20d_indrel_std")
+            .expect("forecast post-return spec");
+        let sql = phase7_factor_backfill_sql(forecast);
+
+        assert!(sql.contains("event.available_at <= $4"));
+        assert!(sql.contains("td.trade_date >= events.available_at"));
+        assert!(sql.contains("anchor_bar.trade_date <= events.available_at"));
+        assert!(sql.contains("current_bar.trade_date = td.trade_date"));
+        assert!(sql.contains("PARTITION BY trade_date, industry"));
+        assert!(
+            !sql.contains("current_bar.trade_date > td.trade_date"),
+            "post-return feature must not read future price data"
+        );
+    }
+
+    #[test]
+    fn phase7_event_reaction_segment_specs_split_early_and_late_windows() {
+        let req = Phase7EventWindowAlphaBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-19".to_string()),
+            version: None,
+            combo_name: Some("phase7_event_reaction_segments_20d_v1".to_string()),
+            statement_timeout_ms: Some(300_000),
+        };
+
+        let plan = req.into_plan().expect("valid event reaction segment plan");
+        let specs = phase7_event_window_alpha_backfill_specs_for_plan(&plan);
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+
+        assert_eq!(plan.combo_name, "phase7_event_reaction_segments_20d_v1");
+        assert_eq!(plan.bundle_name, "phase7_event_reaction_segments_20d_v1");
+        assert_eq!(plan.combo_method, "weighted_event_post_return_curve");
+        assert_eq!(plan.phase, "7-FC");
+        assert_eq!(
+            codes,
+            vec![
+                "event_reaction_forecast_1_5d_indrel_std",
+                "event_reaction_forecast_6_20d_indrel_std",
+                "event_reaction_express_1_5d_indrel_std",
+                "event_reaction_express_6_20d_indrel_std",
+            ]
+        );
+
+        let windows = specs
+            .iter()
+            .map(|spec| match spec.kind {
+                Phase7BackfillFactorKind::EventPostReturnCurve {
+                    min_event_age_days,
+                    max_event_age_days,
+                    higher_is_better,
+                    ..
+                } => (min_event_age_days, max_event_age_days, higher_is_better),
+                _ => panic!("expected segmented event post-return kind"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            windows,
+            vec![(1, 5, true), (6, 20, true), (1, 5, true), (6, 20, true)]
+        );
+    }
+
+    #[test]
+    fn phase7_event_reaction_reversal_specs_rank_negative_reactions_higher() {
+        let specs = phase7_event_reaction_reversal_backfill_specs_for_days(20);
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "event_reaction_reversal_forecast_1_5d_indrel_std",
+                "event_reaction_reversal_forecast_6_20d_indrel_std",
+                "event_reaction_reversal_express_1_5d_indrel_std",
+                "event_reaction_reversal_express_6_20d_indrel_std",
+            ]
+        );
+        assert!(specs.iter().all(|spec| match spec.kind {
+            Phase7BackfillFactorKind::EventPostReturnCurve {
+                higher_is_better, ..
+            } => !higher_is_better,
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn phase7_event_reaction_segment_sql_enforces_segment_age_bounds() {
+        let specs = phase7_event_reaction_segment_backfill_specs_for_days(20);
+        let late = specs
+            .iter()
+            .find(|spec| spec.factor_code == "event_reaction_forecast_6_20d_indrel_std")
+            .expect("late forecast segment");
+        let sql = phase7_factor_backfill_sql(late);
+
+        assert!(sql.contains("event.available_at <= $4"));
+        assert!(sql.contains("td.trade_date >= events.available_at + INTERVAL '6 days'"));
+        assert!(sql.contains("td.trade_date <= events.available_at + INTERVAL '20 days'"));
+        assert!(sql.contains("anchor_bar.trade_date <= events.available_at"));
+        assert!(sql.contains("current_bar.trade_date = td.trade_date"));
+        assert!(
+            !sql.contains("current_bar.trade_date > td.trade_date"),
+            "segmented event reaction feature must not read future price data"
+        );
     }
 
     #[test]
@@ -8243,20 +8767,26 @@ mod tests {
 
     #[test]
     fn phase7_optional_overlay_requires_only_the_base_source() {
-        let req = Phase7AlphaBlendProfilesBackfillRequest {
-            start_date: Some("2016-02-01".to_string()),
-            end_date: Some("2016-02-05".to_string()),
-            version: None,
-            profile_names: Some(vec!["quality_event_window_overlay_5pct".to_string()]),
-            statement_timeout_ms: Some(0),
-        };
-        let plans = req.into_plans().expect("valid optional overlay profile");
-        let plan = plans.first().expect("one selected profile");
+        for profile_name in [
+            "quality_event_window_overlay_5pct",
+            "quality_event_post_return_curve_overlay_5pct",
+            "quality_event_reaction_segments_overlay_5pct",
+            "quality_event_reaction_reversal_overlay_5pct",
+        ] {
+            let req = Phase7AlphaBlendProfilesBackfillRequest {
+                start_date: Some("2016-02-01".to_string()),
+                end_date: Some("2016-02-05".to_string()),
+                version: None,
+                profile_names: Some(vec![profile_name.to_string()]),
+                statement_timeout_ms: Some(0),
+            };
+            let plans = req.into_plans().expect("valid optional overlay profile");
+            let plan = plans.first().expect("one selected profile");
 
-        assert_eq!(plan.combo_name, "phase7_quality_event_window_overlay_v1");
-        assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
-        assert_eq!(plan.source_combos.len(), 2);
-        assert_eq!(phase7_alpha_blend_required_source_count(plan), 1);
+            assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
+            assert_eq!(plan.source_combos.len(), 2);
+            assert_eq!(phase7_alpha_blend_required_source_count(plan), 1);
+        }
     }
 
     #[test]

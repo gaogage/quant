@@ -678,6 +678,21 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "pit_nonlinear_alpha_regime_rebuild"
         | "phase7_execution_pit_nonlinear_alpha_regime_rebuild"
         | "phase7_ez"
+        | "professional_execution_pit_quality_recovery_alpha"
+        | "execution_pit_quality_recovery_alpha"
+        | "pit_quality_recovery_alpha"
+        | "phase7_execution_pit_quality_recovery_alpha"
+        | "phase7_fa"
+        | "professional_execution_event_post_return_curve_alpha"
+        | "execution_event_post_return_curve_alpha"
+        | "event_post_return_curve_alpha"
+        | "phase7_execution_event_post_return_curve_alpha"
+        | "phase7_fb"
+        | "professional_execution_event_reaction_alpha"
+        | "execution_event_reaction_alpha"
+        | "event_reaction_alpha"
+        | "phase7_execution_event_reaction_alpha"
+        | "phase7_fc"
         | "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
         | "oos_regime_alpha_rebuild"
@@ -1645,7 +1660,32 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
         | "phase7_execution_pit_nonlinear_alpha_regime_rebuild"
         | "phase7_ez" => (
             "professional_execution_pit_nonlinear_alpha_regime_rebuild".to_string(),
-            LayeredSearchConfig::professional_execution_pit_nonlinear_alpha_regime_rebuild_default(),
+            LayeredSearchConfig::professional_execution_pit_nonlinear_alpha_regime_rebuild_default(
+            ),
+        ),
+        "professional_execution_pit_quality_recovery_alpha"
+        | "execution_pit_quality_recovery_alpha"
+        | "pit_quality_recovery_alpha"
+        | "phase7_execution_pit_quality_recovery_alpha"
+        | "phase7_fa" => (
+            "professional_execution_pit_quality_recovery_alpha".to_string(),
+            LayeredSearchConfig::professional_execution_pit_quality_recovery_alpha_default(),
+        ),
+        "professional_execution_event_post_return_curve_alpha"
+        | "execution_event_post_return_curve_alpha"
+        | "event_post_return_curve_alpha"
+        | "phase7_execution_event_post_return_curve_alpha"
+        | "phase7_fb" => (
+            "professional_execution_event_post_return_curve_alpha".to_string(),
+            LayeredSearchConfig::professional_execution_event_post_return_curve_alpha_default(),
+        ),
+        "professional_execution_event_reaction_alpha"
+        | "execution_event_reaction_alpha"
+        | "event_reaction_alpha"
+        | "phase7_execution_event_reaction_alpha"
+        | "phase7_fc" => (
+            "professional_execution_event_reaction_alpha".to_string(),
+            LayeredSearchConfig::professional_execution_event_reaction_alpha_default(),
         ),
         "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
@@ -17791,6 +17831,238 @@ mod tests {
             first_trial.parameters["return_first_fill_repair_profile"],
             "return_first_fill_anchor1_top60_stress_fill"
         );
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_pit_nonlinear_alpha_regime_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_ez".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_pit_nonlinear_alpha_regime_rebuild"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_ez"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_ez should seed PIT nonlinear alpha rebuild first");
+        assert_eq!(
+            first_trial.parameters["pit_nonlinear_alpha_regime_rebuild_profile"],
+            "pit_nonlinear_event_overlay_softcap_top100_rebalance180"
+        );
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "alpha_first_low_impact_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["market_regime"],
+            "quality_state_alpha_overlay_selector_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["cash_utilization"],
+            "stress_fill_gross_98_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["execution_schedule_profile"],
+            "twap_20d_v1"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["candidate_ranking"] == "capacity_aware_alpha_liquidity_v1"
+                && trial.parameters["market_regime"]
+                    == "quality_nonlinear_alpha_risk_memory_router_v3"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_pit_quality_recovery_alpha_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_fa".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_pit_quality_recovery_alpha"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fa"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_fa should seed PIT quality recovery first");
+        assert_eq!(
+            first_trial.parameters["combo_name"],
+            "phase7_quality_recovery_acceleration_v1"
+        );
+        assert_eq!(first_trial.parameters["score_direction"], "descending");
+        assert_eq!(
+            first_trial.parameters["pit_quality_recovery_alpha_profile"],
+            "pit_quality_recovery_top100_rebalance160"
+        );
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "alpha_first_low_impact_v1"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["candidate_ranking"] == "capacity_aware_alpha_liquidity_v1"
+                && trial.parameters["market_regime"]
+                    == "quality_nonlinear_alpha_risk_memory_router_v3"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_event_post_return_curve_alpha_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_fb".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_event_post_return_curve_alpha"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fb"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_fb should seed PIT event post-return curve first");
+        assert_eq!(
+            first_trial.parameters["combo_name"],
+            "phase7_quality_event_post_return_curve_overlay_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["event_post_return_curve_alpha_profile"],
+            "event_post_return_curve_top100_rebalance160"
+        );
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "alpha_first_low_impact_v1"
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_event_reaction_alpha_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_fc".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_event_reaction_alpha"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fc"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_fc should seed event reaction segment alpha first");
+        assert_eq!(
+            first_trial.parameters["combo_name"],
+            "phase7_quality_event_reaction_segments_overlay_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["event_reaction_alpha_profile"],
+            "event_reaction_segments_top100_rebalance160"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_quality_event_reaction_reversal_overlay_v1"
+                && trial.parameters["event_reaction_alpha_profile"]
+                    == "event_reaction_reversal_top100_rebalance160"
+        }));
     }
 
     #[test]

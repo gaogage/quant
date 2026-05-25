@@ -139,6 +139,14 @@ async fn main() {
         )
         .route("/api/v1/quant/data/stats", get(routes::sync::data_stats))
         .route(
+            "/api/v1/quant/data/phase7-feasibility-audit",
+            get(routes::sync::phase7_feasibility_audit),
+        )
+        .route(
+            "/api/v1/quant/data/tushare/permission-smoke",
+            post(routes::sync::tushare_permission_smoke),
+        )
+        .route(
             "/api/v1/quant/data/sync/financial",
             post(routes::sync::sync_financial),
         )

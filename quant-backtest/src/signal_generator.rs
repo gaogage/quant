@@ -7195,7 +7195,208 @@ fn standard_score(value: f64, (mean, std_dev): (f64, f64)) -> f64 {
     (value - mean) / std_dev
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DerivedPitAlphaSpec {
+    source_combo_name: &'static str,
+    source_direction: ScoreDirection,
+    current_weight: f64,
+    change_weight: f64,
+}
+
+fn derived_pit_alpha_spec(combo_name: &str) -> Option<DerivedPitAlphaSpec> {
+    match combo_name {
+        "phase7_quality_recovery_acceleration_v1" => Some(DerivedPitAlphaSpec {
+            source_combo_name: "phase7_financial_quality_v1",
+            source_direction: ScoreDirection::Ascending,
+            current_weight: 0.40,
+            change_weight: 0.60,
+        }),
+        _ => None,
+    }
+}
+
+fn derive_pit_quality_recovery_scores(
+    source_scores: &FactorScoresByDate,
+    score_days: &[NaiveDate],
+    source_direction: ScoreDirection,
+    result_direction: ScoreDirection,
+    current_weight: f64,
+    change_weight: f64,
+    score_candidate_pool_size: Option<usize>,
+) -> FactorScoresByDate {
+    let score_days = normalized_dates(score_days);
+    let mut derived = FactorScoresByDate::new();
+    let mut previous_rows: Option<&Vec<(String, f64)>> = None;
+
+    for score_day in score_days {
+        let Some(current_rows) = source_scores.get(&score_day) else {
+            continue;
+        };
+        if current_rows.is_empty() {
+            previous_rows = Some(current_rows);
+            continue;
+        }
+
+        if let Some(previous_rows) = previous_rows {
+            let previous_by_symbol = previous_rows
+                .iter()
+                .filter(|(_, score)| score.is_finite())
+                .map(|(symbol, score)| (symbol.as_str(), *score))
+                .collect::<HashMap<_, _>>();
+            let paired = current_rows
+                .iter()
+                .filter_map(|(symbol, current_score)| {
+                    let previous_score = previous_by_symbol.get(symbol.as_str()).copied()?;
+                    if current_score.is_finite() && previous_score.is_finite() {
+                        Some((
+                            symbol.clone(),
+                            *current_score,
+                            current_score - previous_score,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if !paired.is_empty() {
+                let current_stats =
+                    score_stats(paired.iter().map(|(_, current_score, _)| *current_score));
+                let change_stats =
+                    score_stats(paired.iter().map(|(_, _, score_change)| *score_change));
+                let mut rows = paired
+                    .into_iter()
+                    .map(|(symbol, current_score, score_change)| {
+                        let current_good =
+                            oriented_standard_score(current_score, current_stats, source_direction);
+                        let change_good =
+                            oriented_standard_score(score_change, change_stats, source_direction);
+                        (
+                            symbol,
+                            current_weight.max(0.0) * current_good
+                                + change_weight.max(0.0) * change_good,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                sort_factor_scores(&mut rows, result_direction);
+                if let Some(limit) = normalize_score_candidate_pool_size(score_candidate_pool_size)
+                {
+                    rows.truncate(limit);
+                }
+                if !rows.is_empty() {
+                    derived.insert(score_day, rows);
+                }
+            }
+        }
+
+        previous_rows = Some(current_rows);
+    }
+
+    derived
+}
+
+async fn load_derived_pit_combo_scores_for_dates_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    config: &SignalConfig,
+    score_days: &[NaiveDate],
+    spec: DerivedPitAlphaSpec,
+) -> Result<Arc<FactorScoresByDate>, String> {
+    let score_days = normalized_dates(score_days);
+    if score_days.is_empty() {
+        return Ok(Arc::new(HashMap::new()));
+    }
+
+    let score_candidate_pool_size =
+        normalize_score_candidate_pool_size(config.score_candidate_pool_size);
+    let mut scores_by_date = FactorScoresByDate::new();
+    let mut has_missing_day = false;
+    for day in &score_days {
+        let key = SignalDataCacheKey::combo_scores(
+            &config.combo_name,
+            &config.version,
+            *day,
+            *day,
+            config.score_direction,
+            score_candidate_pool_size,
+            config.universe_profile,
+        );
+        if let Some(cached) = cache.cached_combo_scores(&key) {
+            scores_by_date.extend(cached.as_ref().clone());
+        } else {
+            has_missing_day = true;
+        }
+    }
+
+    if has_missing_day {
+        let mut source_config = config.clone();
+        source_config.combo_name = spec.source_combo_name.to_string();
+        source_config.score_direction = spec.source_direction;
+        source_config.score_candidate_pool_size = None;
+        source_config.prediction_blend = None;
+        source_config.event_gate = None;
+        source_config.score_overlay = None;
+        source_config.portfolio_sleeve = None;
+
+        let source_scores =
+            load_persisted_combo_scores_for_dates_cached(pool, cache, &source_config, &score_days)
+                .await?;
+        let derived_scores = derive_pit_quality_recovery_scores(
+            source_scores.as_ref(),
+            &score_days,
+            spec.source_direction,
+            config.score_direction,
+            spec.current_weight,
+            spec.change_weight,
+            score_candidate_pool_size,
+        );
+        for day in &score_days {
+            let day_scores = derived_scores.get(day).cloned().unwrap_or_default();
+            let day_map = if day_scores.is_empty() {
+                HashMap::new()
+            } else {
+                HashMap::from([(*day, day_scores.clone())])
+            };
+            let key = SignalDataCacheKey::combo_scores(
+                &config.combo_name,
+                &config.version,
+                *day,
+                *day,
+                config.score_direction,
+                score_candidate_pool_size,
+                config.universe_profile,
+            );
+            cache.insert_combo_scores(key, day_map);
+            if !day_scores.is_empty() {
+                scores_by_date.insert(*day, day_scores);
+            }
+        }
+    }
+
+    if scores_by_date.is_empty() {
+        return Err("No derived PIT combo scores found".into());
+    }
+
+    Ok(Arc::new(scores_by_date))
+}
+
 async fn load_combo_scores_for_dates_cached(
+    pool: &PgPool,
+    cache: &mut SignalDataCache,
+    config: &SignalConfig,
+    score_days: &[NaiveDate],
+) -> Result<Arc<FactorScoresByDate>, String> {
+    if let Some(spec) = derived_pit_alpha_spec(&config.combo_name) {
+        return load_derived_pit_combo_scores_for_dates_cached(
+            pool, cache, config, score_days, spec,
+        )
+        .await;
+    }
+
+    load_persisted_combo_scores_for_dates_cached(pool, cache, config, score_days).await
+}
+
+async fn load_persisted_combo_scores_for_dates_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
     config: &SignalConfig,
@@ -15096,6 +15297,56 @@ mod tests {
         assert_eq!(scores[0].0, "BBB");
         assert_eq!(scores[1].0, "CCC");
         assert_eq!(scores[2].0, "AAA");
+    }
+
+    #[test]
+    fn pit_quality_recovery_scores_use_only_prior_score_days() {
+        let d1 = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let future_day = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let base_scores = HashMap::from([
+            (
+                d1,
+                vec![
+                    ("RECOVERING".to_string(), 0.80),
+                    ("STATIC_QUALITY".to_string(), 0.30),
+                ],
+            ),
+            (
+                d2,
+                vec![
+                    ("RECOVERING".to_string(), 0.20),
+                    ("STATIC_QUALITY".to_string(), 0.25),
+                ],
+            ),
+            (
+                future_day,
+                vec![
+                    ("RECOVERING".to_string(), 99.0),
+                    ("STATIC_QUALITY".to_string(), -99.0),
+                ],
+            ),
+        ]);
+
+        let derived = derive_pit_quality_recovery_scores(
+            &base_scores,
+            &[d1, d2],
+            ScoreDirection::Ascending,
+            ScoreDirection::Descending,
+            0.40,
+            0.60,
+            None,
+        );
+
+        assert!(
+            !derived.contains_key(&d1),
+            "first score day has no PIT history"
+        );
+        assert!(!derived.contains_key(&future_day));
+        let d2_scores = derived.get(&d2).expect("recovery score day");
+        assert_eq!(d2_scores[0].0, "RECOVERING");
+        assert_eq!(d2_scores[1].0, "STATIC_QUALITY");
+        assert!(d2_scores[0].1 > d2_scores[1].1);
     }
 
     #[test]

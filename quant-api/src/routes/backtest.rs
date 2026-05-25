@@ -163,6 +163,13 @@ fn effective_coverage_enabled(value: &EffectiveCoverageReq) -> bool {
     value.enabled.unwrap_or(true)
 }
 
+fn effective_coverage_lookup_combo_name(req: &RunFactorBacktestReq) -> &str {
+    match req.combo_name.as_str() {
+        "phase7_quality_recovery_acceleration_v1" => "phase7_financial_quality_v1",
+        _ => req.combo_name.as_str(),
+    }
+}
+
 async fn resolve_effective_factor_coverage(
     db: &sqlx::PgPool,
     req: &RunFactorBacktestReq,
@@ -188,8 +195,9 @@ async fn resolve_effective_factor_coverage(
         .filter(|days| *days > 0);
     let universe_profile = parse_tradable_universe_profile(req.universe_profile.as_deref())?;
     let sql = effective_factor_coverage_sql(universe_profile);
+    let coverage_combo_name = effective_coverage_lookup_combo_name(req);
     let row = sqlx::query_as::<_, (NaiveDate, i64)>(&sql)
-        .bind(&req.combo_name)
+        .bind(coverage_combo_name)
         .bind(&req.version)
         .bind(requested_start)
         .bind(end)
@@ -200,8 +208,8 @@ async fn resolve_effective_factor_coverage(
 
     let Some((coverage_start, observed_rows)) = row else {
         return Err(format!(
-            "No effective factor coverage found for {}:{} between {} and {} with min_rows={}",
-            req.combo_name, req.version, requested_start, end, min_rows
+            "No effective factor coverage found for {}:{} (coverage source {}:{}) between {} and {} with min_rows={}",
+            req.combo_name, req.version, coverage_combo_name, req.version, requested_start, end, min_rows
         ));
     };
 
@@ -2649,6 +2657,27 @@ mod tests {
         assert_eq!(coverage.enabled, Some(true));
         assert_eq!(coverage.mode.as_deref(), Some("adjust_start"));
         assert_eq!(coverage.min_rows, Some(80));
+    }
+
+    #[test]
+    fn effective_coverage_for_derived_pit_quality_recovery_uses_source_combo() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_quality_recovery_acceleration_v1",
+            "version": "1.0.0",
+            "start_date": "20200101",
+            "end_date": "20221230",
+            "effective_coverage": {
+                "enabled": true,
+                "mode": "adjust_start",
+                "min_rows": 100
+            }
+        }))
+        .expect("factor request");
+
+        assert_eq!(
+            effective_coverage_lookup_combo_name(&req),
+            "phase7_financial_quality_v1"
+        );
     }
 
     #[test]

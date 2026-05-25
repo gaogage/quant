@@ -607,4 +607,164 @@ impl TushareClient {
         self.call_api::<Vec<serde_json::Value>>("fina_indicator", params, &[])
             .await
     }
+
+    /// 现金流量表，用于 Phase 7 数据权限 smoke 与后续现金流质量特征。
+    pub async fn cashflow(
+        &self,
+        ts_code: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = vec![("ts_code", ts_code)];
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "cashflow",
+            params,
+            &[
+                "ts_code",
+                "ann_date",
+                "f_ann_date",
+                "end_date",
+                "net_profit",
+                "n_cashflow_act",
+                "c_cash_equ_end_period",
+            ],
+        )
+        .await
+    }
+
+    /// 分红送股，用于 Phase 7 数据权限 smoke 与后续股息质量特征。
+    pub async fn dividend(
+        &self,
+        ts_code: &str,
+        ann_date: Option<&str>,
+        record_date: Option<&str>,
+        ex_date: Option<&str>,
+        imp_ann_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = vec![("ts_code", ts_code)];
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(date) = record_date {
+            params.push(("record_date", date));
+        }
+        if let Some(date) = ex_date {
+            params.push(("ex_date", date));
+        }
+        if let Some(date) = imp_ann_date {
+            params.push(("imp_ann_date", date));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "dividend",
+            params,
+            &[
+                "ts_code",
+                "end_date",
+                "ann_date",
+                "div_proc",
+                "cash_div",
+                "cash_div_tax",
+                "record_date",
+                "ex_date",
+                "pay_date",
+                "imp_ann_date",
+            ],
+        )
+        .await
+    }
+
+    /// 股票回购。Tushare 该接口按公告日期查询，官方参数不包含 ts_code。
+    pub async fn repurchase(
+        &self,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "repurchase",
+            params,
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "proc",
+                "exp_date",
+                "vol",
+                "amount",
+                "high_limit",
+                "low_limit",
+            ],
+        )
+        .await
+    }
 }
