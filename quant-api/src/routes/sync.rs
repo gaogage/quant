@@ -96,7 +96,11 @@ const PHASE7_COVERAGE_RUNNER_MAX_BATCH_SIZE: usize = 100;
 const PHASE7_COVERAGE_RUNNER_DEFAULT_BATCH_COUNT: usize = 4;
 const PHASE7_COVERAGE_RUNNER_MAX_BATCH_COUNT: usize = 10;
 const PHASE7_COVERAGE_RUNNER_DEFAULT_PROFILE: &str = "local_mac_safe";
-const PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES: &[&str] = &["cashflow", "dividend"];
+const PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES: &[&str] = &["cashflow", "dividend", "financial"];
+const PHASE7_COVERAGE_RUNNER_DEFAULT_TARGET_COVERAGE_RATIO: f64 = 1.0;
+const PHASE7_COVERAGE_RUNNER_PARTIAL_GATE_RATIO: f64 = 0.30;
+const PHASE7_COVERAGE_RUNNER_DEFAULT_MAX_ROUNDS: usize = 1;
+const PHASE7_COVERAGE_RUNNER_MAX_ROUNDS: usize = 20;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Phase7OptionalSourceCoverageSyncReq {
@@ -160,6 +164,12 @@ pub struct Phase7CoverageExpansionRunnerReq {
     pub data_version_prefix: Option<String>,
     #[serde(default)]
     pub stop_when_readiness_at_least_partial: Option<bool>,
+    #[serde(default)]
+    pub auto_continue: Option<bool>,
+    #[serde(default)]
+    pub max_rounds: Option<usize>,
+    #[serde(default)]
+    pub target_coverage_ratio: Option<f64>,
 }
 
 fn phase7_permission_smoke_sources(requested: &[String]) -> Vec<String> {
@@ -266,6 +276,30 @@ fn phase7_coverage_runner_plan_only(plan_only: Option<bool>) -> bool {
     plan_only.unwrap_or(true)
 }
 
+fn phase7_coverage_runner_auto_continue(auto_continue: Option<bool>) -> bool {
+    auto_continue.unwrap_or(false)
+}
+
+fn phase7_coverage_runner_max_rounds(max_rounds: Option<usize>, auto_continue: bool) -> usize {
+    if auto_continue {
+        max_rounds
+            .unwrap_or(PHASE7_COVERAGE_RUNNER_DEFAULT_MAX_ROUNDS)
+            .clamp(1, PHASE7_COVERAGE_RUNNER_MAX_ROUNDS)
+    } else {
+        1
+    }
+}
+
+fn phase7_coverage_runner_target_ratio(target: Option<f64>) -> f64 {
+    target
+        .filter(|value| value.is_finite())
+        .unwrap_or(PHASE7_COVERAGE_RUNNER_DEFAULT_TARGET_COVERAGE_RATIO)
+        .clamp(
+            PHASE7_COVERAGE_RUNNER_PARTIAL_GATE_RATIO,
+            PHASE7_COVERAGE_RUNNER_DEFAULT_TARGET_COVERAGE_RATIO,
+        )
+}
+
 fn phase7_coverage_runner_sources(requested: &[String]) -> Result<Vec<String>, String> {
     let raw_sources: Vec<String> = if requested.is_empty() {
         PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES
@@ -285,7 +319,7 @@ fn phase7_coverage_runner_sources(requested: &[String]) -> Result<Vec<String>, S
     for source in raw_sources {
         if !PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES.contains(&source.as_str()) {
             return Err(format!(
-                "unsupported coverage runner source: {}; supported sources are cashflow, dividend",
+                "unsupported coverage runner source: {}; supported sources are cashflow, dividend, financial",
                 source
             ));
         }
@@ -301,6 +335,97 @@ fn phase7_coverage_runner_should_plan_source(readiness: &str) -> bool {
         readiness,
         "partial_feature_candidate" | "ready_for_feature_factory"
     )
+}
+
+fn phase7_coverage_runner_should_plan_source_for_target(
+    readiness: Option<&str>,
+    coverage_ratio: Option<f64>,
+    target_ratio: f64,
+    stop_at_partial_gate: bool,
+) -> bool {
+    if stop_at_partial_gate {
+        return readiness
+            .map(phase7_coverage_runner_should_plan_source)
+            .unwrap_or(true);
+    }
+    let ratio = coverage_ratio.unwrap_or(0.0);
+    ratio < target_ratio
+}
+
+fn phase7_coverage_runner_source_state(
+    audit: &Value,
+) -> (BTreeMap<String, String>, BTreeMap<String, f64>) {
+    let mut readiness_by_source = BTreeMap::new();
+    let mut coverage_by_source = BTreeMap::new();
+    if let Some(sources) = audit
+        .get("optional_data_sources")
+        .and_then(|sources| sources.as_array())
+    {
+        for source in sources {
+            if let Some(name) = source.get("source").and_then(|name| name.as_str()) {
+                if let Some(readiness) = source
+                    .get("feature_readiness")
+                    .and_then(|readiness| readiness.as_str())
+                {
+                    readiness_by_source.insert(name.to_string(), readiness.to_string());
+                }
+                if let Some(ratio) = source
+                    .get("symbol_coverage_ratio")
+                    .and_then(|ratio| ratio.as_f64())
+                {
+                    coverage_by_source.insert(name.to_string(), ratio);
+                }
+            }
+        }
+    }
+
+    if let Some(rows) = audit
+        .get("financial_coverage")
+        .and_then(|sources| sources.as_array())
+    {
+        let mut financial_ready = "ready_for_feature_factory".to_string();
+        let mut financial_ratio = 1.0_f64;
+        let mut has_financial_rows = false;
+        for row in rows {
+            if let (Some(name), Some(coverage_grade)) = (
+                row.get("name").and_then(|name| name.as_str()),
+                row.get("coverage_grade").and_then(|grade| grade.as_str()),
+            ) {
+                if matches!(
+                    name,
+                    "market_financial_statement" | "market_financial_indicator"
+                ) {
+                    has_financial_rows = true;
+                    if let Some(ratio) = row
+                        .get("symbol_coverage_ratio")
+                        .and_then(|ratio| ratio.as_f64())
+                    {
+                        financial_ratio = financial_ratio.min(ratio);
+                    }
+                    let readiness = phase7_financial_source_readiness(coverage_grade).to_string();
+                    if phase7_coverage_runner_should_plan_source(&readiness) {
+                        financial_ready = readiness;
+                    }
+                }
+            }
+        }
+        if has_financial_rows {
+            readiness_by_source.insert("financial".to_string(), financial_ready);
+            coverage_by_source.insert("financial".to_string(), financial_ratio);
+        }
+    }
+
+    (readiness_by_source, coverage_by_source)
+}
+
+fn phase7_financial_source_readiness(coverage_grade: &str) -> &'static str {
+    match coverage_grade {
+        "broad" => "ready_for_feature_factory",
+        "partial" => "partial_feature_candidate",
+        "unknown_reference" => "coverage_reference_missing",
+        "missing" => "needs_sync",
+        _ => "undercovered_do_not_train",
+    }
 }
 
 fn phase7_optional_source_sync_sources(requested: &[String]) -> Result<Vec<String>, String> {
@@ -1507,6 +1632,194 @@ async fn build_phase7_optional_source_coverage_batches(
     }))
 }
 
+async fn build_phase7_financial_coverage_batches(
+    state: Arc<AppState>,
+    start_date: &str,
+    end_date: &str,
+    batch_size: usize,
+    batch_count: usize,
+    plan_only: bool,
+    data_version_prefix: &str,
+) -> Result<Value, String> {
+    let child_background = phase7_optional_source_batch_child_background(plan_only);
+    let offsets = phase7_optional_source_batch_offsets(0, batch_size, batch_count);
+    let planned_next_offset = phase7_optional_source_batch_next_offset(&offsets, batch_size);
+    let recommended_resume_offset =
+        phase7_optional_source_batch_recommended_resume_offset(plan_only, &offsets, batch_size);
+
+    let mut batches = Vec::new();
+    for (batch_index, offset_symbols) in offsets.iter().copied().enumerate() {
+        let symbols =
+            resolve_phase7_financial_sync_symbols(&state, batch_size, offset_symbols).await?;
+        let task_id = format!("{}-financial-b{:03}", data_version_prefix, batch_index + 1);
+        let sync_req = DataSyncTaskReq {
+            dataset: "financial".to_string(),
+            source: "tushare".to_string(),
+            mode: Some("bounded_symbols".to_string()),
+            symbols: symbols.clone(),
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: Some(start_date.to_string()),
+            end_date: Some(end_date.to_string()),
+            data_version_id: Some(task_id.clone()),
+            background: child_background,
+            quality_check: false,
+            create_data_version: true,
+            retry_of_task_id: None,
+            reason: Some("phase7 financial bounded coverage expansion".to_string()),
+        };
+
+        let status;
+        let mut execution = None;
+        if symbols.is_empty() {
+            status = "skipped_no_symbols";
+        } else if plan_only {
+            status = "planned";
+        } else if child_background {
+            register_sync_task(&state, &task_id, &sync_req, "running").await?;
+            let state_for_task = state.clone();
+            let task_id_for_task = task_id.clone();
+            let req_for_task = sync_req.clone();
+            tokio::spawn(async move {
+                if let Err(message) = execute_sync_task(
+                    state_for_task.clone(),
+                    task_id_for_task.clone(),
+                    req_for_task,
+                )
+                .await
+                {
+                    let _ = quant_data::repository::fail_sync_task(
+                        &state_for_task.db,
+                        &task_id_for_task,
+                        &message,
+                    )
+                    .await;
+                    tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 financial bounded 补数失败");
+                }
+            });
+            status = "running";
+        } else {
+            execution = Some(execute_sync_task(state.clone(), task_id.clone(), sync_req).await?);
+            status = "completed";
+        }
+
+        batches.push(json!({
+            "batch_index": batch_index + 1,
+            "offset_symbols": offset_symbols,
+            "batch_size": batch_size,
+            "task_id": task_id,
+            "status": status,
+            "selected_count": symbols.len(),
+            "selected_symbols": symbols,
+            "execution": execution,
+        }));
+    }
+
+    Ok(json!({
+        "audit_version": "phase7-ff-financial-bounded-batch-sync-v1",
+        "mode": if plan_only { "plan_only" } else { "background" },
+        "plan_only": plan_only,
+        "child_background": child_background,
+        "batch_size": batch_size,
+        "batch_count": batch_count,
+        "next_offset": recommended_resume_offset,
+        "planned_next_offset": planned_next_offset,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "source": "financial",
+        "data_version_prefix": data_version_prefix,
+        "batches": batches,
+        "notes": [
+            "This financial runner resolves a bounded stock list before syncing; it never uses an empty symbols full-market request.",
+            "It reuses the existing financial dataset sync for market_financial_statement and market_financial_indicator.",
+            "Run phase7-feasibility-audit after completion and keep financial alpha blocked until coverage reaches partial_feature_candidate."
+        ],
+    }))
+}
+
+async fn run_phase7_coverage_autopilot_background(
+    state: Arc<AppState>,
+    start_date: String,
+    end_date: String,
+    requested_sources: Vec<String>,
+    batch_size: usize,
+    batch_count: usize,
+    max_rounds: usize,
+    target_ratio: f64,
+    data_version_prefix: String,
+) {
+    for round_index in 0..max_rounds {
+        let round_audit = match build_phase7_feasibility_audit(&state).await {
+            Ok(audit) => audit,
+            Err(error) => {
+                tracing::error!(error = %error, "Phase 7 coverage autopilot audit failed");
+                break;
+            }
+        };
+        let (readiness, coverage) = phase7_coverage_runner_source_state(&round_audit);
+        let planned_sources: Vec<String> = requested_sources
+            .iter()
+            .filter(|source| {
+                phase7_coverage_runner_should_plan_source_for_target(
+                    readiness.get(*source).map(String::as_str),
+                    coverage.get(*source).copied(),
+                    target_ratio,
+                    false,
+                )
+            })
+            .cloned()
+            .collect();
+        if planned_sources.is_empty() {
+            tracing::info!(round = round_index + 1, target_ratio, "Phase 7 coverage autopilot reached target");
+            break;
+        }
+
+        let round_prefix = format!("{}-r{:03}", data_version_prefix, round_index + 1);
+        let optional_sources: Vec<String> = planned_sources
+            .iter()
+            .filter(|source| source.as_str() != "financial")
+            .cloned()
+            .collect();
+        if !optional_sources.is_empty() {
+            let batch_req = Phase7OptionalSourceCoverageBatchReq {
+                sources: optional_sources,
+                start_date: Some(start_date.clone()),
+                end_date: Some(end_date.clone()),
+                batch_size: Some(batch_size),
+                batch_count: Some(batch_count),
+                start_offset: Some(0),
+                plan_only: Some(false),
+                data_version_prefix: Some(format!("{}-optional", round_prefix)),
+            };
+            if let Err(error) =
+                build_phase7_optional_source_coverage_batches(state.clone(), batch_req).await
+            {
+                tracing::error!(round = round_index + 1, error = %error, "Phase 7 optional coverage autopilot round failed");
+                break;
+            }
+        }
+
+        if planned_sources.iter().any(|source| source == "financial") {
+            if let Err(error) = build_phase7_financial_coverage_batches(
+                state.clone(),
+                &start_date,
+                &end_date,
+                batch_size,
+                batch_count,
+                false,
+                &format!("{}-financial", round_prefix),
+            )
+            .await
+            {
+                tracing::error!(round = round_index + 1, error = %error, "Phase 7 financial coverage autopilot round failed");
+                break;
+            }
+        }
+    }
+}
+
 async fn build_phase7_coverage_expansion_runner(
     state: Arc<AppState>,
     req: Phase7CoverageExpansionRunnerReq,
@@ -1532,7 +1845,10 @@ async fn build_phase7_coverage_expansion_runner(
     let batch_size = phase7_coverage_runner_batch_size(req.batch_size);
     let batch_count = phase7_coverage_runner_batch_count(req.batch_count);
     let plan_only = phase7_coverage_runner_plan_only(req.plan_only);
-    let stop_when_ready = req.stop_when_readiness_at_least_partial.unwrap_or(true);
+    let auto_continue = phase7_coverage_runner_auto_continue(req.auto_continue);
+    let max_rounds = phase7_coverage_runner_max_rounds(req.max_rounds, auto_continue);
+    let target_ratio = phase7_coverage_runner_target_ratio(req.target_coverage_ratio);
+    let stop_when_ready = req.stop_when_readiness_at_least_partial.unwrap_or(false);
     let data_version_prefix = req.data_version_prefix.clone().unwrap_or_else(|| {
         chrono::Utc::now()
             .format("dv-phase7-ff-coverage-runner-%Y%m%d-%H%M%S%3f")
@@ -1540,33 +1856,17 @@ async fn build_phase7_coverage_expansion_runner(
     });
 
     let audit = build_phase7_feasibility_audit(&state).await?;
-    let mut optional_readiness = BTreeMap::new();
-    if let Some(sources) = audit
-        .get("optional_data_sources")
-        .and_then(|sources| sources.as_array())
-    {
-        for source in sources {
-            if let (Some(name), Some(readiness)) = (
-                source.get("source").and_then(|name| name.as_str()),
-                source
-                    .get("feature_readiness")
-                    .and_then(|readiness| readiness.as_str()),
-            ) {
-                optional_readiness.insert(name.to_string(), readiness.to_string());
-            }
-        }
-    }
+    let (source_readiness, source_coverage_ratio) = phase7_coverage_runner_source_state(&audit);
 
     let planned_sources: Vec<String> = requested_sources
         .iter()
         .filter(|source| {
-            if !stop_when_ready {
-                return true;
-            }
-            optional_readiness
-                .get(*source)
-                .map(|readiness| phase7_coverage_runner_should_plan_source(readiness))
-                .unwrap_or(true)
+            phase7_coverage_runner_should_plan_source_for_target(
+                source_readiness.get(*source).map(String::as_str),
+                source_coverage_ratio.get(*source).copied(),
+                target_ratio,
+                stop_when_ready,
+            )
         })
         .cloned()
         .collect();
@@ -1578,16 +1878,23 @@ async fn build_phase7_coverage_expansion_runner(
             json!({
                 "source": source,
                 "reason": "readiness_at_least_partial",
-                "feature_readiness": optional_readiness.get(source).cloned().unwrap_or_else(|| "unknown".to_string()),
+                "feature_readiness": source_readiness.get(source).cloned().unwrap_or_else(|| "unknown".to_string()),
             })
         })
         .collect();
 
-    let batch_result = if planned_sources.is_empty() {
+    let optional_sources: Vec<String> = planned_sources
+        .iter()
+        .filter(|source| source.as_str() != "financial")
+        .cloned()
+        .collect();
+    let optional_batch_result = if optional_sources.is_empty() {
+        None
+    } else if auto_continue && !plan_only {
         None
     } else {
         let batch_req = Phase7OptionalSourceCoverageBatchReq {
-            sources: planned_sources.clone(),
+            sources: optional_sources.clone(),
             start_date: Some(start_date.clone()),
             end_date: Some(end_date.clone()),
             batch_size: Some(batch_size),
@@ -1596,18 +1903,61 @@ async fn build_phase7_coverage_expansion_runner(
             plan_only: Some(plan_only),
             data_version_prefix: Some(data_version_prefix.clone()),
         };
-        Some(build_phase7_optional_source_coverage_batches(state, batch_req).await?)
+        Some(build_phase7_optional_source_coverage_batches(state.clone(), batch_req).await?)
     };
+    let financial_batch_result = if planned_sources.iter().any(|source| source == "financial") {
+        Some(
+            build_phase7_financial_coverage_batches(
+                state,
+                &start_date,
+                &end_date,
+                batch_size,
+                batch_count,
+                plan_only,
+                &data_version_prefix,
+            )
+            .await?,
+        )
+    } else {
+        None
+    } else if auto_continue && !plan_only {
+        None
+    };
+    if auto_continue && !plan_only && !planned_sources.is_empty() {
+        let state_for_task = state.clone();
+        let start_date_for_task = start_date.clone();
+        let end_date_for_task = end_date.clone();
+        let requested_sources_for_task = requested_sources.clone();
+        let data_version_prefix_for_task = data_version_prefix.clone();
+        tokio::spawn(async move {
+            run_phase7_coverage_autopilot_background(
+                state_for_task,
+                start_date_for_task,
+                end_date_for_task,
+                requested_sources_for_task,
+                batch_size,
+                batch_count,
+                max_rounds,
+                target_ratio,
+                data_version_prefix_for_task,
+            )
+            .await;
+        });
+    }
 
     Ok(json!({
         "audit_version": "phase7-ff-coverage-runner-v1",
         "profile": profile,
-        "mode": if plan_only { "plan_only" } else { "background" },
+        "mode": if plan_only { "plan_only" } else if auto_continue { "autopilot_background" } else { "background" },
         "plan_only": plan_only,
+        "auto_continue": auto_continue,
+        "max_rounds": max_rounds,
+        "target_coverage_ratio": target_ratio,
+        "partial_feature_candidate_gate_ratio": PHASE7_COVERAGE_RUNNER_PARTIAL_GATE_RATIO,
         "stop_when_readiness_at_least_partial": stop_when_ready,
         "batch_size": batch_size,
         "batch_count": batch_count,
-        "max_child_tasks": planned_sources.len() * batch_count,
+        "max_child_tasks": planned_sources.len() * batch_count * max_rounds,
         "date_range": {
             "start_date": start_date,
             "end_date": end_date,
@@ -1615,13 +1965,17 @@ async fn build_phase7_coverage_expansion_runner(
         "requested_sources": requested_sources,
         "planned_sources": planned_sources,
         "skipped_sources": skipped_sources,
-        "optional_source_readiness": optional_readiness,
+        "optional_source_readiness": source_readiness.clone(),
+        "source_readiness": source_readiness,
+        "source_coverage_ratio": source_coverage_ratio,
         "data_version_prefix": data_version_prefix,
-        "batch_plan": batch_result,
+        "optional_batch_plan": optional_batch_result,
+        "financial_batch_plan": financial_batch_result,
         "notes": [
-            "This runner orchestrates bounded optional-source coverage expansion only; it never builds features or runs strategy discovery.",
+            "This runner orchestrates bounded coverage expansion only; it never builds features or runs strategy discovery.",
             "Default profile is local_mac_safe and defaults to plan_only=true.",
-            "The runner only supports symbol-filtered optional sources; repurchase is excluded because the Tushare API is announcement-date-range based.",
+            "The runner supports symbol-filtered cashflow/dividend and bounded financial coverage sync; repurchase is excluded because the Tushare API is announcement-date-range based.",
+            "The 30% partial_feature_candidate threshold is only a research unlock gate; the default target_coverage_ratio is 1.0 for full available coverage.",
             "Feature factories remain blocked while readiness is sample_only_do_not_train."
         ],
     }))
@@ -1803,6 +2157,59 @@ async fn resolve_phase7_optional_source_sync_symbols(
 
     if !uncovered.is_empty() {
         return Ok(uncovered);
+    }
+
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT symbol
+        FROM market_stock
+        WHERE list_status = 'L'
+        ORDER BY symbol
+        OFFSET $1 LIMIT $2
+        "#,
+    )
+    .bind(offset)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn resolve_phase7_financial_sync_symbols(
+    state: &AppState,
+    max_symbols: usize,
+    offset_symbols: usize,
+) -> Result<Vec<String>, String> {
+    let limit = max_symbols as i64;
+    let offset = offset_symbols as i64;
+    let symbols = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT stock.symbol
+        FROM market_stock stock
+        WHERE stock.list_status = 'L'
+          AND (
+              NOT EXISTS (
+                  SELECT 1
+                  FROM market_financial_statement stmt
+                  WHERE stmt.ts_code = stock.symbol
+              )
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM market_financial_indicator ind
+                  WHERE ind.ts_code = stock.symbol
+              )
+          )
+        ORDER BY stock.symbol
+        OFFSET $1 LIMIT $2
+        "#,
+    )
+    .bind(offset)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
+    if !symbols.is_empty() {
+        return Ok(symbols);
     }
 
     sqlx::query_scalar::<_, String>(
@@ -2457,9 +2864,79 @@ mod tests {
         assert_eq!(phase7_coverage_runner_plan_only(None), true);
         assert_eq!(
             phase7_coverage_runner_sources(&[]).unwrap(),
-            vec!["cashflow", "dividend"]
+            vec!["cashflow", "dividend", "financial"]
         );
         assert!(phase7_coverage_runner_sources(&["repurchase".to_string()]).is_err());
+    }
+
+    #[test]
+    fn phase7_coverage_runner_sources_include_bounded_financial_sync() {
+        assert_eq!(
+            phase7_coverage_runner_sources(&[
+                " financial ".to_string(),
+                "cashflow".to_string(),
+                "financial".to_string(),
+            ])
+            .expect("financial source accepted"),
+            vec!["financial", "cashflow"]
+        );
+    }
+
+    #[test]
+    fn phase7_coverage_runner_auto_continue_targets_full_coverage_with_bounds() {
+        assert!(!phase7_coverage_runner_auto_continue(None));
+        assert!(phase7_coverage_runner_auto_continue(Some(true)));
+
+        assert_eq!(phase7_coverage_runner_max_rounds(None, false), 1);
+        assert_eq!(phase7_coverage_runner_max_rounds(None, true), 1);
+        assert_eq!(phase7_coverage_runner_max_rounds(Some(0), true), 1);
+        assert_eq!(phase7_coverage_runner_max_rounds(Some(12), true), 12);
+        assert_eq!(phase7_coverage_runner_max_rounds(Some(1_000), true), 20);
+
+        assert_eq!(phase7_coverage_runner_target_ratio(None), 1.0);
+        assert_eq!(phase7_coverage_runner_target_ratio(Some(0.10)), 0.30);
+        assert_eq!(phase7_coverage_runner_target_ratio(Some(0.75)), 0.75);
+        assert_eq!(phase7_coverage_runner_target_ratio(Some(2.0)), 1.0);
+        assert_eq!(phase7_coverage_runner_target_ratio(Some(f64::NAN)), 1.0);
+    }
+
+    #[test]
+    fn phase7_coverage_runner_partial_gate_does_not_block_full_coverage_target() {
+        assert!(phase7_coverage_runner_should_plan_source_for_target(
+            Some("partial_feature_candidate"),
+            Some(0.35),
+            1.0,
+            false,
+        ));
+        assert!(!phase7_coverage_runner_should_plan_source_for_target(
+            Some("partial_feature_candidate"),
+            Some(0.35),
+            0.30,
+            false,
+        ));
+        assert!(!phase7_coverage_runner_should_plan_source_for_target(
+            Some("partial_feature_candidate"),
+            Some(0.35),
+            1.0,
+            true,
+        ));
+    }
+
+    #[test]
+    fn phase7_financial_source_readiness_maps_coverage_to_training_gate() {
+        assert_eq!(phase7_financial_source_readiness("missing"), "needs_sync");
+        assert_eq!(
+            phase7_financial_source_readiness("thin"),
+            "undercovered_do_not_train"
+        );
+        assert_eq!(
+            phase7_financial_source_readiness("partial"),
+            "partial_feature_candidate"
+        );
+        assert_eq!(
+            phase7_financial_source_readiness("broad"),
+            "ready_for_feature_factory"
+        );
     }
 
     #[test]
