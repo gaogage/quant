@@ -99,7 +99,7 @@ const PHASE7_COVERAGE_RUNNER_DEFAULT_PROFILE: &str = "local_mac_safe";
 const PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES: &[&str] = &["cashflow", "dividend", "financial"];
 const PHASE7_COVERAGE_RUNNER_DEFAULT_TARGET_COVERAGE_RATIO: f64 = 1.0;
 const PHASE7_COVERAGE_RUNNER_PARTIAL_GATE_RATIO: f64 = 0.30;
-const PHASE7_COVERAGE_RUNNER_DEFAULT_MAX_ROUNDS: usize = 1;
+const PHASE7_COVERAGE_RUNNER_DEFAULT_MAX_ROUNDS: usize = PHASE7_COVERAGE_RUNNER_MAX_ROUNDS;
 const PHASE7_COVERAGE_RUNNER_MAX_ROUNDS: usize = 20;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,6 +288,17 @@ fn phase7_coverage_runner_max_rounds(max_rounds: Option<usize>, auto_continue: b
     } else {
         1
     }
+}
+
+fn phase7_coverage_runner_should_build_immediate_batches(
+    plan_only: bool,
+    auto_continue: bool,
+) -> bool {
+    plan_only || !auto_continue
+}
+
+fn phase7_coverage_autopilot_batch_offsets(batch_count: usize) -> Vec<usize> {
+    vec![0; batch_count]
 }
 
 fn phase7_coverage_runner_target_ratio(target: Option<f64>) -> f64 {
@@ -1739,6 +1750,128 @@ async fn build_phase7_financial_coverage_batches(
     }))
 }
 
+fn build_phase7_bounded_sync_req(
+    dataset: &str,
+    symbols: Vec<String>,
+    start_date: &str,
+    end_date: &str,
+    task_id: &str,
+    reason: &str,
+) -> DataSyncTaskReq {
+    DataSyncTaskReq {
+        dataset: dataset.to_string(),
+        source: "tushare".to_string(),
+        mode: Some("bounded_symbols".to_string()),
+        symbols,
+        index_codes: Vec::new(),
+        exchanges: Vec::new(),
+        start_date: Some(start_date.to_string()),
+        end_date: Some(end_date.to_string()),
+        data_version_id: Some(task_id.to_string()),
+        background: false,
+        quality_check: false,
+        create_data_version: true,
+        retry_of_task_id: None,
+        reason: Some(reason.to_string()),
+    }
+}
+
+async fn run_phase7_autopilot_bounded_sync(
+    state: Arc<AppState>,
+    dataset: &str,
+    symbols: Vec<String>,
+    start_date: &str,
+    end_date: &str,
+    task_id: String,
+    reason: &str,
+) -> Result<Value, String> {
+    let sync_req =
+        build_phase7_bounded_sync_req(dataset, symbols, start_date, end_date, &task_id, reason);
+    execute_sync_task(state, task_id, sync_req).await
+}
+
+async fn run_phase7_autopilot_optional_round(
+    state: Arc<AppState>,
+    sources: &[String],
+    start_date: &str,
+    end_date: &str,
+    batch_size: usize,
+    batch_count: usize,
+    round_prefix: &str,
+) -> Result<(), String> {
+    for (batch_index, offset_symbols) in phase7_coverage_autopilot_batch_offsets(batch_count)
+        .into_iter()
+        .enumerate()
+    {
+        for source in sources {
+            let symbols = resolve_phase7_optional_source_sync_symbols(
+                &state,
+                source,
+                &[],
+                batch_size,
+                offset_symbols,
+            )
+            .await?;
+            if symbols.is_empty() {
+                tracing::info!(
+                    source,
+                    round_prefix,
+                    "Phase 7 coverage autopilot optional source has no selected symbols"
+                );
+                continue;
+            }
+            let task_id = format!("{}-{}-b{:03}", round_prefix, source, batch_index + 1);
+            run_phase7_autopilot_bounded_sync(
+                state.clone(),
+                source,
+                symbols,
+                start_date,
+                end_date,
+                task_id,
+                "phase7 coverage autopilot bounded optional source expansion",
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_phase7_autopilot_financial_round(
+    state: Arc<AppState>,
+    start_date: &str,
+    end_date: &str,
+    batch_size: usize,
+    batch_count: usize,
+    round_prefix: &str,
+) -> Result<(), String> {
+    for (batch_index, offset_symbols) in phase7_coverage_autopilot_batch_offsets(batch_count)
+        .into_iter()
+        .enumerate()
+    {
+        let symbols =
+            resolve_phase7_financial_sync_symbols(&state, batch_size, offset_symbols).await?;
+        if symbols.is_empty() {
+            tracing::info!(
+                round_prefix,
+                "Phase 7 coverage autopilot financial source has no selected symbols"
+            );
+            continue;
+        }
+        let task_id = format!("{}-financial-b{:03}", round_prefix, batch_index + 1);
+        run_phase7_autopilot_bounded_sync(
+            state.clone(),
+            "financial",
+            symbols,
+            start_date,
+            end_date,
+            task_id,
+            "phase7 coverage autopilot bounded financial expansion",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn run_phase7_coverage_autopilot_background(
     state: Arc<AppState>,
     start_date: String,
@@ -1772,7 +1905,11 @@ async fn run_phase7_coverage_autopilot_background(
             .cloned()
             .collect();
         if planned_sources.is_empty() {
-            tracing::info!(round = round_index + 1, target_ratio, "Phase 7 coverage autopilot reached target");
+            tracing::info!(
+                round = round_index + 1,
+                target_ratio,
+                "Phase 7 coverage autopilot reached target"
+            );
             break;
         }
 
@@ -1783,18 +1920,16 @@ async fn run_phase7_coverage_autopilot_background(
             .cloned()
             .collect();
         if !optional_sources.is_empty() {
-            let batch_req = Phase7OptionalSourceCoverageBatchReq {
-                sources: optional_sources,
-                start_date: Some(start_date.clone()),
-                end_date: Some(end_date.clone()),
-                batch_size: Some(batch_size),
-                batch_count: Some(batch_count),
-                start_offset: Some(0),
-                plan_only: Some(false),
-                data_version_prefix: Some(format!("{}-optional", round_prefix)),
-            };
-            if let Err(error) =
-                build_phase7_optional_source_coverage_batches(state.clone(), batch_req).await
+            if let Err(error) = run_phase7_autopilot_optional_round(
+                state.clone(),
+                &optional_sources,
+                &start_date,
+                &end_date,
+                batch_size,
+                batch_count,
+                &format!("{}-optional", round_prefix),
+            )
+            .await
             {
                 tracing::error!(round = round_index + 1, error = %error, "Phase 7 optional coverage autopilot round failed");
                 break;
@@ -1802,13 +1937,12 @@ async fn run_phase7_coverage_autopilot_background(
         }
 
         if planned_sources.iter().any(|source| source == "financial") {
-            if let Err(error) = build_phase7_financial_coverage_batches(
+            if let Err(error) = run_phase7_autopilot_financial_round(
                 state.clone(),
                 &start_date,
                 &end_date,
                 batch_size,
                 batch_count,
-                false,
                 &format!("{}-financial", round_prefix),
             )
             .await
@@ -1888,9 +2022,9 @@ async fn build_phase7_coverage_expansion_runner(
         .filter(|source| source.as_str() != "financial")
         .cloned()
         .collect();
-    let optional_batch_result = if optional_sources.is_empty() {
-        None
-    } else if auto_continue && !plan_only {
+    let build_immediate_batches =
+        phase7_coverage_runner_should_build_immediate_batches(plan_only, auto_continue);
+    let optional_batch_result = if optional_sources.is_empty() || !build_immediate_batches {
         None
     } else {
         let batch_req = Phase7OptionalSourceCoverageBatchReq {
@@ -1905,24 +2039,23 @@ async fn build_phase7_coverage_expansion_runner(
         };
         Some(build_phase7_optional_source_coverage_batches(state.clone(), batch_req).await?)
     };
-    let financial_batch_result = if planned_sources.iter().any(|source| source == "financial") {
-        Some(
-            build_phase7_financial_coverage_batches(
-                state,
-                &start_date,
-                &end_date,
-                batch_size,
-                batch_count,
-                plan_only,
-                &data_version_prefix,
+    let financial_batch_result =
+        if planned_sources.iter().any(|source| source == "financial") && build_immediate_batches {
+            Some(
+                build_phase7_financial_coverage_batches(
+                    state.clone(),
+                    &start_date,
+                    &end_date,
+                    batch_size,
+                    batch_count,
+                    plan_only,
+                    &data_version_prefix,
+                )
+                .await?,
             )
-            .await?,
-        )
-    } else {
-        None
-    } else if auto_continue && !plan_only {
-        None
-    };
+        } else {
+            None
+        };
     if auto_continue && !plan_only && !planned_sources.is_empty() {
         let state_for_task = state.clone();
         let start_date_for_task = start_date.clone();
@@ -1954,6 +2087,7 @@ async fn build_phase7_coverage_expansion_runner(
         "max_rounds": max_rounds,
         "target_coverage_ratio": target_ratio,
         "partial_feature_candidate_gate_ratio": PHASE7_COVERAGE_RUNNER_PARTIAL_GATE_RATIO,
+        "coverage_target_policy": if stop_when_ready { "legacy_stop_at_partial_gate" } else { "full_available_coverage_by_default" },
         "stop_when_readiness_at_least_partial": stop_when_ready,
         "batch_size": batch_size,
         "batch_count": batch_count,
@@ -1976,6 +2110,7 @@ async fn build_phase7_coverage_expansion_runner(
             "Default profile is local_mac_safe and defaults to plan_only=true.",
             "The runner supports symbol-filtered cashflow/dividend and bounded financial coverage sync; repurchase is excluded because the Tushare API is announcement-date-range based.",
             "The 30% partial_feature_candidate threshold is only a research unlock gate; the default target_coverage_ratio is 1.0 for full available coverage.",
+            "When auto_continue=true and plan_only=false, one background autopilot task runs bounded child syncs synchronously round by round, then re-audits before selecting the next uncovered batch.",
             "Feature factories remain blocked while readiness is sample_only_do_not_train."
         ],
     }))
@@ -2888,7 +3023,10 @@ mod tests {
         assert!(phase7_coverage_runner_auto_continue(Some(true)));
 
         assert_eq!(phase7_coverage_runner_max_rounds(None, false), 1);
-        assert_eq!(phase7_coverage_runner_max_rounds(None, true), 1);
+        assert_eq!(
+            phase7_coverage_runner_max_rounds(None, true),
+            PHASE7_COVERAGE_RUNNER_MAX_ROUNDS
+        );
         assert_eq!(phase7_coverage_runner_max_rounds(Some(0), true), 1);
         assert_eq!(phase7_coverage_runner_max_rounds(Some(12), true), 12);
         assert_eq!(phase7_coverage_runner_max_rounds(Some(1_000), true), 20);
@@ -2898,6 +3036,23 @@ mod tests {
         assert_eq!(phase7_coverage_runner_target_ratio(Some(0.75)), 0.75);
         assert_eq!(phase7_coverage_runner_target_ratio(Some(2.0)), 1.0);
         assert_eq!(phase7_coverage_runner_target_ratio(Some(f64::NAN)), 1.0);
+    }
+
+    #[test]
+    fn phase7_coverage_runner_autopilot_uses_round_budget_not_manual_batches() {
+        assert!(phase7_coverage_runner_should_build_immediate_batches(
+            true, true
+        ));
+        assert!(phase7_coverage_runner_should_build_immediate_batches(
+            true, false
+        ));
+        assert!(phase7_coverage_runner_should_build_immediate_batches(
+            false, false
+        ));
+        assert!(!phase7_coverage_runner_should_build_immediate_batches(
+            false, true
+        ));
+        assert_eq!(phase7_coverage_autopilot_batch_offsets(3), vec![0, 0, 0]);
     }
 
     #[test]
