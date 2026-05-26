@@ -3,8 +3,10 @@ use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, NaiveDate};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    hash::{Hash, Hasher},
     sync::Arc,
 };
 use tracing::info;
@@ -61,6 +63,42 @@ fn default_source() -> String {
 
 fn generated_data_version_id() -> String {
     chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
+}
+
+fn bounded_phase7_task_id(parts: &[&str]) -> String {
+    const MAX_ID_LEN: usize = 64;
+    let raw = parts
+        .iter()
+        .map(|part| {
+            part.trim()
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                        ch
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if raw.len() <= MAX_ID_LEN {
+        return raw;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+    let suffix = format!("-{:016x}", hasher.finish());
+    let prefix_len = MAX_ID_LEN.saturating_sub(suffix.len());
+    let prefix = raw
+        .chars()
+        .take(prefix_len)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_string();
+    format!("{}{}", prefix, suffix)
 }
 
 fn parse_optional_date(value: Option<&str>) -> Result<Option<NaiveDate>, String> {
@@ -363,17 +401,64 @@ fn phase7_coverage_runner_should_plan_source_for_target(
     ratio < target_ratio
 }
 
-fn phase7_coverage_runner_source_state(
+fn phase7_attempt_coverage_readiness(
+    source: &str,
+    attempted_symbols: i64,
+    reference_symbols: i64,
+) -> &'static str {
+    let grade = phase7_coverage_grade(attempted_symbols, reference_symbols);
+    if source == "financial" {
+        phase7_financial_source_readiness(grade)
+    } else {
+        match grade {
+            "broad" => "ready_for_feature_factory",
+            "partial" => "partial_feature_candidate",
+            "unknown_reference" => "coverage_reference_missing",
+            "missing" => "needs_sync",
+            _ => "sample_only_do_not_train",
+        }
+    }
+}
+
+fn phase7_coverage_runner_source_state_for_window(
     audit: &Value,
+    window_attempts: Option<&BTreeMap<String, i64>>,
 ) -> (BTreeMap<String, String>, BTreeMap<String, f64>) {
     let mut readiness_by_source = BTreeMap::new();
     let mut coverage_by_source = BTreeMap::new();
+    let reference_symbols = audit
+        .get("listed_stock_count")
+        .and_then(|count| count.as_i64())
+        .unwrap_or_default();
     if let Some(sources) = audit
         .get("optional_data_sources")
         .and_then(|sources| sources.as_array())
     {
         for source in sources {
             if let Some(name) = source.get("source").and_then(|name| name.as_str()) {
+                if let Some(attempted_symbols) = window_attempts
+                    .and_then(|attempts| attempts.get(name))
+                    .copied()
+                {
+                    readiness_by_source.insert(
+                        name.to_string(),
+                        phase7_attempt_coverage_readiness(
+                            name,
+                            attempted_symbols,
+                            reference_symbols,
+                        )
+                        .to_string(),
+                    );
+                    coverage_by_source.insert(
+                        name.to_string(),
+                        if reference_symbols > 0 {
+                            attempted_symbols as f64 / reference_symbols as f64
+                        } else {
+                            0.0
+                        },
+                    );
+                    continue;
+                }
                 if let Some(readiness) = source
                     .get("feature_readiness")
                     .and_then(|readiness| readiness.as_str())
@@ -421,8 +506,31 @@ fn phase7_coverage_runner_source_state(
             }
         }
         if has_financial_rows {
-            readiness_by_source.insert("financial".to_string(), financial_ready);
-            coverage_by_source.insert("financial".to_string(), financial_ratio);
+            if let Some(attempted_symbols) = window_attempts
+                .and_then(|attempts| attempts.get("financial"))
+                .copied()
+            {
+                readiness_by_source.insert(
+                    "financial".to_string(),
+                    phase7_attempt_coverage_readiness(
+                        "financial",
+                        attempted_symbols,
+                        reference_symbols,
+                    )
+                    .to_string(),
+                );
+                coverage_by_source.insert(
+                    "financial".to_string(),
+                    if reference_symbols > 0 {
+                        attempted_symbols as f64 / reference_symbols as f64
+                    } else {
+                        0.0
+                    },
+                );
+            } else {
+                readiness_by_source.insert("financial".to_string(), financial_ready);
+                coverage_by_source.insert("financial".to_string(), financial_ratio);
+            }
         }
     }
 
@@ -656,24 +764,41 @@ fn phase7_optional_source_json(
     table: &str,
     table_exists: bool,
     stats: Option<&(i64, Option<NaiveDate>, Option<NaiveDate>, i64)>,
+    attempted_symbols: i64,
+    attempted_zero_row_symbols: i64,
     reference_symbols: i64,
     next_feature: &str,
 ) -> Value {
     let (rows, min_date, max_date, symbols) = stats.copied().unwrap_or((0, None, None, 0));
-    let readiness =
-        phase7_optional_source_readiness(table_exists, rows, symbols, reference_symbols);
+    let available_or_attempted_symbols = symbols.max(attempted_symbols);
+    let readiness = phase7_optional_source_readiness(
+        table_exists,
+        rows,
+        available_or_attempted_symbols,
+        reference_symbols,
+    );
     let mut value = phase7_coverage_json(
         source.to_string(),
         rows,
         min_date,
         max_date,
-        symbols,
+        available_or_attempted_symbols,
         reference_symbols,
     );
     if let Value::Object(ref mut object) = value {
         object.insert("source".to_string(), json!(source));
         object.insert("table".to_string(), json!(table));
         object.insert("table_exists".to_string(), json!(table_exists));
+        object.insert("data_row_symbols".to_string(), json!(symbols));
+        object.insert("attempted_symbols".to_string(), json!(attempted_symbols));
+        object.insert(
+            "attempted_zero_row_symbols".to_string(),
+            json!(attempted_zero_row_symbols),
+        );
+        object.insert(
+            "coverage_basis".to_string(),
+            json!("data_rows_or_successful_attempts"),
+        );
         object.insert("feature_readiness".to_string(), json!(readiness));
         object.insert("next_feature".to_string(), json!(next_feature));
         object.insert(
@@ -1442,6 +1567,8 @@ async fn build_phase7_optional_source_coverage_sync(
             &state,
             &source,
             &req.symbols,
+            start,
+            end,
             max_symbols,
             offset_symbols,
         )
@@ -1457,7 +1584,7 @@ async fn build_phase7_optional_source_coverage_sync(
             continue;
         }
 
-        let task_id = format!("{}-{}", data_version_prefix, source);
+        let task_id = bounded_phase7_task_id(&[data_version_prefix.as_str(), source.as_str()]);
         let sync_req = DataSyncTaskReq {
             dataset: source.clone(),
             source: "tushare".to_string(),
@@ -1592,7 +1719,9 @@ async fn build_phase7_optional_source_coverage_batches(
 
     let mut batches = Vec::new();
     for (batch_index, offset_symbols) in offsets.iter().copied().enumerate() {
-        let batch_prefix = format!("{}-b{:03}", data_version_prefix, batch_index + 1);
+        let batch_label = format!("b{:03}", batch_index + 1);
+        let batch_prefix =
+            bounded_phase7_task_id(&[data_version_prefix.as_str(), batch_label.as_str()]);
         let child_req = Phase7OptionalSourceCoverageSyncReq {
             sources: sources.clone(),
             symbols: Vec::new(),
@@ -1652,6 +1781,10 @@ async fn build_phase7_financial_coverage_batches(
     plan_only: bool,
     data_version_prefix: &str,
 ) -> Result<Value, String> {
+    let start = parse_optional_date(Some(start_date))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end =
+        parse_optional_date(Some(end_date))?.ok_or_else(|| "end_date is required".to_string())?;
     let child_background = phase7_optional_source_batch_child_background(plan_only);
     let offsets = phase7_optional_source_batch_offsets(0, batch_size, batch_count);
     let planned_next_offset = phase7_optional_source_batch_next_offset(&offsets, batch_size);
@@ -1661,8 +1794,11 @@ async fn build_phase7_financial_coverage_batches(
     let mut batches = Vec::new();
     for (batch_index, offset_symbols) in offsets.iter().copied().enumerate() {
         let symbols =
-            resolve_phase7_financial_sync_symbols(&state, batch_size, offset_symbols).await?;
-        let task_id = format!("{}-financial-b{:03}", data_version_prefix, batch_index + 1);
+            resolve_phase7_financial_sync_symbols(&state, start, end, batch_size, offset_symbols)
+                .await?;
+        let batch_label = format!("b{:03}", batch_index + 1);
+        let task_id =
+            bounded_phase7_task_id(&[data_version_prefix, "financial", batch_label.as_str()]);
         let sync_req = DataSyncTaskReq {
             dataset: "financial".to_string(),
             source: "tushare".to_string(),
@@ -1750,6 +1886,44 @@ async fn build_phase7_financial_coverage_batches(
     }))
 }
 
+async fn phase7_completed_attempts_by_source_for_window(
+    state: &AppState,
+    sources: &[String],
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<BTreeMap<String, i64>, String> {
+    let mut attempts = BTreeMap::new();
+    if sources.is_empty() {
+        return Ok(attempts);
+    }
+    for source in sources {
+        attempts.insert(source.clone(), 0);
+    }
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT source::text, COUNT(DISTINCT symbol)::bigint
+        FROM data_sync_attempt
+        WHERE source = ANY($1)
+          AND status = 'completed'
+          AND start_date <= $2
+          AND end_date >= $3
+        GROUP BY source
+        "#,
+    )
+    .bind(sources)
+    .bind(start)
+    .bind(end)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    for (source, symbols) in rows {
+        attempts.insert(source, symbols);
+    }
+    Ok(attempts)
+}
+
 fn build_phase7_bounded_sync_req(
     dataset: &str,
     symbols: Vec<String>,
@@ -1808,6 +1982,10 @@ async fn run_phase7_autopilot_optional_round(
                 &state,
                 source,
                 &[],
+                parse_optional_date(Some(start_date))?
+                    .ok_or_else(|| "start_date is required".to_string())?,
+                parse_optional_date(Some(end_date))?
+                    .ok_or_else(|| "end_date is required".to_string())?,
                 batch_size,
                 offset_symbols,
             )
@@ -1820,7 +1998,9 @@ async fn run_phase7_autopilot_optional_round(
                 );
                 continue;
             }
-            let task_id = format!("{}-{}-b{:03}", round_prefix, source, batch_index + 1);
+            let batch_label = format!("b{:03}", batch_index + 1);
+            let task_id =
+                bounded_phase7_task_id(&[round_prefix, source.as_str(), batch_label.as_str()]);
             run_phase7_autopilot_bounded_sync(
                 state.clone(),
                 source,
@@ -1848,8 +2028,16 @@ async fn run_phase7_autopilot_financial_round(
         .into_iter()
         .enumerate()
     {
-        let symbols =
-            resolve_phase7_financial_sync_symbols(&state, batch_size, offset_symbols).await?;
+        let symbols = resolve_phase7_financial_sync_symbols(
+            &state,
+            parse_optional_date(Some(start_date))?
+                .ok_or_else(|| "start_date is required".to_string())?,
+            parse_optional_date(Some(end_date))?
+                .ok_or_else(|| "end_date is required".to_string())?,
+            batch_size,
+            offset_symbols,
+        )
+        .await?;
         if symbols.is_empty() {
             tracing::info!(
                 round_prefix,
@@ -1857,7 +2045,8 @@ async fn run_phase7_autopilot_financial_round(
             );
             continue;
         }
-        let task_id = format!("{}-financial-b{:03}", round_prefix, batch_index + 1);
+        let batch_label = format!("b{:03}", batch_index + 1);
+        let task_id = bounded_phase7_task_id(&[round_prefix, "financial", batch_label.as_str()]);
         run_phase7_autopilot_bounded_sync(
             state.clone(),
             "financial",
@@ -1891,7 +2080,40 @@ async fn run_phase7_coverage_autopilot_background(
                 break;
             }
         };
-        let (readiness, coverage) = phase7_coverage_runner_source_state(&round_audit);
+        let start = match parse_optional_date(Some(&start_date))
+            .and_then(|value| value.ok_or_else(|| "start_date is required".to_string()))
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, "Phase 7 coverage autopilot start date parse failed");
+                break;
+            }
+        };
+        let end = match parse_optional_date(Some(&end_date))
+            .and_then(|value| value.ok_or_else(|| "end_date is required".to_string()))
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, "Phase 7 coverage autopilot end date parse failed");
+                break;
+            }
+        };
+        let window_attempts = match phase7_completed_attempts_by_source_for_window(
+            &state,
+            &requested_sources,
+            start,
+            end,
+        )
+        .await
+        {
+            Ok(attempts) => attempts,
+            Err(error) => {
+                tracing::error!(error = %error, "Phase 7 coverage autopilot attempt audit failed");
+                break;
+            }
+        };
+        let (readiness, coverage) =
+            phase7_coverage_runner_source_state_for_window(&round_audit, Some(&window_attempts));
         let planned_sources: Vec<String> = requested_sources
             .iter()
             .filter(|source| {
@@ -1913,7 +2135,9 @@ async fn run_phase7_coverage_autopilot_background(
             break;
         }
 
-        let round_prefix = format!("{}-r{:03}", data_version_prefix, round_index + 1);
+        let round_label = format!("r{:03}", round_index + 1);
+        let round_prefix =
+            bounded_phase7_task_id(&[data_version_prefix.as_str(), round_label.as_str()]);
         let optional_sources: Vec<String> = planned_sources
             .iter()
             .filter(|source| source.as_str() != "financial")
@@ -1927,7 +2151,7 @@ async fn run_phase7_coverage_autopilot_background(
                 &end_date,
                 batch_size,
                 batch_count,
-                &format!("{}-optional", round_prefix),
+                &bounded_phase7_task_id(&[round_prefix.as_str(), "optional"]),
             )
             .await
             {
@@ -1943,7 +2167,7 @@ async fn run_phase7_coverage_autopilot_background(
                 &end_date,
                 batch_size,
                 batch_count,
-                &format!("{}-financial", round_prefix),
+                &bounded_phase7_task_id(&[round_prefix.as_str(), "financial"]),
             )
             .await
             {
@@ -1990,7 +2214,11 @@ async fn build_phase7_coverage_expansion_runner(
     });
 
     let audit = build_phase7_feasibility_audit(&state).await?;
-    let (source_readiness, source_coverage_ratio) = phase7_coverage_runner_source_state(&audit);
+    let window_attempts =
+        phase7_completed_attempts_by_source_for_window(&state, &requested_sources, start, end)
+            .await?;
+    let (source_readiness, source_coverage_ratio) =
+        phase7_coverage_runner_source_state_for_window(&audit, Some(&window_attempts));
 
     let planned_sources: Vec<String> = requested_sources
         .iter()
@@ -2102,6 +2330,7 @@ async fn build_phase7_coverage_expansion_runner(
         "optional_source_readiness": source_readiness.clone(),
         "source_readiness": source_readiness,
         "source_coverage_ratio": source_coverage_ratio,
+        "window_completed_attempts": window_attempts,
         "data_version_prefix": data_version_prefix,
         "optional_batch_plan": optional_batch_result,
         "financial_batch_plan": financial_batch_result,
@@ -2194,6 +2423,8 @@ async fn resolve_phase7_optional_source_sync_symbols(
     state: &AppState,
     source: &str,
     requested: &[String],
+    start: NaiveDate,
+    end: NaiveDate,
     max_symbols: usize,
     offset_symbols: usize,
 ) -> Result<Vec<String>, String> {
@@ -2229,63 +2460,16 @@ async fn resolve_phase7_optional_source_sync_symbols(
     .map_err(|error| error.to_string())?;
 
     let uncovered = if table_exists {
-        match source {
-            "cashflow" => sqlx::query_scalar::<_, String>(
-                r#"
-                    SELECT stock.symbol
-                    FROM market_stock stock
-                    WHERE stock.list_status = 'L'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM market_stock_cashflow data
-                          WHERE data.symbol = stock.symbol
-                      )
-                    ORDER BY stock.symbol
-                    OFFSET $1 LIMIT $2
-                    "#,
-            )
+        let sql = phase7_optional_source_uncovered_symbols_sql(source)
+            .ok_or_else(|| format!("unsupported optional source: {}", source))?;
+        sqlx::query_scalar::<_, String>(sql)
+            .bind(start)
+            .bind(end)
             .bind(offset)
             .bind(limit)
             .fetch_all(&state.db)
             .await
-            .map_err(|error| error.to_string())?,
-            "dividend" => sqlx::query_scalar::<_, String>(
-                r#"
-                    SELECT stock.symbol
-                    FROM market_stock stock
-                    WHERE stock.list_status = 'L'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM market_stock_dividend data
-                          WHERE data.symbol = stock.symbol
-                      )
-                    ORDER BY stock.symbol
-                    OFFSET $1 LIMIT $2
-                    "#,
-            )
-            .bind(offset)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|error| error.to_string())?,
-            "repurchase" => sqlx::query_scalar::<_, String>(
-                r#"
-                    SELECT stock.symbol
-                    FROM market_stock stock
-                    WHERE stock.list_status = 'L'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM market_stock_repurchase data
-                          WHERE data.symbol = stock.symbol
-                      )
-                    ORDER BY stock.symbol
-                    OFFSET $1 LIMIT $2
-                    "#,
-            )
-            .bind(offset)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|error| error.to_string())?,
-            _ => Vec::new(),
-        }
+            .map_err(|error| error.to_string())?
     } else {
         Vec::new()
     };
@@ -2293,74 +2477,106 @@ async fn resolve_phase7_optional_source_sync_symbols(
     if !uncovered.is_empty() {
         return Ok(uncovered);
     }
+    if table_exists {
+        return Ok(Vec::new());
+    }
 
-    sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT symbol
-        FROM market_stock
-        WHERE list_status = 'L'
-        ORDER BY symbol
-        OFFSET $1 LIMIT $2
-        "#,
-    )
-    .bind(offset)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|error| error.to_string())
+    Ok(Vec::new())
+}
+
+fn phase7_optional_source_uncovered_symbols_sql(source: &str) -> Option<&'static str> {
+    match source {
+        "cashflow" => Some(
+            r#"
+            SELECT stock.symbol
+            FROM market_stock stock
+            WHERE stock.list_status = 'L'
+              AND NOT EXISTS (
+                  SELECT 1 FROM data_sync_attempt attempt
+                  WHERE attempt.source = 'cashflow'
+                    AND attempt.symbol = stock.symbol
+                    AND attempt.status = 'completed'
+                    AND attempt.start_date <= $1
+                    AND attempt.end_date >= $2
+              )
+            ORDER BY stock.symbol
+            OFFSET $3 LIMIT $4
+            "#,
+        ),
+        "dividend" => Some(
+            r#"
+            SELECT stock.symbol
+            FROM market_stock stock
+            WHERE stock.list_status = 'L'
+              AND NOT EXISTS (
+                  SELECT 1 FROM data_sync_attempt attempt
+                  WHERE attempt.source = 'dividend'
+                    AND attempt.symbol = stock.symbol
+                    AND attempt.status = 'completed'
+                    AND attempt.start_date <= $1
+                    AND attempt.end_date >= $2
+              )
+            ORDER BY stock.symbol
+            OFFSET $3 LIMIT $4
+            "#,
+        ),
+        "repurchase" => Some(
+            r#"
+            SELECT stock.symbol
+            FROM market_stock stock
+            WHERE stock.list_status = 'L'
+              AND NOT EXISTS (
+                  SELECT 1 FROM data_sync_attempt attempt
+                  WHERE attempt.source = 'repurchase'
+                    AND attempt.symbol = stock.symbol
+                    AND attempt.status = 'completed'
+                    AND attempt.start_date <= $1
+                    AND attempt.end_date >= $2
+              )
+            ORDER BY stock.symbol
+            OFFSET $3 LIMIT $4
+            "#,
+        ),
+        _ => None,
+    }
 }
 
 async fn resolve_phase7_financial_sync_symbols(
     state: &AppState,
+    start: NaiveDate,
+    end: NaiveDate,
     max_symbols: usize,
     offset_symbols: usize,
 ) -> Result<Vec<String>, String> {
     let limit = max_symbols as i64;
     let offset = offset_symbols as i64;
-    let symbols = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT stock.symbol
-        FROM market_stock stock
-        WHERE stock.list_status = 'L'
-          AND (
-              NOT EXISTS (
-                  SELECT 1
-                  FROM market_financial_statement stmt
-                  WHERE stmt.ts_code = stock.symbol
-              )
-              OR NOT EXISTS (
-                  SELECT 1
-                  FROM market_financial_indicator ind
-                  WHERE ind.ts_code = stock.symbol
-              )
-          )
-        ORDER BY stock.symbol
-        OFFSET $1 LIMIT $2
-        "#,
-    )
-    .bind(offset)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|error| error.to_string())?;
-    if !symbols.is_empty() {
-        return Ok(symbols);
-    }
+    let symbols = sqlx::query_scalar::<_, String>(phase7_financial_uncovered_symbols_sql())
+        .bind(start)
+        .bind(end)
+        .bind(offset)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(symbols)
+}
 
-    sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT symbol
-        FROM market_stock
-        WHERE list_status = 'L'
-        ORDER BY symbol
-        OFFSET $1 LIMIT $2
-        "#,
-    )
-    .bind(offset)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|error| error.to_string())
+fn phase7_financial_uncovered_symbols_sql() -> &'static str {
+    r#"
+    SELECT stock.symbol
+    FROM market_stock stock
+    WHERE stock.list_status = 'L'
+      AND NOT EXISTS (
+          SELECT 1 FROM data_sync_attempt attempt
+          WHERE attempt.source = 'financial'
+            AND attempt.symbol = stock.symbol
+            AND attempt.status = 'completed'
+            AND attempt.start_date <= $1
+            AND attempt.end_date >= $2
+      )
+    ORDER BY stock.symbol
+    OFFSET $3 LIMIT $4
+    "#
 }
 
 async fn run_tushare_permission_source_smoke(
@@ -2568,6 +2784,19 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
     .map_err(|error| error.to_string())?;
     let available_optional_tables: BTreeSet<String> =
         available_optional_tables.into_iter().collect();
+    let sync_attempt_table_exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = 'data_sync_attempt'
+        )
+        "#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
 
     let optional_source_specs = [
         (
@@ -2619,15 +2848,43 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
     for (source, rows, min_date, max_date, symbols) in optional_rows {
         optional_stats_by_source.insert(source, (rows, min_date, max_date, symbols));
     }
+    let optional_attempt_rows: Vec<(String, i64, i64)> = if sync_attempt_table_exists {
+        sqlx::query_as(
+            r#"
+            SELECT source::text,
+                   COUNT(DISTINCT symbol)::bigint AS attempted_symbols,
+                   COUNT(DISTINCT CASE WHEN row_count = 0 THEN symbol END)::bigint AS zero_row_symbols
+            FROM data_sync_attempt
+            WHERE source IN ('cashflow', 'dividend', 'repurchase')
+              AND status = 'completed'
+            GROUP BY source
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let mut optional_attempts_by_source = BTreeMap::new();
+    for (source, attempted_symbols, zero_row_symbols) in optional_attempt_rows {
+        optional_attempts_by_source.insert(source, (attempted_symbols, zero_row_symbols));
+    }
 
     let optional_data_sources: Vec<Value> = optional_source_specs
         .into_iter()
         .map(|(source, table, next_feature)| {
+            let (attempted_symbols, zero_row_symbols) = optional_attempts_by_source
+                .get(source)
+                .copied()
+                .unwrap_or_default();
             phase7_optional_source_json(
                 source,
                 table,
                 available_optional_tables.contains(table),
                 optional_stats_by_source.get(source),
+                attempted_symbols,
+                zero_row_symbols,
                 listed_stock_count,
                 next_feature,
             )
@@ -3005,6 +3262,27 @@ mod tests {
     }
 
     #[test]
+    fn phase7_bounded_task_id_keeps_database_varchar64_contract() {
+        let short = bounded_phase7_task_id(&["dv-phase7", "cashflow", "b001"]);
+        assert_eq!(short, "dv-phase7-cashflow-b001");
+        assert!(short.len() <= 64);
+
+        let long = bounded_phase7_task_id(&[
+            "dv-phase7-ff-full-auto-2016-20260526a",
+            "r001",
+            "optional",
+            "cashflow",
+            "b001",
+        ]);
+        assert!(long.len() <= 64, "task id length was {}", long.len());
+        assert!(long.starts_with("dv-phase7-ff-full-auto-2016-20260526a-r001"));
+        assert_ne!(
+            long,
+            "dv-phase7-ff-full-auto-2016-20260526a-r001-optional-cashflow-b001"
+        );
+    }
+
+    #[test]
     fn phase7_coverage_runner_sources_include_bounded_financial_sync() {
         assert_eq!(
             phase7_coverage_runner_sources(&[
@@ -3053,6 +3331,67 @@ mod tests {
             false, true
         ));
         assert_eq!(phase7_coverage_autopilot_batch_offsets(3), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn phase7_optional_source_symbol_resolver_uses_attempt_ledger() {
+        let sql = phase7_optional_source_uncovered_symbols_sql("cashflow").expect("cashflow sql");
+
+        assert!(sql.contains("data_sync_attempt attempt"));
+        assert!(sql.contains("attempt.source = 'cashflow'"));
+        assert!(sql.contains("attempt.status = 'completed'"));
+        assert!(sql.contains("attempt.symbol = stock.symbol"));
+        assert!(sql.contains("attempt.start_date <= $1"));
+        assert!(sql.contains("attempt.end_date >= $2"));
+        assert!(sql.contains("OFFSET $3 LIMIT $4"));
+    }
+
+    #[test]
+    fn phase7_financial_symbol_resolver_uses_attempt_ledger() {
+        let sql = phase7_financial_uncovered_symbols_sql();
+
+        assert!(sql.contains("data_sync_attempt attempt"));
+        assert!(sql.contains("attempt.source = 'financial'"));
+        assert!(sql.contains("attempt.status = 'completed'"));
+        assert!(sql.contains("attempt.symbol = stock.symbol"));
+        assert!(sql.contains("attempt.start_date <= $1"));
+        assert!(sql.contains("attempt.end_date >= $2"));
+        assert!(sql.contains("OFFSET $3 LIMIT $4"));
+    }
+
+    #[test]
+    fn phase7_coverage_runner_source_state_prefers_requested_window_attempts() {
+        let audit = json!({
+            "listed_stock_count": 100,
+            "optional_data_sources": [
+                {
+                    "source": "cashflow",
+                    "feature_readiness": "ready_for_feature_factory",
+                    "symbol_coverage_ratio": 0.99
+                }
+            ],
+            "financial_coverage": [
+                {
+                    "name": "market_financial_statement",
+                    "coverage_grade": "broad",
+                    "symbol_coverage_ratio": 0.98
+                },
+                {
+                    "name": "market_financial_indicator",
+                    "coverage_grade": "broad",
+                    "symbol_coverage_ratio": 0.96
+                }
+            ]
+        });
+        let mut window_attempts = BTreeMap::new();
+        window_attempts.insert("cashflow".to_string(), 25);
+        window_attempts.insert("financial".to_string(), 40);
+
+        let (_, coverage) =
+            phase7_coverage_runner_source_state_for_window(&audit, Some(&window_attempts));
+
+        assert_eq!(coverage.get("cashflow"), Some(&0.25));
+        assert_eq!(coverage.get("financial"), Some(&0.40));
     }
 
     #[test]

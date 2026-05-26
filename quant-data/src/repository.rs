@@ -1179,3 +1179,93 @@ pub async fn fail_sync_task(
     .await?;
     Ok(())
 }
+
+pub fn sync_attempt_upsert_sql() -> &'static str {
+    r#"INSERT INTO data_sync_attempt
+       (source, symbol, start_date, end_date, task_id, status, row_count, error_message,
+        attempted_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
+       ON CONFLICT (source, symbol, start_date, end_date) DO UPDATE SET
+         task_id = EXCLUDED.task_id,
+         status = EXCLUDED.status,
+         row_count = EXCLUDED.row_count,
+         error_message = EXCLUDED.error_message,
+         attempted_at = EXCLUDED.attempted_at,
+         updated_at = now()"#
+}
+
+pub fn sync_attempt_success_filter_sql() -> &'static str {
+    r#"SELECT attempt.symbol
+       FROM data_sync_attempt attempt
+       WHERE attempt.start_date <= $1
+         AND attempt.end_date >= $2
+         AND attempt.source = $3
+         AND attempt.status = 'completed'"#
+}
+
+pub async fn upsert_sync_attempt(
+    pool: &PgPool,
+    source: &str,
+    symbol: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    task_id: &str,
+    status: &str,
+    row_count: i64,
+    error_message: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(sync_attempt_upsert_sql())
+        .bind(source)
+        .bind(symbol)
+        .bind(start_date)
+        .bind(end_date)
+        .bind(task_id)
+        .bind(status)
+        .bind(row_count)
+        .bind(error_message)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_successfully_attempted_symbols(
+    pool: &PgPool,
+    source: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let symbols: Vec<String> = sqlx::query_scalar(sync_attempt_success_filter_sql())
+        .bind(start_date)
+        .bind(end_date)
+        .bind(source)
+        .fetch_all(pool)
+        .await?;
+    Ok(symbols.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_attempt_upsert_sql_records_zero_row_successes() {
+        let sql = sync_attempt_upsert_sql();
+
+        assert!(sql.contains("INSERT INTO data_sync_attempt"));
+        assert!(sql.contains("row_count"));
+        assert!(sql.contains("status"));
+        assert!(sql.contains("ON CONFLICT (source, symbol, start_date, end_date)"));
+        assert!(sql.contains("task_id = EXCLUDED.task_id"));
+    }
+
+    #[test]
+    fn sync_attempt_query_filters_successful_attempts_by_source() {
+        let sql = sync_attempt_success_filter_sql();
+
+        assert!(sql.contains("data_sync_attempt attempt"));
+        assert!(sql.contains("attempt.source = $3"));
+        assert!(sql.contains("attempt.status = 'completed'"));
+        assert!(sql.contains("attempt.start_date <= $1"));
+        assert!(sql.contains("attempt.end_date >= $2"));
+    }
+}

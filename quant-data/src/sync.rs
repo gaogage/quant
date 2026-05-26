@@ -79,6 +79,13 @@ fn date_in_range(date: NaiveDate, start: NaiveDate, end: NaiveDate) -> bool {
     date >= start && date <= end
 }
 
+fn financial_sync_attempt_window() -> (NaiveDate, NaiveDate) {
+    (
+        NaiveDate::from_ymd_opt(1900, 1, 1).expect("valid financial sync attempt start"),
+        NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid financial sync attempt end"),
+    )
+}
+
 // ─── sync_stock_basic ────────────────────────────────────────────
 
 pub async fn sync_stock_basic(
@@ -1295,120 +1302,164 @@ pub async fn sync_financial_data_with_task(
                 i, total, stmt_count, ind_count, sym
             );
         }
+        let symbol_stmt_start = stmt_count;
+        let symbol_ind_start = ind_count;
+        let mut symbol_failed = false;
+        let mut symbol_error: Option<String> = None;
 
         // 利润表
-        if let Ok(resp) = client.income(sym, None, None).await {
-            if let Some(data) = resp.data {
-                let maps = data.to_maps();
-                for item in &maps {
-                    let end_date = to_date(&get_str(item, "end_date"));
-                    let ann_date = to_date(&get_str(item, "ann_date"));
-                    if end_date.is_none() {
-                        continue;
-                    }
-                    let ed = end_date.unwrap();
-                    let ad = ann_date.unwrap_or(ed);
-
-                    for (field, val) in item.iter() {
-                        if field == "ts_code"
-                            || field == "end_date"
-                            || field == "ann_date"
-                            || field == "f_ann_date"
-                            || field == "report_type"
-                            || field == "comp_type"
-                        {
+        match client.income(sym, None, None).await {
+            Ok(resp) => {
+                if let Some(data) = resp.data {
+                    let maps = data.to_maps();
+                    for item in &maps {
+                        let end_date = to_date(&get_str(item, "end_date"));
+                        let ann_date = to_date(&get_str(item, "ann_date"));
+                        if end_date.is_none() {
                             continue;
                         }
-                        if let Some(v) = val.as_f64() {
-                            sqlx::query(
-                                "INSERT INTO market_financial_statement (ts_code, ann_date, end_date, statement_type, field_name, field_value)
+                        let ed = end_date.unwrap();
+                        let ad = ann_date.unwrap_or(ed);
+
+                        for (field, val) in item.iter() {
+                            if field == "ts_code"
+                                || field == "end_date"
+                                || field == "ann_date"
+                                || field == "f_ann_date"
+                                || field == "report_type"
+                                || field == "comp_type"
+                            {
+                                continue;
+                            }
+                            if let Some(v) = val.as_f64() {
+                                sqlx::query(
+                                    "INSERT INTO market_financial_statement (ts_code, ann_date, end_date, statement_type, field_name, field_value)
                                  VALUES ($1, $2, $3, 'income', $4, $5)
                                  ON CONFLICT (ts_code, end_date, statement_type, field_name, report_type) DO UPDATE SET field_value = $5",
-                            )
-                            .bind(sym).bind(ad).bind(ed).bind(field).bind(v)
-                            .execute(pool).await?;
-                            stmt_count += 1;
+                                )
+                                .bind(sym).bind(ad).bind(ed).bind(field).bind(v)
+                                .execute(pool).await?;
+                                stmt_count += 1;
+                            }
                         }
                     }
                 }
+            }
+            Err(error) => {
+                symbol_failed = true;
+                symbol_error = Some(error.to_string());
             }
         }
 
         // 资产负债表 — 只取关键字段减少数据量
-        if let Ok(resp) = client.balancesheet(sym, None, None).await {
-            if let Some(data) = resp.data {
-                let maps = data.to_maps();
-                const BS_FIELDS: &[&str] = &[
-                    "total_assets",
-                    "total_liab",
-                    "total_hldr_eqy_inc_min_int",
-                    "total_cur_assets",
-                    "total_cur_liab",
-                    "money_cap",
-                    "inventories",
-                    "accounts_receiv",
-                    "fix_assets",
-                ];
-                for item in &maps {
-                    let end_date = to_date(&get_str(item, "end_date"));
-                    let ann_date = to_date(&get_str(item, "ann_date"));
-                    if end_date.is_none() {
-                        continue;
-                    }
-                    let ed = end_date.unwrap();
-                    let ad = ann_date.unwrap_or(ed);
+        match client.balancesheet(sym, None, None).await {
+            Ok(resp) => {
+                if let Some(data) = resp.data {
+                    let maps = data.to_maps();
+                    const BS_FIELDS: &[&str] = &[
+                        "total_assets",
+                        "total_liab",
+                        "total_hldr_eqy_inc_min_int",
+                        "total_cur_assets",
+                        "total_cur_liab",
+                        "money_cap",
+                        "inventories",
+                        "accounts_receiv",
+                        "fix_assets",
+                    ];
+                    for item in &maps {
+                        let end_date = to_date(&get_str(item, "end_date"));
+                        let ann_date = to_date(&get_str(item, "ann_date"));
+                        if end_date.is_none() {
+                            continue;
+                        }
+                        let ed = end_date.unwrap();
+                        let ad = ann_date.unwrap_or(ed);
 
-                    for field in BS_FIELDS {
-                        if let Some(v) = item.get(*field).and_then(|v| v.as_f64()) {
-                            sqlx::query(
-                                "INSERT INTO market_financial_statement (ts_code, ann_date, end_date, statement_type, field_name, field_value)
+                        for field in BS_FIELDS {
+                            if let Some(v) = item.get(*field).and_then(|v| v.as_f64()) {
+                                sqlx::query(
+                                    "INSERT INTO market_financial_statement (ts_code, ann_date, end_date, statement_type, field_name, field_value)
                                  VALUES ($1, $2, $3, 'balance', $4, $5)
                                  ON CONFLICT (ts_code, end_date, statement_type, field_name, report_type) DO UPDATE SET field_value = $5",
-                            )
-                            .bind(sym).bind(ad).bind(ed).bind(*field).bind(v)
-                            .execute(pool).await?;
-                            stmt_count += 1;
+                                )
+                                .bind(sym).bind(ad).bind(ed).bind(*field).bind(v)
+                                .execute(pool).await?;
+                                stmt_count += 1;
+                            }
                         }
                     }
                 }
             }
+            Err(error) => {
+                symbol_failed = true;
+                let message = error.to_string();
+                symbol_error = Some(match symbol_error {
+                    Some(existing) => format!("{}; {}", existing, message),
+                    None => message,
+                });
+            }
         }
 
         // 财务指标
-        if let Ok(resp) = client.fina_indicator(sym, None, None).await {
-            if let Some(data) = resp.data {
-                let maps = data.to_maps();
-                for item in &maps {
-                    let end_date = to_date(&get_str(item, "end_date"));
-                    let ann_date = to_date(&get_str(item, "ann_date"));
-                    if end_date.is_none() {
-                        continue;
-                    }
-                    let ed = end_date.unwrap();
-                    let ad = ann_date.unwrap_or(ed);
+        match client.fina_indicator(sym, None, None).await {
+            Ok(resp) => {
+                if let Some(data) = resp.data {
+                    let maps = data.to_maps();
+                    for item in &maps {
+                        let end_date = to_date(&get_str(item, "end_date"));
+                        let ann_date = to_date(&get_str(item, "ann_date"));
+                        if end_date.is_none() {
+                            continue;
+                        }
+                        let ed = end_date.unwrap();
+                        let ad = ann_date.unwrap_or(ed);
 
-                    sqlx::query(
-                        "INSERT INTO market_financial_indicator (ts_code, ann_date, end_date,
+                        sqlx::query(
+                            "INSERT INTO market_financial_indicator (ts_code, ann_date, end_date,
                          eps, roe, roa, gross_margin, netprofit_margin, debt_to_assets, current_ratio, quick_ratio)
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                          ON CONFLICT (ts_code, end_date) DO UPDATE SET
                          eps=$4, roe=$5, roa=$6, gross_margin=$7, netprofit_margin=$8,
                          debt_to_assets=$9, current_ratio=$10, quick_ratio=$11",
-                    )
-                    .bind(sym).bind(ad).bind(ed)
-                    .bind(item.get("eps").and_then(|v| v.as_f64()))
-                    .bind(item.get("roe").and_then(|v| v.as_f64()))
-                    .bind(item.get("roa").and_then(|v| v.as_f64()))
-                    .bind(item.get("gross_margin").and_then(|v| v.as_f64()))
-                    .bind(item.get("netprofit_margin").and_then(|v| v.as_f64()))
-                    .bind(item.get("debt_to_assets").and_then(|v| v.as_f64()))
-                    .bind(item.get("current_ratio").and_then(|v| v.as_f64()))
-                    .bind(item.get("quick_ratio").and_then(|v| v.as_f64()))
-                    .execute(pool).await?;
-                    ind_count += 1;
+                        )
+                        .bind(sym).bind(ad).bind(ed)
+                        .bind(item.get("eps").and_then(|v| v.as_f64()))
+                        .bind(item.get("roe").and_then(|v| v.as_f64()))
+                        .bind(item.get("roa").and_then(|v| v.as_f64()))
+                        .bind(item.get("gross_margin").and_then(|v| v.as_f64()))
+                        .bind(item.get("netprofit_margin").and_then(|v| v.as_f64()))
+                        .bind(item.get("debt_to_assets").and_then(|v| v.as_f64()))
+                        .bind(item.get("current_ratio").and_then(|v| v.as_f64()))
+                        .bind(item.get("quick_ratio").and_then(|v| v.as_f64()))
+                        .execute(pool).await?;
+                        ind_count += 1;
+                    }
                 }
             }
+            Err(error) => {
+                symbol_failed = true;
+                let message = error.to_string();
+                symbol_error = Some(match symbol_error {
+                    Some(existing) => format!("{}; {}", existing, message),
+                    None => message,
+                });
+            }
         }
+        let symbol_rows = stmt_count - symbol_stmt_start + ind_count - symbol_ind_start;
+        let (attempt_start, attempt_end) = financial_sync_attempt_window();
+        repository::upsert_sync_attempt(
+            pool,
+            "financial",
+            sym,
+            attempt_start,
+            attempt_end,
+            task_id,
+            if symbol_failed { "failed" } else { "completed" },
+            symbol_rows as i64,
+            symbol_error.as_deref(),
+        )
+        .await?;
 
         // 速率控制 — 每只股票 ~0.3s，避免被限流
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1935,6 +1986,8 @@ pub async fn sync_cashflow(
     for symbol in symbols {
         let mut offset = 0usize;
         let mut symbol_failed = false;
+        let mut symbol_rows = 0usize;
+        let mut symbol_error: Option<String> = None;
         loop {
             match client
                 .cashflow(
@@ -1952,9 +2005,11 @@ pub async fn sync_cashflow(
                     let rows: Vec<MarketStockCashflow> =
                         maps.iter().filter_map(cashflow_row_from_map).collect();
                     if !rows.is_empty() {
-                        total_rows +=
+                        let saved =
                             repository::upsert_cashflow_batch(pool, &rows, dv_id, "tushare")
                                 .await?;
+                        symbol_rows += saved;
+                        total_rows += saved;
                     }
                     if row_count < page_limit {
                         break;
@@ -1963,12 +2018,25 @@ pub async fn sync_cashflow(
                 }
                 Err(error) => {
                     warn!("{} cashflow failed: {}", symbol, error);
+                    symbol_error = Some(error.to_string());
                     failed += 1;
                     symbol_failed = true;
                     break;
                 }
             }
         }
+        repository::upsert_sync_attempt(
+            pool,
+            "cashflow",
+            symbol,
+            s,
+            e,
+            &task_id,
+            if symbol_failed { "failed" } else { "completed" },
+            symbol_rows as i64,
+            symbol_error.as_deref(),
+        )
+        .await?;
         if !symbol_failed {
             ok += 1;
         }
@@ -2073,6 +2141,8 @@ pub async fn sync_dividend(
     for symbol in symbols {
         let mut offset = 0usize;
         let mut symbol_failed = false;
+        let mut symbol_rows = 0usize;
+        let mut symbol_error: Option<String> = None;
         loop {
             match client
                 .dividend(
@@ -2095,9 +2165,11 @@ pub async fn sync_dividend(
                         .filter(|row| date_in_range(row.available_at, s, e))
                         .collect();
                     if !rows.is_empty() {
-                        total_rows +=
+                        let saved =
                             repository::upsert_dividend_batch(pool, &rows, dv_id, "tushare")
                                 .await?;
+                        symbol_rows += saved;
+                        total_rows += saved;
                     }
                     if row_count < page_limit {
                         break;
@@ -2106,12 +2178,25 @@ pub async fn sync_dividend(
                 }
                 Err(error) => {
                     warn!("{} dividend failed: {}", symbol, error);
+                    symbol_error = Some(error.to_string());
                     failed += 1;
                     symbol_failed = true;
                     break;
                 }
             }
         }
+        repository::upsert_sync_attempt(
+            pool,
+            "dividend",
+            symbol,
+            s,
+            e,
+            &task_id,
+            if symbol_failed { "failed" } else { "completed" },
+            symbol_rows as i64,
+            symbol_error.as_deref(),
+        )
+        .await?;
         if !symbol_failed {
             ok += 1;
         }
@@ -2298,6 +2383,14 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn financial_sync_attempt_window_uses_postgres_safe_dates() {
+        let (start, end) = financial_sync_attempt_window();
+
+        assert_eq!(start, NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
     }
 
     #[test]

@@ -3,6 +3,47 @@
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
+CREATE TABLE IF NOT EXISTS public.data_sync_attempt (
+    source VARCHAR(64) NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    task_id VARCHAR(64) NULL,
+    status VARCHAR(32) NOT NULL,
+    row_count BIGINT NOT NULL DEFAULT 0,
+    error_message TEXT NULL,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (source, symbol, start_date, end_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_sync_attempt_source_status
+    ON public.data_sync_attempt (source, status, symbol);
+CREATE INDEX IF NOT EXISTS idx_data_sync_attempt_task
+    ON public.data_sync_attempt (task_id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_data_sync_attempt_status'
+    ) THEN
+        ALTER TABLE public.data_sync_attempt
+            ADD CONSTRAINT chk_data_sync_attempt_status CHECK (status IN ('completed', 'failed'));
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_data_sync_attempt_task'
+    ) THEN
+        ALTER TABLE public.data_sync_attempt
+            ADD CONSTRAINT fk_data_sync_attempt_task
+            FOREIGN KEY (task_id) REFERENCES public.data_sync_task(task_id)
+            ON DELETE SET NULL;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS public.market_stock_cashflow (
     symbol VARCHAR(20) NOT NULL,
     ann_date DATE NOT NULL,
