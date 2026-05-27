@@ -237,6 +237,14 @@ async fn main() {
             post(routes::factors::backfill_phase7_moneyflow_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-cashflow-quality-backfill/background",
+            post(routes::factors::backfill_phase7_cashflow_quality_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-dividend-quality-backfill/background",
+            post(routes::factors::backfill_phase7_dividend_quality_background),
+        )
+        .route(
             "/api/v1/quant/factors/phase7-event-alpha-backfill/background",
             post(routes::factors::backfill_phase7_event_alpha_background),
         )

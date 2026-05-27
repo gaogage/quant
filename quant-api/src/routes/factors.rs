@@ -149,6 +149,24 @@ pub struct Phase7MoneyflowBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7CashflowQualityBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7DividendQualityBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7EventAlphaBackfillRequest {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
@@ -237,6 +255,8 @@ type Phase7QualityRelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7GrowthRecoveryBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7ValuationBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7MoneyflowBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7CashflowQualityBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7DividendQualityBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7EventAlphaBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7EventWindowAlphaBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7EventSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
@@ -272,6 +292,15 @@ enum Phase7BackfillFactorKind {
     },
     MoneyflowRolling {
         amount_expression: &'static str,
+        higher_is_better: bool,
+    },
+    CashflowLatest {
+        value_expression: &'static str,
+        required_filter: &'static str,
+        higher_is_better: bool,
+    },
+    DividendRollingQuality {
+        value_expression: &'static str,
         higher_is_better: bool,
     },
     EventLatest {
@@ -778,6 +807,96 @@ impl Phase7MoneyflowBackfillRequest {
     }
 }
 
+impl Phase7CashflowQualityBackfillRequest {
+    fn into_plan(self) -> Result<Phase7CashflowQualityBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_cashflow_quality_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7CashflowQualityBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_cashflow_quality_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_cashflow_quality_v1",
+            category: "cashflow_quality",
+            phase: "7-FF/7-J",
+            dependencies: &["market_stock_cashflow", "market_trade_calendar"],
+            combo_method: "equal_weight_cashflow_quality",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7DividendQualityBackfillRequest {
+    fn into_plan(self) -> Result<Phase7DividendQualityBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_dividend_quality_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7DividendQualityBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_dividend_quality_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_dividend_quality_v1",
+            category: "dividend_quality",
+            phase: "7-FF/7-J",
+            dependencies: &["market_stock_dividend", "market_trade_calendar"],
+            combo_method: "equal_weight_dividend_quality",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
 impl Phase7EventAlphaBackfillRequest {
     fn into_plan(self) -> Result<Phase7EventAlphaBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
@@ -1091,7 +1210,10 @@ impl Phase7AlphaBlendProfilesBackfillRequest {
             }
             let combo_method = if matches!(
                 profile.combo_name.as_str(),
-                "phase7_quality_event_window_overlay_v1"
+                "phase7_quality_cashflow_confirm_v1"
+                    | "phase7_quality_dividend_confirm_v1"
+                    | "phase7_quality_cashflow_dividend_confirm_v1"
+                    | "phase7_quality_event_window_overlay_v1"
                     | "phase7_quality_event_post_return_curve_overlay_v1"
                     | "phase7_quality_event_reaction_segments_overlay_v1"
                     | "phase7_quality_event_reaction_reversal_overlay_v1"
@@ -1624,6 +1746,101 @@ fn phase7_moneyflow_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
                 higher_is_better: false,
             },
             weight: 0.2,
+        },
+    ]
+}
+
+fn phase7_cashflow_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "cf_ocf_to_profit_latest_std",
+            name: "Phase 7 PIT operating cashflow to profit rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::CashflowLatest {
+                value_expression: "n_cashflow_act::double precision / NULLIF(ABS(net_profit::double precision), 0.0)",
+                required_filter: "cf.n_cashflow_act IS NOT NULL AND cf.net_profit IS NOT NULL",
+                higher_is_better: true,
+            },
+            weight: 0.35,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "cf_ocf_profit_gap_latest_std",
+            name: "Phase 7 PIT operating cashflow minus profit rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::CashflowLatest {
+                value_expression: "(n_cashflow_act::double precision - net_profit::double precision) / NULLIF(ABS(net_profit::double precision), 0.0)",
+                required_filter: "cf.n_cashflow_act IS NOT NULL AND cf.net_profit IS NOT NULL",
+                higher_is_better: true,
+            },
+            weight: 0.30,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "cf_cash_buffer_latest_std",
+            name: "Phase 7 PIT cash buffer to profit rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::CashflowLatest {
+                value_expression: "c_cash_equ_end_period::double precision / NULLIF(ABS(net_profit::double precision), 0.0)",
+                required_filter: "cf.c_cash_equ_end_period IS NOT NULL AND cf.net_profit IS NOT NULL",
+                higher_is_better: true,
+            },
+            weight: 0.20,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "cf_ocf_positive_latest_std",
+            name: "Phase 7 PIT positive operating cashflow rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::CashflowLatest {
+                value_expression: "CASE WHEN n_cashflow_act::double precision > 0.0 THEN 1.0 ELSE 0.0 END",
+                required_filter: "cf.n_cashflow_act IS NOT NULL",
+                higher_is_better: true,
+            },
+            weight: 0.15,
+        },
+    ]
+}
+
+fn phase7_dividend_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "div_paid_years_4y_std",
+            name: "Phase 7 PIT 4y dividend paid-years rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DividendRollingQuality {
+                value_expression: "dividend_years::double precision",
+                higher_is_better: true,
+            },
+            weight: 0.35,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "div_cash_sum_4y_std",
+            name: "Phase 7 PIT 4y cash-dividend sum rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DividendRollingQuality {
+                value_expression: "cash_div_sum",
+                higher_is_better: true,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "div_stability_4y_std",
+            name: "Phase 7 PIT 4y dividend stability rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DividendRollingQuality {
+                value_expression:
+                    "CASE WHEN cash_div_avg > 0.0 THEN cash_div_stdev / cash_div_avg ELSE NULL END",
+                higher_is_better: false,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "div_recent_positive_std",
+            name: "Phase 7 PIT recent positive dividend rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::DividendRollingQuality {
+                value_expression: "recent_positive_dividend::double precision",
+                higher_is_better: true,
+            },
+            weight: 0.15,
         },
     ]
 }
@@ -4246,6 +4463,256 @@ pub async fn backfill_phase7_moneyflow_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-cashflow-quality-backfill/background
+///
+/// Set-based PIT cashflow quality alpha backfill from `market_stock_cashflow`.
+pub async fn backfill_phase7_cashflow_quality_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7CashflowQualityBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 cashflow quality backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_cashflow_quality_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_cashflow_quality_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 cashflow quality backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 cashflow quality backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 cashflow quality backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-dividend-quality-backfill/background
+///
+/// Set-based PIT dividend quality alpha backfill from `market_stock_dividend`.
+pub async fn backfill_phase7_dividend_quality_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7DividendQualityBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 dividend quality backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_dividend_quality_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_dividend_quality_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 dividend quality backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 dividend quality backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 dividend quality backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-event-alpha-backfill/background
 ///
 /// Set-based PIT event alpha backfill from forecast, express, and disclosure
@@ -4978,6 +5445,26 @@ async fn run_phase7_moneyflow_backfill(
     run_set_based_factor_backfill(db, task_id, job).await
 }
 
+async fn run_phase7_cashflow_quality_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7CashflowQualityBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_cashflow_quality_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_phase7_dividend_quality_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7DividendQualityBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_dividend_quality_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
 async fn run_phase7_event_alpha_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -5563,6 +6050,17 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             amount_expression,
             higher_is_better,
         } => phase7_moneyflow_backfill_sql(spec.period, amount_expression, higher_is_better),
+        Phase7BackfillFactorKind::CashflowLatest {
+            value_expression,
+            required_filter,
+            higher_is_better,
+        } => {
+            phase7_cashflow_latest_backfill_sql(value_expression, required_filter, higher_is_better)
+        }
+        Phase7BackfillFactorKind::DividendRollingQuality {
+            value_expression,
+            higher_is_better,
+        } => phase7_dividend_rolling_quality_backfill_sql(value_expression, higher_is_better),
         Phase7BackfillFactorKind::EventLatest {
             source_table,
             value_expression,
@@ -6248,6 +6746,165 @@ fn phase7_moneyflow_backfill_sql(
         INSERT INTO factor_value
             (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
         SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, trade_date
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_cashflow_latest_backfill_sql(
+    value_expression: &'static str,
+    required_filter: &'static str,
+    higher_is_better: bool,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        event_points AS (
+            SELECT DISTINCT ON (cf.symbol, cf.available_at)
+                cf.symbol,
+                cf.available_at,
+                {value_expression} AS raw_value
+            FROM market_stock_cashflow cf
+            WHERE cf.symbol IS NOT NULL
+              AND cf.available_at IS NOT NULL
+              AND {required_filter}
+            ORDER BY cf.symbol, cf.available_at, cf.end_date DESC, cf.ann_date DESC
+        ),
+        version_intervals AS (
+            SELECT
+                symbol,
+                available_at,
+                LEAD(available_at) OVER (
+                    PARTITION BY symbol ORDER BY available_at
+                ) AS next_available_at,
+                raw_value
+            FROM event_points
+        ),
+        latest AS (
+            SELECT
+                vi.symbol,
+                td.trade_date,
+                vi.available_at,
+                vi.raw_value
+            FROM version_intervals vi
+            JOIN trade_days td
+              ON td.trade_date >= vi.available_at
+             AND (vi.next_available_at IS NULL OR td.trade_date < vi.next_available_at)
+            WHERE vi.raw_value IS NOT NULL
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order}) AS normalized_value
+            FROM latest
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_dividend_rolling_quality_backfill_sql(
+    value_expression: &'static str,
+    higher_is_better: bool,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        symbols AS (
+            SELECT DISTINCT symbol
+            FROM market_stock_dividend
+            WHERE COALESCE(cash_div_tax, cash_div) IS NOT NULL
+        ),
+        history AS (
+            SELECT
+                symbols.symbol,
+                td.trade_date,
+                MAX(div.ann_date) AS available_at,
+                COUNT(DISTINCT div.end_date) FILTER (WHERE div.cash_div_value > 0.0) AS dividend_years,
+                SUM(div.cash_div_value) FILTER (WHERE div.cash_div_value > 0.0) AS cash_div_sum,
+                AVG(div.cash_div_value) FILTER (WHERE div.cash_div_value > 0.0) AS cash_div_avg,
+                STDDEV_POP(cash_div_value) FILTER (WHERE div.cash_div_value > 0.0) AS cash_div_stdev,
+                MAX(
+                    CASE
+                        WHEN div.end_date >= (td.trade_date - INTERVAL '18 months')::date
+                         AND div.cash_div_value > 0.0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS recent_positive_dividend
+            FROM symbols
+            JOIN trade_days td ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    div.ann_date,
+                    div.end_date,
+                    COALESCE(div.cash_div_tax, div.cash_div)::double precision AS cash_div_value
+                FROM market_stock_dividend div
+                WHERE div.symbol = symbols.symbol
+                  AND div.ann_date <= td.trade_date
+                  AND div.end_date >= (td.trade_date - INTERVAL '4 years')::date
+                  AND COALESCE(div.cash_div_tax, div.cash_div) IS NOT NULL
+            ) div ON true
+            GROUP BY symbols.symbol, td.trade_date
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                {value_expression} AS raw_value
+            FROM history
+            WHERE available_at IS NOT NULL
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order}) AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
         FROM ranked
         ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
             raw_value = EXCLUDED.raw_value,
@@ -7786,6 +8443,54 @@ mod tests {
     }
 
     #[test]
+    fn phase7_cashflow_quality_backfill_request_builds_pit_plan() {
+        let req = Phase7CashflowQualityBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-26".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: Some(180_000),
+        };
+
+        let plan = req.into_plan().expect("valid cashflow quality plan");
+
+        assert_eq!(plan.bundle_name, "phase7_cashflow_quality_v1");
+        assert_eq!(plan.combo_name, "phase7_cashflow_quality_v1");
+        assert_eq!(plan.task_type, "phase7_cashflow_quality_backfill");
+        assert_eq!(plan.category, "cashflow_quality");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_cashflow", "market_trade_calendar"]
+        );
+        assert_eq!(plan.phase, "7-FF/7-J");
+        assert_eq!(plan.statement_timeout_ms, 180_000);
+    }
+
+    #[test]
+    fn phase7_dividend_quality_backfill_request_builds_pit_plan() {
+        let req = Phase7DividendQualityBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2026-05-26".to_string()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: Some(180_000),
+        };
+
+        let plan = req.into_plan().expect("valid dividend quality plan");
+
+        assert_eq!(plan.bundle_name, "phase7_dividend_quality_v1");
+        assert_eq!(plan.combo_name, "phase7_dividend_quality_v1");
+        assert_eq!(plan.task_type, "phase7_dividend_quality_backfill");
+        assert_eq!(plan.category, "dividend_quality");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_dividend", "market_trade_calendar"]
+        );
+        assert_eq!(plan.phase, "7-FF/7-J");
+        assert_eq!(plan.statement_timeout_ms, 180_000);
+    }
+
+    #[test]
     fn phase7_alpha_blend_request_builds_weighted_combo_plan() {
         let req = Phase7AlphaBlendBackfillRequest {
             start_date: Some("2016-04-05".to_string()),
@@ -7893,13 +8598,16 @@ mod tests {
             .map(|plan| plan.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(plans.len(), 16);
+        assert_eq!(plans.len(), 19);
         assert!(combo_names.contains("phase7_value_quality_growth_rel_v1"));
         assert!(combo_names.contains("phase7_blend_value_tilt_v1"));
         assert!(combo_names.contains("phase7_blend_quality_growth_v1"));
         assert!(combo_names.contains("phase7_blend_defensive_rel_v1"));
         assert!(combo_names.contains("phase7_blend_recovery_tilt_v1"));
         assert!(combo_names.contains("phase7_quality_moneyflow_pos_5pct_v1"));
+        assert!(combo_names.contains("phase7_quality_cashflow_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_dividend_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_cashflow_dividend_confirm_v1"));
         assert!(combo_names.contains("phase7_quality_event_confirm_v1"));
         assert!(combo_names.contains("phase7_quality_event_surprise_confirm_v1"));
         assert!(combo_names.contains("phase7_quality_event_window_overlay_v1"));
@@ -7914,7 +8622,10 @@ mod tests {
             assert_eq!(plan.task_type, "phase7_alpha_blend_profiles_backfill");
             if matches!(
                 plan.combo_name.as_str(),
-                "phase7_quality_event_window_overlay_v1"
+                "phase7_quality_cashflow_confirm_v1"
+                    | "phase7_quality_dividend_confirm_v1"
+                    | "phase7_quality_cashflow_dividend_confirm_v1"
+                    | "phase7_quality_event_window_overlay_v1"
                     | "phase7_quality_event_post_return_curve_overlay_v1"
                     | "phase7_quality_event_reaction_segments_overlay_v1"
                     | "phase7_quality_event_reaction_reversal_overlay_v1"
@@ -8660,6 +9371,62 @@ mod tests {
     }
 
     #[test]
+    fn phase7_cashflow_quality_sql_uses_interval_pit_carry_forward() {
+        let specs = phase7_cashflow_quality_backfill_specs();
+        let ocf_cover = specs
+            .iter()
+            .find(|spec| spec.factor_code == "cf_ocf_to_profit_latest_std")
+            .expect("ocf cover spec");
+        let gap = specs
+            .iter()
+            .find(|spec| spec.factor_code == "cf_ocf_profit_gap_latest_std")
+            .expect("cashflow profit gap spec");
+
+        let ocf_sql = phase7_factor_backfill_sql(ocf_cover);
+        let gap_sql = phase7_factor_backfill_sql(gap);
+
+        assert!(ocf_sql.contains("market_stock_cashflow"));
+        assert!(ocf_sql.contains("DISTINCT ON (cf.symbol, cf.available_at)"));
+        assert!(ocf_sql.contains("LEAD(available_at) OVER"));
+        assert!(ocf_sql
+            .contains("ORDER BY cf.symbol, cf.available_at, cf.end_date DESC, cf.ann_date DESC"));
+        assert!(ocf_sql.contains("td.trade_date >= vi.available_at"));
+        assert!(ocf_sql
+            .contains("vi.next_available_at IS NULL OR td.trade_date < vi.next_available_at"));
+        assert!(!ocf_sql.contains("JOIN LATERAL"));
+        assert!(ocf_sql.contains("n_cashflow_act::double precision"));
+        assert!(ocf_sql.contains("net_profit::double precision"));
+        assert!(ocf_sql.contains("available_at"));
+        assert!(ocf_sql.contains("ORDER BY raw_value) AS normalized_value"));
+        assert!(gap_sql.contains("n_cashflow_act::double precision - net_profit::double precision"));
+    }
+
+    #[test]
+    fn phase7_dividend_quality_sql_uses_only_announced_history_window() {
+        let specs = phase7_dividend_quality_backfill_specs();
+        let years = specs
+            .iter()
+            .find(|spec| spec.factor_code == "div_paid_years_4y_std")
+            .expect("paid years spec");
+        let stability = specs
+            .iter()
+            .find(|spec| spec.factor_code == "div_stability_4y_std")
+            .expect("dividend stability spec");
+
+        let years_sql = phase7_factor_backfill_sql(years);
+        let stability_sql = phase7_factor_backfill_sql(stability);
+
+        assert!(years_sql.contains("market_stock_dividend div"));
+        assert!(years_sql.contains("div.ann_date <= td.trade_date"));
+        assert!(years_sql.contains("div.end_date >= (td.trade_date - INTERVAL '4 years')::date"));
+        assert!(years_sql.contains("COUNT(DISTINCT div.end_date)"));
+        assert!(years_sql.contains("MAX(div.ann_date) AS available_at"));
+        assert!(years_sql.contains("ORDER BY raw_value) AS normalized_value"));
+        assert!(stability_sql.contains("STDDEV_POP(cash_div_value)"));
+        assert!(stability_sql.contains("ORDER BY raw_value DESC) AS normalized_value"));
+    }
+
+    #[test]
     fn phase7_event_alpha_sql_uses_available_at_pit_carry_forward() {
         let specs = phase7_event_alpha_backfill_specs();
         let plan = Phase7EventAlphaBackfillRequest {
@@ -8785,6 +9552,31 @@ mod tests {
 
             assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
             assert_eq!(plan.source_combos.len(), 2);
+            assert_eq!(phase7_alpha_blend_required_source_count(plan), 1);
+        }
+    }
+
+    #[test]
+    fn phase7_cashflow_dividend_confirmation_profiles_keep_sparse_sources_optional() {
+        for profile_name in [
+            "quality_dividend_confirm_5pct",
+            "quality_cashflow_dividend_confirm_10pct",
+        ] {
+            let req = Phase7AlphaBlendProfilesBackfillRequest {
+                start_date: Some("2016-02-01".to_string()),
+                end_date: Some("2016-02-05".to_string()),
+                version: None,
+                profile_names: Some(vec![profile_name.to_string()]),
+                statement_timeout_ms: Some(0),
+            };
+            let plans = req.into_plans().expect("valid cashflow/dividend profile");
+            let plan = plans.first().expect("one selected profile");
+
+            assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
+            assert_eq!(
+                plan.source_combos.first().expect("base source").combo_name,
+                "phase7_financial_quality_v1"
+            );
             assert_eq!(phase7_alpha_blend_required_source_count(plan), 1);
         }
     }

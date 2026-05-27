@@ -4,6 +4,8 @@ use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
+use std::future::Future;
+use std::time::Duration as StdDuration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -84,6 +86,46 @@ fn financial_sync_attempt_window() -> (NaiveDate, NaiveDate) {
         NaiveDate::from_ymd_opt(1900, 1, 1).expect("valid financial sync attempt start"),
         NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid financial sync attempt end"),
     )
+}
+
+fn tushare_symbol_call_timeout() -> StdDuration {
+    const DEFAULT_TIMEOUT_SECS: u64 = 20;
+    const MAX_TIMEOUT_SECS: u64 = 120;
+    let secs = std::env::var("PHASE7_TUSHARE_SYMBOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(1, MAX_TIMEOUT_SECS))
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    StdDuration::from_secs(secs)
+}
+
+async fn bounded_tushare_symbol_call<T, E, F>(
+    source: &str,
+    symbol: &str,
+    timeout: StdDuration,
+    future: F,
+) -> Result<T, String>
+where
+    E: std::fmt::Display,
+    F: Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err(format!(
+            "{} request timed out after {}s for {}",
+            source,
+            timeout.as_secs_f64(),
+            symbol
+        )),
+    }
+}
+
+fn append_symbol_error(existing: Option<String>, message: String) -> String {
+    match existing {
+        Some(existing) => format!("{}; {}", existing, message),
+        None => message,
+    }
 }
 
 // ─── sync_stock_basic ────────────────────────────────────────────
@@ -1293,7 +1335,10 @@ pub async fn sync_financial_data_with_task(
 
     let mut stmt_count = 0usize;
     let mut ind_count = 0usize;
+    let mut ok = 0usize;
+    let mut failed = 0usize;
     let total = symbols.len();
+    let call_timeout = tushare_symbol_call_timeout();
 
     for (i, sym) in symbols.iter().enumerate() {
         if i % 100 == 0 {
@@ -1308,7 +1353,14 @@ pub async fn sync_financial_data_with_task(
         let mut symbol_error: Option<String> = None;
 
         // 利润表
-        match client.income(sym, None, None).await {
+        match bounded_tushare_symbol_call(
+            "financial/income",
+            sym,
+            call_timeout,
+            client.income(sym, None, None),
+        )
+        .await
+        {
             Ok(resp) => {
                 if let Some(data) = resp.data {
                     let maps = data.to_maps();
@@ -1346,13 +1398,21 @@ pub async fn sync_financial_data_with_task(
                 }
             }
             Err(error) => {
+                warn!("{} financial income failed: {}", sym, error);
                 symbol_failed = true;
-                symbol_error = Some(error.to_string());
+                symbol_error = Some(error);
             }
         }
 
         // 资产负债表 — 只取关键字段减少数据量
-        match client.balancesheet(sym, None, None).await {
+        match bounded_tushare_symbol_call(
+            "financial/balancesheet",
+            sym,
+            call_timeout,
+            client.balancesheet(sym, None, None),
+        )
+        .await
+        {
             Ok(resp) => {
                 if let Some(data) = resp.data {
                     let maps = data.to_maps();
@@ -1392,17 +1452,21 @@ pub async fn sync_financial_data_with_task(
                 }
             }
             Err(error) => {
+                warn!("{} financial balancesheet failed: {}", sym, error);
                 symbol_failed = true;
-                let message = error.to_string();
-                symbol_error = Some(match symbol_error {
-                    Some(existing) => format!("{}; {}", existing, message),
-                    None => message,
-                });
+                symbol_error = Some(append_symbol_error(symbol_error, error));
             }
         }
 
         // 财务指标
-        match client.fina_indicator(sym, None, None).await {
+        match bounded_tushare_symbol_call(
+            "financial/fina_indicator",
+            sym,
+            call_timeout,
+            client.fina_indicator(sym, None, None),
+        )
+        .await
+        {
             Ok(resp) => {
                 if let Some(data) = resp.data {
                     let maps = data.to_maps();
@@ -1438,12 +1502,9 @@ pub async fn sync_financial_data_with_task(
                 }
             }
             Err(error) => {
+                warn!("{} financial indicator failed: {}", sym, error);
                 symbol_failed = true;
-                let message = error.to_string();
-                symbol_error = Some(match symbol_error {
-                    Some(existing) => format!("{}; {}", existing, message),
-                    None => message,
-                });
+                symbol_error = Some(append_symbol_error(symbol_error, error));
             }
         }
         let symbol_rows = stmt_count - symbol_stmt_start + ind_count - symbol_ind_start;
@@ -1460,6 +1521,11 @@ pub async fn sync_financial_data_with_task(
             symbol_error.as_deref(),
         )
         .await?;
+        if symbol_failed {
+            failed += 1;
+        } else {
+            ok += 1;
+        }
 
         // 速率控制 — 每只股票 ~0.3s，避免被限流
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1468,15 +1534,15 @@ pub async fn sync_financial_data_with_task(
     repository::update_sync_task(
         pool,
         task_id,
-        "completed",
-        (stmt_count + ind_count) as i32,
-        (stmt_count + ind_count) as i32,
-        0,
+        if failed > 0 { "partial" } else { "completed" },
+        total as i32,
+        ok as i32,
+        failed as i32,
     )
     .await?;
     info!(
-        "财务数据同步完成: {} statements + {} indicators",
-        stmt_count, ind_count
+        "财务数据同步完成: {} statements + {} indicators, ok={}, failed={}",
+        stmt_count, ind_count, ok, failed
     );
     Ok((stmt_count, ind_count))
 }
@@ -1982,6 +2048,7 @@ pub async fn sync_cashflow(
     let mut failed = 0usize;
     let mut total_rows = 0usize;
     let page_limit = 2000usize;
+    let call_timeout = tushare_symbol_call_timeout();
 
     for symbol in symbols {
         let mut offset = 0usize;
@@ -1989,15 +2056,19 @@ pub async fn sync_cashflow(
         let mut symbol_rows = 0usize;
         let mut symbol_error: Option<String> = None;
         loop {
-            match client
-                .cashflow(
+            match bounded_tushare_symbol_call(
+                "cashflow",
+                symbol,
+                call_timeout,
+                client.cashflow(
                     symbol,
                     Some(start),
                     Some(end),
                     Some(page_limit),
                     Some(offset),
-                )
-                .await
+                ),
+            )
+            .await
             {
                 Ok(resp) => {
                     let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
@@ -2018,7 +2089,7 @@ pub async fn sync_cashflow(
                 }
                 Err(error) => {
                     warn!("{} cashflow failed: {}", symbol, error);
-                    symbol_error = Some(error.to_string());
+                    symbol_error = Some(error);
                     failed += 1;
                     symbol_failed = true;
                     break;
@@ -2137,6 +2208,7 @@ pub async fn sync_dividend(
     let mut failed = 0usize;
     let mut total_rows = 0usize;
     let page_limit = 2000usize;
+    let call_timeout = tushare_symbol_call_timeout();
 
     for symbol in symbols {
         let mut offset = 0usize;
@@ -2144,8 +2216,11 @@ pub async fn sync_dividend(
         let mut symbol_rows = 0usize;
         let mut symbol_error: Option<String> = None;
         loop {
-            match client
-                .dividend(
+            match bounded_tushare_symbol_call(
+                "dividend",
+                symbol,
+                call_timeout,
+                client.dividend(
                     symbol,
                     None,
                     None,
@@ -2153,8 +2228,9 @@ pub async fn sync_dividend(
                     None,
                     Some(page_limit),
                     Some(offset),
-                )
-                .await
+                ),
+            )
+            .await
             {
                 Ok(resp) => {
                     let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
@@ -2178,7 +2254,7 @@ pub async fn sync_dividend(
                 }
                 Err(error) => {
                     warn!("{} dividend failed: {}", symbol, error);
-                    symbol_error = Some(error.to_string());
+                    symbol_error = Some(error);
                     failed += 1;
                     symbol_failed = true;
                     break;
@@ -2391,6 +2467,41 @@ mod tests {
 
         assert_eq!(start, NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
         assert_eq!(end, NaiveDate::from_ymd_opt(9999, 12, 31).unwrap());
+    }
+
+    #[tokio::test]
+    async fn bounded_tushare_symbol_call_times_out_instead_of_waiting_forever() {
+        let result = bounded_tushare_symbol_call(
+            "cashflow",
+            "000001.SZ",
+            std::time::Duration::from_millis(1),
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<(), &'static str>(())
+            },
+        )
+        .await;
+
+        let error = result.expect_err("pending request should time out");
+        assert!(error.contains("cashflow"));
+        assert!(error.contains("000001.SZ"));
+        assert!(error.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn bounded_tushare_symbol_call_preserves_upstream_error_message() {
+        let result = bounded_tushare_symbol_call(
+            "dividend",
+            "000002.SZ",
+            std::time::Duration::from_secs(10),
+            async { Err::<(), _>("HTTP error: error sending request for url") },
+        )
+        .await;
+
+        assert_eq!(
+            result.expect_err("upstream error should be returned"),
+            "HTTP error: error sending request for url"
+        );
     }
 
     #[test]

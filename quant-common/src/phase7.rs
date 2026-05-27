@@ -526,6 +526,41 @@ pub fn phase7_alpha_blend_profiles() -> Vec<AlphaBlendProfile> {
             ],
         },
         AlphaBlendProfile {
+            profile_name: "quality_cashflow_confirm_5pct".to_string(),
+            combo_name: "phase7_quality_cashflow_confirm_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Financial quality with a light cashflow-quality confirmation overlay"
+                .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_v1", Decimal::new(95, 2)),
+                source("phase7_cashflow_quality_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "quality_dividend_confirm_5pct".to_string(),
+            combo_name: "phase7_quality_dividend_confirm_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Financial quality with a light dividend-quality confirmation overlay"
+                .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_v1", Decimal::new(95, 2)),
+                source("phase7_dividend_quality_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "quality_cashflow_dividend_confirm_10pct".to_string(),
+            combo_name: "phase7_quality_cashflow_dividend_confirm_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial quality with cashflow and dividend quality confirmation overlays"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_v1", Decimal::new(90, 2)),
+                source("phase7_cashflow_quality_v1", Decimal::new(5, 2)),
+                source("phase7_dividend_quality_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
             profile_name: "quality_event_confirm_5pct".to_string(),
             combo_name: "phase7_quality_event_confirm_v1".to_string(),
             version: "1.0.0".to_string(),
@@ -28567,13 +28602,16 @@ mod tests {
             .map(|profile| profile.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(profiles.len(), 13);
+        assert_eq!(profiles.len(), 19);
         assert!(names.contains("phase7_value_quality_growth_rel_v1"));
         assert!(names.contains("phase7_blend_value_tilt_v1"));
         assert!(names.contains("phase7_blend_quality_growth_v1"));
         assert!(names.contains("phase7_blend_defensive_rel_v1"));
         assert!(names.contains("phase7_blend_recovery_tilt_v1"));
         assert!(names.contains("phase7_quality_moneyflow_pos_5pct_v1"));
+        assert!(names.contains("phase7_quality_cashflow_confirm_v1"));
+        assert!(names.contains("phase7_quality_dividend_confirm_v1"));
+        assert!(names.contains("phase7_quality_cashflow_dividend_confirm_v1"));
         assert!(names.contains("phase7_quality_event_confirm_v1"));
         assert!(names.contains("phase7_quality_event_surprise_confirm_v1"));
         assert!(names.contains("phase7_quality_event_window_overlay_v1"));
