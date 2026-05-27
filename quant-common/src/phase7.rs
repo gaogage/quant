@@ -13230,6 +13230,290 @@ fn professional_execution_event_reaction_alpha_seed_trials() -> Vec<Value> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn with_broad_financial_feature_discovery_seed(
+    seed: Value,
+    combo_name: &str,
+    score_direction: ScoreDirection,
+    top_n: usize,
+    rebalance_days: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    capacity_penalty_strength: &str,
+    capacity_risk_budget: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    score_candidate_pool_size: usize,
+    candidate_risk_filter: &str,
+    risk_contribution_control: &str,
+    market_regime: &str,
+    candidate_ranking: &str,
+    execution_impact_budget: &str,
+    profile_name: &str,
+) -> Value {
+    let seed = with_pit_nonlinear_alpha_regime_rebuild_seed(
+        seed,
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        "listed_non_st",
+        candidate_ranking,
+        execution_impact_budget,
+        profile_name,
+    );
+    let mut seed = set_seed_score_direction(seed, score_direction);
+    seed["broad_financial_feature_discovery_profile"] = json!(profile_name);
+    seed
+}
+
+fn professional_execution_broad_financial_feature_discovery_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (
+        profile_name,
+        combo_name,
+        score_direction,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        candidate_ranking,
+        execution_impact_budget,
+    ) in [
+        (
+            "broad_ff_dual_confirm_ascending_top100",
+            "phase7_quality_cashflow_dividend_confirm_v1",
+            ScoreDirection::Ascending,
+            100usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "1.50",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "broad_ff_cashflow_confirm_ascending_top100",
+            "phase7_quality_cashflow_confirm_v1",
+            ScoreDirection::Ascending,
+            100usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "1.50",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "broad_ff_dividend_confirm_ascending_top100",
+            "phase7_quality_dividend_confirm_v1",
+            ScoreDirection::Ascending,
+            100usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "1.50",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "broad_ff_financial_quality_ascending_top100",
+            "phase7_financial_quality_v1",
+            ScoreDirection::Ascending,
+            100usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "1.50",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            "quality_mixed_state_risk_memory_router_v14",
+            "alpha_first_low_impact_v1",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "broad_ff_industry_residual_ascending_top120",
+            "phase7_industry_residual_quality_v1",
+            ScoreDirection::Ascending,
+            120usize,
+            180usize,
+            "0.06",
+            "0.90",
+            "2.00",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            90usize,
+            2400usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "broad_ff_growth_recovery_descending_top100",
+            "phase7_growth_recovery_v1",
+            ScoreDirection::Descending,
+            100usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "1.50",
+            "capacity_participation_balanced_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            "broad_ff_relative_strength_descending_top80",
+            "phase7_quality_relative_strength_v1",
+            ScoreDirection::Descending,
+            80usize,
+            120usize,
+            "0.10",
+            "1",
+            "1.25",
+            "capacity_stress_participation_soft_cap_v1",
+            "twap_15d_v1",
+            Decimal::new(10, 2),
+            60usize,
+            1800usize,
+            "soft_low_volatility_v1",
+            "soft_single_name_20pct_v1",
+            "quality_state_alpha_overlay_selector_v1",
+            "alpha_first_low_impact_v1",
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            "broad_ff_dividend_confirm_descending_top100",
+            "phase7_quality_dividend_confirm_v1",
+            ScoreDirection::Descending,
+            100usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "1.50",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "broad_ff_cashflow_confirm_descending_top100",
+            "phase7_quality_cashflow_confirm_v1",
+            ScoreDirection::Descending,
+            100usize,
+            160usize,
+            "0.08",
+            "0.95",
+            "1.50",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            2200usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "impact_turnover_15pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_broad_financial_feature_discovery_seed(
+                anchor.clone(),
+                combo_name,
+                score_direction,
+                top_n,
+                rebalance_days,
+                max_position_pct,
+                max_gross_exposure,
+                capacity_penalty_strength,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                score_candidate_pool_size,
+                candidate_risk_filter,
+                risk_contribution_control,
+                market_regime,
+                candidate_ranking,
+                execution_impact_budget,
+                profile_name,
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
 fn with_bull_sleeve_cash_recovery_seed(
     seed: Value,
     combo_name: &str,
@@ -20460,6 +20744,66 @@ impl LayeredSearchConfig {
         config
     }
 
+    pub fn professional_execution_broad_financial_feature_discovery_default() -> Self {
+        let mut config = Self::professional_execution_pit_nonlinear_alpha_regime_rebuild_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_industry_residual_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_cashflow_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_dividend_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_cashflow_dividend_confirm_v1", "1.0.0"),
+        ];
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.top_n = vec![80, 100, 120];
+        config.rebalance_days = vec![120, 160, 180];
+        config.max_position_pct = vec![Decimal::new(6, 2), Decimal::new(8, 2), Decimal::new(10, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2), Decimal::ONE];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(125, 2),
+            Decimal::new(150, 2),
+            Decimal::new(200, 2),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_soft_cap_v1".to_string(),
+            "capacity_participation_balanced_v1".to_string(),
+        ];
+        config.candidate_ranking_profiles = vec![
+            "alpha_first_low_impact_v1".to_string(),
+            "capacity_aware_alpha_liquidity_v1".to_string(),
+        ];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
+            "soft_low_volatility_low_correlation_v1".to_string(),
+            "soft_low_volatility_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_15pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![1800, 2200, 2400];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = professional_execution_broad_financial_feature_discovery_seed_trials();
+        config
+    }
+
     pub fn professional_return_alpha_sharpe_bridge_default() -> Self {
         let mut config = Self::professional_v14_ultra_micro_lift_default();
         config.market_regime_policies = vec![
@@ -23132,6 +23476,63 @@ mod tests {
         }));
         for seed in &config.seed_trials {
             let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_execution_broad_financial_feature_discovery_profile_uses_trainable_ff_combos() {
+        let config =
+            LayeredSearchConfig::professional_execution_broad_financial_feature_discovery_default();
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(combo_names.contains(&"phase7_financial_quality_v1"));
+        assert!(combo_names.contains(&"phase7_industry_residual_quality_v1"));
+        assert!(combo_names.contains(&"phase7_growth_recovery_v1"));
+        assert!(combo_names.contains(&"phase7_quality_relative_strength_v1"));
+        assert!(combo_names.contains(&"phase7_quality_cashflow_confirm_v1"));
+        assert!(combo_names.contains(&"phase7_quality_dividend_confirm_v1"));
+        assert!(combo_names.contains(&"phase7_quality_cashflow_dividend_confirm_v1"));
+        assert!(!combo_names.contains(&"phase7_dividend_quality_v1"));
+        assert!(!combo_names.contains(&"phase7_cashflow_quality_v1"));
+        assert_eq!(
+            config.candidate_ranking_profiles,
+            vec![
+                "alpha_first_low_impact_v1".to_string(),
+                "capacity_aware_alpha_liquidity_v1".to_string(),
+            ]
+        );
+        assert_eq!(
+            config.score_directions,
+            vec![ScoreDirection::Ascending, ScoreDirection::Descending]
+        );
+
+        let first_seed = config
+            .seed_trials
+            .first()
+            .expect("phase7_fg should seed broad FF financial combos first");
+        assert_eq!(
+            first_seed["combo_name"],
+            "phase7_quality_cashflow_dividend_confirm_v1"
+        );
+        assert_eq!(
+            first_seed["broad_financial_feature_discovery_profile"],
+            "broad_ff_dual_confirm_ascending_top100"
+        );
+        assert_eq!(first_seed["candidate_ranking"], "alpha_first_low_impact_v1");
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_dividend_confirm_v1"
+                && trial["score_direction"] == "descending"
+        }));
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("phase7_dividend_quality_v1"));
+            assert!(!serialized.contains("phase7_cashflow_quality_v1"));
             assert!(!serialized.contains("2017"));
             assert!(!serialized.contains("2020"));
         }

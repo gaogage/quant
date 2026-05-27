@@ -693,6 +693,11 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "event_reaction_alpha"
         | "phase7_execution_event_reaction_alpha"
         | "phase7_fc"
+        | "professional_execution_broad_financial_feature_discovery"
+        | "execution_broad_financial_feature_discovery"
+        | "broad_financial_feature_discovery"
+        | "phase7_execution_broad_financial_feature_discovery"
+        | "phase7_fg"
         | "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
         | "oos_regime_alpha_rebuild"
@@ -1686,6 +1691,14 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
         | "phase7_fc" => (
             "professional_execution_event_reaction_alpha".to_string(),
             LayeredSearchConfig::professional_execution_event_reaction_alpha_default(),
+        ),
+        "professional_execution_broad_financial_feature_discovery"
+        | "execution_broad_financial_feature_discovery"
+        | "broad_financial_feature_discovery"
+        | "phase7_execution_broad_financial_feature_discovery"
+        | "phase7_fg" => (
+            "professional_execution_broad_financial_feature_discovery".to_string(),
+            LayeredSearchConfig::professional_execution_broad_financial_feature_discovery_default(),
         ),
         "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
@@ -18062,6 +18075,68 @@ mod tests {
             trial.parameters["combo_name"] == "phase7_quality_event_reaction_reversal_overlay_v1"
                 && trial.parameters["event_reaction_alpha_profile"]
                     == "event_reaction_reversal_top100_rebalance160"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_broad_financial_feature_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(24),
+            search_profile: Some("phase7_fg".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_broad_financial_feature_discovery"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fg"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_trial = bundle
+            .plan
+            .trials
+            .first()
+            .expect("phase7_fg should seed broad FF financial combos first");
+        assert_eq!(
+            first_trial.parameters["combo_name"],
+            "phase7_quality_cashflow_dividend_confirm_v1"
+        );
+        assert_eq!(
+            first_trial.parameters["broad_financial_feature_discovery_profile"],
+            "broad_ff_dual_confirm_ascending_top100"
+        );
+        assert_eq!(
+            first_trial.parameters["candidate_ranking"],
+            "alpha_first_low_impact_v1"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_quality_dividend_confirm_v1"
+                && trial.parameters["score_direction"] == "descending"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_dividend_quality_v1"
+                || trial.parameters["combo_name"] == "phase7_cashflow_quality_v1"
         }));
     }
 
