@@ -21,13 +21,14 @@ use quant_backtest::engine::{
 use quant_backtest::portfolio::FeeConfig;
 use quant_backtest::runner::{BacktestDataCache, BacktestMarketDataPrewarmReport, BacktestRunner};
 use quant_backtest::signal_generator::{
-    prewarm_factor_signal_batch_feature_cache, prewarm_market_feature_cache,
-    CandidateRankingProfile, CandidateRiskFilterProfile, CapacityRiskBudgetProfile,
-    CashUtilizationProfile, EventGateConfig, EventGateMode, ExecutionImpactBudgetProfile,
-    FactorSignalBatchPrewarmReport, FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport,
-    MarketFeatureSnapshotScope, MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod,
-    PredictionBlendConfig, ReturnRiskFeatureCacheMode, RiskContributionControlProfile,
-    ScoreDirection, SignalConfig, SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
+    load_open_trading_days_cached, prewarm_factor_signal_batch_feature_cache,
+    prewarm_market_feature_cache, score_days_for_signal_dates, CandidateRankingProfile,
+    CandidateRiskFilterProfile, CapacityRiskBudgetProfile, CashUtilizationProfile, EventGateConfig,
+    EventGateMode, ExecutionImpactBudgetProfile, FactorSignalBatchPrewarmReport,
+    FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport, MarketFeatureSnapshotScope,
+    MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig,
+    ReturnRiskFeatureCacheMode, RiskContributionControlProfile, ScoreDirection, SignalConfig,
+    SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -2186,6 +2187,13 @@ pub(crate) async fn execute_factor_backtest_with_caches(
             .max(req.kelly_lookback_days)
             .max(req.risk_budget_lookback_days)
             .max(1);
+        let signal_dates = signals.keys().copied().collect::<Vec<_>>();
+        let trading_days = load_open_trading_days_cached(db, cache, effective_start, end).await?;
+        let score_days = score_days_for_signal_dates(
+            trading_days.as_ref(),
+            &signal_dates,
+            sig_config.entry_delay_days,
+        );
         Some(
             prewarm_market_feature_cache(
                 db,
@@ -2199,7 +2207,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
                 end,
                 lookback_days,
                 &all_symbols,
-                &[],
+                &score_days,
                 parse_return_risk_feature_cache_mode(&req)?,
             )
             .await

@@ -290,8 +290,16 @@ async fn main() {
             post(routes::ml::train_linear_model),
         )
         .route(
+            "/api/v1/quant/ml/training-tasks/nonlinear-quantile-ranker",
+            post(routes::ml::train_nonlinear_quantile_ranker),
+        )
+        .route(
             "/api/v1/quant/ml/prediction-sets/walk-forward-linear",
             post(routes::ml::create_walk_forward_linear_prediction_set),
+        )
+        .route(
+            "/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker",
+            post(routes::ml::create_walk_forward_nonlinear_quantile_ranker_prediction_set),
         )
         .route(
             "/api/v1/quant/ml/prediction-sets/evaluate",

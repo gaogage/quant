@@ -53,6 +53,28 @@ pub struct TrainLinearModelRequest {
     pub prediction_start_date: String,
     pub prediction_end_date: String,
     pub label_horizon_days: Option<i64>,
+    pub label_objective: Option<String>,
+    pub factors: Vec<LinearFactorRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TrainNonlinearQuantileRankerRequest {
+    pub model_code: String,
+    pub model_version: String,
+    pub model_version_id: Option<String>,
+    pub training_task_id: Option<String>,
+    pub prediction_set_id: Option<String>,
+    pub data_version_id: String,
+    pub feature_set_version_id: String,
+    pub training_dataset_id: String,
+    pub train_start_date: String,
+    pub train_end_date: String,
+    pub prediction_start_date: String,
+    pub prediction_end_date: String,
+    pub label_horizon_days: Option<i64>,
+    pub label_objective: Option<String>,
+    pub bucket_count: Option<usize>,
+    pub min_samples_per_bucket: Option<usize>,
     pub factors: Vec<LinearFactorRef>,
 }
 
@@ -71,8 +93,32 @@ pub struct WalkForwardLinearPredictionSetRequest {
     pub train_lookback_days: Option<i64>,
     pub prediction_step_days: Option<i64>,
     pub label_horizon_days: Option<i64>,
+    pub label_objective: Option<String>,
     pub min_training_samples: Option<usize>,
     pub max_windows: Option<usize>,
+    pub factors: Vec<LinearFactorRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalkForwardNonlinearQuantileRankerRequest {
+    pub model_code: String,
+    pub model_version: String,
+    pub model_version_id: Option<String>,
+    pub training_task_id: Option<String>,
+    pub prediction_set_id: Option<String>,
+    pub data_version_id: String,
+    pub feature_set_version_id: String,
+    pub training_dataset_id: String,
+    pub prediction_start_date: String,
+    pub prediction_end_date: String,
+    pub train_lookback_days: Option<i64>,
+    pub prediction_step_days: Option<i64>,
+    pub label_horizon_days: Option<i64>,
+    pub label_objective: Option<String>,
+    pub min_training_samples: Option<usize>,
+    pub max_windows: Option<usize>,
+    pub bucket_count: Option<usize>,
+    pub min_samples_per_bucket: Option<usize>,
     pub factors: Vec<LinearFactorRef>,
 }
 
@@ -98,6 +144,7 @@ struct NormalizedLinearPredictionSetRequest {
     factors: Vec<LinearFactorWeight>,
 }
 
+#[derive(Debug)]
 struct NormalizedLinearTrainingRequest {
     model_code: String,
     model_version: String,
@@ -112,9 +159,32 @@ struct NormalizedLinearTrainingRequest {
     prediction_start_date: NaiveDate,
     prediction_end_date: NaiveDate,
     label_horizon_days: i64,
+    label_objective: LabelObjective,
     factors: Vec<LinearFactorRef>,
 }
 
+#[derive(Debug)]
+struct NormalizedNonlinearQuantileRankerRequest {
+    model_code: String,
+    model_version: String,
+    model_version_id: String,
+    training_task_id: String,
+    prediction_set_id: String,
+    data_version_id: String,
+    feature_set_version_id: String,
+    training_dataset_id: String,
+    train_start_date: NaiveDate,
+    train_end_date: NaiveDate,
+    prediction_start_date: NaiveDate,
+    prediction_end_date: NaiveDate,
+    label_horizon_days: i64,
+    label_objective: LabelObjective,
+    bucket_count: usize,
+    min_samples_per_bucket: usize,
+    factors: Vec<LinearFactorRef>,
+}
+
+#[derive(Debug)]
 struct NormalizedWalkForwardLinearPredictionSetRequest {
     model_code: String,
     model_version: String,
@@ -129,9 +199,53 @@ struct NormalizedWalkForwardLinearPredictionSetRequest {
     train_lookback_days: i64,
     prediction_step_days: i64,
     label_horizon_days: i64,
+    label_objective: LabelObjective,
     min_training_samples: usize,
     max_windows: Option<usize>,
     factors: Vec<LinearFactorRef>,
+}
+
+#[derive(Debug)]
+struct NormalizedWalkForwardNonlinearQuantileRankerRequest {
+    linear: NormalizedWalkForwardLinearPredictionSetRequest,
+    bucket_count: usize,
+    min_samples_per_bucket: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelObjective {
+    FutureReturn,
+    FutureExcessReturn,
+    RiskAdjustedExcessReturn,
+}
+
+impl LabelObjective {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("future_return") => Ok(Self::FutureReturn),
+            Some("future_excess_return") => Ok(Self::FutureExcessReturn),
+            Some("risk_adjusted_excess_return") => Ok(Self::RiskAdjustedExcessReturn),
+            Some(other) => Err(format!(
+                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return; got {}",
+                other
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FutureReturn => "future_return",
+            Self::FutureExcessReturn => "future_excess_return",
+            Self::RiskAdjustedExcessReturn => "risk_adjusted_excess_return",
+        }
+    }
+
+    fn requires_benchmark(self) -> bool {
+        matches!(
+            self,
+            Self::FutureExcessReturn | Self::RiskAdjustedExcessReturn
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +271,20 @@ struct WalkForwardWindowSummary {
     weights: Vec<LinearFactorWeight>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WalkForwardNonlinearWindowSummary {
+    window_index: usize,
+    train_start_date: NaiveDate,
+    train_end_date: NaiveDate,
+    prediction_start_date: NaiveDate,
+    prediction_end_date: NaiveDate,
+    sample_count: usize,
+    prediction_rows: usize,
+    skipped: bool,
+    skip_reason: Option<String>,
+    model: Option<NonlinearQuantileRanker>,
+}
+
 #[derive(Debug, Clone)]
 struct PredictionRow {
     prediction_set_id: String,
@@ -166,6 +294,13 @@ struct PredictionRow {
     probability: Option<f64>,
     rank: i32,
     available_at: NaiveDate,
+}
+
+#[derive(Debug, Clone)]
+struct TrainingFeatureMatrixRow {
+    symbol: String,
+    trade_date: NaiveDate,
+    features: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,11 +337,31 @@ pub async fn train_linear_model(
     }
 }
 
+pub async fn train_nonlinear_quantile_ranker(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TrainNonlinearQuantileRankerRequest>,
+) -> impl IntoResponse {
+    match train_nonlinear_quantile_ranker_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
 pub async fn create_walk_forward_linear_prediction_set(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WalkForwardLinearPredictionSetRequest>,
 ) -> impl IntoResponse {
     match create_walk_forward_linear_prediction_set_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn create_walk_forward_nonlinear_quantile_ranker_prediction_set(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<WalkForwardNonlinearQuantileRankerRequest>,
+) -> impl IntoResponse {
+    match create_walk_forward_nonlinear_quantile_ranker_inner(&state.db, req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -249,6 +404,7 @@ async fn create_walk_forward_linear_prediction_set_inner(
             prediction_start_date: window.prediction_start_date,
             prediction_end_date: window.prediction_end_date,
             label_horizon_days: req.label_horizon_days,
+            label_objective: req.label_objective,
             factors: req.factors.clone(),
         };
         let samples = load_training_samples(db, &training_req).await?;
@@ -323,11 +479,7 @@ async fn create_walk_forward_linear_prediction_set_inner(
     } else {
         "partial"
     };
-    let label_definition = json!({
-        "label": "future_return",
-        "horizon_trading_days": req.label_horizon_days,
-        "price": "close",
-    });
+    let label_definition = label_definition_json(req.label_objective, req.label_horizon_days);
     let feature_config = json!({
         "feature_set_version_id": req.feature_set_version_id,
         "factors": req.factors,
@@ -339,6 +491,7 @@ async fn create_walk_forward_linear_prediction_set_inner(
         "prediction_step_days": req.prediction_step_days,
         "min_training_samples": req.min_training_samples,
     });
+    let experiment_config = walk_forward_linear_experiment_config(&req, &label_definition);
     let window_json = serde_json::to_value(&summaries)
         .map_err(|error| format!("Failed to serialize walk-forward windows: {}", error))?;
     let dataset_hash = stable_metadata_hash(&json!({
@@ -527,7 +680,7 @@ async fn create_walk_forward_linear_prediction_set_inner(
     )
     .bind(&experiment_run_id)
     .bind(&req.prediction_set_id)
-    .bind(&hyperparameters)
+    .bind(&experiment_config)
     .bind(json!({
         "prediction_rows": all_rows.len(),
         "window_count": summaries.len(),
@@ -554,6 +707,402 @@ async fn create_walk_forward_linear_prediction_set_inner(
         "window_count": summaries.len(),
         "completed_windows": completed_windows,
         "skipped_windows": skipped_windows,
+        "status": status,
+        "prediction_hash": prediction_hash,
+        "experiment_run_id": experiment_run_id,
+        "windows": summaries,
+    }))
+}
+
+async fn create_walk_forward_nonlinear_quantile_ranker_inner(
+    db: &sqlx::PgPool,
+    req: WalkForwardNonlinearQuantileRankerRequest,
+) -> Result<Value, String> {
+    let req = normalize_walk_forward_nonlinear_quantile_ranker_request(&req)?;
+    let linear = &req.linear;
+    let windows = build_walk_forward_windows(linear)?;
+    if windows.is_empty() {
+        return Err("walk-forward nonlinear request produced no windows".into());
+    }
+
+    let mut all_rows = Vec::new();
+    let mut summaries = Vec::new();
+    for window in &windows {
+        let training_req = NormalizedLinearTrainingRequest {
+            model_code: linear.model_code.clone(),
+            model_version: linear.model_version.clone(),
+            model_version_id: linear.model_version_id.clone(),
+            training_task_id: linear.training_task_id.clone(),
+            prediction_set_id: linear.prediction_set_id.clone(),
+            data_version_id: linear.data_version_id.clone(),
+            feature_set_version_id: linear.feature_set_version_id.clone(),
+            training_dataset_id: linear.training_dataset_id.clone(),
+            train_start_date: window.train_start_date,
+            train_end_date: window.train_end_date,
+            prediction_start_date: window.prediction_start_date,
+            prediction_end_date: window.prediction_end_date,
+            label_horizon_days: linear.label_horizon_days,
+            label_objective: linear.label_objective,
+            factors: linear.factors.clone(),
+        };
+        let samples = load_training_samples(db, &training_req).await?;
+        let required_samples = linear
+            .min_training_samples
+            .max(req.bucket_count * req.min_samples_per_bucket);
+        if samples.len() < required_samples {
+            summaries.push(WalkForwardNonlinearWindowSummary {
+                window_index: window.window_index,
+                train_start_date: window.train_start_date,
+                train_end_date: window.train_end_date,
+                prediction_start_date: window.prediction_start_date,
+                prediction_end_date: window.prediction_end_date,
+                sample_count: samples.len(),
+                prediction_rows: 0,
+                skipped: true,
+                skip_reason: Some(format!(
+                    "sample_count {} < required_samples {}",
+                    samples.len(),
+                    required_samples
+                )),
+                model: None,
+            });
+            continue;
+        }
+
+        let model = match fit_nonlinear_quantile_ranker(
+            &samples,
+            linear.factors.len(),
+            req.bucket_count,
+            req.min_samples_per_bucket,
+        ) {
+            Ok(model) => model,
+            Err(message) => {
+                summaries.push(WalkForwardNonlinearWindowSummary {
+                    window_index: window.window_index,
+                    train_start_date: window.train_start_date,
+                    train_end_date: window.train_end_date,
+                    prediction_start_date: window.prediction_start_date,
+                    prediction_end_date: window.prediction_end_date,
+                    sample_count: samples.len(),
+                    prediction_rows: 0,
+                    skipped: true,
+                    skip_reason: Some(message),
+                    model: None,
+                });
+                continue;
+            }
+        };
+        let prediction_req = NormalizedLinearPredictionSetRequest {
+            model_code: linear.model_code.clone(),
+            model_version: linear.model_version.clone(),
+            model_version_id: linear.model_version_id.clone(),
+            prediction_set_id: linear.prediction_set_id.clone(),
+            data_version_id: linear.data_version_id.clone(),
+            feature_set_version_id: linear.feature_set_version_id.clone(),
+            training_dataset_id: linear.training_dataset_id.clone(),
+            start_date: window.prediction_start_date,
+            end_date: window.prediction_end_date,
+            factors: linear
+                .factors
+                .iter()
+                .map(|factor| LinearFactorWeight {
+                    factor_code: factor.factor_code.clone(),
+                    factor_version: factor.factor_version.clone(),
+                    weight: 1.0,
+                })
+                .collect(),
+        };
+        let feature_rows = load_prediction_feature_matrix_rows(db, &prediction_req).await?;
+        let mut rows = nonlinear_prediction_rows_from_feature_matrix_rows(
+            &linear.prediction_set_id,
+            feature_rows,
+            &model,
+        )?;
+        let prediction_rows = rows.len();
+        all_rows.append(&mut rows);
+        summaries.push(WalkForwardNonlinearWindowSummary {
+            window_index: window.window_index,
+            train_start_date: window.train_start_date,
+            train_end_date: window.train_end_date,
+            prediction_start_date: window.prediction_start_date,
+            prediction_end_date: window.prediction_end_date,
+            sample_count: samples.len(),
+            prediction_rows,
+            skipped: false,
+            skip_reason: None,
+            model: Some(model),
+        });
+    }
+
+    if all_rows.is_empty() {
+        return Err("walk-forward nonlinear ranker produced no prediction rows".into());
+    }
+
+    let skipped_windows = summaries.iter().filter(|summary| summary.skipped).count();
+    let completed_windows = summaries.len().saturating_sub(skipped_windows);
+    let status = if skipped_windows == 0 {
+        "completed"
+    } else {
+        "partial"
+    };
+    let label_definition = label_definition_json(linear.label_objective, linear.label_horizon_days);
+    let feature_config = json!({
+        "feature_set_version_id": linear.feature_set_version_id,
+        "factors": linear.factors,
+        "point_in_time_policy": "factor_value.available_at <= trade_date",
+    });
+    let hyperparameters = json!({
+        "trainer": "walk_forward_nonlinear_quantile_ranker_v1",
+        "train_lookback_days": linear.train_lookback_days,
+        "prediction_step_days": linear.prediction_step_days,
+        "min_training_samples": linear.min_training_samples,
+        "bucket_count": req.bucket_count,
+        "min_samples_per_bucket": req.min_samples_per_bucket,
+    });
+    let experiment_config = walk_forward_nonlinear_quantile_ranker_experiment_config(&req);
+    let window_json = serde_json::to_value(&summaries).map_err(|error| {
+        format!(
+            "Failed to serialize nonlinear walk-forward windows: {}",
+            error
+        )
+    })?;
+    let dataset_hash = stable_metadata_hash(&json!({
+        "data_version_id": linear.data_version_id,
+        "feature_set_version_id": linear.feature_set_version_id,
+        "prediction_window": {"start": linear.prediction_start_date, "end": linear.prediction_end_date},
+        "train_lookback_days": linear.train_lookback_days,
+        "prediction_step_days": linear.prediction_step_days,
+        "label_definition": label_definition,
+        "factors": feature_config["factors"],
+        "trainer": hyperparameters,
+    }));
+    let metadata = json!({
+        "model_type": "walk_forward_nonlinear_quantile_ranker",
+        "training_task_id": linear.training_task_id,
+        "prediction_set_id": linear.prediction_set_id,
+        "window_count": summaries.len(),
+        "completed_windows": completed_windows,
+        "skipped_windows": skipped_windows,
+        "prediction_rows": all_rows.len(),
+        "windows": window_json,
+        "point_in_time_policy": "each window trains on dates <= prediction_start_date - label_horizon_days; model_prediction.available_at = trade_date",
+    });
+    let artifact_hash = stable_metadata_hash(&metadata);
+    let prediction_hash = stable_metadata_hash(&json!({
+        "model_version_id": linear.model_version_id,
+        "prediction_set_id": linear.prediction_set_id,
+        "data_version_id": linear.data_version_id,
+        "feature_set_version_id": linear.feature_set_version_id,
+        "prediction_window": {"start": linear.prediction_start_date, "end": linear.prediction_end_date},
+        "windows": metadata["windows"],
+    }));
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+
+    let mut tx = db.begin().await.map_err(|error| {
+        format!(
+            "Failed to begin nonlinear walk-forward ML transaction: {}",
+            error
+        )
+    })?;
+
+    sqlx::query(
+        "INSERT INTO training_dataset
+           (training_dataset_id, data_version_id, feature_set_version_id, label_definition,
+            train_window, validation_window, test_window, sample_filter, split_policy,
+            dataset_hash, status, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'frozen', $11)
+         ON CONFLICT (training_dataset_id) DO UPDATE SET
+            data_version_id = EXCLUDED.data_version_id,
+            feature_set_version_id = EXCLUDED.feature_set_version_id,
+            label_definition = EXCLUDED.label_definition,
+            train_window = EXCLUDED.train_window,
+            validation_window = EXCLUDED.validation_window,
+            test_window = EXCLUDED.test_window,
+            sample_filter = EXCLUDED.sample_filter,
+            split_policy = EXCLUDED.split_policy,
+            dataset_hash = EXCLUDED.dataset_hash,
+            status = EXCLUDED.status,
+            metadata = EXCLUDED.metadata",
+    )
+    .bind(&linear.training_dataset_id)
+    .bind(&linear.data_version_id)
+    .bind(&linear.feature_set_version_id)
+    .bind(&label_definition)
+    .bind(json!({
+        "lookback_days": linear.train_lookback_days,
+        "first_train_start": summaries.first().map(|summary| summary.train_start_date),
+        "last_train_end": summaries.iter().rev().find(|summary| !summary.skipped).map(|summary| summary.train_end_date),
+    }))
+    .bind(json!({"walk_forward_validation": "windowed"}))
+    .bind(json!({"prediction_start": linear.prediction_start_date, "prediction_end": linear.prediction_end_date}))
+    .bind(json!({
+        "min_training_samples": linear.min_training_samples,
+        "bucket_count": req.bucket_count,
+        "min_samples_per_bucket": req.min_samples_per_bucket,
+    }))
+    .bind(json!({"type": "walk_forward_nonlinear_quantile_ranker", "prediction_step_days": linear.prediction_step_days}))
+    .bind(&dataset_hash)
+    .bind(&metadata)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert nonlinear walk-forward training_dataset: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO model_training_task
+           (training_task_id, model_code, model_type, data_version_id, training_dataset_id,
+            feature_config, label_definition, hyperparameters, status, progress,
+            last_heartbeat_at, heartbeat_timeout_seconds, started_at, completed_at)
+         VALUES ($1, $2, 'walk_forward_nonlinear_quantile_ranker', $3, $4, $5, $6, $7, $8, 100,
+                 now(), 600, now(), now())
+         ON CONFLICT (training_task_id) DO UPDATE SET
+            training_dataset_id = EXCLUDED.training_dataset_id,
+            feature_config = EXCLUDED.feature_config,
+            label_definition = EXCLUDED.label_definition,
+            hyperparameters = EXCLUDED.hyperparameters,
+            status = EXCLUDED.status,
+            progress = 100,
+            last_heartbeat_at = now(),
+            completed_at = now(),
+            error_message = NULL",
+    )
+    .bind(&linear.training_task_id)
+    .bind(&linear.model_code)
+    .bind(&linear.data_version_id)
+    .bind(&linear.training_dataset_id)
+    .bind(&feature_config)
+    .bind(&label_definition)
+    .bind(&hyperparameters)
+    .bind(status)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to upsert nonlinear walk-forward model_training_task: {}",
+            error
+        )
+    })?;
+
+    sqlx::query(
+        "INSERT INTO model_registry
+           (model_version_id, model_code, model_type, version, feature_version_id,
+            label_definition, training_window, validation_metrics, test_metrics,
+            artifact_path, artifact_hash, status, training_dataset_id)
+         VALUES ($1, $2, 'walk_forward_nonlinear_quantile_ranker', $3, $4, $5, $6,
+                 $7, $8, $9, $10, 'active', $11)
+         ON CONFLICT (model_version_id) DO UPDATE SET
+            feature_version_id = EXCLUDED.feature_version_id,
+            label_definition = EXCLUDED.label_definition,
+            training_window = EXCLUDED.training_window,
+            validation_metrics = EXCLUDED.validation_metrics,
+            test_metrics = EXCLUDED.test_metrics,
+            artifact_path = EXCLUDED.artifact_path,
+            artifact_hash = EXCLUDED.artifact_hash,
+            status = EXCLUDED.status,
+            training_dataset_id = EXCLUDED.training_dataset_id",
+    )
+    .bind(&linear.model_version_id)
+    .bind(&linear.model_code)
+    .bind(&linear.model_version)
+    .bind(&linear.feature_set_version_id)
+    .bind(&label_definition)
+    .bind(json!({"walk_forward_windows": summaries.len(), "lookback_days": linear.train_lookback_days}))
+    .bind(json!({
+        "completed_windows": completed_windows,
+        "skipped_windows": skipped_windows,
+        "bucket_count": req.bucket_count,
+    }))
+    .bind(json!({"prediction_row_count": all_rows.len()}))
+    .bind(format!("memory://{}", linear.training_task_id))
+    .bind(&artifact_hash)
+    .bind(&linear.training_dataset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert nonlinear walk-forward model_registry: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO prediction_set
+           (prediction_set_id, model_version_id, feature_set_version_id, data_version_id,
+            start_date, end_date, prediction_hash, status, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8)
+         ON CONFLICT (prediction_set_id) DO UPDATE SET
+            model_version_id = EXCLUDED.model_version_id,
+            feature_set_version_id = EXCLUDED.feature_set_version_id,
+            data_version_id = EXCLUDED.data_version_id,
+            start_date = EXCLUDED.start_date,
+            end_date = EXCLUDED.end_date,
+            prediction_hash = EXCLUDED.prediction_hash,
+            status = EXCLUDED.status,
+            metadata = EXCLUDED.metadata",
+    )
+    .bind(&linear.prediction_set_id)
+    .bind(&linear.model_version_id)
+    .bind(&linear.feature_set_version_id)
+    .bind(&linear.data_version_id)
+    .bind(linear.prediction_start_date)
+    .bind(linear.prediction_end_date)
+    .bind(&prediction_hash)
+    .bind(&metadata)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to upsert nonlinear walk-forward prediction_set: {}",
+            error
+        )
+    })?;
+
+    sqlx::query("DELETE FROM model_prediction WHERE prediction_set_id = $1")
+        .bind(&linear.prediction_set_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to clear nonlinear walk-forward model_prediction: {}",
+                error
+            )
+        })?;
+    insert_prediction_rows(&mut tx, &all_rows).await?;
+
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status)
+         VALUES ($1, 'ml_walk_forward_nonlinear_quantile_ranker', 'prediction_set', $2, $3, $4, $5)",
+    )
+    .bind(&experiment_run_id)
+    .bind(&linear.prediction_set_id)
+    .bind(&experiment_config)
+    .bind(json!({
+        "prediction_rows": all_rows.len(),
+        "window_count": summaries.len(),
+        "completed_windows": completed_windows,
+        "skipped_windows": skipped_windows,
+        "bucket_count": req.bucket_count,
+        "prediction_hash": prediction_hash,
+        "artifact_hash": artifact_hash,
+    }))
+    .bind(status)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to insert nonlinear walk-forward experiment_run: {}", error))?;
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "Failed to commit nonlinear walk-forward ML transaction: {}",
+            error
+        )
+    })?;
+
+    Ok(json!({
+        "training_task_id": linear.training_task_id,
+        "model_version_id": linear.model_version_id,
+        "training_dataset_id": linear.training_dataset_id,
+        "prediction_set_id": linear.prediction_set_id,
+        "prediction_rows": all_rows.len(),
+        "window_count": summaries.len(),
+        "completed_windows": completed_windows,
+        "skipped_windows": skipped_windows,
+        "bucket_count": req.bucket_count,
         "status": status,
         "prediction_hash": prediction_hash,
         "experiment_run_id": experiment_run_id,
@@ -603,11 +1152,7 @@ async fn train_linear_model_inner(
         return Err("trained linear model found no prediction factor values".into());
     }
 
-    let label_definition = json!({
-        "label": "future_return",
-        "horizon_trading_days": req.label_horizon_days,
-        "price": "close",
-    });
+    let label_definition = label_definition_json(req.label_objective, req.label_horizon_days);
     let feature_config = json!({
         "feature_set_version_id": req.feature_set_version_id,
         "factors": req.factors,
@@ -840,6 +1385,286 @@ async fn train_linear_model_inner(
     }))
 }
 
+async fn train_nonlinear_quantile_ranker_inner(
+    db: &sqlx::PgPool,
+    req: TrainNonlinearQuantileRankerRequest,
+) -> Result<Value, String> {
+    let req = normalize_nonlinear_quantile_ranker_request(&req)?;
+    let training_req = NormalizedLinearTrainingRequest {
+        model_code: req.model_code.clone(),
+        model_version: req.model_version.clone(),
+        model_version_id: req.model_version_id.clone(),
+        training_task_id: req.training_task_id.clone(),
+        prediction_set_id: req.prediction_set_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        training_dataset_id: req.training_dataset_id.clone(),
+        train_start_date: req.train_start_date,
+        train_end_date: req.train_end_date,
+        prediction_start_date: req.prediction_start_date,
+        prediction_end_date: req.prediction_end_date,
+        label_horizon_days: req.label_horizon_days,
+        label_objective: req.label_objective,
+        factors: req.factors.clone(),
+    };
+    let samples = load_training_samples(db, &training_req).await?;
+    let model = fit_nonlinear_quantile_ranker(
+        &samples,
+        req.factors.len(),
+        req.bucket_count,
+        req.min_samples_per_bucket,
+    )?;
+    let prediction_req = NormalizedLinearPredictionSetRequest {
+        model_code: req.model_code.clone(),
+        model_version: req.model_version.clone(),
+        model_version_id: req.model_version_id.clone(),
+        prediction_set_id: req.prediction_set_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        training_dataset_id: req.training_dataset_id.clone(),
+        start_date: req.prediction_start_date,
+        end_date: req.prediction_end_date,
+        factors: req
+            .factors
+            .iter()
+            .map(|factor| LinearFactorWeight {
+                factor_code: factor.factor_code.clone(),
+                factor_version: factor.factor_version.clone(),
+                weight: 1.0,
+            })
+            .collect(),
+    };
+    let feature_rows = load_prediction_feature_matrix_rows(db, &prediction_req).await?;
+    let rows = nonlinear_prediction_rows_from_feature_matrix_rows(
+        &req.prediction_set_id,
+        feature_rows,
+        &model,
+    )?;
+    if rows.is_empty() {
+        return Err("nonlinear quantile ranker found no prediction factor values".into());
+    }
+
+    let label_definition = label_definition_json(req.label_objective, req.label_horizon_days);
+    let feature_config = json!({
+        "feature_set_version_id": req.feature_set_version_id,
+        "factors": req.factors,
+        "point_in_time_policy": "factor_value.available_at <= trade_date",
+    });
+    let hyperparameters = json!({
+        "trainer": "nonlinear_quantile_ranker_v1",
+        "bucket_count": req.bucket_count,
+        "min_samples_per_bucket": req.min_samples_per_bucket,
+        "scoring": "sum_train_window_bucket_mean_label",
+    });
+    let model_json = serde_json::to_value(&model)
+        .map_err(|error| format!("Failed to serialize nonlinear ranker model: {}", error))?;
+    let metadata = json!({
+        "model_type": "nonlinear_quantile_ranker",
+        "training_task_id": req.training_task_id,
+        "sample_count": samples.len(),
+        "label_definition": label_definition,
+        "point_in_time_policy": "model_prediction.available_at = trade_date",
+        "model": model_json,
+    });
+    let dataset_hash = stable_metadata_hash(&json!({
+        "data_version_id": req.data_version_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "training_window": {"start": req.train_start_date, "end": req.train_end_date},
+        "label_definition": label_definition,
+        "factors": feature_config["factors"],
+        "trainer": hyperparameters,
+    }));
+    let artifact_hash = stable_metadata_hash(&metadata);
+    let prediction_hash = stable_metadata_hash(&json!({
+        "model_version_id": req.model_version_id,
+        "prediction_set_id": req.prediction_set_id,
+        "data_version_id": req.data_version_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "start_date": req.prediction_start_date,
+        "end_date": req.prediction_end_date,
+        "model": metadata["model"],
+    }));
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let experiment_config = nonlinear_quantile_ranker_experiment_config(&req);
+    let experiment_metrics = nonlinear_quantile_ranker_experiment_metrics(
+        samples.len(),
+        rows.len(),
+        &metadata["model"],
+        &artifact_hash,
+        &prediction_hash,
+    );
+
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin nonlinear ranker transaction: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO training_dataset
+           (training_dataset_id, data_version_id, feature_set_version_id, label_definition,
+            train_window, validation_window, test_window, sample_filter, split_policy,
+            dataset_hash, status, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'frozen', $11)
+         ON CONFLICT (training_dataset_id) DO UPDATE SET
+            data_version_id = EXCLUDED.data_version_id,
+            feature_set_version_id = EXCLUDED.feature_set_version_id,
+            label_definition = EXCLUDED.label_definition,
+            train_window = EXCLUDED.train_window,
+            validation_window = EXCLUDED.validation_window,
+            test_window = EXCLUDED.test_window,
+            sample_filter = EXCLUDED.sample_filter,
+            split_policy = EXCLUDED.split_policy,
+            dataset_hash = EXCLUDED.dataset_hash,
+            status = EXCLUDED.status,
+            metadata = EXCLUDED.metadata",
+    )
+    .bind(&req.training_dataset_id)
+    .bind(&req.data_version_id)
+    .bind(&req.feature_set_version_id)
+    .bind(&label_definition)
+    .bind(json!({"start": req.train_start_date, "end": req.train_end_date}))
+    .bind(json!({"start": req.train_start_date, "end": req.train_end_date}))
+    .bind(json!({"start": req.prediction_start_date, "end": req.prediction_end_date}))
+    .bind(json!({"complete_features": true, "finite_label": true}))
+    .bind(json!({"type": "train_predict_split", "selection_scope": "train_window_only"}))
+    .bind(&dataset_hash)
+    .bind(json!({"training_task_id": req.training_task_id, "sample_count": samples.len()}))
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert nonlinear training_dataset: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO model_training_task
+           (training_task_id, model_code, model_type, data_version_id, training_dataset_id,
+            feature_config, label_definition, hyperparameters, status, progress,
+            last_heartbeat_at, heartbeat_timeout_seconds, started_at, completed_at)
+         VALUES ($1, $2, 'nonlinear_quantile_ranker', $3, $4, $5, $6, $7, 'completed', 100,
+                 now(), 600, now(), now())
+         ON CONFLICT (training_task_id) DO UPDATE SET
+            training_dataset_id = EXCLUDED.training_dataset_id,
+            feature_config = EXCLUDED.feature_config,
+            label_definition = EXCLUDED.label_definition,
+            hyperparameters = EXCLUDED.hyperparameters,
+            status = EXCLUDED.status,
+            progress = EXCLUDED.progress,
+            last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+            completed_at = EXCLUDED.completed_at",
+    )
+    .bind(&req.training_task_id)
+    .bind(&req.model_code)
+    .bind(&req.data_version_id)
+    .bind(&req.training_dataset_id)
+    .bind(&feature_config)
+    .bind(&label_definition)
+    .bind(&hyperparameters)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert nonlinear model_training_task: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO model_registry
+           (model_version_id, model_code, model_type, version, feature_version_id,
+            label_definition, training_window, validation_metrics, test_metrics,
+            artifact_path, artifact_hash, status, training_dataset_id)
+         VALUES ($1, $2, 'nonlinear_quantile_ranker', $3, $4, $5, $6,
+                 $7, $8, $9, $10, 'active', $11)
+         ON CONFLICT (model_version_id) DO UPDATE SET
+            feature_version_id = EXCLUDED.feature_version_id,
+            label_definition = EXCLUDED.label_definition,
+            training_window = EXCLUDED.training_window,
+            validation_metrics = EXCLUDED.validation_metrics,
+            test_metrics = EXCLUDED.test_metrics,
+            artifact_hash = EXCLUDED.artifact_hash,
+            status = EXCLUDED.status,
+            training_dataset_id = EXCLUDED.training_dataset_id",
+    )
+    .bind(&req.model_version_id)
+    .bind(&req.model_code)
+    .bind(&req.model_version)
+    .bind(&req.feature_set_version_id)
+    .bind(&label_definition)
+    .bind(json!({"start": req.train_start_date, "end": req.train_end_date}))
+    .bind(json!({"sample_count": samples.len(), "bucket_count": req.bucket_count}))
+    .bind(json!({"prediction_row_count": rows.len()}))
+    .bind(format!("artifact://{}", req.model_version_id))
+    .bind(&artifact_hash)
+    .bind(&req.training_dataset_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert nonlinear model_registry: {}", error))?;
+
+    sqlx::query(
+        "INSERT INTO prediction_set
+           (prediction_set_id, model_version_id, feature_set_version_id, data_version_id,
+            start_date, end_date, prediction_hash, status, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8)
+         ON CONFLICT (prediction_set_id) DO UPDATE SET
+            model_version_id = EXCLUDED.model_version_id,
+            feature_set_version_id = EXCLUDED.feature_set_version_id,
+            data_version_id = EXCLUDED.data_version_id,
+            start_date = EXCLUDED.start_date,
+            end_date = EXCLUDED.end_date,
+            prediction_hash = EXCLUDED.prediction_hash,
+            status = EXCLUDED.status,
+            metadata = EXCLUDED.metadata",
+    )
+    .bind(&req.prediction_set_id)
+    .bind(&req.model_version_id)
+    .bind(&req.feature_set_version_id)
+    .bind(&req.data_version_id)
+    .bind(req.prediction_start_date)
+    .bind(req.prediction_end_date)
+    .bind(&prediction_hash)
+    .bind(&metadata)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert nonlinear prediction_set: {}", error))?;
+
+    sqlx::query("DELETE FROM model_prediction WHERE prediction_set_id = $1")
+        .bind(&req.prediction_set_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to clear nonlinear model_prediction: {}", error))?;
+    insert_prediction_rows(&mut tx, &rows).await?;
+
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'ml_nonlinear_quantile_ranker', 'model_training_task', $2, $3, $4,
+                 'completed', now(), now())
+         ON CONFLICT (experiment_run_id) DO UPDATE SET
+            config = EXCLUDED.config,
+            metrics = EXCLUDED.metrics,
+            status = EXCLUDED.status,
+            completed_at = EXCLUDED.completed_at",
+    )
+    .bind(&experiment_run_id)
+    .bind(&req.training_task_id)
+    .bind(&experiment_config)
+    .bind(&experiment_metrics)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to insert nonlinear experiment_run: {}", error))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit nonlinear ranker transaction: {}", error))?;
+
+    Ok(json!({
+        "training_task_id": req.training_task_id,
+        "model_version_id": req.model_version_id,
+        "training_dataset_id": req.training_dataset_id,
+        "prediction_set_id": req.prediction_set_id,
+        "sample_count": samples.len(),
+        "prediction_rows": rows.len(),
+        "bucket_count": req.bucket_count,
+        "prediction_hash": prediction_hash,
+        "experiment_run_id": experiment_run_id,
+        "status": "completed",
+    }))
+}
+
 async fn evaluate_prediction_set_inner(
     db: &sqlx::PgPool,
     req: EvaluatePredictionSetRequest,
@@ -998,13 +1823,120 @@ fn linear_training_experiment_config(req: &NormalizedLinearTrainingRequest) -> V
         "train_window": {"start": req.train_start_date, "end": req.train_end_date},
         "prediction_window": {"start": req.prediction_start_date, "end": req.prediction_end_date},
         "label": {
-            "type": "future_return",
+            "type": req.label_objective.as_str(),
             "horizon_trading_days": req.label_horizon_days,
-            "price": "close"
+            "price": "close",
+            "benchmark": if req.label_objective.requires_benchmark() { Some("000300.SH") } else { None::<&str> },
+            "risk_adjustment": if req.label_objective == LabelObjective::RiskAdjustedExcessReturn {
+                Some("forward_downside_volatility_floor_1pct")
+            } else {
+                None::<&str>
+            }
         },
         "factors": req.factors,
         "trainer": "covariance_linear_v1",
         "point_in_time_policy": "factor_value.available_at <= trade_date"
+    })
+}
+
+fn nonlinear_quantile_ranker_experiment_config(
+    req: &NormalizedNonlinearQuantileRankerRequest,
+) -> Value {
+    json!({
+        "model_code": req.model_code,
+        "model_version": req.model_version,
+        "model_version_id": req.model_version_id,
+        "training_task_id": req.training_task_id,
+        "training_dataset_id": req.training_dataset_id,
+        "prediction_set_id": req.prediction_set_id,
+        "data_version_id": req.data_version_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "train_window": {"start": req.train_start_date, "end": req.train_end_date},
+        "prediction_window": {"start": req.prediction_start_date, "end": req.prediction_end_date},
+        "label": {
+            "type": req.label_objective.as_str(),
+            "horizon_trading_days": req.label_horizon_days,
+            "price": "close",
+            "benchmark": if req.label_objective.requires_benchmark() { Some("000300.SH") } else { None::<&str> },
+            "risk_adjustment": if req.label_objective == LabelObjective::RiskAdjustedExcessReturn {
+                Some("forward_downside_volatility_floor_1pct")
+            } else {
+                None::<&str>
+            }
+        },
+        "factors": req.factors,
+        "trainer": "nonlinear_quantile_ranker_v1",
+        "bucket_count": req.bucket_count,
+        "min_samples_per_bucket": req.min_samples_per_bucket,
+        "point_in_time_policy": "factor_value.available_at <= trade_date; labels capped at train_end_date"
+    })
+}
+
+fn walk_forward_linear_experiment_config(
+    req: &NormalizedWalkForwardLinearPredictionSetRequest,
+    label_definition: &Value,
+) -> Value {
+    json!({
+        "model_code": req.model_code,
+        "model_version": req.model_version,
+        "model_version_id": req.model_version_id,
+        "training_task_id": req.training_task_id,
+        "training_dataset_id": req.training_dataset_id,
+        "prediction_set_id": req.prediction_set_id,
+        "data_version_id": req.data_version_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "prediction_window": {"start": req.prediction_start_date, "end": req.prediction_end_date},
+        "label": label_definition,
+        "factors": req.factors,
+        "trainer": "walk_forward_covariance_linear_v1",
+        "train_lookback_days": req.train_lookback_days,
+        "prediction_step_days": req.prediction_step_days,
+        "min_training_samples": req.min_training_samples,
+        "point_in_time_policy": "each window trains on dates <= train_end_date and labels are capped at train_end_date"
+    })
+}
+
+fn walk_forward_nonlinear_quantile_ranker_experiment_config(
+    req: &NormalizedWalkForwardNonlinearQuantileRankerRequest,
+) -> Value {
+    let linear = &req.linear;
+    json!({
+        "model_code": linear.model_code,
+        "model_version": linear.model_version,
+        "model_version_id": linear.model_version_id,
+        "training_task_id": linear.training_task_id,
+        "training_dataset_id": linear.training_dataset_id,
+        "prediction_set_id": linear.prediction_set_id,
+        "data_version_id": linear.data_version_id,
+        "feature_set_version_id": linear.feature_set_version_id,
+        "prediction_window": {"start": linear.prediction_start_date, "end": linear.prediction_end_date},
+        "label": label_definition_json(linear.label_objective, linear.label_horizon_days),
+        "factors": linear.factors,
+        "trainer": "walk_forward_nonlinear_quantile_ranker_v1",
+        "train_lookback_days": linear.train_lookback_days,
+        "prediction_step_days": linear.prediction_step_days,
+        "min_training_samples": linear.min_training_samples,
+        "bucket_count": req.bucket_count,
+        "min_samples_per_bucket": req.min_samples_per_bucket,
+        "point_in_time_policy": "each window trains on dates <= prediction_start_date - label_horizon_days and labels are capped at train_end_date"
+    })
+}
+
+fn nonlinear_quantile_ranker_experiment_metrics(
+    sample_count: usize,
+    prediction_rows: usize,
+    model: &Value,
+    artifact_hash: &str,
+    prediction_hash: &str,
+) -> Value {
+    json!({
+        "sample_count": sample_count,
+        "prediction_rows": prediction_rows,
+        "model": model,
+        "artifact_hash": artifact_hash,
+        "prediction_hash": prediction_hash,
+        "prediction_point_in_time_policy": "model_prediction.available_at = trade_date",
+        "status": "training_and_prediction_completed"
     })
 }
 
@@ -1023,6 +1955,21 @@ fn linear_training_experiment_metrics(
         "prediction_hash": prediction_hash,
         "prediction_point_in_time_policy": "model_prediction.available_at = trade_date",
         "status": "training_and_prediction_completed"
+    })
+}
+
+fn label_definition_json(label_objective: LabelObjective, horizon_days: i64) -> Value {
+    json!({
+        "label": label_objective.as_str(),
+        "horizon_trading_days": horizon_days,
+        "price": "close",
+        "benchmark": if label_objective.requires_benchmark() { Some("000300.SH") } else { None::<&str> },
+        "risk_adjustment": if label_objective == LabelObjective::RiskAdjustedExcessReturn {
+            Some("forward_downside_volatility_floor_1pct")
+        } else {
+            None::<&str>
+        },
+        "point_in_time_policy": "labels are computed only inside the training window; prediction windows never contribute labels"
     })
 }
 
@@ -1355,6 +2302,7 @@ fn normalize_linear_training_request(
     if label_horizon_days <= 0 {
         return Err("label_horizon_days must be positive".into());
     }
+    let label_objective = LabelObjective::parse(req.label_objective.as_deref())?;
 
     Ok(NormalizedLinearTrainingRequest {
         model_version_id: req
@@ -1396,7 +2344,59 @@ fn normalize_linear_training_request(
         prediction_start_date,
         prediction_end_date,
         label_horizon_days,
+        label_objective,
         factors: req.factors.clone(),
+    })
+}
+
+fn normalize_nonlinear_quantile_ranker_request(
+    req: &TrainNonlinearQuantileRankerRequest,
+) -> Result<NormalizedNonlinearQuantileRankerRequest, String> {
+    let linear_req = TrainLinearModelRequest {
+        model_code: req.model_code.clone(),
+        model_version: req.model_version.clone(),
+        model_version_id: req.model_version_id.clone(),
+        training_task_id: req.training_task_id.clone(),
+        prediction_set_id: req.prediction_set_id.clone(),
+        data_version_id: req.data_version_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        training_dataset_id: req.training_dataset_id.clone(),
+        train_start_date: req.train_start_date.clone(),
+        train_end_date: req.train_end_date.clone(),
+        prediction_start_date: req.prediction_start_date.clone(),
+        prediction_end_date: req.prediction_end_date.clone(),
+        label_horizon_days: req.label_horizon_days,
+        label_objective: req.label_objective.clone(),
+        factors: req.factors.clone(),
+    };
+    let normalized = normalize_linear_training_request(&linear_req)?;
+    let bucket_count = req.bucket_count.unwrap_or(5);
+    if !(2..=20).contains(&bucket_count) {
+        return Err("bucket_count must be between 2 and 20".into());
+    }
+    let min_samples_per_bucket = req.min_samples_per_bucket.unwrap_or(100);
+    if min_samples_per_bucket == 0 {
+        return Err("min_samples_per_bucket must be positive".into());
+    }
+
+    Ok(NormalizedNonlinearQuantileRankerRequest {
+        model_code: normalized.model_code,
+        model_version: normalized.model_version,
+        model_version_id: normalized.model_version_id,
+        training_task_id: normalized.training_task_id,
+        prediction_set_id: normalized.prediction_set_id,
+        data_version_id: normalized.data_version_id,
+        feature_set_version_id: normalized.feature_set_version_id,
+        training_dataset_id: normalized.training_dataset_id,
+        train_start_date: normalized.train_start_date,
+        train_end_date: normalized.train_end_date,
+        prediction_start_date: normalized.prediction_start_date,
+        prediction_end_date: normalized.prediction_end_date,
+        label_horizon_days: normalized.label_horizon_days,
+        label_objective: normalized.label_objective,
+        bucket_count,
+        min_samples_per_bucket,
+        factors: normalized.factors,
     })
 }
 
@@ -1440,6 +2440,7 @@ fn normalize_walk_forward_linear_prediction_request(
     if label_horizon_days <= 0 {
         return Err("label_horizon_days must be positive".into());
     }
+    let label_objective = LabelObjective::parse(req.label_objective.as_deref())?;
     let min_training_samples = req
         .min_training_samples
         .unwrap_or_else(|| req.factors.len().max(100));
@@ -1487,9 +2488,61 @@ fn normalize_walk_forward_linear_prediction_request(
         train_lookback_days,
         prediction_step_days,
         label_horizon_days,
+        label_objective,
         min_training_samples,
         max_windows: req.max_windows,
         factors: req.factors.clone(),
+    })
+}
+
+fn normalize_walk_forward_nonlinear_quantile_ranker_request(
+    req: &WalkForwardNonlinearQuantileRankerRequest,
+) -> Result<NormalizedWalkForwardNonlinearQuantileRankerRequest, String> {
+    let linear_req = WalkForwardLinearPredictionSetRequest {
+        model_code: req.model_code.clone(),
+        model_version: req.model_version.clone(),
+        model_version_id: req.model_version_id.clone(),
+        training_task_id: req.training_task_id.clone(),
+        prediction_set_id: req.prediction_set_id.clone().or_else(|| {
+            let model_code = req.model_code.trim();
+            let model_version = req.model_version.trim();
+            (!model_code.is_empty() && !model_version.is_empty()).then(|| {
+                format!(
+                    "pred-{}-{}-nlq-wf-{}-{}",
+                    model_code,
+                    model_version,
+                    req.prediction_start_date.trim(),
+                    req.prediction_end_date.trim()
+                )
+            })
+        }),
+        data_version_id: req.data_version_id.clone(),
+        feature_set_version_id: req.feature_set_version_id.clone(),
+        training_dataset_id: req.training_dataset_id.clone(),
+        prediction_start_date: req.prediction_start_date.clone(),
+        prediction_end_date: req.prediction_end_date.clone(),
+        train_lookback_days: req.train_lookback_days,
+        prediction_step_days: req.prediction_step_days,
+        label_horizon_days: req.label_horizon_days,
+        label_objective: req.label_objective.clone(),
+        min_training_samples: req.min_training_samples,
+        max_windows: req.max_windows,
+        factors: req.factors.clone(),
+    };
+    let linear = normalize_walk_forward_linear_prediction_request(&linear_req)?;
+    let bucket_count = req.bucket_count.unwrap_or(5);
+    if !(2..=20).contains(&bucket_count) {
+        return Err("bucket_count must be between 2 and 20".into());
+    }
+    let min_samples_per_bucket = req.min_samples_per_bucket.unwrap_or(100);
+    if min_samples_per_bucket == 0 {
+        return Err("min_samples_per_bucket must be positive".into());
+    }
+
+    Ok(NormalizedWalkForwardNonlinearQuantileRankerRequest {
+        linear,
+        bucket_count,
+        min_samples_per_bucket,
     })
 }
 
@@ -1527,32 +2580,7 @@ async fn load_training_samples(
     db: &sqlx::PgPool,
     req: &NormalizedLinearTrainingRequest,
 ) -> Result<Vec<TrainingSample>, String> {
-    let mut features_by_key: BTreeMap<(NaiveDate, String), Vec<Option<f64>>> = BTreeMap::new();
-    for (factor_idx, factor) in req.factors.iter().enumerate() {
-        let rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
-            "SELECT symbol, trade_date, normalized_value::double precision
-             FROM factor_value
-             WHERE factor_code = $1
-               AND factor_version = $2
-               AND trade_date >= $3
-               AND trade_date <= $4
-               AND (available_at IS NULL OR available_at <= trade_date)",
-        )
-        .bind(&factor.factor_code)
-        .bind(&factor.factor_version)
-        .bind(req.train_start_date)
-        .bind(req.train_end_date)
-        .fetch_all(db)
-        .await
-        .map_err(|error| format!("Failed to load training factor values: {}", error))?;
-
-        for (symbol, trade_date, value) in rows {
-            let entry = features_by_key
-                .entry((trade_date, symbol))
-                .or_insert_with(|| vec![None; req.factors.len()]);
-            entry[factor_idx] = value;
-        }
-    }
+    let feature_rows = load_training_feature_matrix_rows(db, req).await?;
 
     let label_end_date = req.train_end_date + Duration::days(req.label_horizon_days + 7);
     let price_rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
@@ -1581,36 +2609,155 @@ async fn load_training_samples(
         }
     }
 
-    let mut samples = Vec::new();
-    for ((trade_date, symbol), maybe_features) in features_by_key {
-        let Some(features) = complete_features(maybe_features) else {
-            continue;
-        };
-        let Some(label) = future_return_label(
-            closes_by_symbol.get(&symbol),
+    let benchmark_closes = if req.label_objective.requires_benchmark() {
+        load_benchmark_closes(db, "000300.SH", req.train_start_date, label_end_date).await?
+    } else {
+        Vec::new()
+    };
+
+    Ok(training_samples_from_feature_matrix_rows(
+        feature_rows,
+        &closes_by_symbol,
+        &benchmark_closes,
+        req.label_objective,
+        Some(req.train_end_date),
+        req.label_horizon_days,
+        req.factors.len(),
+    ))
+}
+
+async fn load_benchmark_closes(
+    db: &sqlx::PgPool,
+    benchmark_symbol: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<Vec<(NaiveDate, f64)>, String> {
+    let rows = sqlx::query_as::<_, (NaiveDate, Option<f64>)>(
+        "SELECT trade_date, close::double precision
+         FROM market_index_daily_bar
+         WHERE symbol = $1
+           AND trade_date >= $2
+           AND trade_date <= $3
+           AND close IS NOT NULL
+         ORDER BY trade_date",
+    )
+    .bind(benchmark_symbol)
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load benchmark labels: {}", error))?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(trade_date, close)| {
+            close
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|close| (trade_date, close))
+        })
+        .collect())
+}
+
+async fn load_training_feature_matrix_rows(
+    db: &sqlx::PgPool,
+    req: &NormalizedLinearTrainingRequest,
+) -> Result<Vec<TrainingFeatureMatrixRow>, String> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "WITH requested(factor_code, factor_version, factor_idx) AS (",
+    );
+    builder.push_values(
+        req.factors.iter().enumerate(),
+        |mut row, (factor_idx, factor)| {
+            row.push_bind(&factor.factor_code)
+                .push_bind(&factor.factor_version)
+                .push_bind(factor_idx as i32);
+        },
+    );
+    builder.push(
+        ")
+         SELECT fv.symbol,
+                fv.trade_date,
+                array_agg(fv.normalized_value::double precision ORDER BY requested.factor_idx)::double precision[] AS features
+         FROM factor_value fv
+         JOIN requested
+           ON requested.factor_code = fv.factor_code
+          AND requested.factor_version = fv.factor_version
+         WHERE fv.trade_date >= ",
+    );
+    builder.push_bind(req.train_start_date);
+    builder.push(
+        "
+           AND fv.trade_date <= ",
+    );
+    builder.push_bind(req.train_end_date);
+    builder.push(
+        "
+           AND (fv.available_at IS NULL OR fv.available_at <= fv.trade_date)
+         GROUP BY fv.symbol, fv.trade_date
+         HAVING COUNT(*) = ",
+    );
+    builder.push_bind(req.factors.len() as i64);
+    builder.push(
+        "
+            AND bool_and(fv.normalized_value IS NOT NULL)
+         ORDER BY fv.trade_date, fv.symbol",
+    );
+
+    let rows = builder
+        .build_query_as::<(String, NaiveDate, Vec<f64>)>()
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("Failed to load training factor matrix: {}", error))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(symbol, trade_date, features)| TrainingFeatureMatrixRow {
+            symbol,
             trade_date,
-            req.label_horizon_days,
+            features,
+        })
+        .collect())
+}
+
+fn training_samples_from_feature_matrix_rows(
+    rows: Vec<TrainingFeatureMatrixRow>,
+    closes_by_symbol: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    benchmark_closes: &Vec<(NaiveDate, f64)>,
+    label_objective: LabelObjective,
+    max_label_date: Option<NaiveDate>,
+    horizon_days: i64,
+    factor_count: usize,
+) -> Vec<TrainingSample> {
+    let mut samples = Vec::new();
+    for row in rows {
+        if row.features.len() != factor_count || row.features.iter().any(|value| !value.is_finite())
+        {
+            continue;
+        }
+        let Some(label) = label_for_objective(
+            label_objective,
+            closes_by_symbol.get(&row.symbol),
+            Some(benchmark_closes).filter(|closes| !closes.is_empty()),
+            row.trade_date,
+            max_label_date,
+            horizon_days,
         ) else {
             continue;
         };
         if label.is_finite() {
-            samples.push(TrainingSample { features, label });
+            samples.push(TrainingSample {
+                features: row.features,
+                label,
+            });
         }
     }
-
-    Ok(samples)
+    samples
 }
 
-fn complete_features(values: Vec<Option<f64>>) -> Option<Vec<f64>> {
-    values
-        .into_iter()
-        .map(|value| value.filter(|v| v.is_finite()))
-        .collect()
-}
-
-fn future_return_label(
+fn future_return_label_until(
     closes: Option<&Vec<(NaiveDate, f64)>>,
     trade_date: NaiveDate,
+    max_label_date: Option<NaiveDate>,
     horizon_days: i64,
 ) -> Option<f64> {
     let closes = closes?;
@@ -1619,12 +2766,86 @@ fn future_return_label(
         .position(|(date, close)| *date == trade_date && close.is_finite() && *close > 0.0)?;
     let target_idx = current_idx.checked_add(horizon_days as usize)?;
     let (_, current_close) = closes.get(current_idx)?;
-    let (_, future_close) = closes.get(target_idx)?;
+    let (future_date, future_close) = closes.get(target_idx)?;
+    if max_label_date.is_some_and(|max_date| *future_date > max_date) {
+        return None;
+    }
     if *future_close > 0.0 {
         Some((future_close / current_close) - 1.0)
     } else {
         None
     }
+}
+
+fn label_for_objective(
+    label_objective: LabelObjective,
+    closes: Option<&Vec<(NaiveDate, f64)>>,
+    benchmark_closes: Option<&Vec<(NaiveDate, f64)>>,
+    trade_date: NaiveDate,
+    max_label_date: Option<NaiveDate>,
+    horizon_days: i64,
+) -> Option<f64> {
+    let stock_return = future_return_label_until(closes, trade_date, max_label_date, horizon_days)?;
+    match label_objective {
+        LabelObjective::FutureReturn => Some(stock_return),
+        LabelObjective::FutureExcessReturn => {
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
+            Some(stock_return - benchmark_return)
+        }
+        LabelObjective::RiskAdjustedExcessReturn => {
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
+            let downside_volatility =
+                forward_downside_volatility(closes?, trade_date, max_label_date, horizon_days)?;
+            Some((stock_return - benchmark_return) / downside_volatility.max(0.01))
+        }
+    }
+}
+
+fn forward_downside_volatility(
+    closes: &[(NaiveDate, f64)],
+    trade_date: NaiveDate,
+    max_label_date: Option<NaiveDate>,
+    horizon_days: i64,
+) -> Option<f64> {
+    let current_idx = closes
+        .iter()
+        .position(|(date, close)| *date == trade_date && close.is_finite() && *close > 0.0)?;
+    let target_idx = current_idx.checked_add(horizon_days as usize)?;
+    if target_idx >= closes.len() {
+        return None;
+    }
+    if max_label_date.is_some_and(|max_date| closes[target_idx].0 > max_date) {
+        return None;
+    }
+
+    let mut downside_squares = Vec::new();
+    for pair in closes[current_idx..=target_idx].windows(2) {
+        let previous = pair[0].1;
+        let current = pair[1].1;
+        if !previous.is_finite() || !current.is_finite() || previous <= 0.0 || current <= 0.0 {
+            return None;
+        }
+        let daily_return = (current / previous) - 1.0;
+        if daily_return < 0.0 {
+            downside_squares.push(daily_return * daily_return);
+        }
+    }
+
+    if downside_squares.is_empty() {
+        return Some(0.01);
+    }
+    let mean = downside_squares.iter().sum::<f64>() / downside_squares.len() as f64;
+    Some(mean.sqrt())
 }
 
 fn fit_linear_weights(samples: &[TrainingSample], factor_count: usize) -> Vec<f64> {
@@ -1657,50 +2878,143 @@ fn normalize_weights(mut weights: Vec<f64>) -> Vec<f64> {
     weights
 }
 
-async fn build_linear_prediction_rows(
-    db: &sqlx::PgPool,
-    req: &NormalizedLinearPredictionSetRequest,
-) -> Result<Vec<PredictionRow>, String> {
-    let mut scores: HashMap<(NaiveDate, String), f64> = HashMap::new();
-    let mut feature_counts: HashMap<(NaiveDate, String), usize> = HashMap::new();
-    for factor in &req.factors {
-        let rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
-            "SELECT symbol, trade_date, normalized_value::double precision
-             FROM factor_value
-             WHERE factor_code = $1
-               AND factor_version = $2
-               AND trade_date >= $3
-               AND trade_date <= $4
-               AND (available_at IS NULL OR available_at <= trade_date)",
-        )
-        .bind(&factor.factor_code)
-        .bind(&factor.factor_version)
-        .bind(req.start_date)
-        .bind(req.end_date)
-        .fetch_all(db)
-        .await
-        .map_err(|error| format!("Failed to load factor values: {}", error))?;
+#[derive(Debug, Clone, Serialize)]
+struct NonlinearQuantileRanker {
+    factor_count: usize,
+    bucket_count: usize,
+    min_samples_per_bucket: usize,
+    tables: Vec<NonlinearQuantileFactorTable>,
+    global_label_mean: f64,
+}
 
-        for (symbol, trade_date, value) in rows {
-            if let Some(value) = value {
-                let key = (trade_date, symbol);
-                *scores.entry(key.clone()).or_insert(0.0) += value * factor.weight;
-                *feature_counts.entry(key).or_insert(0) += 1;
-            }
+#[derive(Debug, Clone, Serialize)]
+struct NonlinearQuantileFactorTable {
+    factor_idx: usize,
+    cutpoints: Vec<f64>,
+    bucket_scores: Vec<f64>,
+    bucket_counts: Vec<usize>,
+}
+
+fn fit_nonlinear_quantile_ranker(
+    samples: &[TrainingSample],
+    factor_count: usize,
+    bucket_count: usize,
+    min_samples_per_bucket: usize,
+) -> Result<NonlinearQuantileRanker, String> {
+    if factor_count == 0 {
+        return Err("nonlinear ranker factor_count must be positive".into());
+    }
+    let bucket_count = bucket_count.clamp(2, 20);
+    let min_samples_per_bucket = min_samples_per_bucket.max(1);
+    let usable_labels = samples
+        .iter()
+        .filter(|sample| {
+            sample.features.len() == factor_count
+                && sample.label.is_finite()
+                && sample.features.iter().all(|value| value.is_finite())
+        })
+        .map(|sample| sample.label)
+        .collect::<Vec<_>>();
+    if usable_labels.len() < bucket_count * min_samples_per_bucket {
+        return Err(format!(
+            "nonlinear ranker found too few complete samples: {}",
+            usable_labels.len()
+        ));
+    }
+    let global_label_mean = usable_labels.iter().sum::<f64>() / usable_labels.len() as f64;
+    let mut tables = Vec::with_capacity(factor_count);
+
+    for factor_idx in 0..factor_count {
+        let mut pairs = samples
+            .iter()
+            .filter_map(|sample| {
+                if sample.features.len() != factor_count || !sample.label.is_finite() {
+                    return None;
+                }
+                let feature = sample.features[factor_idx];
+                (feature.is_finite()).then_some((feature, sample.label))
+            })
+            .collect::<Vec<_>>();
+        pairs.sort_by(|left, right| left.0.total_cmp(&right.0));
+        if pairs.len() < bucket_count * min_samples_per_bucket {
+            return Err(format!(
+                "nonlinear ranker factor {} found too few complete samples: {}",
+                factor_idx,
+                pairs.len()
+            ));
         }
+
+        let mut bucket_scores = Vec::with_capacity(bucket_count);
+        let mut bucket_counts = Vec::with_capacity(bucket_count);
+        for bucket_idx in 0..bucket_count {
+            let start = bucket_idx * pairs.len() / bucket_count;
+            let end = ((bucket_idx + 1) * pairs.len() / bucket_count).max(start + 1);
+            let slice = &pairs[start..end.min(pairs.len())];
+            let count = slice.len();
+            let score = if count >= min_samples_per_bucket {
+                slice.iter().map(|(_, label)| *label).sum::<f64>() / count as f64
+            } else {
+                global_label_mean
+            };
+            bucket_scores.push(score);
+            bucket_counts.push(count);
+        }
+
+        let cutpoints = (1..bucket_count)
+            .map(|bucket_idx| {
+                let idx = (bucket_idx * pairs.len() / bucket_count).min(pairs.len() - 1);
+                pairs[idx].0
+            })
+            .collect::<Vec<_>>();
+        tables.push(NonlinearQuantileFactorTable {
+            factor_idx,
+            cutpoints,
+            bucket_scores,
+            bucket_counts,
+        });
     }
 
+    Ok(NonlinearQuantileRanker {
+        factor_count,
+        bucket_count,
+        min_samples_per_bucket,
+        tables,
+        global_label_mean,
+    })
+}
+
+fn nonlinear_prediction_rows_from_feature_matrix_rows(
+    prediction_set_id: &str,
+    feature_rows: Vec<TrainingFeatureMatrixRow>,
+    model: &NonlinearQuantileRanker,
+) -> Result<Vec<PredictionRow>, String> {
     let mut by_date: BTreeMap<NaiveDate, Vec<(String, f64)>> = BTreeMap::new();
-    for ((trade_date, symbol), score) in scores {
-        if feature_counts
-            .get(&(trade_date, symbol.clone()))
-            .copied()
-            .unwrap_or_default()
-            < req.factors.len()
+    for row in feature_rows {
+        if row.features.len() != model.factor_count
+            || row.features.iter().any(|value| !value.is_finite())
         {
             continue;
         }
-        by_date.entry(trade_date).or_default().push((symbol, score));
+        let mut score = 0.0;
+        for table in &model.tables {
+            let feature = row.features[table.factor_idx];
+            let bucket_idx = table
+                .cutpoints
+                .partition_point(|cutpoint| feature >= *cutpoint);
+            let bucket_score = table
+                .bucket_scores
+                .get(bucket_idx)
+                .copied()
+                .unwrap_or(model.global_label_mean);
+            score += bucket_score;
+        }
+        if !score.is_finite() {
+            continue;
+        }
+        by_date
+            .entry(row.trade_date)
+            .or_default()
+            .push((row.symbol, score));
     }
 
     let mut predictions = Vec::new();
@@ -1713,7 +3027,139 @@ async fn build_linear_prediction_rows(
         });
         for (idx, (symbol, score)) in rows.into_iter().enumerate() {
             predictions.push(build_prediction_row(
-                &req.prediction_set_id,
+                prediction_set_id,
+                &symbol,
+                &trade_date.to_string(),
+                score,
+                (idx + 1) as i32,
+            )?);
+        }
+    }
+
+    Ok(predictions)
+}
+
+async fn build_linear_prediction_rows(
+    db: &sqlx::PgPool,
+    req: &NormalizedLinearPredictionSetRequest,
+) -> Result<Vec<PredictionRow>, String> {
+    let feature_rows = load_prediction_feature_matrix_rows(db, req).await?;
+    let weights = req
+        .factors
+        .iter()
+        .map(|factor| factor.weight)
+        .collect::<Vec<_>>();
+
+    prediction_rows_from_feature_matrix_rows(
+        &req.prediction_set_id,
+        feature_rows,
+        &weights,
+        req.factors.len(),
+    )
+}
+
+async fn load_prediction_feature_matrix_rows(
+    db: &sqlx::PgPool,
+    req: &NormalizedLinearPredictionSetRequest,
+) -> Result<Vec<TrainingFeatureMatrixRow>, String> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "WITH requested(factor_code, factor_version, factor_idx) AS (",
+    );
+    builder.push_values(
+        req.factors.iter().enumerate(),
+        |mut row, (factor_idx, factor)| {
+            row.push_bind(&factor.factor_code)
+                .push_bind(&factor.factor_version)
+                .push_bind(factor_idx as i32);
+        },
+    );
+    builder.push(
+        ")
+         SELECT fv.symbol,
+                fv.trade_date,
+                array_agg(fv.normalized_value::double precision ORDER BY requested.factor_idx)::double precision[] AS features
+         FROM factor_value fv
+         JOIN requested
+           ON requested.factor_code = fv.factor_code
+          AND requested.factor_version = fv.factor_version
+         WHERE fv.trade_date >= ",
+    );
+    builder.push_bind(req.start_date);
+    builder.push(
+        "
+           AND fv.trade_date <= ",
+    );
+    builder.push_bind(req.end_date);
+    builder.push(
+        "
+           AND (fv.available_at IS NULL OR fv.available_at <= fv.trade_date)
+         GROUP BY fv.symbol, fv.trade_date
+         HAVING COUNT(*) = ",
+    );
+    builder.push_bind(req.factors.len() as i64);
+    builder.push(
+        "
+            AND bool_and(fv.normalized_value IS NOT NULL)
+         ORDER BY fv.trade_date, fv.symbol",
+    );
+
+    let rows = builder
+        .build_query_as::<(String, NaiveDate, Vec<f64>)>()
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("Failed to load prediction factor matrix: {}", error))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(symbol, trade_date, features)| TrainingFeatureMatrixRow {
+            symbol,
+            trade_date,
+            features,
+        })
+        .collect())
+}
+
+fn prediction_rows_from_feature_matrix_rows(
+    prediction_set_id: &str,
+    feature_rows: Vec<TrainingFeatureMatrixRow>,
+    weights: &[f64],
+    factor_count: usize,
+) -> Result<Vec<PredictionRow>, String> {
+    let mut by_date: BTreeMap<NaiveDate, Vec<(String, f64)>> = BTreeMap::new();
+    if weights.len() != factor_count {
+        return Err("prediction weights count must match factor count".into());
+    }
+    for row in feature_rows {
+        if row.features.len() != factor_count || row.features.iter().any(|value| !value.is_finite())
+        {
+            continue;
+        }
+        let score = row
+            .features
+            .iter()
+            .zip(weights.iter())
+            .map(|(feature, weight)| feature * weight)
+            .sum::<f64>();
+        if !score.is_finite() {
+            continue;
+        }
+        by_date
+            .entry(row.trade_date)
+            .or_default()
+            .push((row.symbol, score));
+    }
+
+    let mut predictions = Vec::new();
+    for (trade_date, mut rows) in by_date {
+        rows.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        for (idx, (symbol, score)) in rows.into_iter().enumerate() {
+            predictions.push(build_prediction_row(
+                prediction_set_id,
                 &symbol,
                 &trade_date.to_string(),
                 score,
@@ -1886,6 +3332,7 @@ mod tests {
             prediction_start_date: "20250121".into(),
             prediction_end_date: "20250131".into(),
             label_horizon_days: None,
+            label_objective: None,
             factors: vec![LinearFactorRef {
                 factor_code: "mom_5d_std".into(),
                 factor_version: "1.0.0".into(),
@@ -1925,6 +3372,7 @@ mod tests {
             train_lookback_days: None,
             prediction_step_days: None,
             label_horizon_days: None,
+            label_objective: None,
             min_training_samples: None,
             max_windows: Some(2),
             factors: vec![LinearFactorRef {
@@ -1970,6 +3418,7 @@ mod tests {
             train_lookback_days: Some(10),
             prediction_step_days: Some(5),
             label_horizon_days: Some(2),
+            label_objective: None,
             min_training_samples: Some(1),
             max_windows: Some(2),
             factors: vec![LinearFactorRef {
@@ -2034,14 +3483,429 @@ mod tests {
             (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 12.1),
         ];
 
-        let label = future_return_label(
+        let label = future_return_label_until(
             Some(&closes),
             NaiveDate::from_ymd_opt(2025, 1, 9).unwrap(),
+            None,
             2,
         )
         .expect("label");
 
         assert!((label - 0.21).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linear_training_request_accepts_label_objective_and_rejects_unknown() {
+        let mut req = TrainLinearModelRequest {
+            model_code: "trained_linear_alpha".into(),
+            model_version: "phase7-fu-v1".into(),
+            model_version_id: None,
+            training_task_id: None,
+            prediction_set_id: None,
+            data_version_id: "full-market-2016-v1".into(),
+            feature_set_version_id: "phase7-alpha-v1".into(),
+            training_dataset_id: "phase7-fu-training-v1".into(),
+            train_start_date: "20250109".into(),
+            train_end_date: "20250120".into(),
+            prediction_start_date: "20250121".into(),
+            prediction_end_date: "20250131".into(),
+            label_horizon_days: Some(60),
+            label_objective: Some("risk_adjusted_excess_return".into()),
+            factors: vec![LinearFactorRef {
+                factor_code: "fin_roe_daily_std".into(),
+                factor_version: "1.0.0".into(),
+            }],
+        };
+
+        let normalized = normalize_linear_training_request(&req).expect("training request");
+        assert_eq!(
+            normalized.label_objective.as_str(),
+            "risk_adjusted_excess_return"
+        );
+
+        req.label_objective = Some("future_magic".into());
+        let err = normalize_linear_training_request(&req).expect_err("unknown objective");
+        assert!(err.contains("label_objective"));
+    }
+
+    #[test]
+    fn walk_forward_request_persists_label_objective_in_config() {
+        let req = WalkForwardLinearPredictionSetRequest {
+            model_code: "phase7_wf_linear_alpha".into(),
+            model_version: "phase7-fu-v1".into(),
+            model_version_id: None,
+            training_task_id: None,
+            prediction_set_id: None,
+            data_version_id: "full-market-2016-v1".into(),
+            feature_set_version_id: "phase7-alpha-v1".into(),
+            training_dataset_id: "phase7-fu-training-v1".into(),
+            prediction_start_date: "20250121".into(),
+            prediction_end_date: "20250131".into(),
+            train_lookback_days: Some(756),
+            prediction_step_days: Some(20),
+            label_horizon_days: Some(60),
+            label_objective: Some("future_excess_return".into()),
+            min_training_samples: Some(100),
+            max_windows: Some(1),
+            factors: vec![LinearFactorRef {
+                factor_code: "fin_roe_daily_std".into(),
+                factor_version: "1.0.0".into(),
+            }],
+        };
+
+        let normalized =
+            normalize_walk_forward_linear_prediction_request(&req).expect("wf request");
+
+        assert_eq!(normalized.label_objective.as_str(), "future_excess_return");
+    }
+
+    #[test]
+    fn walk_forward_linear_experiment_config_records_label_objective() {
+        let req = WalkForwardLinearPredictionSetRequest {
+            model_code: "phase7_wf_linear_alpha".into(),
+            model_version: "phase7-fu-v1".into(),
+            model_version_id: None,
+            training_task_id: None,
+            prediction_set_id: None,
+            data_version_id: "full-market-2016-v1".into(),
+            feature_set_version_id: "phase7-alpha-v1".into(),
+            training_dataset_id: "phase7-fu-training-v1".into(),
+            prediction_start_date: "20250121".into(),
+            prediction_end_date: "20250131".into(),
+            train_lookback_days: Some(756),
+            prediction_step_days: Some(20),
+            label_horizon_days: Some(60),
+            label_objective: Some("future_excess_return".into()),
+            min_training_samples: Some(100),
+            max_windows: Some(1),
+            factors: vec![LinearFactorRef {
+                factor_code: "fin_roe_daily_std".into(),
+                factor_version: "1.0.0".into(),
+            }],
+        };
+        let normalized =
+            normalize_walk_forward_linear_prediction_request(&req).expect("wf request");
+        let label_definition =
+            label_definition_json(normalized.label_objective, normalized.label_horizon_days);
+
+        let config = walk_forward_linear_experiment_config(&normalized, &label_definition);
+
+        assert_eq!(config["label"]["label"], "future_excess_return");
+        assert_eq!(config["label"]["benchmark"], "000300.SH");
+        assert_eq!(
+            config["point_in_time_policy"],
+            "each window trains on dates <= train_end_date and labels are capped at train_end_date"
+        );
+    }
+
+    #[test]
+    fn walk_forward_nonlinear_quantile_ranker_request_keeps_label_gap_and_bucket_params() {
+        let req = WalkForwardNonlinearQuantileRankerRequest {
+            model_code: "p7_nlq_wf".into(),
+            model_version: "h60-fe-v1".into(),
+            model_version_id: None,
+            training_task_id: None,
+            prediction_set_id: None,
+            data_version_id: "full-market-2016-v1".into(),
+            feature_set_version_id: "phase7-fy-core9-v1".into(),
+            training_dataset_id: "ds-p7fy-nlq-wf-v1".into(),
+            prediction_start_date: "20250121".into(),
+            prediction_end_date: "20250210".into(),
+            train_lookback_days: Some(120),
+            prediction_step_days: Some(5),
+            label_horizon_days: Some(60),
+            label_objective: Some("future_excess_return".into()),
+            min_training_samples: Some(100),
+            max_windows: Some(2),
+            bucket_count: Some(7),
+            min_samples_per_bucket: Some(25),
+            factors: vec![LinearFactorRef {
+                factor_code: "fin_roe_daily_std".into(),
+                factor_version: "1.0.0".into(),
+            }],
+        };
+
+        let normalized =
+            normalize_walk_forward_nonlinear_quantile_ranker_request(&req).expect("wf nlq request");
+        let windows = build_walk_forward_windows(&normalized.linear).expect("wf windows");
+        let config = walk_forward_nonlinear_quantile_ranker_experiment_config(&normalized);
+
+        assert_eq!(normalized.bucket_count, 7);
+        assert_eq!(normalized.min_samples_per_bucket, 25);
+        assert_eq!(
+            normalized.linear.prediction_set_id,
+            "pred-p7_nlq_wf-h60-fe-v1-nlq-wf-20250121-20250210"
+        );
+        assert_eq!(windows.len(), 2);
+        assert_eq!(
+            windows[0].train_end_date,
+            NaiveDate::from_ymd_opt(2024, 11, 22).unwrap()
+        );
+        assert_eq!(
+            windows[0].prediction_start_date,
+            NaiveDate::from_ymd_opt(2025, 1, 21).unwrap()
+        );
+        assert_eq!(
+            config["trainer"],
+            "walk_forward_nonlinear_quantile_ranker_v1"
+        );
+        assert_eq!(config["bucket_count"], 7);
+        assert_eq!(config["label"]["label"], "future_excess_return");
+    }
+
+    #[test]
+    fn excess_label_subtracts_benchmark_future_return() {
+        let trade_date = NaiveDate::from_ymd_opt(2025, 1, 9).unwrap();
+        let stock_closes = vec![
+            (trade_date, 10.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 10.5),
+            (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 11.0),
+        ];
+        let benchmark_closes = vec![
+            (trade_date, 100.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 101.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 102.0),
+        ];
+
+        let label = label_for_objective(
+            LabelObjective::FutureExcessReturn,
+            Some(&stock_closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            2,
+        )
+        .expect("excess label");
+
+        assert!((label - 0.08).abs() < 1e-9);
+    }
+
+    #[test]
+    fn risk_adjusted_excess_label_penalizes_forward_downside() {
+        let trade_date = NaiveDate::from_ymd_opt(2025, 1, 9).unwrap();
+        let smooth_stock = vec![
+            (trade_date, 10.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 10.4),
+            (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 10.8),
+        ];
+        let choppy_stock = vec![
+            (trade_date, 10.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 9.2),
+            (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 10.8),
+        ];
+        let benchmark_closes = vec![
+            (trade_date, 100.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 100.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 100.0),
+        ];
+
+        let smooth = label_for_objective(
+            LabelObjective::RiskAdjustedExcessReturn,
+            Some(&smooth_stock),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            2,
+        )
+        .expect("smooth label");
+        let choppy = label_for_objective(
+            LabelObjective::RiskAdjustedExcessReturn,
+            Some(&choppy_stock),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            2,
+        )
+        .expect("choppy label");
+
+        assert!(smooth > choppy);
+    }
+
+    #[test]
+    fn label_objective_drops_samples_when_target_date_crosses_prediction_cutoff() {
+        let trade_date = NaiveDate::from_ymd_opt(2025, 1, 9).unwrap();
+        let closes = vec![
+            (trade_date, 10.0),
+            (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 10.5),
+            (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 11.0),
+        ];
+
+        let label = label_for_objective(
+            LabelObjective::FutureReturn,
+            Some(&closes),
+            None,
+            trade_date,
+            Some(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap()),
+            2,
+        );
+
+        assert!(label.is_none());
+    }
+
+    #[test]
+    fn training_feature_matrix_rows_build_samples_without_losing_factor_order() {
+        let trade_date = NaiveDate::from_ymd_opt(2025, 1, 9).unwrap();
+        let mut closes_by_symbol = HashMap::new();
+        closes_by_symbol.insert(
+            "AAA".to_string(),
+            vec![
+                (trade_date, 10.0),
+                (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 10.5),
+                (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 11.0),
+            ],
+        );
+        closes_by_symbol.insert(
+            "BBB".to_string(),
+            vec![
+                (trade_date, 20.0),
+                (NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 20.5),
+                (NaiveDate::from_ymd_opt(2025, 1, 13).unwrap(), 21.0),
+            ],
+        );
+
+        let samples = training_samples_from_feature_matrix_rows(
+            vec![
+                TrainingFeatureMatrixRow {
+                    symbol: "AAA".to_string(),
+                    trade_date,
+                    features: vec![0.25, -0.75],
+                },
+                TrainingFeatureMatrixRow {
+                    symbol: "BBB".to_string(),
+                    trade_date,
+                    features: vec![0.50],
+                },
+                TrainingFeatureMatrixRow {
+                    symbol: "AAA".to_string(),
+                    trade_date: NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(),
+                    features: vec![f64::NAN, 0.10],
+                },
+            ],
+            &closes_by_symbol,
+            &Vec::new(),
+            LabelObjective::FutureReturn,
+            None,
+            2,
+            2,
+        );
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].features, vec![0.25, -0.75]);
+        assert!((samples[0].label - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prediction_feature_matrix_rows_build_ranked_scores_without_losing_factor_order() {
+        let trade_date = NaiveDate::from_ymd_opt(2025, 1, 9).unwrap();
+        let rows = prediction_rows_from_feature_matrix_rows(
+            "pred-v1",
+            vec![
+                TrainingFeatureMatrixRow {
+                    symbol: "BBB".to_string(),
+                    trade_date,
+                    features: vec![1.0, 0.25],
+                },
+                TrainingFeatureMatrixRow {
+                    symbol: "AAA".to_string(),
+                    trade_date,
+                    features: vec![2.0, -0.5],
+                },
+                TrainingFeatureMatrixRow {
+                    symbol: "CCC".to_string(),
+                    trade_date,
+                    features: vec![4.0],
+                },
+                TrainingFeatureMatrixRow {
+                    symbol: "DDD".to_string(),
+                    trade_date,
+                    features: vec![f64::NAN, 1.0],
+                },
+            ],
+            &[0.25, -1.0],
+            2,
+        )
+        .expect("prediction rows");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].symbol, "AAA");
+        assert_eq!(rows[0].rank, 1);
+        assert!((rows[0].score - 1.0).abs() < 1e-9);
+        assert_eq!(rows[0].available_at, trade_date);
+        assert_eq!(rows[1].symbol, "BBB");
+        assert_eq!(rows[1].rank, 2);
+        assert!((rows[1].score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nonlinear_quantile_ranker_learns_bucket_payoffs_and_scores_prediction_rows() {
+        let train_rows = vec![
+            TrainingSample {
+                features: vec![-1.0, 0.2],
+                label: -0.02,
+            },
+            TrainingSample {
+                features: vec![-0.8, 0.1],
+                label: -0.01,
+            },
+            TrainingSample {
+                features: vec![0.1, 0.5],
+                label: 0.01,
+            },
+            TrainingSample {
+                features: vec![0.2, 0.4],
+                label: 0.02,
+            },
+            TrainingSample {
+                features: vec![0.8, -0.3],
+                label: 0.08,
+            },
+            TrainingSample {
+                features: vec![1.0, -0.2],
+                label: 0.10,
+            },
+        ];
+
+        let model =
+            fit_nonlinear_quantile_ranker(&train_rows, 2, 3, 2).expect("nonlinear quantile ranker");
+
+        assert_eq!(model.factor_count, 2);
+        assert_eq!(model.bucket_count, 3);
+        assert_eq!(model.tables.len(), 2);
+        assert!(
+            model.tables[0].bucket_scores[2] > model.tables[0].bucket_scores[0],
+            "first factor should learn that the high bucket has the stronger payoff"
+        );
+
+        let trade_date = NaiveDate::from_ymd_opt(2025, 1, 9).unwrap();
+        let rows = nonlinear_prediction_rows_from_feature_matrix_rows(
+            "pred-nonlinear-v1",
+            vec![
+                TrainingFeatureMatrixRow {
+                    symbol: "WEAK".to_string(),
+                    trade_date,
+                    features: vec![-0.9, 0.1],
+                },
+                TrainingFeatureMatrixRow {
+                    symbol: "STRONG".to_string(),
+                    trade_date,
+                    features: vec![0.9, -0.1],
+                },
+                TrainingFeatureMatrixRow {
+                    symbol: "BROKEN".to_string(),
+                    trade_date,
+                    features: vec![f64::NAN, 1.0],
+                },
+            ],
+            &model,
+        )
+        .expect("prediction rows");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].symbol, "STRONG");
+        assert_eq!(rows[0].rank, 1);
+        assert_eq!(rows[0].available_at, trade_date);
+        assert_eq!(rows[1].symbol, "WEAK");
+        assert!(rows[0].score > rows[1].score);
     }
 
     #[test]
@@ -2060,6 +3924,7 @@ mod tests {
             prediction_start_date: "20250121".into(),
             prediction_end_date: "20250131".into(),
             label_horizon_days: Some(1),
+            label_objective: Some("future_excess_return".into()),
             factors: vec![LinearFactorRef {
                 factor_code: "mom_5d_std".into(),
                 factor_version: "1.0.0".into(),
@@ -2085,6 +3950,7 @@ mod tests {
             "pred-trained_linear_alpha-phase5c-v1-20250121-20250131"
         );
         assert_eq!(config["label"]["horizon_trading_days"], 1);
+        assert_eq!(config["label"]["type"], "future_excess_return");
         assert_eq!(metrics["sample_count"], 40367);
         assert_eq!(metrics["prediction_rows"], 25418);
         assert_eq!(metrics["artifact_hash"], "hash-artifact");

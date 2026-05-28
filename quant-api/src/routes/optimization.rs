@@ -335,8 +335,10 @@ struct CostCapacityPerturbationSummary {
     max_drawdown: Decimal,
     min_annual_return: Decimal,
     avg_sharpe: Decimal,
+    min_num_trades: u64,
     max_final_cash_weight: Decimal,
     avg_final_cash_weight: Decimal,
+    min_final_actual_gross_exposure: Decimal,
     max_final_unfilled_target_gap: Decimal,
     avg_final_unfilled_target_gap: Decimal,
     min_final_execution_fill_ratio: Decimal,
@@ -698,6 +700,67 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "broad_financial_feature_discovery"
         | "phase7_execution_broad_financial_feature_discovery"
         | "phase7_fg"
+        | "professional_execution_broad_financial_feature_stratified_discovery"
+        | "execution_broad_financial_feature_stratified_discovery"
+        | "broad_financial_feature_stratified_discovery"
+        | "phase7_execution_broad_financial_feature_stratified_discovery"
+        | "phase7_fh"
+        | "professional_execution_native_alpha_fusion_discovery"
+        | "execution_native_alpha_fusion_discovery"
+        | "native_alpha_fusion_discovery"
+        | "phase7_execution_native_alpha_fusion_discovery"
+        | "phase7_fj"
+        | "professional_trainable_alpha_admission_discovery"
+        | "trainable_alpha_admission_discovery"
+        | "phase7_trainable_alpha_admission"
+        | "phase7_ft"
+        | "professional_prediction_capacity_dual_objective"
+        | "prediction_capacity_dual_objective"
+        | "phase7_prediction_capacity_dual_objective"
+        | "phase7_fl"
+        | "professional_prediction_target_gross_signal_fidelity"
+        | "prediction_target_gross_signal_fidelity"
+        | "phase7_prediction_target_gross_signal_fidelity"
+        | "phase7_fm"
+        | "professional_prediction_confidence_turnover_discovery"
+        | "prediction_confidence_turnover_discovery"
+        | "phase7_prediction_confidence_turnover_discovery"
+        | "phase7_fn"
+        | "professional_prediction_confidence_alpha_lift"
+        | "prediction_confidence_alpha_lift"
+        | "phase7_prediction_confidence_alpha_lift"
+        | "phase7_fo"
+        | "professional_prediction_long_horizon_low_turnover"
+        | "prediction_long_horizon_low_turnover"
+        | "phase7_prediction_long_horizon_low_turnover"
+        | "phase7_fp"
+        | "professional_prediction_long_horizon_regime_alpha"
+        | "prediction_long_horizon_regime_alpha"
+        | "phase7_prediction_long_horizon_regime_alpha"
+        | "phase7_fr"
+        | "professional_prediction_h60_nonlinear_stress_discovery"
+        | "prediction_h60_nonlinear_stress_discovery"
+        | "h60_nonlinear_stress_discovery"
+        | "phase7_prediction_h60_nonlinear_stress_discovery"
+        | "phase7_fw"
+        | "professional_prediction_h120_low_impact_stress_discovery"
+        | "prediction_h120_low_impact_stress_discovery"
+        | "h120_low_impact_stress_discovery"
+        | "phase7_prediction_h120_low_impact_stress_discovery"
+        | "phase7_fz"
+        | "professional_train_window_nonlinear_ranking_discovery"
+        | "train_window_nonlinear_ranking_discovery"
+        | "phase7_train_window_nonlinear_ranking_discovery"
+        | "phase7_fx"
+        | "professional_train_window_stress_fill_target_exposure"
+        | "train_window_stress_fill_target_exposure"
+        | "stress_fill_target_exposure"
+        | "phase7_train_window_stress_fill_target_exposure"
+        | "phase7_ga"
+        | "professional_current_event_nonlinear_alpha_discovery"
+        | "current_event_nonlinear_alpha_discovery"
+        | "phase7_current_event_nonlinear_alpha_discovery"
+        | "phase7_fs"
         | "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
         | "oos_regime_alpha_rebuild"
@@ -725,6 +788,9 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
                 "capacity_stress_target_annual_return": 0.15,
                 "min_train_perturbed_annual_return": 0.05,
                 "min_train_avg_perturbed_calmar": 1.2,
+                "min_train_trade_count": 50,
+                "min_train_final_actual_gross_exposure_pct": 0.25,
+                "max_train_final_cash_weight_pct": 0.75,
                 "max_train_final_unfilled_target_gap_pct": 0.08,
                 "min_train_final_execution_fill_ratio": 0.90,
                 "max_train_execution_schedule_expired_count": 0
@@ -1700,6 +1766,109 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_execution_broad_financial_feature_discovery".to_string(),
             LayeredSearchConfig::professional_execution_broad_financial_feature_discovery_default(),
         ),
+        "professional_execution_broad_financial_feature_stratified_discovery"
+        | "execution_broad_financial_feature_stratified_discovery"
+        | "broad_financial_feature_stratified_discovery"
+        | "phase7_execution_broad_financial_feature_stratified_discovery"
+        | "phase7_fh" => (
+            "professional_execution_broad_financial_feature_stratified_discovery".to_string(),
+            LayeredSearchConfig::professional_execution_broad_financial_feature_stratified_discovery_default(),
+        ),
+        "professional_execution_native_alpha_fusion_discovery"
+        | "execution_native_alpha_fusion_discovery"
+        | "native_alpha_fusion_discovery"
+        | "phase7_execution_native_alpha_fusion_discovery"
+        | "phase7_fj" => (
+            "professional_execution_native_alpha_fusion_discovery".to_string(),
+            LayeredSearchConfig::professional_execution_native_alpha_fusion_discovery_default(),
+        ),
+        "professional_trainable_alpha_admission_discovery"
+        | "trainable_alpha_admission_discovery"
+        | "phase7_trainable_alpha_admission"
+        | "phase7_ft" => (
+            "professional_trainable_alpha_admission_discovery".to_string(),
+            LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default(),
+        ),
+        "professional_prediction_capacity_dual_objective"
+        | "prediction_capacity_dual_objective"
+        | "phase7_prediction_capacity_dual_objective"
+        | "phase7_fl" => (
+            "professional_prediction_capacity_dual_objective".to_string(),
+            LayeredSearchConfig::professional_prediction_capacity_dual_objective_default(),
+        ),
+        "professional_prediction_target_gross_signal_fidelity"
+        | "prediction_target_gross_signal_fidelity"
+        | "phase7_prediction_target_gross_signal_fidelity"
+        | "phase7_fm" => (
+            "professional_prediction_target_gross_signal_fidelity".to_string(),
+            LayeredSearchConfig::professional_prediction_target_gross_signal_fidelity_default(),
+        ),
+        "professional_prediction_confidence_turnover_discovery"
+        | "prediction_confidence_turnover_discovery"
+        | "phase7_prediction_confidence_turnover_discovery"
+        | "phase7_fn" => (
+            "professional_prediction_confidence_turnover_discovery".to_string(),
+            LayeredSearchConfig::professional_prediction_confidence_turnover_discovery_default(),
+        ),
+        "professional_prediction_confidence_alpha_lift"
+        | "prediction_confidence_alpha_lift"
+        | "phase7_prediction_confidence_alpha_lift"
+        | "phase7_fo" => (
+            "professional_prediction_confidence_alpha_lift".to_string(),
+            LayeredSearchConfig::professional_prediction_confidence_alpha_lift_default(),
+        ),
+        "professional_prediction_long_horizon_low_turnover"
+        | "prediction_long_horizon_low_turnover"
+        | "phase7_prediction_long_horizon_low_turnover"
+        | "phase7_fp" => (
+            "professional_prediction_long_horizon_low_turnover".to_string(),
+            LayeredSearchConfig::professional_prediction_long_horizon_low_turnover_default(),
+        ),
+        "professional_prediction_long_horizon_regime_alpha"
+        | "prediction_long_horizon_regime_alpha"
+        | "phase7_prediction_long_horizon_regime_alpha"
+        | "phase7_fr" => (
+            "professional_prediction_long_horizon_regime_alpha".to_string(),
+            LayeredSearchConfig::professional_prediction_long_horizon_regime_alpha_default(),
+        ),
+        "professional_prediction_h60_nonlinear_stress_discovery"
+        | "prediction_h60_nonlinear_stress_discovery"
+        | "h60_nonlinear_stress_discovery"
+        | "phase7_prediction_h60_nonlinear_stress_discovery"
+        | "phase7_fw" => (
+            "professional_prediction_h60_nonlinear_stress_discovery".to_string(),
+            LayeredSearchConfig::professional_prediction_h60_nonlinear_stress_discovery_default(),
+        ),
+        "professional_prediction_h120_low_impact_stress_discovery"
+        | "prediction_h120_low_impact_stress_discovery"
+        | "h120_low_impact_stress_discovery"
+        | "phase7_prediction_h120_low_impact_stress_discovery"
+        | "phase7_fz" => (
+            "professional_prediction_h120_low_impact_stress_discovery".to_string(),
+            LayeredSearchConfig::professional_prediction_h120_low_impact_stress_discovery_default(),
+        ),
+        "professional_train_window_nonlinear_ranking_discovery"
+        | "train_window_nonlinear_ranking_discovery"
+        | "phase7_train_window_nonlinear_ranking_discovery"
+        | "phase7_fx" => (
+            "professional_train_window_nonlinear_ranking_discovery".to_string(),
+            LayeredSearchConfig::professional_train_window_nonlinear_ranking_discovery_default(),
+        ),
+        "professional_train_window_stress_fill_target_exposure"
+        | "train_window_stress_fill_target_exposure"
+        | "stress_fill_target_exposure"
+        | "phase7_train_window_stress_fill_target_exposure"
+        | "phase7_ga" => (
+            "professional_train_window_stress_fill_target_exposure".to_string(),
+            LayeredSearchConfig::professional_train_window_stress_fill_target_exposure_default(),
+        ),
+        "professional_current_event_nonlinear_alpha_discovery"
+        | "current_event_nonlinear_alpha_discovery"
+        | "phase7_current_event_nonlinear_alpha_discovery"
+        | "phase7_fs" => (
+            "professional_current_event_nonlinear_alpha_discovery".to_string(),
+            LayeredSearchConfig::professional_current_event_nonlinear_alpha_discovery_default(),
+        ),
         "professional_execution_oos_regime_alpha_rebuild"
         | "execution_oos_regime_alpha_rebuild"
         | "oos_regime_alpha_rebuild"
@@ -1862,8 +2031,14 @@ fn build_phase7_layered_plan_bundle_with_trial_cap(
     }
 
     let (search_profile, mut config) = phase7_search_config(req.search_profile.as_deref());
-    if let Some(prediction_set_ids) = req.prediction_set_ids.as_ref() {
-        config.prediction_set_ids = normalize_prediction_set_ids(prediction_set_ids);
+    if profile_accepts_prediction_set_override(&search_profile) {
+        if let Some(prediction_set_ids) = req.prediction_set_ids.as_ref() {
+            config.prediction_set_ids = normalize_prediction_set_ids(prediction_set_ids);
+            apply_prediction_set_override_to_seed_trials(
+                &mut config.seed_trials,
+                &config.prediction_set_ids,
+            );
+        }
     }
     let plan = build_layered_search_plan(&config, &resource_plan);
     let search_space = json!({
@@ -1882,6 +2057,14 @@ fn build_phase7_layered_plan_bundle_with_trial_cap(
         plan,
         search_space,
     }
+}
+
+fn profile_accepts_prediction_set_override(search_profile: &str) -> bool {
+    !matches!(
+        search_profile,
+        "professional_train_window_nonlinear_ranking_discovery"
+            | "professional_train_window_stress_fill_target_exposure"
+    )
 }
 
 fn phase7_discovery_layered_request(
@@ -1951,6 +2134,22 @@ fn normalize_prediction_set_ids(values: &[String]) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn apply_prediction_set_override_to_seed_trials(
+    seed_trials: &mut [Value],
+    prediction_set_ids: &[String],
+) {
+    let Some(prediction_set_id) = prediction_set_ids.first() else {
+        return;
+    };
+    for seed in seed_trials {
+        if seed.get("prediction_set_id").is_some() {
+            seed["prediction_set_id"] = json!(prediction_set_id);
+            seed["prediction_set_override"] = json!(true);
+            seed["prediction_set_override_source"] = json!("request");
+        }
+    }
 }
 
 fn default_effective_coverage_policy(top_n: usize) -> EffectiveCoverageReq {
@@ -3084,7 +3283,7 @@ async fn execute_train_cost_capacity_perturbations(
         return Ok(Vec::new());
     }
 
-    let perturbations = resolved_oos_cost_capacity_perturbations(req);
+    let perturbations = resolved_train_cost_capacity_perturbations(req, train_gate_policy);
     let mut results = Vec::with_capacity(perturbations.len());
     for (index, perturbation) in perturbations.into_iter().enumerate() {
         let name = oos_cost_capacity_perturbation_name(&perturbation, index);
@@ -3174,6 +3373,20 @@ fn resolved_oos_cost_capacity_perturbations(
     req: &Phase7OosWalkForwardDiscoveryRequest,
 ) -> Vec<OosCostCapacityPerturbationRequest> {
     if !cost_capacity_perturbation_gate_enabled(req) {
+        return Vec::new();
+    }
+    req.cost_capacity_perturbations
+        .clone()
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(default_oos_cost_capacity_perturbations)
+}
+
+fn resolved_train_cost_capacity_perturbations(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    train_gate_policy: &Value,
+) -> Vec<OosCostCapacityPerturbationRequest> {
+    let gate = train_cost_capacity_perturbation_gate_config(req, train_gate_policy);
+    if !gate.enabled {
         return Vec::new();
     }
     req.cost_capacity_perturbations
@@ -3440,8 +3653,10 @@ fn cost_capacity_perturbation_summary(
     let mut max_drawdown = Decimal::ZERO;
     let mut min_annual_return = Decimal::MAX;
     let mut total_sharpe = Decimal::ZERO;
+    let mut min_num_trades = u64::MAX;
     let mut max_final_cash_weight = Decimal::ZERO;
     let mut total_final_cash_weight = Decimal::ZERO;
+    let mut min_final_actual_gross_exposure = Decimal::MAX;
     let mut max_final_unfilled_target_gap = Decimal::ZERO;
     let mut total_final_unfilled_target_gap = Decimal::ZERO;
     let mut min_final_execution_fill_ratio = Decimal::MAX;
@@ -3457,8 +3672,11 @@ fn cost_capacity_perturbation_summary(
         max_drawdown = max_drawdown.max(metrics.max_drawdown_pct);
         min_annual_return = min_annual_return.min(metrics.annual_return_pct);
         total_sharpe += metrics.sharpe_ratio;
+        min_num_trades = min_num_trades.min(metrics.num_trades as u64);
         max_final_cash_weight = max_final_cash_weight.max(metrics.final_cash_weight_pct);
         total_final_cash_weight += metrics.final_cash_weight_pct;
+        min_final_actual_gross_exposure =
+            min_final_actual_gross_exposure.min(metrics.final_actual_gross_exposure_pct);
         max_final_unfilled_target_gap =
             max_final_unfilled_target_gap.max(metrics.final_unfilled_target_gap_pct);
         total_final_unfilled_target_gap += metrics.final_unfilled_target_gap_pct;
@@ -3475,6 +3693,8 @@ fn cost_capacity_perturbation_summary(
     if total_count == 0 {
         min_calmar = Decimal::ZERO;
         min_annual_return = Decimal::ZERO;
+        min_num_trades = 0;
+        min_final_actual_gross_exposure = Decimal::ZERO;
         min_final_execution_fill_ratio = Decimal::ONE;
     }
     let denominator = Decimal::from(total_count.max(1) as i64);
@@ -3487,8 +3707,10 @@ fn cost_capacity_perturbation_summary(
         max_drawdown,
         min_annual_return,
         avg_sharpe: total_sharpe / denominator,
+        min_num_trades,
         max_final_cash_weight,
         avg_final_cash_weight: total_final_cash_weight / denominator,
+        min_final_actual_gross_exposure,
         max_final_unfilled_target_gap,
         avg_final_unfilled_target_gap: total_final_unfilled_target_gap / denominator,
         min_final_execution_fill_ratio,
@@ -3518,8 +3740,10 @@ fn cost_capacity_perturbation_summary_from_counts(
         max_drawdown: Decimal::ZERO,
         min_annual_return: Decimal::ZERO,
         avg_sharpe: Decimal::ZERO,
+        min_num_trades: total_count as u64,
         max_final_cash_weight: Decimal::ZERO,
         avg_final_cash_weight: Decimal::ZERO,
+        min_final_actual_gross_exposure: Decimal::ONE,
         max_final_unfilled_target_gap: Decimal::ZERO,
         avg_final_unfilled_target_gap: Decimal::ZERO,
         min_final_execution_fill_ratio: Decimal::ONE,
@@ -3682,11 +3906,70 @@ fn train_candidate_capacity_stress_return_score(
         Decimal::from(-1),
         Decimal::from(1),
     ) * Decimal::from(220_000);
+    let execution_quality_penalty =
+        train_execution_quality_penalty(candidate, summary, train_gate_policy);
 
     base + stress_return_bonus
         - min_annual_shortfall
         - target_annual_shortfall
         - target_calmar_shortfall
+        - execution_quality_penalty
+}
+
+fn train_execution_quality_penalty(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> Decimal {
+    let mut penalty = Decimal::ZERO;
+    if let Some(limit) = constraint_i64(Some(train_gate_policy), "min_train_trade_count") {
+        let actual = candidate
+            .metrics
+            .num_trades
+            .min(summary.min_num_trades)
+            .min(i64::MAX as u64) as i64;
+        penalty += Decimal::from((limit - actual).max(0)) * Decimal::from(12_000);
+    }
+    if let Some(limit) = constraint_decimal(
+        Some(train_gate_policy),
+        "min_train_final_actual_gross_exposure_pct",
+    ) {
+        let actual = candidate
+            .metrics
+            .final_actual_gross_exposure
+            .min(summary.min_final_actual_gross_exposure);
+        penalty += positive_decimal_gap(limit, actual) * Decimal::from(700_000);
+    }
+    if let Some(limit) =
+        constraint_decimal(Some(train_gate_policy), "max_train_final_cash_weight_pct")
+    {
+        let actual = candidate
+            .metrics
+            .final_cash_weight
+            .max(summary.max_final_cash_weight);
+        penalty += positive_decimal_gap(actual, limit) * Decimal::from(420_000);
+    }
+    if let Some(limit) = constraint_decimal(
+        Some(train_gate_policy),
+        "max_train_final_unfilled_target_gap_pct",
+    ) {
+        let actual = candidate
+            .metrics
+            .final_unfilled_target_gap
+            .max(summary.max_final_unfilled_target_gap);
+        penalty += positive_decimal_gap(actual, limit) * Decimal::from(620_000);
+    }
+    if let Some(limit) = constraint_decimal(
+        Some(train_gate_policy),
+        "min_train_final_execution_fill_ratio",
+    ) {
+        let actual = candidate
+            .metrics
+            .final_execution_fill_ratio
+            .min(summary.min_final_execution_fill_ratio);
+        penalty += positive_decimal_gap(limit, actual) * Decimal::from(480_000);
+    }
+    penalty
 }
 
 fn train_candidate_cash_drag_fill_gap_score(
@@ -3925,6 +4208,19 @@ fn attach_train_cash_drag_fill_gap_gates_to_robustness(
     train_gate_policy: &Value,
 ) -> (Value, bool) {
     let mut gates = Vec::new();
+    if let Some(limit) = constraint_i64(Some(train_gate_policy), "min_train_trade_count") {
+        let actual = candidate
+            .metrics
+            .num_trades
+            .min(summary.min_num_trades)
+            .min(i64::MAX as u64) as i64;
+        gates.push(json!({
+            "gate": "train_trade_count",
+            "passed": actual >= limit,
+            "limit": limit,
+            "actual": actual,
+        }));
+    }
     if let Some(limit) =
         constraint_decimal(Some(train_gate_policy), "max_train_final_cash_weight_pct")
     {
@@ -3935,6 +4231,21 @@ fn attach_train_cash_drag_fill_gap_gates_to_robustness(
         gates.push(json!({
             "gate": "train_final_cash_weight",
             "passed": actual <= limit,
+            "limit": limit,
+            "actual": actual,
+        }));
+    }
+    if let Some(limit) = constraint_decimal(
+        Some(train_gate_policy),
+        "min_train_final_actual_gross_exposure_pct",
+    ) {
+        let actual = candidate
+            .metrics
+            .final_actual_gross_exposure
+            .min(summary.min_final_actual_gross_exposure);
+        gates.push(json!({
+            "gate": "train_final_actual_gross_exposure",
+            "passed": actual >= limit,
             "limit": limit,
             "actual": actual,
         }));
@@ -5401,7 +5712,10 @@ fn oos_walk_forward_experiment_config(
                 &train_cost_gate
             ),
             "stress_aware_selection_score": train_stress_score_profile,
-            "perturbations": resolved_oos_cost_capacity_perturbations(req),
+            "perturbations": resolved_train_cost_capacity_perturbations(
+                req,
+                &train_selection_gate_policy
+            ),
             "min_pass_ratio": train_cost_gate.min_pass_ratio,
             "min_perturbed_oos_calmar": train_cost_gate.min_perturbed_calmar,
             "max_perturbed_oos_drawdown_pct": train_cost_gate.max_perturbed_drawdown_pct,
@@ -11394,6 +11708,131 @@ mod tests {
     }
 
     #[test]
+    fn train_execution_quality_gate_rejects_zero_trade_low_exposure_candidate() {
+        let candidate = DiscoveryCandidate {
+            trial_id: "empty-exposure".to_string(),
+            backtest_task_id: None,
+            score: Some(Decimal::new(50, 0)),
+            candidate_type: CandidateType::ReviewRequired,
+            professional_gap_score: Decimal::ZERO,
+            metrics: CandidateMetrics {
+                annual_return: Decimal::ZERO,
+                sharpe: Decimal::ZERO,
+                num_trades: 0,
+                final_cash_weight: Decimal::new(90, 2),
+                final_actual_gross_exposure: Decimal::new(10, 2),
+                final_unfilled_target_gap: Decimal::new(2, 2),
+                final_execution_fill_ratio: Decimal::new(95, 2),
+                ..CandidateMetrics::default()
+            },
+            parameters: json!({}),
+        };
+        let mut summary = cost_capacity_perturbation_summary_from_counts(3, 3);
+        summary.min_num_trades = 0;
+        summary.max_final_cash_weight = Decimal::new(92, 2);
+        summary.min_final_actual_gross_exposure = Decimal::new(8, 2);
+        let policy = json!({
+            "min_train_trade_count": 50,
+            "min_train_final_actual_gross_exposure_pct": 0.25,
+            "max_train_final_cash_weight_pct": 0.75,
+            "max_train_final_unfilled_target_gap_pct": 0.08,
+            "min_train_final_execution_fill_ratio": 0.90
+        });
+
+        let (robustness, passed) = attach_train_cash_drag_fill_gap_gates_to_robustness(
+            json!({"status": "approved_candidate", "gate_results": []}),
+            &candidate,
+            &summary,
+            &policy,
+        );
+
+        assert!(!passed);
+        assert_eq!(robustness["status"], "rejected");
+        let gates = robustness["gate_results"].as_array().unwrap();
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "train_trade_count" && gate["passed"] == false));
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "train_final_actual_gross_exposure"
+                && gate["passed"] == false
+                && gate["actual"] == json!("0.08")));
+        assert!(gates
+            .iter()
+            .any(|gate| gate["gate"] == "train_final_cash_weight" && gate["passed"] == false));
+    }
+
+    #[test]
+    fn capacity_stress_return_score_penalizes_low_trade_low_exposure_candidates() {
+        let candidate = |trial_id: &str,
+                         num_trades: u64,
+                         final_cash_weight: Decimal,
+                         final_actual_gross_exposure: Decimal|
+         -> DiscoveryCandidate {
+            DiscoveryCandidate {
+                trial_id: trial_id.to_string(),
+                backtest_task_id: None,
+                score: Some(Decimal::new(50, 0)),
+                candidate_type: CandidateType::ReviewRequired,
+                professional_gap_score: Decimal::ZERO,
+                metrics: CandidateMetrics {
+                    annual_return: Decimal::new(20, 2),
+                    excess_return: Decimal::new(8, 2),
+                    sharpe: Decimal::new(12, 1),
+                    sortino: Decimal::new(18, 1),
+                    max_drawdown: Decimal::new(20, 2),
+                    num_trades,
+                    final_cash_weight,
+                    final_actual_gross_exposure,
+                    final_unfilled_target_gap: Decimal::new(2, 2),
+                    final_execution_fill_ratio: Decimal::new(95, 2),
+                    ..CandidateMetrics::default()
+                },
+                parameters: json!({}),
+            }
+        };
+        let mut low_exposure_summary = cost_capacity_perturbation_summary_from_counts(3, 3);
+        low_exposure_summary.min_calmar = Decimal::new(150, 2);
+        low_exposure_summary.avg_calmar = Decimal::new(170, 2);
+        low_exposure_summary.avg_sharpe = Decimal::new(120, 2);
+        low_exposure_summary.min_annual_return = Decimal::new(8, 2);
+        low_exposure_summary.max_drawdown = Decimal::new(14, 2);
+        low_exposure_summary.min_num_trades = 0;
+        low_exposure_summary.max_final_cash_weight = Decimal::new(90, 2);
+        low_exposure_summary.min_final_actual_gross_exposure = Decimal::new(10, 2);
+        let mut tradable_summary = low_exposure_summary.clone();
+        tradable_summary.min_num_trades = 260;
+        tradable_summary.max_final_cash_weight = Decimal::new(28, 2);
+        tradable_summary.min_final_actual_gross_exposure = Decimal::new(70, 2);
+        let policy = json!({
+            "train_stress_score_profile": "capacity_stress_return_score_v1",
+            "capacity_stress_target_annual_return": 0.15,
+            "min_train_perturbed_annual_return": 0.05,
+            "min_train_trade_count": 50,
+            "min_train_final_actual_gross_exposure_pct": 0.25,
+            "max_train_final_cash_weight_pct": 0.75,
+            "max_train_final_unfilled_target_gap_pct": 0.08,
+            "min_train_final_execution_fill_ratio": 0.90
+        });
+
+        let low_exposure_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate("low-exposure", 0, Decimal::new(90, 2), Decimal::new(10, 2)),
+            &low_exposure_summary,
+            &policy,
+        );
+        let tradable_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate("tradable", 260, Decimal::new(28, 2), Decimal::new(72, 2)),
+            &tradable_summary,
+            &policy,
+        );
+
+        assert!(
+            tradable_score > low_exposure_score,
+            "tradable_score={tradable_score}, low_exposure_score={low_exposure_score}"
+        );
+    }
+
+    #[test]
     fn capacity_stress_calmar_score_prefers_capacity_resilience_when_pass_ratio_ties() {
         let candidate = |trial_id: &str,
                          annual_return: Decimal,
@@ -11645,6 +12084,130 @@ mod tests {
         assert_eq!(report["passed"], json!(false));
         assert_eq!(report["actual"], json!(0.5));
         assert_eq!(report["limit"], json!(0.75));
+    }
+
+    #[test]
+    fn train_cost_capacity_perturbations_default_when_train_gate_enabled_without_final_gate() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: None,
+            search_profile: Some("phase7_fo".to_string()),
+            trial_batch_limit: None,
+            trial_concurrency: None,
+            train_cache_mode: None,
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+        let train_gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fo"));
+
+        let perturbations = resolved_train_cost_capacity_perturbations(&req, &train_gate_policy);
+
+        assert_eq!(perturbations.len(), 3);
+        assert_eq!(perturbations[0].name.as_deref(), Some("cost_up_150pct"));
+        assert_eq!(
+            perturbations[1].name.as_deref(),
+            Some("impact_cost_2pct_participation_10pct")
+        );
+        assert_eq!(
+            perturbations[2].name.as_deref(),
+            Some("capacity_tight_participation_5pct")
+        );
+        assert!(
+            resolved_oos_cost_capacity_perturbations(&req).is_empty(),
+            "final/OOS perturbation gate should remain opt-in for final promotion"
+        );
+    }
+
+    #[test]
+    fn oos_experiment_config_reports_train_perturbations_independent_of_final_gate() {
+        let req = Phase7OosWalkForwardDiscoveryRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: None,
+            constraints: None,
+            walk_forward: None,
+            backtest_template: None,
+            prediction_set_ids: None,
+            max_trials_per_window: Some(6),
+            search_profile: Some("phase7_fo".to_string()),
+            trial_batch_limit: None,
+            trial_concurrency: None,
+            train_cache_mode: None,
+            max_batches_per_window: None,
+            train_window_days: None,
+            test_window_days: None,
+            step_days: None,
+            validation_mode: None,
+            in_sample_ratio: None,
+            include_partial_last_window: None,
+            plan_only: None,
+            execution_mode: None,
+            exhaustive_search: None,
+            require_train_robustness_approval: None,
+            train_robustness_gate_policy: None,
+            train_selection_gate_policy: None,
+            final_promotion_gate_policy: None,
+            min_stitched_oos_calmar: None,
+            min_positive_oos_window_ratio: None,
+            min_oos_window_count: None,
+            oos_top_n: None,
+            enable_cost_capacity_perturbation_gate: None,
+            cost_capacity_perturbations: None,
+            min_cost_capacity_perturbation_pass_ratio: None,
+            min_perturbed_oos_calmar: None,
+            max_perturbed_oos_drawdown_pct: None,
+        };
+
+        let config =
+            oos_walk_forward_experiment_config(&req, &json!({"validation_mode": "walk_forward"}));
+
+        assert_eq!(
+            config["train_cost_capacity_perturbation_gate"]["enabled"],
+            true
+        );
+        assert_eq!(
+            config["train_cost_capacity_perturbation_gate"]["perturbations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(config["cost_capacity_perturbation_gate"]["enabled"], false);
+        assert_eq!(
+            config["cost_capacity_perturbation_gate"]["perturbations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -18138,6 +18701,1001 @@ mod tests {
             trial.parameters["combo_name"] == "phase7_dividend_quality_v1"
                 || trial.parameters["combo_name"] == "phase7_cashflow_quality_v1"
         }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_broad_financial_stratified_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: Some("phase7_fh".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_broad_financial_feature_stratified_discovery"
+        );
+        let first_four_combos = bundle
+            .plan
+            .trials
+            .iter()
+            .take(4)
+            .map(|trial| trial.parameters["combo_name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert!(first_four_combos.contains(&"phase7_financial_quality_v1"));
+        assert!(first_four_combos.contains(&"phase7_growth_recovery_v1"));
+        assert!(first_four_combos.contains(&"phase7_industry_residual_quality_v1"));
+        assert!(first_four_combos.contains(&"phase7_quality_relative_strength_v1"));
+        assert!(bundle.plan.trials.iter().take(8).all(|trial| {
+            trial.parameters["broad_financial_feature_sampling"] == "stratified_seed_v1"
+        }));
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fh"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_dividend_quality_v1"
+                || trial.parameters["combo_name"] == "phase7_cashflow_quality_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_native_alpha_fusion_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(12),
+            search_profile: Some("phase7_fj".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_execution_native_alpha_fusion_discovery"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!(["pred-p7-wf-wide-qgvrel-v1-201602-202605"])
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fj"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_four_families = bundle
+            .plan
+            .trials
+            .iter()
+            .take(4)
+            .map(|trial| {
+                trial.parameters["alpha_source_family"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(first_four_families.contains(&"broad_financial"));
+        assert!(first_four_families.contains(&"event_surprise"));
+        assert!(first_four_families.contains(&"event_reaction"));
+        assert!(first_four_families.contains(&"prediction_confirmation"));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["native_alpha_fusion_profile"] == "broad_financial_core"
+                && trial.parameters["alpha_source_family"] == "broad_financial"
+        }));
+        let event_surprise_trial = bundle
+            .plan
+            .trials
+            .iter()
+            .find(|trial| trial.parameters["alpha_source_family"] == "event_surprise")
+            .expect("phase7_fj should include an event surprise trial");
+        assert_eq!(
+            event_surprise_trial.parameters["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            event_surprise_trial.parameters["event_gate_combo_name"],
+            "phase7_event_surprise_v1"
+        );
+        assert_ne!(
+            event_surprise_trial.parameters["combo_name"],
+            "phase7_quality_event_surprise_confirm_v1"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["native_alpha_fusion_profile"] == "event_reaction_segments"
+                && trial.parameters["alpha_source_family"] == "event_reaction"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["native_alpha_fusion_profile"] == "prediction_confirmation"
+                && trial.parameters["alpha_source_family"] == "prediction_confirmation"
+                && trial.parameters["prediction_set_id"]
+                    == "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+        }));
+        let prediction_trial = bundle
+            .plan
+            .trials
+            .iter()
+            .find(|trial| trial.parameters["alpha_source_family"] == "prediction_confirmation")
+            .expect("phase7_fj should include a prediction confirmation trial");
+        assert_eq!(
+            prediction_trial.parameters["candidate_ranking"],
+            "capacity_aware_alpha_liquidity_v1"
+        );
+        assert_eq!(
+            prediction_trial.parameters["capacity_risk_budget"],
+            "capacity_stress_participation_alpha_headroom_floor_70_v1"
+        );
+        assert_eq!(prediction_trial.parameters["max_position_pct"], "0.08");
+        assert_eq!(
+            prediction_trial.parameters["universe_profile"],
+            "listed_non_st"
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_trainable_alpha_admission_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(12),
+            search_profile: Some("phase7_ft".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_trainable_alpha_admission_discovery"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_ft"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let first_six_families = bundle
+            .plan
+            .trials
+            .iter()
+            .take(6)
+            .map(|trial| {
+                trial.parameters["alpha_source_family"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(first_six_families.contains("broad_financial"));
+        assert!(first_six_families.contains("residual_confirm"));
+        assert!(first_six_families.contains("value_recovery"));
+        assert!(bundle.plan.trials.iter().take(12).all(|trial| {
+            let combo_name = trial.parameters["combo_name"].as_str().unwrap_or_default();
+            quant_common::phase7::is_phase7_base_trainable_alpha(combo_name)
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_event_surprise_v1"
+                || trial.parameters["combo_name"] == "phase7_event_window_earnings_v1"
+                || trial.parameters["combo_name"]
+                    == "phase7_quality_event_post_return_curve_overlay_v1"
+                || trial.parameters["combo_name"]
+                    == "phase7_quality_event_reaction_segments_overlay_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_prediction_capacity_dual_objective_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: Some("phase7_fl".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_capacity_dual_objective"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!(["pred-p7-wf-wide-qgvrel-v1-201602-202605"])
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fl"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_capacity_dual_objective_profile"]
+                == "return_anchor_capacity_off"
+                && trial.parameters["candidate_ranking"] == "off"
+                && trial.parameters["capacity_risk_budget"] == "off"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_capacity_dual_objective_profile"]
+                == "capacity_aware_twap20_blended_headroom70"
+                && trial.parameters["candidate_ranking"] == "capacity_aware_alpha_liquidity_v1"
+                && trial.parameters["capacity_risk_budget"]
+                    == "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+                && trial.parameters["execution_schedule_profile"] == "twap_20d_v1"
+                && trial.parameters["max_position_pct"] == "0.08"
+                && trial.parameters["universe_profile"] == "listed_non_st"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_prediction_target_gross_signal_fidelity_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_fm".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_target_gross_signal_fidelity"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fm"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_target_gross_signal_fidelity_profile"]
+                == "gross65_signal_fidelity"
+                && trial.parameters["max_gross_exposure"] == "0.65"
+                && trial.parameters["candidate_ranking"] == "off"
+                && trial.parameters["capacity_risk_budget"] == "off"
+                && trial.parameters["cash_utilization"] == "off"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_prediction_confidence_turnover_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_fn".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_confidence_turnover_discovery"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "FN should use PIT prediction as an overlay in seeds instead of standalone model_prediction trials"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fn"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_confidence_turnover_profile"]
+                == "return_anchor_confidence_off"
+                && trial.parameters["rebalance_hysteresis_pct"] == "0"
+                && trial.parameters["partial_rebalance_ratio"] == "1"
+                && trial.parameters["execution_impact_budget"] == "off"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_confidence_turnover_profile"]
+                == "confidence30_turnover_smooth"
+                && trial.parameters["prediction_min_percentile"] == "0.30"
+                && trial.parameters["rebalance"] == "160"
+                && trial.parameters["rebalance_hysteresis_pct"] == "0.01"
+                && trial.parameters["partial_rebalance_ratio"] == "0.75"
+                && trial.parameters["execution_impact_budget"] == "impact_turnover_20pct_v1"
+                && trial.parameters["execution_carry_policy"] == "roll_forward_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_prediction_confidence_alpha_lift_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_fo".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_confidence_alpha_lift"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "FO should use PIT prediction as an overlay in seeds instead of standalone model_prediction trials"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fo"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_confidence_alpha_lift_profile"]
+                == "confidence40_quality_nonlinear_alpha_lift"
+                && trial.parameters["market_regime"]
+                    == "quality_nonlinear_alpha_risk_memory_router_v3"
+                && trial.parameters["prediction_min_percentile"] == "0.40"
+                && trial.parameters["rebalance"] == "200"
+                && trial.parameters["rebalance_hysteresis_pct"] == "0.02"
+                && trial.parameters["partial_rebalance_ratio"] == "0.65"
+                && trial.parameters["execution_impact_budget"] == "impact_turnover_15pct_v1"
+                && trial.parameters["execution_carry_policy"] == "roll_forward_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_confidence_alpha_lift_family"] == "event_post_curve"
+                && trial.parameters["combo_name"]
+                    == "phase7_quality_event_post_return_curve_overlay_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_confidence_alpha_lift_family"] == "event_reaction"
+                && trial.parameters["combo_name"]
+                    == "phase7_quality_event_reaction_segments_overlay_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_prediction_long_horizon_low_turnover_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(6),
+            search_profile: Some("phase7_fp".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_long_horizon_low_turnover"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "FP should use PIT prediction as an overlay in seeds instead of standalone model_prediction trials"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fp"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_long_horizon_low_turnover_profile"]
+                == "h60_confidence50_low_turnover_quality"
+                && trial.parameters["prediction_set_id"]
+                    == "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605"
+                && trial.parameters["prediction_min_percentile"] == "0.50"
+                && trial.parameters["rebalance"] == "240"
+                && trial.parameters["rebalance_hysteresis_pct"] == "0.03"
+                && trial.parameters["partial_rebalance_ratio"] == "0.60"
+                && trial.parameters["execution_impact_budget"] == "impact_turnover_15pct_v1"
+                && trial.parameters["execution_carry_policy"] == "roll_forward_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_long_horizon_low_turnover_profile"]
+                == "h60_confidence40_gross65_signal_fidelity"
+                && trial.parameters["max_gross_exposure"] == "0.65"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_overrides_long_horizon_seed_prediction_set() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec![
+                " pred-phase7-fu-future-excess-h60-v1-202301-202501 ".to_string()
+            ]),
+            max_trials: Some(3),
+            search_profile: Some("phase7_fp".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!(["pred-phase7-fu-future-excess-h60-v1-202301-202501"])
+        );
+        assert_eq!(bundle.plan.trials.len(), 3);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["prediction_long_horizon_low_turnover_profile"].is_string()
+                && trial.parameters["prediction_set_id"]
+                    == "pred-phase7-fu-future-excess-h60-v1-202301-202501"
+                && trial.parameters["prediction_label_horizon_days"] == 60
+                && trial.parameters["prediction_set_override"] == true
+                && trial.parameters["prediction_set_override_source"] == "request"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_prediction_long_horizon_regime_alpha_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: Some("phase7_fr".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_long_horizon_regime_alpha"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "FR should use H60 PIT prediction as an overlay in seeds"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fr"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(
+            bundle.plan.trials.iter().all(|trial| {
+                trial.parameters["prediction_long_horizon_regime_alpha_profile"].is_string()
+                    && trial.parameters["prediction_set_id"]
+                        == "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605"
+                    && trial.parameters["prediction_label_horizon_days"] == 60
+            }),
+            "phase7_fr tiny smoke should not spill into generic non-H60 cartesian trials"
+        );
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_long_horizon_regime_alpha_profile"]
+                == "h60_value_recovery_regime_alpha"
+                && trial.parameters["prediction_set_id"]
+                    == "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605"
+                && trial.parameters["prediction_label_horizon_days"] == 60
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["prediction_long_horizon_regime_alpha_family"] == "event_post_curve"
+                && trial.parameters["combo_name"]
+                    == "phase7_quality_event_post_return_curve_overlay_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_overrides_regime_alpha_seed_prediction_set() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec![
+                "pred-phase7-fu-risk-adjusted-excess-h60-v1-202301-202501".to_string(),
+            ]),
+            max_trials: Some(8),
+            search_profile: Some("phase7_fr".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!(["pred-phase7-fu-risk-adjusted-excess-h60-v1-202301-202501"])
+        );
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["prediction_long_horizon_regime_alpha_profile"].is_string()
+                && trial.parameters["prediction_set_id"]
+                    == "pred-phase7-fu-risk-adjusted-excess-h60-v1-202301-202501"
+                && trial.parameters["prediction_label_horizon_days"] == 60
+                && trial.parameters["prediction_set_override"] == true
+                && trial.parameters["prediction_set_override_source"] == "request"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_h60_nonlinear_stress_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: Some("phase7_fw".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_h60_nonlinear_stress_discovery"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "FW should keep H60 prediction as seed overlay instead of standalone model_prediction trials"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fw"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["prediction_h60_nonlinear_stress_profile"].is_string()
+                && trial.parameters["prediction_set_id"]
+                    == "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605"
+                && trial.parameters["prediction_label_horizon_days"] == 60
+                && trial.parameters["signal_source"] == "factor_combo"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["candidate_ranking"] == "relative_strength_alpha_liquidity_v1"
+                && trial.parameters["capacity_risk_budget"]
+                    == "capacity_stress_participation_alpha_headroom_floor_70_v1"
+                && trial.parameters["cash_utilization"] == "stress_fill_gross_98_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_h120_low_impact_stress_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: Some("phase7_fz".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_prediction_h120_low_impact_stress_discovery"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "FZ should keep H120 prediction as seed overlay instead of standalone model_prediction trials"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fz"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["prediction_h120_low_impact_stress_profile"].is_string()
+                && trial.parameters["prediction_set_id"]
+                    == "pred-p7-wf-wide-qgvrel-h120-v1-201602-202605"
+                && trial.parameters["prediction_label_horizon_days"] == 120
+                && trial.parameters["signal_source"] == "factor_combo"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["candidate_ranking"] == "alpha_first_low_impact_v1"
+                && trial.parameters["capacity_risk_budget"]
+                    == "capacity_stress_participation_alpha_headroom_floor_70_v1"
+                && trial.parameters["cash_utilization"] == "stress_fill_gross_98_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_fz_defaults_train_gate_to_execution_quality_requirements() {
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fz"));
+
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(gate_policy["min_train_trade_count"], json!(50));
+        assert_eq!(
+            gate_policy["min_train_final_actual_gross_exposure_pct"],
+            json!(0.25)
+        );
+        assert_eq!(gate_policy["max_train_final_cash_weight_pct"], json!(0.75));
+        assert_eq!(
+            gate_policy["max_train_final_unfilled_target_gap_pct"],
+            json!(0.08)
+        );
+        assert_eq!(
+            gate_policy["min_train_final_execution_fill_ratio"],
+            json!(0.90)
+        );
+    }
+
+    #[test]
+    fn phase7_layered_request_overrides_h60_nonlinear_stress_prediction_set() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec![
+                "pred-p7fu-fex-h60-smk2-v1-20240902-20250324".to_string()
+            ]),
+            max_trials: Some(8),
+            search_profile: Some("phase7_fw".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!(["pred-p7fu-fex-h60-smk2-v1-20240902-20250324"])
+        );
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["prediction_h60_nonlinear_stress_profile"].is_string()
+                && trial.parameters["prediction_set_id"]
+                    == "pred-p7fu-fex-h60-smk2-v1-20240902-20250324"
+                && trial.parameters["prediction_set_override"] == true
+                && trial.parameters["prediction_set_override_source"] == "request"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_train_window_nonlinear_ranking_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["should-not-be-used-by-fx".to_string()]),
+            max_trials: Some(8),
+            search_profile: Some("phase7_fx".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_train_window_nonlinear_ranking_discovery"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "FX should ignore request prediction sets because it is a native train-window ranking profile"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fx"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["train_window_nonlinear_ranking_profile"].is_string()
+                && trial.parameters["candidate_ranking"] == "nonlinear_regime_alpha_liquidity_v1"
+                && trial.parameters["signal_source"] == "factor_combo"
+                && trial.parameters.get("prediction_set_id").is_none()
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["capacity_risk_budget"]
+                == "capacity_stress_participation_alpha_headroom_floor_70_v1"
+                && trial.parameters["cash_utilization"] == "stress_fill_gross_98_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_train_window_stress_fill_target_exposure_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["should-not-be-used-by-ga".to_string()]),
+            max_trials: Some(8),
+            search_profile: Some("phase7_ga".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_train_window_stress_fill_target_exposure"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "GA should ignore request prediction sets because it is native train-window construction"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_ga"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(gate_policy["min_train_trade_count"], json!(50));
+        assert_eq!(
+            gate_policy["min_train_final_actual_gross_exposure_pct"],
+            json!(0.25)
+        );
+        assert_eq!(gate_policy["max_train_final_cash_weight_pct"], json!(0.75));
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["train_window_stress_fill_target_exposure_profile"].is_string()
+                && trial.parameters["candidate_ranking"] == "nonlinear_regime_alpha_liquidity_v1"
+                && trial.parameters["signal_source"] == "factor_combo"
+                && trial.parameters["cash_utilization"] == "stress_fill_gross_98_v1"
+                && trial.parameters.get("prediction_set_id").is_none()
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["capacity_risk_budget"]
+                == "capacity_stress_participation_alpha_headroom_floor_70_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["capacity_risk_budget"]
+                == "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_current_event_nonlinear_alpha_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: None,
+            max_trials: Some(8),
+            search_profile: Some("phase7_fs".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_current_event_nonlinear_alpha_discovery"
+        );
+        assert_eq!(bundle.plan.planned_trials, 8);
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_fs"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["current_event_nonlinear_alpha_profile"].is_string()
+                && trial.parameters.get("prediction_set_id").is_none()
+                && trial.parameters["combo_name"] != "phase7_quality_event_surprise_confirm_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["current_event_nonlinear_alpha_family"] == "event_surprise"
+                && trial.parameters["event_gate_combo_name"] == "phase7_event_surprise_v1"
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["current_event_nonlinear_alpha_family"] == "event_window"
+                && matches!(
+                    trial.parameters["event_gate_combo_name"].as_str(),
+                    Some("phase7_event_window_earnings_v1" | "phase7_event_window_earnings_40d_v1")
+                )
+        }));
+        for trial in &bundle.plan.trials {
+            let serialized = trial.parameters.to_string();
+            assert!(!serialized.contains("event_reaction"));
+            assert!(!serialized.contains("post_return_curve"));
+        }
     }
 
     #[test]

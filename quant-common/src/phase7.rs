@@ -65,6 +65,141 @@ impl ComboVersion {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Phase7AlphaSourceRole {
+    BaseTrainable,
+    OptionalOverlayOnly,
+    EventGateOnly,
+    Excluded,
+}
+
+impl Phase7AlphaSourceRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BaseTrainable => "base_trainable",
+            Self::OptionalOverlayOnly => "optional_overlay_only",
+            Self::EventGateOnly => "event_gate_only",
+            Self::Excluded => "excluded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Phase7AlphaSourceAdmission {
+    pub combo_name: &'static str,
+    pub role: Phase7AlphaSourceRole,
+    pub reason: &'static str,
+}
+
+pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmission {
+    let (role, reason) = match combo_name {
+        "phase7_financial_quality_v1"
+        | "phase7_industry_residual_quality_v1"
+        | "phase7_growth_recovery_v1"
+        | "phase7_quality_relative_strength_v1"
+        | "phase7_valuation_v1"
+        | "phase7_moneyflow_v1"
+        | "phase7_quality_moneyflow_pos_5pct_v1"
+        | "phase7_quality_cashflow_confirm_v1"
+        | "phase7_quality_dividend_confirm_v1"
+        | "phase7_quality_cashflow_dividend_confirm_v1"
+        | "phase7_quality_value_recovery_confirm_v1"
+        | "phase7_quality_residual_confirm_5pct_v1"
+        | "phase7_quality_residual_confirm_10pct_v1"
+        | "phase7_blend_quality_growth_v1"
+        | "phase7_blend_recovery_tilt_v1" => (
+            Phase7AlphaSourceRole::BaseTrainable,
+            "broad PIT source or broad quality-core optional overlay",
+        ),
+        "phase7_event_earnings_v1"
+        | "phase7_event_surprise_v1"
+        | "phase7_event_window_earnings_v1"
+        | "phase7_event_window_earnings_10d_v1"
+        | "phase7_event_window_earnings_40d_v1" => (
+            Phase7AlphaSourceRole::EventGateOnly,
+            "current event source is sparse and must gate/boost a broad base instead of defining the base universe",
+        ),
+        "phase7_quality_event_window_overlay_v1" => (
+            Phase7AlphaSourceRole::OptionalOverlayOnly,
+            "event-window overlay must preserve and audit a broad quality base before entering full-market training",
+        ),
+        "phase7_quality_event_confirm_v1"
+        | "phase7_quality_event_surprise_confirm_v1"
+        | "phase7_quality_value_recovery_event_confirm_v1" => (
+            Phase7AlphaSourceRole::Excluded,
+            "event-confirm blend is sparse under the current full-intersection backfill and must be rebuilt as optional overlay before training",
+        ),
+        "phase7_event_post_return_curve_20d_v1"
+        | "phase7_event_reaction_segments_20d_v1"
+        | "phase7_event_reaction_reversal_20d_v1" => (
+            Phase7AlphaSourceRole::Excluded,
+            "event reaction source is stale/sample-limited and must be rebuilt before full-market training",
+        ),
+        _ => (
+            Phase7AlphaSourceRole::Excluded,
+            "source has not been admitted to Phase 7 professional discovery",
+        ),
+    };
+
+    Phase7AlphaSourceAdmission {
+        combo_name: match combo_name {
+            "phase7_financial_quality_v1" => "phase7_financial_quality_v1",
+            "phase7_industry_residual_quality_v1" => "phase7_industry_residual_quality_v1",
+            "phase7_growth_recovery_v1" => "phase7_growth_recovery_v1",
+            "phase7_quality_relative_strength_v1" => "phase7_quality_relative_strength_v1",
+            "phase7_valuation_v1" => "phase7_valuation_v1",
+            "phase7_moneyflow_v1" => "phase7_moneyflow_v1",
+            "phase7_quality_moneyflow_pos_5pct_v1" => "phase7_quality_moneyflow_pos_5pct_v1",
+            "phase7_quality_cashflow_confirm_v1" => "phase7_quality_cashflow_confirm_v1",
+            "phase7_quality_dividend_confirm_v1" => "phase7_quality_dividend_confirm_v1",
+            "phase7_quality_cashflow_dividend_confirm_v1" => {
+                "phase7_quality_cashflow_dividend_confirm_v1"
+            }
+            "phase7_quality_value_recovery_confirm_v1" => {
+                "phase7_quality_value_recovery_confirm_v1"
+            }
+            "phase7_quality_residual_confirm_5pct_v1" => "phase7_quality_residual_confirm_5pct_v1",
+            "phase7_quality_residual_confirm_10pct_v1" => {
+                "phase7_quality_residual_confirm_10pct_v1"
+            }
+            "phase7_quality_value_recovery_event_confirm_v1" => {
+                "phase7_quality_value_recovery_event_confirm_v1"
+            }
+            "phase7_blend_quality_growth_v1" => "phase7_blend_quality_growth_v1",
+            "phase7_blend_recovery_tilt_v1" => "phase7_blend_recovery_tilt_v1",
+            "phase7_event_earnings_v1" => "phase7_event_earnings_v1",
+            "phase7_event_surprise_v1" => "phase7_event_surprise_v1",
+            "phase7_event_window_earnings_v1" => "phase7_event_window_earnings_v1",
+            "phase7_event_window_earnings_10d_v1" => "phase7_event_window_earnings_10d_v1",
+            "phase7_event_window_earnings_40d_v1" => "phase7_event_window_earnings_40d_v1",
+            "phase7_quality_event_confirm_v1" => "phase7_quality_event_confirm_v1",
+            "phase7_quality_event_surprise_confirm_v1" => {
+                "phase7_quality_event_surprise_confirm_v1"
+            }
+            "phase7_quality_event_window_overlay_v1" => "phase7_quality_event_window_overlay_v1",
+            "phase7_event_post_return_curve_20d_v1" => "phase7_event_post_return_curve_20d_v1",
+            "phase7_event_reaction_segments_20d_v1" => "phase7_event_reaction_segments_20d_v1",
+            "phase7_event_reaction_reversal_20d_v1" => "phase7_event_reaction_reversal_20d_v1",
+            _ => "unknown",
+        },
+        role,
+        reason,
+    }
+}
+
+pub fn is_phase7_base_trainable_alpha(combo_name: &str) -> bool {
+    phase7_alpha_source_admission(combo_name).role == Phase7AlphaSourceRole::BaseTrainable
+}
+
+fn phase7_base_trainable_combo_versions(candidates: &[&str]) -> Vec<ComboVersion> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|combo_name| is_phase7_base_trainable_alpha(combo_name))
+        .map(|combo_name| ComboVersion::new(combo_name, "1.0.0"))
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlphaBlendSource {
     pub combo_name: String,
@@ -2470,12 +2605,21 @@ fn with_execution_schedule_control_seed(
 }
 
 fn with_execution_carry_policy_seed(mut seed: Value, execution_carry_policy: &str) -> Value {
-    seed["execution_carry_policy"] = json!(execution_carry_policy);
-    insert_execution_rule_value(
-        &mut seed,
-        "execution_carry_policy",
-        json!(execution_carry_policy),
-    );
+    let policy = execution_carry_policy.trim();
+    if policy.is_empty() || policy == "expire" || policy == "off" || policy == "default" {
+        if let Some(object) = seed.as_object_mut() {
+            object.remove("execution_carry_policy");
+            if let Some(Value::Object(rules)) = object.get_mut("execution_rules") {
+                rules.remove("execution_carry_policy");
+                if rules.is_empty() {
+                    object.remove("execution_rules");
+                }
+            }
+        }
+        return seed;
+    }
+    seed["execution_carry_policy"] = json!(policy);
+    insert_execution_rule_value(&mut seed, "execution_carry_policy", json!(policy));
     seed
 }
 
@@ -2747,28 +2891,18 @@ fn professional_second_alpha_source_seed_trials() -> Vec<Value> {
     let style_seeds = professional_style_risk_budget_seed_trials();
     let mut seeds = Vec::new();
     let combos = [
-        "phase7_event_earnings_v1",
-        "phase7_event_surprise_v1",
-        "phase7_event_window_earnings_v1",
-        "phase7_quality_event_window_overlay_v1",
-        "phase7_quality_event_surprise_confirm_v1",
         "phase7_quality_value_recovery_confirm_v1",
-        "phase7_quality_value_recovery_event_confirm_v1",
         "phase7_financial_quality_v1",
         "phase7_quality_moneyflow_pos_5pct_v1",
-        "phase7_quality_event_confirm_v1",
         "phase7_blend_quality_growth_v1",
         "phase7_blend_recovery_tilt_v1",
     ];
     let direction_sweep_combos = [
         "phase7_quality_value_recovery_confirm_v1",
-        "phase7_event_earnings_v1",
-        "phase7_event_surprise_v1",
-        "phase7_event_window_earnings_v1",
-        "phase7_quality_event_window_overlay_v1",
-        "phase7_quality_event_surprise_confirm_v1",
-        "phase7_quality_event_confirm_v1",
-        "phase7_quality_value_recovery_event_confirm_v1",
+        "phase7_financial_quality_v1",
+        "phase7_quality_moneyflow_pos_5pct_v1",
+        "phase7_blend_quality_growth_v1",
+        "phase7_blend_recovery_tilt_v1",
     ];
 
     if let Some(priority_seed) = style_seeds
@@ -2805,15 +2939,7 @@ fn professional_second_alpha_source_seed_trials() -> Vec<Value> {
             set_seed_score_direction(priority_seed.clone(), ScoreDirection::Ascending),
             "phase7_quality_value_recovery_confirm_v1",
         ));
-        for combo_name in [
-            "phase7_event_earnings_v1",
-            "phase7_event_surprise_v1",
-            "phase7_event_window_earnings_v1",
-            "phase7_quality_event_window_overlay_v1",
-            "phase7_quality_event_surprise_confirm_v1",
-            "phase7_quality_event_confirm_v1",
-            "phase7_quality_value_recovery_event_confirm_v1",
-        ] {
+        for combo_name in direction_sweep_combos {
             seeds.push(retarget_seed_combo(
                 set_seed_score_direction(priority_seed.clone(), ScoreDirection::Descending),
                 combo_name,
@@ -12709,6 +12835,182 @@ fn professional_execution_pit_nonlinear_alpha_regime_rebuild_seed_trials() -> Ve
 }
 
 #[allow(clippy::too_many_arguments)]
+fn with_train_window_nonlinear_ranking_seed(
+    seed: Value,
+    combo_name: &str,
+    score_direction: ScoreDirection,
+    top_n: usize,
+    rebalance_days: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    capacity_penalty_strength: &str,
+    capacity_risk_budget: &str,
+    cash_utilization: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    score_candidate_pool_size: usize,
+    candidate_risk_filter: &str,
+    risk_contribution_control: &str,
+    market_regime: &str,
+    execution_impact_budget: &str,
+    profile_name: &str,
+) -> Value {
+    let seed = with_low_impact_alpha_stress_return_seed(
+        seed,
+        combo_name,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        "listed_non_st",
+    );
+    let seed = set_seed_score_direction(seed, score_direction);
+    let seed = with_candidate_ranking_seed(seed, "nonlinear_regime_alpha_liquidity_v1");
+    let seed = with_cash_utilization_seed(seed, cash_utilization);
+    let mut seed = with_execution_impact_budget_seed(seed, execution_impact_budget);
+    if let Some(object) = seed.as_object_mut() {
+        object.remove("prediction_set_id");
+        object.remove("prediction_blend_weight");
+        object.remove("prediction_min_percentile");
+        object.remove("prediction_label_horizon_days");
+    }
+    seed["train_window_nonlinear_ranking_profile"] = json!(profile_name);
+    seed["alpha_source_family"] = json!("train_window_native_nonlinear_ranking");
+    seed
+}
+
+fn professional_train_window_nonlinear_ranking_discovery_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+
+    let anchors = [
+        phase7_high_sharpe_boundary_base_seed(),
+        phase7_current_event_window_15pct_risk_budget_180_anchor_seed(),
+        phase7_current_anchor_bg_trial4_seed(),
+    ];
+
+    for anchor in anchors.into_iter().flatten() {
+        for (
+            profile_name,
+            combo_name,
+            score_direction,
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            cash_utilization,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            candidate_risk_filter,
+            risk_contribution_control,
+            market_regime,
+            execution_impact_budget,
+        ) in [
+            (
+                "native_quality_low_impact_rebalance180_fill70",
+                "phase7_financial_quality_v1",
+                ScoreDirection::Ascending,
+                100usize,
+                180usize,
+                "0.06",
+                "0.90",
+                "2.0",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                "stress_fill_gross_98_v1",
+                "twap_20d_v1",
+                Decimal::new(6, 2),
+                90usize,
+                2400usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_20pct_v1",
+                "quality_nonlinear_alpha_risk_memory_router_v3",
+                "impact_turnover_15pct_v1",
+            ),
+            (
+                "native_value_recovery_rebalance220_fill70",
+                "phase7_quality_value_recovery_confirm_v1",
+                ScoreDirection::Descending,
+                100usize,
+                220usize,
+                "0.06",
+                "0.90",
+                "2.5",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                "stress_fill_gross_98_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                110usize,
+                2400usize,
+                "soft_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_mixed_orthogonal_risk_memory_router_v3",
+                "impact_turnover_15pct_v1",
+            ),
+            (
+                "native_growth_recovery_rebalance180_fill60",
+                "phase7_growth_recovery_v1",
+                ScoreDirection::Descending,
+                80usize,
+                180usize,
+                "0.08",
+                "0.95",
+                "1.5",
+                "capacity_stress_participation_alpha_headroom_floor_60_v1",
+                "fillable_gross_95_v1",
+                "twap_15d_v1",
+                Decimal::new(8, 2),
+                90usize,
+                2200usize,
+                "soft_low_volatility_low_correlation_v1",
+                "soft_single_name_20pct_v1",
+                "quality_mixed_state_risk_memory_router_v14",
+                "impact_turnover_20pct_v1",
+            ),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_train_window_nonlinear_ranking_seed(
+                    anchor.clone(),
+                    combo_name,
+                    score_direction,
+                    top_n,
+                    rebalance_days,
+                    max_position_pct,
+                    max_gross_exposure,
+                    capacity_penalty_strength,
+                    capacity_risk_budget,
+                    cash_utilization,
+                    execution_schedule_profile,
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                    score_candidate_pool_size,
+                    candidate_risk_filter,
+                    risk_contribution_control,
+                    market_regime,
+                    execution_impact_budget,
+                    profile_name,
+                )],
+            );
+        }
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
 fn with_pit_quality_recovery_alpha_seed(
     seed: Value,
     top_n: usize,
@@ -13511,6 +13813,2132 @@ fn professional_execution_broad_financial_feature_discovery_seed_trials() -> Vec
     }
 
     seeds
+}
+
+fn professional_execution_broad_financial_feature_stratified_discovery_seed_trials() -> Vec<Value> {
+    let priority_profiles = [
+        "broad_ff_financial_quality_ascending_top100",
+        "broad_ff_growth_recovery_descending_top100",
+        "broad_ff_industry_residual_ascending_top120",
+        "broad_ff_relative_strength_descending_top80",
+        "broad_ff_dual_confirm_ascending_top100",
+        "broad_ff_dividend_confirm_descending_top100",
+        "broad_ff_cashflow_confirm_descending_top100",
+        "broad_ff_cashflow_confirm_ascending_top100",
+        "broad_ff_dividend_confirm_ascending_top100",
+    ];
+    let mut seeds = reorder_seed_trials_by_string_field(
+        professional_execution_broad_financial_feature_discovery_seed_trials(),
+        "broad_financial_feature_discovery_profile",
+        &priority_profiles,
+    );
+    for seed in &mut seeds {
+        seed["broad_financial_feature_sampling"] = json!("stratified_seed_v1");
+    }
+    seeds
+}
+
+fn tag_native_alpha_fusion_seed(
+    mut seed: Value,
+    native_profile: &str,
+    alpha_source_family: &str,
+) -> Value {
+    seed["native_alpha_fusion_profile"] = json!(native_profile);
+    seed["alpha_source_family"] = json!(alpha_source_family);
+    seed
+}
+
+fn professional_execution_native_alpha_fusion_discovery_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+
+    let broad_financial_seeds =
+        professional_execution_broad_financial_feature_stratified_discovery_seed_trials()
+            .into_iter()
+            .take(4)
+            .map(|seed| {
+                tag_native_alpha_fusion_seed(seed, "broad_financial_core", "broad_financial")
+            })
+            .collect::<Vec<_>>();
+
+    let event_surprise_seeds = phase7_high_sharpe_boundary_base_seed()
+        .map(|anchor| {
+            let seed = with_event_surprise_gate_seed(
+                with_broad_financial_feature_discovery_seed(
+                    anchor,
+                    "phase7_financial_quality_v1",
+                    ScoreDirection::Ascending,
+                    100,
+                    160,
+                    "0.08",
+                    "0.95",
+                    "1.50",
+                    "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                    "twap_15d_v1",
+                    Decimal::new(8, 2),
+                    75,
+                    2200,
+                    "soft_liquidity_low_volatility_low_correlation_v1",
+                    "soft_single_name_20pct_v1",
+                    "quality_state_alpha_overlay_selector_v1",
+                    "alpha_first_low_impact_v1",
+                    "impact_turnover_15pct_v1",
+                    "event_surprise_gate_top100",
+                ),
+                "event_surprise_exclude_negative",
+                "exclude_negative",
+                "0",
+            );
+            tag_native_alpha_fusion_seed(seed, "event_surprise_gate", "event_surprise")
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let event_reaction_seeds = professional_execution_event_reaction_alpha_seed_trials()
+        .into_iter()
+        .map(|seed| {
+            let combo_name = seed
+                .get("combo_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let native_profile =
+                if combo_name == "phase7_quality_event_reaction_reversal_overlay_v1" {
+                    "event_reaction_reversal"
+                } else {
+                    "event_reaction_segments"
+                };
+            tag_native_alpha_fusion_seed(seed, native_profile, "event_reaction")
+        })
+        .collect::<Vec<_>>();
+
+    let prediction_confirmation_seeds =
+        professional_native_alpha_fusion_prediction_confirmation_seed_trials()
+            .into_iter()
+            .take(4)
+            .map(|seed| {
+                tag_native_alpha_fusion_seed(
+                    seed,
+                    "prediction_confirmation",
+                    "prediction_confirmation",
+                )
+            })
+            .collect::<Vec<_>>();
+
+    for source_group in [
+        &broad_financial_seeds,
+        &event_surprise_seeds,
+        &event_reaction_seeds,
+        &prediction_confirmation_seeds,
+    ] {
+        if let Some(seed) = source_group.first() {
+            append_unique_seeds(&mut seeds, vec![seed.clone()]);
+        }
+    }
+
+    for source_group in [
+        &broad_financial_seeds,
+        &event_surprise_seeds,
+        &event_reaction_seeds,
+        &prediction_confirmation_seeds,
+    ] {
+        append_unique_seeds(&mut seeds, source_group.iter().skip(1).cloned().collect());
+    }
+
+    seeds
+}
+
+fn tag_trainable_alpha_admission_seed(
+    mut seed: Value,
+    profile: &str,
+    alpha_source_family: &str,
+) -> Value {
+    if let Some(object) = seed.as_object_mut() {
+        for key in [
+            "event_gate_profile",
+            "event_gate_combo_name",
+            "event_gate_version",
+            "event_gate_mode",
+            "event_gate_min_score",
+            "event_gate_boost_weight",
+            "event_gate_score_direction",
+            "event_gate_active_regimes",
+        ] {
+            object.remove(key);
+        }
+    }
+    seed["trainable_alpha_admission_profile"] = json!(profile);
+    seed["alpha_source_family"] = json!(alpha_source_family);
+    seed
+}
+
+fn professional_trainable_alpha_admission_discovery_seed_trials() -> Vec<Value> {
+    let mut seeds = Vec::new();
+
+    let broad_financial_seeds =
+        professional_execution_broad_financial_feature_stratified_discovery_seed_trials()
+            .into_iter()
+            .take(4)
+            .map(|seed| {
+                tag_trainable_alpha_admission_seed(
+                    seed,
+                    "broad_financial_stratified_core",
+                    "broad_financial",
+                )
+            })
+            .collect::<Vec<_>>();
+    append_unique_seeds(&mut seeds, broad_financial_seeds);
+
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return seeds;
+    };
+    for (profile, combo_name, score_direction, top_n, family, market_regime, candidate_ranking) in [
+        (
+            "residual_confirm_10pct_ascending_top100",
+            "phase7_quality_residual_confirm_10pct_v1",
+            ScoreDirection::Ascending,
+            100usize,
+            "residual_confirm",
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+        ),
+        (
+            "value_recovery_descending_top100",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Descending,
+            100usize,
+            "value_recovery",
+            "quality_state_alpha_overlay_selector_v1",
+            "alpha_first_low_impact_v1",
+        ),
+        (
+            "residual_confirm_5pct_ascending_top120",
+            "phase7_quality_residual_confirm_5pct_v1",
+            ScoreDirection::Ascending,
+            120usize,
+            "residual_confirm",
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+        ),
+        (
+            "quality_moneyflow_pos_ascending_top100",
+            "phase7_quality_moneyflow_pos_5pct_v1",
+            ScoreDirection::Ascending,
+            100usize,
+            "moneyflow_quality",
+            "quality_mixed_state_risk_memory_router_v14",
+            "capacity_aware_alpha_liquidity_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![tag_trainable_alpha_admission_seed(
+                with_broad_financial_feature_discovery_seed(
+                    anchor.clone(),
+                    combo_name,
+                    score_direction,
+                    top_n,
+                    160,
+                    "0.08",
+                    "0.95",
+                    "1.50",
+                    "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                    "twap_15d_v1",
+                    Decimal::new(8, 2),
+                    75,
+                    2200,
+                    "soft_liquidity_low_volatility_low_correlation_v1",
+                    "soft_single_name_20pct_v1",
+                    market_regime,
+                    candidate_ranking,
+                    "impact_turnover_15pct_v1",
+                    profile,
+                ),
+                profile,
+                family,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn professional_native_alpha_fusion_prediction_confirmation_seed_trials() -> Vec<Value> {
+    let wide_prediction_set = "pred-p7-wf-wide-qgvrel-v1-201602-202605";
+    let mut seeds = Vec::new();
+
+    if let Some(capacity_repair_seed) =
+        professional_execution_pit_alpha_first_low_impact_seed_trials()
+            .into_iter()
+            .next()
+    {
+        let mut seed = with_prediction_confirmation_seed(
+            with_capacity_aware_candidate_ranking_seed(
+                capacity_repair_seed,
+                "native_alpha_fusion_prediction_capacity_repair_top80",
+            ),
+            wide_prediction_set,
+            "0.02",
+            None,
+        );
+        seed["native_prediction_capacity_repair_profile"] =
+            json!("prediction_capacity_repair_top80_rebalance160");
+        append_unique_seeds(&mut seeds, vec![seed]);
+    }
+
+    append_unique_seeds(
+        &mut seeds,
+        professional_prediction_confirmed_sharpe_bridge_seed_trials(),
+    );
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_prediction_capacity_dual_objective_seed(
+    seed: Value,
+    profile_name: &str,
+    candidate_ranking: &str,
+    top_n: usize,
+    max_position_pct: &str,
+    capacity_risk_budget: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    partial_rebalance_ratio: &str,
+    score_candidate_pool_size: usize,
+    universe_profile: &str,
+) -> Value {
+    let seed = with_top_n_seed(seed, top_n, profile_name);
+    let seed = with_position_shape_seed(seed, profile_name, max_position_pct, "0.75");
+    let seed = with_candidate_ranking_seed(seed, candidate_ranking);
+    let seed = with_capacity_risk_budget_seed(seed, capacity_risk_budget);
+    let seed =
+        with_execution_robustness_seed(seed, profile_name, "1.50", "0.04", partial_rebalance_ratio);
+    let seed = with_execution_schedule_control_seed(
+        seed,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+    );
+    let seed = with_execution_impact_budget_seed(seed, "impact_turnover_20pct_v1");
+    let mut seed = with_cash_utilization_seed(seed, "stress_fill_gross_98_v1");
+    seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+    seed["universe_profile"] = json!(universe_profile);
+    seed["prediction_capacity_dual_objective_profile"] = json!(profile_name);
+    seed
+}
+
+fn with_prediction_capacity_return_anchor_seed(mut seed: Value) -> Value {
+    seed["candidate_ranking"] = json!("off");
+    seed["capacity_risk_budget"] = json!("off");
+    seed["prediction_capacity_dual_objective_profile"] = json!("return_anchor_capacity_off");
+    seed
+}
+
+fn professional_prediction_capacity_dual_objective_seed_trials() -> Vec<Value> {
+    let bridge_seeds = professional_prediction_confirmed_sharpe_bridge_seed_trials();
+    let Some(return_anchor) = bridge_seeds.first().cloned() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_prediction_capacity_return_anchor_seed(
+            return_anchor.clone(),
+        )],
+    );
+
+    for (
+        source_index,
+        profile_name,
+        candidate_ranking,
+        top_n,
+        max_position_pct,
+        capacity_risk_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        partial_rebalance_ratio,
+        score_candidate_pool_size,
+    ) in [
+        (
+            1usize,
+            "alpha_first_twap15_headroom70",
+            "alpha_first_low_impact_v1",
+            40usize,
+            "0.10",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            "0.35",
+            1800usize,
+        ),
+        (
+            2usize,
+            "capacity_aware_twap15_headroom70",
+            "capacity_aware_alpha_liquidity_v1",
+            40usize,
+            "0.10",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            "0.35",
+            1800usize,
+        ),
+        (
+            3usize,
+            "capacity_aware_twap20_blended_headroom70",
+            "capacity_aware_alpha_liquidity_v1",
+            60usize,
+            "0.08",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            100usize,
+            "0.25",
+            2200usize,
+        ),
+    ] {
+        let source_seed = bridge_seeds
+            .get(source_index)
+            .cloned()
+            .unwrap_or_else(|| return_anchor.clone());
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_capacity_dual_objective_seed(
+                source_seed,
+                profile_name,
+                candidate_ranking,
+                top_n,
+                max_position_pct,
+                capacity_risk_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                partial_rebalance_ratio,
+                score_candidate_pool_size,
+                "listed_non_st",
+            )],
+        );
+    }
+
+    for seed in bridge_seeds.into_iter().skip(4) {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_capacity_dual_objective_seed(
+                seed,
+                "bridge_tail_light_capacity_neighbor",
+                "alpha_first_low_impact_v1",
+                40,
+                "0.10",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                "twap_15d_v1",
+                Decimal::new(8, 2),
+                75,
+                "0.35",
+                1800,
+                "listed_non_st",
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn with_prediction_target_gross_signal_fidelity_seed(
+    seed: Value,
+    profile_name: &str,
+    max_gross_exposure: &str,
+) -> Value {
+    let seed = with_max_gross_exposure_seed(seed, max_gross_exposure, profile_name);
+    let seed = with_candidate_ranking_seed(seed, "off");
+    let seed = with_capacity_risk_budget_seed(seed, "off");
+    let mut seed = with_cash_utilization_seed(seed, "off");
+    seed["prediction_target_gross_signal_fidelity_profile"] = json!(profile_name);
+    seed
+}
+
+fn professional_prediction_target_gross_signal_fidelity_seed_trials() -> Vec<Value> {
+    let bridge_seeds = professional_prediction_confirmed_sharpe_bridge_seed_trials();
+    let Some(return_anchor) = bridge_seeds.first().cloned() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (profile_name, max_gross_exposure) in [
+        ("gross100_return_anchor", "1"),
+        ("gross65_signal_fidelity", "0.65"),
+        ("gross50_signal_fidelity", "0.50"),
+        ("gross35_signal_fidelity", "0.35"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_target_gross_signal_fidelity_seed(
+                return_anchor.clone(),
+                profile_name,
+                max_gross_exposure,
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_prediction_confidence_turnover_seed(
+    seed: Value,
+    profile_name: &str,
+    blend_weight: &str,
+    min_percentile: Option<&str>,
+    rebalance_days: usize,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+    execution_impact_budget: &str,
+    execution_carry_policy: &str,
+) -> Value {
+    let wide_prediction_set = "pred-p7-wf-wide-qgvrel-v1-201602-202605";
+    with_prediction_confidence_turnover_seed_for_prediction_set(
+        seed,
+        profile_name,
+        wide_prediction_set,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+        execution_carry_policy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_prediction_confidence_turnover_seed_for_prediction_set(
+    seed: Value,
+    profile_name: &str,
+    prediction_set_id: &str,
+    blend_weight: &str,
+    min_percentile: Option<&str>,
+    rebalance_days: usize,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+    execution_impact_budget: &str,
+    execution_carry_policy: &str,
+) -> Value {
+    let seed =
+        with_prediction_confirmation_seed(seed, prediction_set_id, blend_weight, min_percentile);
+    let seed = with_rebalance_days_seed(seed, rebalance_days, profile_name);
+    let seed = with_rebalance_smoothing_seed(
+        seed,
+        profile_name,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+    );
+    let seed = with_execution_impact_budget_seed(seed, execution_impact_budget);
+    let seed = with_execution_carry_policy_seed(seed, execution_carry_policy);
+    let seed = with_candidate_ranking_seed(seed, "off");
+    let seed = with_capacity_risk_budget_seed(seed, "off");
+    let mut seed = with_cash_utilization_seed(seed, "off");
+    seed["prediction_confidence_turnover_profile"] = json!(profile_name);
+    seed
+}
+
+fn professional_prediction_confidence_turnover_discovery_seed_trials() -> Vec<Value> {
+    let bridge_seeds = professional_prediction_confirmed_sharpe_bridge_seed_trials();
+    let Some(return_anchor) = bridge_seeds.first().cloned() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_prediction_confidence_turnover_seed(
+            return_anchor.clone(),
+            "return_anchor_confidence_off",
+            "0.02",
+            None,
+            120,
+            "0",
+            "1",
+            "off",
+            "off",
+        )],
+    );
+
+    for (
+        source_index,
+        profile_name,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+    ) in [
+        (
+            1usize,
+            "confidence20_turnover_smooth",
+            "0.05",
+            Some("0.20"),
+            120usize,
+            "0.005",
+            "0.85",
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            2usize,
+            "confidence30_turnover_smooth",
+            "0.05",
+            Some("0.30"),
+            160usize,
+            "0.01",
+            "0.75",
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            3usize,
+            "confidence40_low_turnover",
+            "0.08",
+            Some("0.40"),
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+    ] {
+        let source_seed = bridge_seeds
+            .get(source_index)
+            .cloned()
+            .unwrap_or_else(|| return_anchor.clone());
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_confidence_turnover_seed(
+                source_seed,
+                profile_name,
+                blend_weight,
+                min_percentile,
+                rebalance_days,
+                rebalance_hysteresis_pct,
+                partial_rebalance_ratio,
+                execution_impact_budget,
+                "roll_forward_v1",
+            )],
+        );
+    }
+
+    for seed in bridge_seeds.into_iter().skip(4) {
+        let blend_weight = seed
+            .get("prediction_blend_weight")
+            .and_then(Value::as_str)
+            .unwrap_or("0.05")
+            .to_string();
+        let min_percentile = seed
+            .get("prediction_min_percentile")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| Some("0.20".to_string()));
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_confidence_turnover_seed(
+                seed,
+                "bridge_tail_confidence20_turnover_smooth",
+                &blend_weight,
+                min_percentile.as_deref(),
+                160,
+                "0.01",
+                "0.75",
+                "impact_turnover_20pct_v1",
+                "roll_forward_v1",
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_prediction_confidence_alpha_lift_seed(
+    seed: Value,
+    profile_name: &str,
+    family: &str,
+    combo_name: &str,
+    score_direction: ScoreDirection,
+    market_regime: &str,
+    blend_weight: &str,
+    min_percentile: &str,
+    rebalance_days: usize,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+    execution_impact_budget: &str,
+) -> Value {
+    let seed = retarget_seed_combo(seed, combo_name);
+    let seed = set_seed_score_direction(seed, score_direction);
+    let seed = with_market_regime_seed(seed, market_regime);
+    let mut seed = with_prediction_confidence_turnover_seed(
+        seed,
+        profile_name,
+        blend_weight,
+        Some(min_percentile),
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+        "roll_forward_v1",
+    );
+    seed["prediction_confidence_alpha_lift_profile"] = json!(profile_name);
+    seed["prediction_confidence_alpha_lift_family"] = json!(family);
+    seed
+}
+
+fn professional_prediction_confidence_alpha_lift_seed_trials() -> Vec<Value> {
+    let confidence_seeds = professional_prediction_confidence_turnover_discovery_seed_trials();
+    let low_gap_anchor = confidence_seeds
+        .iter()
+        .find(|seed| seed["prediction_confidence_turnover_profile"] == "confidence40_low_turnover")
+        .cloned()
+        .or_else(|| confidence_seeds.first().cloned());
+    let Some(low_gap_anchor) = low_gap_anchor else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    for (
+        profile_name,
+        family,
+        combo_name,
+        score_direction,
+        market_regime,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+    ) in [
+        (
+            "confidence40_quality_nonlinear_alpha_lift",
+            "nonlinear_regime",
+            "phase7_financial_quality_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "0.08",
+            "0.40",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "confidence40_value_recovery_alpha_lift",
+            "value_recovery",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "0.08",
+            "0.40",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "confidence40_event_post_curve_lift",
+            "event_post_curve",
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            ScoreDirection::Descending,
+            "quality_event_window_return_sharpe_router_v4",
+            "0.08",
+            "0.40",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "confidence40_event_reaction_segments_lift",
+            "event_reaction",
+            "phase7_quality_event_reaction_segments_overlay_v1",
+            ScoreDirection::Descending,
+            "quality_event_window_return_sharpe_router_v4",
+            "0.08",
+            "0.40",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "confidence40_event_reaction_reversal_lift",
+            "event_reaction",
+            "phase7_quality_event_reaction_reversal_overlay_v1",
+            ScoreDirection::Descending,
+            "quality_event_window_return_sharpe_router_v4",
+            "0.08",
+            "0.40",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "confidence35_return_recovery_lift",
+            "value_recovery",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "0.06",
+            "0.35",
+            160usize,
+            "0.01",
+            "0.75",
+            "impact_turnover_20pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_confidence_alpha_lift_seed(
+                low_gap_anchor.clone(),
+                profile_name,
+                family,
+                combo_name,
+                score_direction,
+                market_regime,
+                blend_weight,
+                min_percentile,
+                rebalance_days,
+                rebalance_hysteresis_pct,
+                partial_rebalance_ratio,
+                execution_impact_budget,
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_prediction_long_horizon_low_turnover_seed(
+    seed: Value,
+    profile_name: &str,
+    blend_weight: &str,
+    min_percentile: &str,
+    rebalance_days: usize,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+    max_gross_exposure: Option<&str>,
+) -> Value {
+    let long_horizon_prediction_set = "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605";
+    let seed = with_prediction_confidence_turnover_seed_for_prediction_set(
+        seed,
+        profile_name,
+        long_horizon_prediction_set,
+        blend_weight,
+        Some(min_percentile),
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        "impact_turnover_15pct_v1",
+        "roll_forward_v1",
+    );
+    let mut seed = if let Some(max_gross_exposure) = max_gross_exposure {
+        with_max_gross_exposure_seed(seed, max_gross_exposure, profile_name)
+    } else {
+        seed
+    };
+    seed["prediction_long_horizon_low_turnover_profile"] = json!(profile_name);
+    seed["prediction_label_horizon_days"] = json!(60);
+    seed
+}
+
+fn professional_prediction_long_horizon_low_turnover_seed_trials() -> Vec<Value> {
+    let confidence_seeds = professional_prediction_confidence_turnover_discovery_seed_trials();
+    let low_turnover_anchor = confidence_seeds
+        .iter()
+        .find(|seed| seed["prediction_confidence_turnover_profile"] == "confidence40_low_turnover")
+        .cloned()
+        .or_else(|| confidence_seeds.first().cloned());
+    let Some(low_turnover_anchor) = low_turnover_anchor else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    for (
+        profile_name,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        max_gross_exposure,
+    ) in [
+        (
+            "h60_confidence40_low_turnover_quality",
+            "0.08",
+            "0.40",
+            200usize,
+            "0.02",
+            "0.65",
+            None,
+        ),
+        (
+            "h60_confidence50_low_turnover_quality",
+            "0.10",
+            "0.50",
+            240usize,
+            "0.03",
+            "0.60",
+            None,
+        ),
+        (
+            "h60_confidence40_gross65_signal_fidelity",
+            "0.08",
+            "0.40",
+            240usize,
+            "0.02",
+            "0.65",
+            Some("0.65"),
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_long_horizon_low_turnover_seed(
+                low_turnover_anchor.clone(),
+                profile_name,
+                blend_weight,
+                min_percentile,
+                rebalance_days,
+                rebalance_hysteresis_pct,
+                partial_rebalance_ratio,
+                max_gross_exposure,
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_prediction_long_horizon_regime_alpha_seed(
+    seed: Value,
+    profile_name: &str,
+    family: &str,
+    combo_name: &str,
+    score_direction: ScoreDirection,
+    market_regime: &str,
+    blend_weight: &str,
+    min_percentile: &str,
+    rebalance_days: usize,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+    execution_impact_budget: &str,
+) -> Value {
+    let long_horizon_prediction_set = "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605";
+    let seed = retarget_seed_combo(seed, combo_name);
+    let seed = set_seed_score_direction(seed, score_direction);
+    let seed = with_market_regime_seed(seed, market_regime);
+    let mut seed = with_prediction_confidence_turnover_seed_for_prediction_set(
+        seed,
+        profile_name,
+        long_horizon_prediction_set,
+        blend_weight,
+        Some(min_percentile),
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+        "roll_forward_v1",
+    );
+    seed["prediction_long_horizon_regime_alpha_profile"] = json!(profile_name);
+    seed["prediction_long_horizon_regime_alpha_family"] = json!(family);
+    seed["prediction_label_horizon_days"] = json!(60);
+    seed
+}
+
+fn professional_prediction_long_horizon_regime_alpha_seed_trials() -> Vec<Value> {
+    let confidence_seeds = professional_prediction_confidence_turnover_discovery_seed_trials();
+    let low_turnover_anchor = confidence_seeds
+        .iter()
+        .find(|seed| seed["prediction_confidence_turnover_profile"] == "confidence40_low_turnover")
+        .cloned()
+        .or_else(|| confidence_seeds.first().cloned());
+    let Some(low_turnover_anchor) = low_turnover_anchor else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    for (
+        profile_name,
+        family,
+        combo_name,
+        score_direction,
+        market_regime,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+    ) in [
+        (
+            "h60_value_recovery_regime_alpha",
+            "value_recovery",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "0.08",
+            "0.40",
+            180usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "h60_event_post_curve_regime_alpha",
+            "event_post_curve",
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            ScoreDirection::Descending,
+            "quality_event_window_return_sharpe_router_v4",
+            "0.08",
+            "0.40",
+            180usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "h60_relative_strength_regime_alpha",
+            "relative_strength",
+            "phase7_quality_relative_strength_v1",
+            ScoreDirection::Descending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "0.06",
+            "0.35",
+            160usize,
+            "0.01",
+            "0.75",
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            "h60_value_recovery_confidence35_regime_alpha",
+            "value_recovery",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "0.06",
+            "0.35",
+            160usize,
+            "0.01",
+            "0.75",
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            "h60_value_recovery_confidence45_regime_alpha",
+            "value_recovery",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "0.10",
+            "0.45",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "h60_event_post_curve_confidence35_regime_alpha",
+            "event_post_curve",
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            ScoreDirection::Descending,
+            "quality_event_window_return_sharpe_router_v4",
+            "0.06",
+            "0.35",
+            160usize,
+            "0.01",
+            "0.75",
+            "impact_turnover_20pct_v1",
+        ),
+        (
+            "h60_event_post_curve_confidence45_regime_alpha",
+            "event_post_curve",
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            ScoreDirection::Descending,
+            "quality_event_window_return_sharpe_router_v4",
+            "0.10",
+            "0.45",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+        (
+            "h60_relative_strength_confidence45_regime_alpha",
+            "relative_strength",
+            "phase7_quality_relative_strength_v1",
+            ScoreDirection::Descending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "0.10",
+            "0.45",
+            200usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_long_horizon_regime_alpha_seed(
+                low_turnover_anchor.clone(),
+                profile_name,
+                family,
+                combo_name,
+                score_direction,
+                market_regime,
+                blend_weight,
+                min_percentile,
+                rebalance_days,
+                rebalance_hysteresis_pct,
+                partial_rebalance_ratio,
+                execution_impact_budget,
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_prediction_h60_nonlinear_stress_seed(
+    seed: Value,
+    profile_name: &str,
+    label_family: &str,
+    combo_name: &str,
+    score_direction: ScoreDirection,
+    market_regime: &str,
+    candidate_ranking: &str,
+    capacity_risk_budget: &str,
+    cash_utilization: &str,
+    top_n: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    blend_weight: &str,
+    min_percentile: &str,
+    rebalance_days: usize,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+    execution_impact_budget: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    candidate_risk_filter: &str,
+    risk_contribution_control: &str,
+    score_candidate_pool_size: usize,
+) -> Value {
+    let long_horizon_prediction_set = "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605";
+    let seed = retarget_seed_combo(seed, combo_name);
+    let seed = set_seed_score_direction(seed, score_direction);
+    let seed = with_market_regime_seed(seed, market_regime);
+    let seed = with_prediction_confidence_turnover_seed_for_prediction_set(
+        seed,
+        profile_name,
+        long_horizon_prediction_set,
+        blend_weight,
+        Some(min_percentile),
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+        "roll_forward_v1",
+    );
+    let seed = with_top_n_seed(seed, top_n, profile_name);
+    let seed = with_position_shape_seed(seed, profile_name, max_position_pct, "0.75");
+    let seed = with_max_gross_exposure_seed(seed, max_gross_exposure, profile_name);
+    let seed = with_candidate_ranking_seed(seed, candidate_ranking);
+    let seed = with_capacity_risk_budget_seed(seed, capacity_risk_budget);
+    let seed = with_cash_utilization_seed(seed, cash_utilization);
+    let seed = with_execution_schedule_control_seed(
+        seed,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+    );
+    let seed = with_candidate_risk_filter_seed(seed, candidate_risk_filter);
+    let seed = with_risk_contribution_control_seed(seed, risk_contribution_control);
+    let mut seed = with_execution_carry_policy_seed(seed, "roll_forward_v1");
+    seed["prediction_h60_nonlinear_stress_profile"] = json!(profile_name);
+    seed["prediction_h60_label_family"] = json!(label_family);
+    seed["prediction_label_horizon_days"] = json!(60);
+    seed["score_candidate_pool_size"] = json!(score_candidate_pool_size);
+    seed["universe_profile"] = json!("listed_non_st");
+    seed
+}
+
+fn professional_prediction_h60_nonlinear_stress_discovery_seed_trials() -> Vec<Value> {
+    let confidence_seeds = professional_prediction_confidence_turnover_discovery_seed_trials();
+    let low_turnover_anchor = confidence_seeds
+        .iter()
+        .find(|seed| seed["prediction_confidence_turnover_profile"] == "confidence40_low_turnover")
+        .cloned()
+        .or_else(|| confidence_seeds.first().cloned());
+    let Some(low_turnover_anchor) = low_turnover_anchor else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    for (
+        profile_name,
+        label_family,
+        combo_name,
+        score_direction,
+        market_regime,
+        candidate_ranking,
+        capacity_risk_budget,
+        cash_utilization,
+        top_n,
+        max_position_pct,
+        max_gross_exposure,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_impact_budget,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        candidate_risk_filter,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "h60_fex_relative_strength_rank_fill70",
+            "future_excess_return",
+            "phase7_quality_relative_strength_v1",
+            ScoreDirection::Descending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "relative_strength_alpha_liquidity_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            100usize,
+            "0.06",
+            "0.90",
+            "0.10",
+            "0.45",
+            180usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            90usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2400usize,
+        ),
+        (
+            "h60_fex_alpha_first_value_recovery_fill60",
+            "future_excess_return",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "fillable_gross_95_v1",
+            100usize,
+            "0.08",
+            "0.95",
+            "0.08",
+            "0.40",
+            220usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2200usize,
+        ),
+        (
+            "h60_raex_nonlinear_quality_rank_fill70",
+            "risk_adjusted_excess_return",
+            "phase7_financial_quality_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            120usize,
+            "0.06",
+            "0.90",
+            "0.10",
+            "0.45",
+            220usize,
+            "0.03",
+            "0.60",
+            "impact_turnover_15pct_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            90usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2400usize,
+        ),
+        (
+            "h60_fex_event_post_curve_rank_fill70",
+            "future_excess_return",
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            ScoreDirection::Descending,
+            "quality_event_window_return_sharpe_router_v4",
+            "alpha_first_low_impact_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            100usize,
+            "0.08",
+            "0.90",
+            "0.08",
+            "0.40",
+            180usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            90usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2400usize,
+        ),
+        (
+            "h60_raex_growth_recovery_rank_fill60",
+            "risk_adjusted_excess_return",
+            "phase7_growth_recovery_v1",
+            ScoreDirection::Descending,
+            "quality_mixed_state_risk_memory_router_v14",
+            "relative_strength_alpha_liquidity_v1",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "fillable_gross_95_v1",
+            80usize,
+            "0.08",
+            "0.95",
+            "0.08",
+            "0.40",
+            180usize,
+            "0.02",
+            "0.65",
+            "impact_turnover_15pct_v1",
+            "twap_15d_v1",
+            Decimal::new(8, 2),
+            75usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2200usize,
+        ),
+        (
+            "h60_fex_residual_confirm_rank_fill70",
+            "future_excess_return",
+            "phase7_quality_residual_confirm_10pct_v1",
+            ScoreDirection::Ascending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            120usize,
+            "0.06",
+            "0.90",
+            "0.08",
+            "0.40",
+            220usize,
+            "0.03",
+            "0.60",
+            "impact_turnover_15pct_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            90usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2400usize,
+        ),
+        (
+            "h60_raex_moneyflow_quality_rank_fill60",
+            "risk_adjusted_excess_return",
+            "phase7_quality_moneyflow_pos_5pct_v1",
+            ScoreDirection::Ascending,
+            "quality_state_alpha_overlay_selector_v1",
+            "alpha_first_low_impact_v1",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "fillable_gross_95_v1",
+            100usize,
+            "0.08",
+            "0.95",
+            "0.08",
+            "0.40",
+            260usize,
+            "0.03",
+            "0.60",
+            "impact_turnover_15pct_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            90usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2200usize,
+        ),
+        (
+            "h60_fex_quality_rank_signal_fidelity",
+            "future_excess_return",
+            "phase7_financial_quality_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "relative_strength_alpha_liquidity_v1",
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            80usize,
+            "0.08",
+            "0.80",
+            "0.10",
+            "0.50",
+            260usize,
+            "0.03",
+            "0.60",
+            "impact_turnover_15pct_v1",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            100usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2400usize,
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_h60_nonlinear_stress_seed(
+                low_turnover_anchor.clone(),
+                profile_name,
+                label_family,
+                combo_name,
+                score_direction,
+                market_regime,
+                candidate_ranking,
+                capacity_risk_budget,
+                cash_utilization,
+                top_n,
+                max_position_pct,
+                max_gross_exposure,
+                blend_weight,
+                min_percentile,
+                rebalance_days,
+                rebalance_hysteresis_pct,
+                partial_rebalance_ratio,
+                execution_impact_budget,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                candidate_risk_filter,
+                risk_contribution_control,
+                score_candidate_pool_size,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn with_prediction_h120_low_impact_stress_seed(
+    seed: Value,
+    profile_name: &str,
+    label_family: &str,
+    combo_name: &str,
+    score_direction: ScoreDirection,
+    market_regime: &str,
+    candidate_ranking: &str,
+    capacity_risk_budget: &str,
+    cash_utilization: &str,
+    top_n: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    blend_weight: &str,
+    min_percentile: &str,
+    rebalance_days: usize,
+    rebalance_hysteresis_pct: &str,
+    partial_rebalance_ratio: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    candidate_risk_filter: &str,
+    risk_contribution_control: &str,
+    score_candidate_pool_size: usize,
+) -> Value {
+    let seed = with_prediction_h60_nonlinear_stress_seed(
+        seed,
+        profile_name,
+        label_family,
+        combo_name,
+        score_direction,
+        market_regime,
+        candidate_ranking,
+        capacity_risk_budget,
+        cash_utilization,
+        top_n,
+        max_position_pct,
+        max_gross_exposure,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        "impact_turnover_15pct_v1",
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        candidate_risk_filter,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    );
+    let seed = with_prediction_confidence_turnover_seed_for_prediction_set(
+        seed,
+        profile_name,
+        "pred-p7-wf-wide-qgvrel-h120-v1-201602-202605",
+        blend_weight,
+        Some(min_percentile),
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        "impact_turnover_15pct_v1",
+        "roll_forward_v1",
+    );
+    let seed = with_candidate_ranking_seed(seed, candidate_ranking);
+    let seed = with_capacity_risk_budget_seed(seed, capacity_risk_budget);
+    let mut seed = with_cash_utilization_seed(seed, cash_utilization);
+    seed["prediction_h120_low_impact_stress_profile"] = json!(profile_name);
+    seed["prediction_h120_label_family"] = json!(label_family);
+    seed["prediction_label_horizon_days"] = json!(120);
+    if let Some(object) = seed.as_object_mut() {
+        object.remove("prediction_h60_nonlinear_stress_profile");
+        object.remove("prediction_h60_label_family");
+    }
+    seed
+}
+
+fn professional_prediction_h120_low_impact_stress_discovery_seed_trials() -> Vec<Value> {
+    let confidence_seeds = professional_prediction_confidence_turnover_discovery_seed_trials();
+    let low_turnover_anchor = confidence_seeds
+        .iter()
+        .find(|seed| seed["prediction_confidence_turnover_profile"] == "confidence40_low_turnover")
+        .cloned()
+        .or_else(|| confidence_seeds.first().cloned());
+    let Some(low_turnover_anchor) = low_turnover_anchor else {
+        return Vec::new();
+    };
+
+    let mut seeds = Vec::new();
+    for (
+        profile_name,
+        label_family,
+        combo_name,
+        score_direction,
+        market_regime,
+        candidate_ranking,
+        capacity_risk_budget,
+        cash_utilization,
+        top_n,
+        max_position_pct,
+        max_gross_exposure,
+        blend_weight,
+        min_percentile,
+        rebalance_days,
+        rebalance_hysteresis_pct,
+        partial_rebalance_ratio,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        candidate_risk_filter,
+        risk_contribution_control,
+        score_candidate_pool_size,
+    ) in [
+        (
+            "h120_fex_quality_alpha_first_fill70",
+            "future_excess_return",
+            "phase7_financial_quality_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            100usize,
+            "0.06",
+            "0.90",
+            "0.08",
+            "0.40",
+            240usize,
+            "0.03",
+            "0.60",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            140usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2400usize,
+        ),
+        (
+            "h120_fex_value_recovery_alpha_first_fill70",
+            "future_excess_return",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            100usize,
+            "0.06",
+            "0.90",
+            "0.08",
+            "0.40",
+            300usize,
+            "0.03",
+            "0.60",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            160usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2400usize,
+        ),
+        (
+            "h120_fex_growth_capacity_rank_fill60",
+            "future_excess_return",
+            "phase7_growth_recovery_v1",
+            ScoreDirection::Descending,
+            "quality_mixed_state_risk_memory_router_v14",
+            "capacity_aware_alpha_liquidity_v1",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "fillable_gross_95_v1",
+            80usize,
+            "0.08",
+            "0.95",
+            "0.08",
+            "0.35",
+            240usize,
+            "0.03",
+            "0.60",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            140usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2200usize,
+        ),
+        (
+            "h120_raex_quality_capacity_rank_fill70",
+            "risk_adjusted_excess_return",
+            "phase7_financial_quality_v1",
+            ScoreDirection::Ascending,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            120usize,
+            "0.06",
+            "0.90",
+            "0.10",
+            "0.45",
+            300usize,
+            "0.03",
+            "0.60",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            160usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            2600usize,
+        ),
+        (
+            "h120_raex_value_recovery_alpha_first_fill70",
+            "risk_adjusted_excess_return",
+            "phase7_quality_value_recovery_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            100usize,
+            "0.06",
+            "0.90",
+            "0.08",
+            "0.40",
+            300usize,
+            "0.03",
+            "0.60",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            160usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            2400usize,
+        ),
+        (
+            "h120_fex_residual_confirm_alpha_first_fill70",
+            "future_excess_return",
+            "phase7_quality_residual_confirm_10pct_v1",
+            ScoreDirection::Ascending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "alpha_first_low_impact_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            120usize,
+            "0.06",
+            "0.90",
+            "0.08",
+            "0.40",
+            360usize,
+            "0.04",
+            "0.55",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            180usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            2600usize,
+        ),
+        (
+            "h120_fex_relative_strength_capacity_rank_fill60",
+            "future_excess_return",
+            "phase7_quality_relative_strength_v1",
+            ScoreDirection::Descending,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+            "capacity_stress_participation_alpha_headroom_floor_60_v1",
+            "fillable_gross_95_v1",
+            80usize,
+            "0.08",
+            "0.95",
+            "0.08",
+            "0.35",
+            240usize,
+            "0.03",
+            "0.60",
+            "twap_20d_v1",
+            Decimal::new(6, 2),
+            140usize,
+            "soft_low_volatility_low_correlation_v1",
+            "soft_single_name_20pct_v1",
+            2200usize,
+        ),
+        (
+            "h120_raex_cashflow_dividend_capacity_rank_fill70",
+            "risk_adjusted_excess_return",
+            "phase7_quality_cashflow_dividend_confirm_v1",
+            ScoreDirection::Ascending,
+            "quality_state_alpha_overlay_selector_v1",
+            "capacity_aware_alpha_liquidity_v1",
+            "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "stress_fill_gross_98_v1",
+            100usize,
+            "0.06",
+            "0.90",
+            "0.08",
+            "0.40",
+            360usize,
+            "0.04",
+            "0.55",
+            "twap_20d_v1",
+            Decimal::new(5, 2),
+            180usize,
+            "soft_liquidity_low_volatility_low_correlation_v1",
+            "soft_single_name_15pct_v1",
+            2600usize,
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_prediction_h120_low_impact_stress_seed(
+                low_turnover_anchor.clone(),
+                profile_name,
+                label_family,
+                combo_name,
+                score_direction,
+                market_regime,
+                candidate_ranking,
+                capacity_risk_budget,
+                cash_utilization,
+                top_n,
+                max_position_pct,
+                max_gross_exposure,
+                blend_weight,
+                min_percentile,
+                rebalance_days,
+                rebalance_hysteresis_pct,
+                partial_rebalance_ratio,
+                execution_schedule_profile,
+                daily_target_move_limit_pct,
+                max_carry_days,
+                candidate_risk_filter,
+                risk_contribution_control,
+                score_candidate_pool_size,
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_train_window_stress_fill_target_exposure_seed(
+    seed: Value,
+    profile_name: &str,
+    combo_name: &str,
+    score_direction: ScoreDirection,
+    top_n: usize,
+    rebalance_days: usize,
+    max_position_pct: &str,
+    max_gross_exposure: &str,
+    capacity_penalty_strength: &str,
+    capacity_risk_budget: &str,
+    cash_utilization: &str,
+    execution_schedule_profile: &str,
+    daily_target_move_limit_pct: Decimal,
+    max_carry_days: usize,
+    score_candidate_pool_size: usize,
+    candidate_risk_filter: &str,
+    risk_contribution_control: &str,
+    market_regime: &str,
+    execution_impact_budget: &str,
+) -> Value {
+    let mut seed = with_train_window_nonlinear_ranking_seed(
+        seed,
+        combo_name,
+        score_direction,
+        top_n,
+        rebalance_days,
+        max_position_pct,
+        max_gross_exposure,
+        capacity_penalty_strength,
+        capacity_risk_budget,
+        cash_utilization,
+        execution_schedule_profile,
+        daily_target_move_limit_pct,
+        max_carry_days,
+        score_candidate_pool_size,
+        candidate_risk_filter,
+        risk_contribution_control,
+        market_regime,
+        execution_impact_budget,
+        profile_name,
+    );
+    seed["train_window_stress_fill_target_exposure_profile"] = json!(profile_name);
+    seed["alpha_source_family"] = json!("train_window_stress_fill_target_exposure");
+    seed
+}
+
+fn professional_train_window_stress_fill_target_exposure_seed_trials() -> Vec<Value> {
+    let anchors = [
+        phase7_high_sharpe_boundary_base_seed(),
+        phase7_current_event_window_15pct_risk_budget_180_anchor_seed(),
+        phase7_current_anchor_bg_trial4_seed(),
+    ];
+    let mut seeds = Vec::new();
+
+    for anchor in anchors.into_iter().flatten() {
+        for (
+            profile_name,
+            combo_name,
+            score_direction,
+            top_n,
+            rebalance_days,
+            max_position_pct,
+            max_gross_exposure,
+            capacity_penalty_strength,
+            capacity_risk_budget,
+            cash_utilization,
+            execution_schedule_profile,
+            daily_target_move_limit_pct,
+            max_carry_days,
+            score_candidate_pool_size,
+            candidate_risk_filter,
+            risk_contribution_control,
+            market_regime,
+            execution_impact_budget,
+        ) in [
+            (
+                "native_quality_stress_fill_floor70_rebalance240",
+                "phase7_financial_quality_v1",
+                ScoreDirection::Ascending,
+                120usize,
+                240usize,
+                "0.06",
+                "0.90",
+                "2.0",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                "stress_fill_gross_98_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                140usize,
+                2600usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_nonlinear_alpha_risk_memory_router_v3",
+                "impact_turnover_15pct_v1",
+            ),
+            (
+                "native_value_stress_fill_floor70_rebalance300",
+                "phase7_quality_value_recovery_confirm_v1",
+                ScoreDirection::Ascending,
+                120usize,
+                300usize,
+                "0.06",
+                "0.90",
+                "2.5",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                "stress_fill_gross_98_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                160usize,
+                2600usize,
+                "soft_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_mixed_orthogonal_risk_memory_router_v3",
+                "impact_turnover_15pct_v1",
+            ),
+            (
+                "native_growth_stress_fill_floor60_rebalance240",
+                "phase7_growth_recovery_v1",
+                ScoreDirection::Descending,
+                100usize,
+                240usize,
+                "0.08",
+                "0.90",
+                "2.0",
+                "capacity_stress_participation_alpha_headroom_floor_60_v1",
+                "stress_fill_gross_98_v1",
+                "twap_20d_v1",
+                Decimal::new(6, 2),
+                140usize,
+                2400usize,
+                "soft_low_volatility_low_correlation_v1",
+                "soft_single_name_20pct_v1",
+                "quality_mixed_state_risk_memory_router_v14",
+                "impact_turnover_15pct_v1",
+            ),
+            (
+                "native_residual_stress_fill_blended_floor70_rebalance300",
+                "phase7_quality_residual_confirm_10pct_v1",
+                ScoreDirection::Ascending,
+                140usize,
+                300usize,
+                "0.05",
+                "0.90",
+                "2.5",
+                "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+                "stress_fill_gross_98_v1",
+                "twap_20d_v1",
+                Decimal::new(4, 2),
+                180usize,
+                2800usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_mixed_orthogonal_risk_memory_router_v3",
+                "impact_turnover_15pct_v1",
+            ),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_train_window_stress_fill_target_exposure_seed(
+                    anchor.clone(),
+                    profile_name,
+                    combo_name,
+                    score_direction,
+                    top_n,
+                    rebalance_days,
+                    max_position_pct,
+                    max_gross_exposure,
+                    capacity_penalty_strength,
+                    capacity_risk_budget,
+                    cash_utilization,
+                    execution_schedule_profile,
+                    daily_target_move_limit_pct,
+                    max_carry_days,
+                    score_candidate_pool_size,
+                    candidate_risk_filter,
+                    risk_contribution_control,
+                    market_regime,
+                    execution_impact_budget,
+                )],
+            );
+        }
+    }
+
+    seeds
+}
+
+fn with_current_event_nonlinear_alpha_seed(
+    mut seed: Value,
+    profile_name: &str,
+    family: &str,
+) -> Value {
+    seed["current_event_nonlinear_alpha_profile"] = json!(profile_name);
+    seed["current_event_nonlinear_alpha_family"] = json!(family);
+    seed["alpha_source_family"] = json!(family);
+    seed
+}
+
+fn professional_current_event_nonlinear_alpha_discovery_seed_trials() -> Vec<Value> {
+    let anchors = professional_return_distribution_repair_seed_trials();
+    let nonlinear_anchor = anchors
+        .iter()
+        .find(|seed| seed["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3")
+        .cloned()
+        .or_else(|| anchors.first().cloned());
+    let orthogonal_anchor = anchors
+        .iter()
+        .find(|seed| seed["market_regime"] == "quality_mixed_orthogonal_risk_memory_router_v3")
+        .cloned()
+        .or_else(|| anchors.first().cloned());
+    let Some(nonlinear_anchor) = nonlinear_anchor else {
+        return Vec::new();
+    };
+    let orthogonal_anchor = orthogonal_anchor.unwrap_or_else(|| nonlinear_anchor.clone());
+    let event_router_anchor = with_market_regime_seed(
+        nonlinear_anchor.clone(),
+        "quality_event_window_return_sharpe_router_v4",
+    );
+    let mut seeds = Vec::new();
+
+    for (base, profile_name, min_score, boost_weight) in [
+        (
+            nonlinear_anchor.clone(),
+            "cm_event_surprise_boost_p75",
+            "0.35",
+            "0.03",
+        ),
+        (
+            nonlinear_anchor.clone(),
+            "cm_event_surprise_boost_p90",
+            "0.43",
+            "0.05",
+        ),
+        (
+            orthogonal_anchor.clone(),
+            "cl_event_surprise_boost_p75",
+            "0.35",
+            "0.03",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_current_event_nonlinear_alpha_seed(
+                with_event_combo_gate_seed_with_min_score(
+                    base,
+                    profile_name,
+                    "phase7_event_surprise_v1",
+                    "boost_positive",
+                    min_score,
+                    boost_weight,
+                    ScoreDirection::Descending,
+                ),
+                profile_name,
+                "event_surprise",
+            )],
+        );
+    }
+
+    append_unique_seeds(
+        &mut seeds,
+        vec![with_current_event_nonlinear_alpha_seed(
+            with_event_combo_gate_seed_with_min_score(
+                orthogonal_anchor.clone(),
+                "cl_event_surprise_exclude_negative",
+                "phase7_event_surprise_v1",
+                "exclude_negative",
+                "0",
+                "0",
+                ScoreDirection::Descending,
+            ),
+            "cl_event_surprise_exclude_negative",
+            "event_surprise",
+        )],
+    );
+
+    for (base, profile_name, combo_name, mode, min_score, boost_weight) in [
+        (
+            event_router_anchor.clone(),
+            "cm_event_window_20d_boost_p75",
+            "phase7_event_window_earnings_v1",
+            "boost_positive",
+            "0.38",
+            "0.03",
+        ),
+        (
+            orthogonal_anchor.clone(),
+            "cl_event_window_40d_exclude_negative",
+            "phase7_event_window_earnings_40d_v1",
+            "exclude_negative",
+            "0",
+            "0",
+        ),
+        (
+            nonlinear_anchor.clone(),
+            "cm_event_window_40d_boost_p75",
+            "phase7_event_window_earnings_40d_v1",
+            "boost_positive",
+            "0.38",
+            "0.03",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_current_event_nonlinear_alpha_seed(
+                with_event_combo_gate_seed_with_min_score(
+                    base,
+                    profile_name,
+                    combo_name,
+                    mode,
+                    min_score,
+                    boost_weight,
+                    ScoreDirection::Descending,
+                ),
+                profile_name,
+                "event_window",
+            )],
+        );
+    }
+
+    for (base, profile_name) in [
+        (orthogonal_anchor, "cl_residual_confirm_router"),
+        (nonlinear_anchor, "cm_residual_confirm_router"),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_current_event_nonlinear_alpha_seed(
+                set_seed_score_direction(
+                    retarget_seed_combo(base, "phase7_quality_residual_confirm_10pct_v1"),
+                    ScoreDirection::Descending,
+                ),
+                profile_name,
+                "residual_confirm",
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn reorder_seed_trials_by_string_field(
+    seeds: Vec<Value>,
+    field: &str,
+    priority_values: &[&str],
+) -> Vec<Value> {
+    let mut remaining = seeds;
+    let mut ordered = Vec::with_capacity(remaining.len());
+    for priority_value in priority_values {
+        if let Some(index) = remaining
+            .iter()
+            .position(|seed| seed.get(field).and_then(Value::as_str) == Some(*priority_value))
+        {
+            ordered.push(remaining.remove(index));
+        }
+    }
+    ordered.extend(remaining);
+    ordered
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16438,21 +18866,21 @@ impl LayeredSearchConfig {
 
     pub fn professional_second_alpha_source_default() -> Self {
         let mut config = Self::professional_style_risk_budget_default();
-        config.combo_versions = vec![
-            ComboVersion::new("phase7_event_earnings_v1", "1.0.0"),
-            ComboVersion::new("phase7_event_surprise_v1", "1.0.0"),
-            ComboVersion::new("phase7_event_window_earnings_v1", "1.0.0"),
-            ComboVersion::new("phase7_quality_event_window_overlay_v1", "1.0.0"),
-            ComboVersion::new("phase7_quality_event_surprise_confirm_v1", "1.0.0"),
-            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
-            ComboVersion::new("phase7_quality_value_recovery_event_confirm_v1", "1.0.0"),
-            ComboVersion::new("phase7_industry_residual_quality_v1", "1.0.0"),
-            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
-            ComboVersion::new("phase7_quality_moneyflow_pos_5pct_v1", "1.0.0"),
-            ComboVersion::new("phase7_quality_event_confirm_v1", "1.0.0"),
-            ComboVersion::new("phase7_blend_quality_growth_v1", "1.0.0"),
-            ComboVersion::new("phase7_blend_recovery_tilt_v1", "1.0.0"),
-        ];
+        config.combo_versions = phase7_base_trainable_combo_versions(&[
+            "phase7_event_earnings_v1",
+            "phase7_event_surprise_v1",
+            "phase7_event_window_earnings_v1",
+            "phase7_quality_event_window_overlay_v1",
+            "phase7_quality_event_surprise_confirm_v1",
+            "phase7_quality_value_recovery_confirm_v1",
+            "phase7_quality_value_recovery_event_confirm_v1",
+            "phase7_industry_residual_quality_v1",
+            "phase7_financial_quality_v1",
+            "phase7_quality_moneyflow_pos_5pct_v1",
+            "phase7_quality_event_confirm_v1",
+            "phase7_blend_quality_growth_v1",
+            "phase7_blend_recovery_tilt_v1",
+        ]);
         config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
         config.event_gate_profiles = vec![
             EventGateProfile::off(),
@@ -18703,6 +21131,417 @@ impl LayeredSearchConfig {
         config
     }
 
+    pub fn professional_prediction_capacity_dual_objective_default() -> Self {
+        let mut config = Self::professional_prediction_confirmed_sharpe_bridge_default();
+        config.prediction_set_ids = vec!["pred-p7-wf-wide-qgvrel-v1-201602-202605".to_string()];
+        config.top_n = vec![20, 40, 60];
+        config.max_position_pct =
+            vec![Decimal::new(15, 2), Decimal::new(10, 2), Decimal::new(8, 2)];
+        config.candidate_ranking_profiles = vec![
+            "off".to_string(),
+            "alpha_first_low_impact_v1".to_string(),
+            "capacity_aware_alpha_liquidity_v1".to_string(),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "off".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.cash_utilization_profiles = vec![
+            "stress_fill_gross_98_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_15pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+        ];
+        config.partial_rebalance_ratio =
+            vec![Decimal::ONE, Decimal::new(35, 2), Decimal::new(25, 2)];
+        config.score_candidate_pool_sizes = vec![500, 1800, 2200];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = professional_prediction_capacity_dual_objective_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_target_gross_signal_fidelity_default() -> Self {
+        let mut config = Self::professional_prediction_confirmed_sharpe_bridge_default();
+        config.prediction_set_ids = vec!["pred-p7-wf-wide-qgvrel-v1-201602-202605".to_string()];
+        config.top_n = vec![20];
+        config.max_gross_exposure = vec![
+            Decimal::new(35, 2),
+            Decimal::new(50, 2),
+            Decimal::new(65, 2),
+            Decimal::new(80, 2),
+            Decimal::ONE,
+        ];
+        config.candidate_ranking_profiles = vec!["off".to_string()];
+        config.capacity_risk_budget_profiles = vec!["off".to_string()];
+        config.cash_utilization_profiles = vec!["off".to_string()];
+        config.execution_schedule_profiles = vec!["immediate".to_string()];
+        config.execution_carry_policy_profiles = vec!["off".to_string()];
+        config.execution_impact_budget_profiles = vec!["off".to_string()];
+        config.partial_rebalance_ratio = vec![Decimal::ONE];
+        config.seed_trials = professional_prediction_target_gross_signal_fidelity_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_confidence_turnover_discovery_default() -> Self {
+        let mut config = Self::professional_prediction_confirmed_sharpe_bridge_default();
+        config.prediction_set_ids = Vec::new();
+        config.rebalance_days = vec![120, 160, 200];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.candidate_ranking_profiles = vec!["off".to_string()];
+        config.capacity_risk_budget_profiles = vec!["off".to_string()];
+        config.cash_utilization_profiles = vec!["off".to_string()];
+        config.execution_schedule_profiles = vec!["immediate".to_string()];
+        config.execution_carry_policy_profiles =
+            vec!["off".to_string(), "roll_forward_v1".to_string()];
+        config.execution_impact_budget_profiles = vec![
+            "off".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+            "impact_turnover_15pct_v1".to_string(),
+        ];
+        config.rebalance_hysteresis_pct = vec![
+            Decimal::ZERO,
+            Decimal::new(5, 3),
+            Decimal::new(1, 2),
+            Decimal::new(2, 2),
+        ];
+        config.partial_rebalance_ratio = vec![
+            Decimal::ONE,
+            Decimal::new(85, 2),
+            Decimal::new(75, 2),
+            Decimal::new(65, 2),
+        ];
+        config.seed_trials = professional_prediction_confidence_turnover_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_confidence_alpha_lift_default() -> Self {
+        let mut config = Self::professional_prediction_confidence_turnover_discovery_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_post_return_curve_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_reaction_segments_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_reaction_reversal_overlay_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+        ];
+        config.rebalance_days = vec![160, 200];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(1, 2), Decimal::new(2, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(75, 2), Decimal::new(65, 2)];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_15pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+        ];
+        config.seed_trials = professional_prediction_confidence_alpha_lift_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_long_horizon_low_turnover_default() -> Self {
+        let mut config = Self::professional_prediction_confidence_turnover_discovery_default();
+        config.prediction_set_ids = Vec::new();
+        config.rebalance_days = vec![200, 240];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(2, 2), Decimal::new(3, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(65, 2), Decimal::new(60, 2)];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.candidate_ranking_profiles = vec!["off".to_string()];
+        config.capacity_risk_budget_profiles = vec!["off".to_string()];
+        config.cash_utilization_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_prediction_long_horizon_low_turnover_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_long_horizon_regime_alpha_default() -> Self {
+        let mut config = Self::professional_prediction_confidence_turnover_discovery_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_post_return_curve_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+        ];
+        config.rebalance_days = vec![160, 180, 200];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(1, 2), Decimal::new(2, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(75, 2), Decimal::new(65, 2)];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_15pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+        ];
+        config.candidate_ranking_profiles = vec!["off".to_string()];
+        config.capacity_risk_budget_profiles = vec!["off".to_string()];
+        config.cash_utilization_profiles = vec!["off".to_string()];
+        config.seed_trials = professional_prediction_long_horizon_regime_alpha_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_h60_nonlinear_stress_discovery_default() -> Self {
+        let mut config = Self::professional_prediction_long_horizon_regime_alpha_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_post_return_curve_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_moneyflow_pos_5pct_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+        ];
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.top_n = vec![80, 100, 120];
+        config.rebalance_days = vec![180, 220, 260];
+        config.max_position_pct = vec![Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_gross_exposure = vec![
+            Decimal::new(80, 2),
+            Decimal::new(90, 2),
+            Decimal::new(95, 2),
+        ];
+        config.capacity_penalty_strength = vec![Decimal::new(150, 2), Decimal::new(200, 2)];
+        config.candidate_ranking_profiles = vec![
+            "relative_strength_alpha_liquidity_v1".to_string(),
+            "alpha_first_low_impact_v1".to_string(),
+            "capacity_aware_alpha_liquidity_v1".to_string(),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec![
+            "stress_fill_gross_98_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(2, 2), Decimal::new(3, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(65, 2), Decimal::new(60, 2)];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_low_volatility_low_correlation_v1".to_string(),
+            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![2200, 2400];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = professional_prediction_h60_nonlinear_stress_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_prediction_h120_low_impact_stress_discovery_default() -> Self {
+        let mut config = Self::professional_prediction_h60_nonlinear_stress_discovery_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_cashflow_dividend_confirm_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+        ];
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.top_n = vec![80, 100, 120];
+        config.rebalance_days = vec![240, 300, 360];
+        config.max_position_pct = vec![Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.capacity_penalty_strength = vec![Decimal::new(150, 2), Decimal::new(200, 2)];
+        config.candidate_ranking_profiles = vec![
+            "alpha_first_low_impact_v1".to_string(),
+            "capacity_aware_alpha_liquidity_v1".to_string(),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+        ];
+        config.cash_utilization_profiles = vec![
+            "stress_fill_gross_98_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(60, 2), Decimal::new(55, 2)];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_low_volatility_low_correlation_v1".to_string(),
+            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.score_candidate_pool_sizes = vec![2200, 2400, 2600];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = professional_prediction_h120_low_impact_stress_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_train_window_stress_fill_target_exposure_default() -> Self {
+        let mut config = Self::professional_train_window_nonlinear_ranking_discovery_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_cashflow_dividend_confirm_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.top_n = vec![100, 120, 140];
+        config.rebalance_days = vec![240, 300, 360];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.capacity_penalty_strength = vec![Decimal::new(200, 2), Decimal::new(250, 2)];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
+        ];
+        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v1".to_string()];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
+            "soft_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_15pct_v1".to_string(),
+            "soft_single_name_20pct_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2), Decimal::new(4, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(55, 2), Decimal::new(60, 2)];
+        config.score_candidate_pool_sizes = vec![2400, 2600, 2800];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = professional_train_window_stress_fill_target_exposure_seed_trials();
+        config
+    }
+
+    pub fn professional_current_event_nonlinear_alpha_discovery_default() -> Self {
+        let mut config = Self::professional_nonlinear_sharpe_return_bridge_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_window_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::off(),
+            EventGateProfile::event_surprise(
+                "event_surprise_boost_p75_3pct",
+                "boost_positive",
+                Decimal::new(35, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_surprise(
+                "event_surprise_boost_p90_5pct",
+                "boost_positive",
+                Decimal::new(43, 2),
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_surprise(
+                "event_surprise_exclude_negative",
+                "exclude_negative",
+                Decimal::ZERO,
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_window(
+                "event_window_20d_boost_p75_3pct",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_window_40d_boost_p75_3pct",
+                "phase7_event_window_earnings_40d_v1",
+                "boost_positive",
+                Decimal::new(38, 2),
+                Decimal::new(3, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_window_40d_exclude_negative",
+                "phase7_event_window_earnings_40d_v1",
+                "exclude_negative",
+                Decimal::ZERO,
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_48_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(48, 2),
+                Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_16_50_100",
+                Decimal::new(16, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
+            ),
+        ];
+        config.risk_budget_lookback_days = vec![160, 180];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2)];
+        config.max_position_pct = vec![Decimal::new(15, 2)];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.seed_trials = professional_current_event_nonlinear_alpha_discovery_seed_trials();
+        config
+    }
+
     pub fn professional_high_sharpe_boundary_return_bridge_default() -> Self {
         let mut config = Self::professional_prediction_confirmed_sharpe_bridge_default();
         config.market_regime_policies = vec![
@@ -20640,6 +23479,57 @@ impl LayeredSearchConfig {
         config
     }
 
+    pub fn professional_train_window_nonlinear_ranking_discovery_default() -> Self {
+        let mut config = Self::professional_execution_pit_nonlinear_alpha_regime_rebuild_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.top_n = vec![80, 100, 120];
+        config.rebalance_days = vec![180, 220, 260];
+        config.max_position_pct = vec![Decimal::new(6, 2), Decimal::new(8, 2)];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.capacity_penalty_strength = vec![Decimal::new(150, 2), Decimal::new(200, 2)];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
+        ];
+        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
+            "soft_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_15pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.cash_utilization_profiles = vec![
+            "stress_fill_gross_98_v1".to_string(),
+            "fillable_gross_95_v1".to_string(),
+        ];
+        config.score_candidate_pool_sizes = vec![2200, 2400];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = professional_train_window_nonlinear_ranking_discovery_seed_trials();
+        config
+    }
+
     pub fn professional_execution_pit_quality_recovery_alpha_default() -> Self {
         let mut config = Self::professional_execution_pit_nonlinear_alpha_regime_rebuild_default();
         config.combo_versions = vec![ComboVersion::new(
@@ -20801,6 +23691,108 @@ impl LayeredSearchConfig {
         config.score_candidate_pool_sizes = vec![1800, 2200, 2400];
         config.universe_profiles = vec!["listed_non_st".to_string()];
         config.seed_trials = professional_execution_broad_financial_feature_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_broad_financial_feature_stratified_discovery_default() -> Self {
+        let mut config = Self::professional_execution_broad_financial_feature_discovery_default();
+        config.seed_trials =
+            professional_execution_broad_financial_feature_stratified_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_execution_native_alpha_fusion_discovery_default() -> Self {
+        let mut config =
+            Self::professional_execution_broad_financial_feature_stratified_discovery_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_industry_residual_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_residual_confirm_10pct_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_event_surprise_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_post_return_curve_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_reaction_segments_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_event_reaction_reversal_overlay_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_cashflow_dividend_confirm_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = vec!["pred-p7-wf-wide-qgvrel-v1-201602-202605".to_string()];
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+        ];
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.top_n = vec![80, 100, 120];
+        config.rebalance_days = vec![120, 160, 180];
+        config.candidate_ranking_profiles = vec![
+            "alpha_first_low_impact_v1".to_string(),
+            "capacity_aware_alpha_liquidity_v1".to_string(),
+        ];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
+            "soft_low_volatility_low_correlation_v1".to_string(),
+            "soft_low_volatility_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_20pct_v1".to_string(),
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
+            "capacity_stress_participation_soft_cap_v1".to_string(),
+            "capacity_participation_balanced_v1".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec![
+            "impact_turnover_15pct_v1".to_string(),
+            "impact_turnover_20pct_v1".to_string(),
+        ];
+        config.execution_schedule_profiles =
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.score_candidate_pool_sizes = vec![1800, 2200, 2400];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = professional_execution_native_alpha_fusion_discovery_seed_trials();
+        config
+    }
+
+    pub fn professional_trainable_alpha_admission_discovery_default() -> Self {
+        let mut config =
+            Self::professional_execution_broad_financial_feature_stratified_discovery_default();
+        config.combo_versions = phase7_base_trainable_combo_versions(&[
+            "phase7_financial_quality_v1",
+            "phase7_industry_residual_quality_v1",
+            "phase7_growth_recovery_v1",
+            "phase7_quality_relative_strength_v1",
+            "phase7_valuation_v1",
+            "phase7_moneyflow_v1",
+            "phase7_quality_moneyflow_pos_5pct_v1",
+            "phase7_quality_cashflow_confirm_v1",
+            "phase7_quality_dividend_confirm_v1",
+            "phase7_quality_cashflow_dividend_confirm_v1",
+            "phase7_quality_value_recovery_confirm_v1",
+            "phase7_quality_residual_confirm_5pct_v1",
+            "phase7_quality_residual_confirm_10pct_v1",
+            "phase7_blend_quality_growth_v1",
+            "phase7_blend_recovery_tilt_v1",
+            "phase7_event_surprise_v1",
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            "phase7_quality_event_reaction_segments_overlay_v1",
+        ]);
+        config.prediction_set_ids = Vec::new();
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_state_alpha_overlay_selector_v1".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.event_gate_profiles = vec![EventGateProfile::off()];
+        config.seed_trials = professional_trainable_alpha_admission_discovery_seed_trials();
         config
     }
 
@@ -23535,6 +26527,1176 @@ mod tests {
             assert!(!serialized.contains("phase7_cashflow_quality_v1"));
             assert!(!serialized.contains("2017"));
             assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_execution_broad_financial_feature_stratified_discovery_profile_diversifies_small_budgets(
+    ) {
+        let config = LayeredSearchConfig::professional_execution_broad_financial_feature_stratified_discovery_default();
+        let first_four_combos = config
+            .seed_trials
+            .iter()
+            .take(4)
+            .map(|trial| trial["combo_name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        let first_four_directions = config
+            .seed_trials
+            .iter()
+            .take(4)
+            .map(|trial| trial["score_direction"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        assert!(first_four_combos.contains(&"phase7_financial_quality_v1"));
+        assert!(first_four_combos.contains(&"phase7_growth_recovery_v1"));
+        assert!(first_four_combos.contains(&"phase7_industry_residual_quality_v1"));
+        assert!(first_four_combos.contains(&"phase7_quality_relative_strength_v1"));
+        assert!(first_four_directions.contains(&"ascending"));
+        assert!(first_four_directions.contains(&"descending"));
+        for seed in config.seed_trials.iter().take(8) {
+            assert_eq!(
+                seed["broad_financial_feature_sampling"],
+                "stratified_seed_v1"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("phase7_dividend_quality_v1"));
+            assert!(!serialized.contains("phase7_cashflow_quality_v1"));
+        }
+    }
+
+    #[test]
+    fn professional_execution_native_alpha_fusion_discovery_profile_combines_broad_event_prediction_sources(
+    ) {
+        let config =
+            LayeredSearchConfig::professional_execution_native_alpha_fusion_discovery_default();
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(combo_names.contains(&"phase7_financial_quality_v1"));
+        assert!(combo_names.contains(&"phase7_industry_residual_quality_v1"));
+        assert!(combo_names.contains(&"phase7_growth_recovery_v1"));
+        assert!(combo_names.contains(&"phase7_quality_relative_strength_v1"));
+        assert!(combo_names.contains(&"phase7_event_surprise_v1"));
+        assert!(
+            !combo_names.contains(&"phase7_quality_event_surprise_confirm_v1"),
+            "sparse event surprise confirmation should be used as a gate/overlay, not as an FJ base combo"
+        );
+        assert!(combo_names.contains(&"phase7_quality_event_reaction_segments_overlay_v1"));
+        assert_eq!(
+            config.prediction_set_ids,
+            vec!["pred-p7-wf-wide-qgvrel-v1-201602-202605".to_string()]
+        );
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_state_alpha_overlay_selector_v1".to_string()));
+        assert!(config
+            .candidate_ranking_profiles
+            .contains(&"capacity_aware_alpha_liquidity_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+
+        let first_four_families = config
+            .seed_trials
+            .iter()
+            .take(4)
+            .map(|trial| trial["alpha_source_family"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert!(
+            first_four_families.contains(&"broad_financial"),
+            "tiny FJ smoke should cover broad financial"
+        );
+        assert!(
+            first_four_families.contains(&"event_surprise"),
+            "tiny FJ smoke should cover event surprise"
+        );
+        assert!(
+            first_four_families.contains(&"event_reaction"),
+            "tiny FJ smoke should cover event reaction"
+        );
+        assert!(
+            first_four_families.contains(&"prediction_confirmation"),
+            "tiny FJ smoke should cover prediction confirmation"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["native_alpha_fusion_profile"] == "broad_financial_core"
+                && trial["alpha_source_family"] == "broad_financial"
+                && trial["broad_financial_feature_sampling"] == "stratified_seed_v1"
+        }));
+        let event_surprise_seed = config
+            .seed_trials
+            .iter()
+            .find(|trial| trial["alpha_source_family"] == "event_surprise")
+            .expect("phase7_fj should include an event surprise seed");
+        assert_eq!(
+            event_surprise_seed["combo_name"],
+            "phase7_financial_quality_v1"
+        );
+        assert_eq!(
+            event_surprise_seed["event_gate_combo_name"],
+            "phase7_event_surprise_v1"
+        );
+        assert_ne!(
+            event_surprise_seed["combo_name"],
+            "phase7_quality_event_surprise_confirm_v1"
+        );
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["native_alpha_fusion_profile"] == "event_reaction_segments"
+                && trial["alpha_source_family"] == "event_reaction"
+                && trial["combo_name"] == "phase7_quality_event_reaction_segments_overlay_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["native_alpha_fusion_profile"] == "prediction_confirmation"
+                && trial["alpha_source_family"] == "prediction_confirmation"
+                && trial["prediction_set_id"] == "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+        }));
+        let prediction_seed = config
+            .seed_trials
+            .iter()
+            .find(|trial| trial["alpha_source_family"] == "prediction_confirmation")
+            .expect("phase7_fj should include a prediction confirmation seed");
+        assert_eq!(
+            prediction_seed["candidate_ranking"],
+            "capacity_aware_alpha_liquidity_v1"
+        );
+        assert_eq!(
+            prediction_seed["capacity_risk_budget"],
+            "capacity_stress_participation_alpha_headroom_floor_70_v1"
+        );
+        assert_eq!(prediction_seed["max_position_pct"], "0.08");
+        assert_eq!(prediction_seed["universe_profile"], "listed_non_st");
+
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("phase7_dividend_quality_v1"));
+            assert!(!serialized.contains("phase7_cashflow_quality_v1"));
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_trainable_alpha_admission_discovery_profile_keeps_base_sources_trainable() {
+        let config =
+            LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(combo_names.contains("phase7_financial_quality_v1"));
+        assert!(combo_names.contains("phase7_industry_residual_quality_v1"));
+        assert!(combo_names.contains("phase7_growth_recovery_v1"));
+        assert!(combo_names.contains("phase7_quality_relative_strength_v1"));
+        assert!(combo_names.contains("phase7_quality_cashflow_dividend_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_value_recovery_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_residual_confirm_10pct_v1"));
+        for combo_name in &combo_names {
+            assert!(
+                is_phase7_base_trainable_alpha(combo_name),
+                "{combo_name} must be admitted as a trainable Phase 7 base alpha"
+            );
+        }
+        for forbidden_base in [
+            "phase7_event_earnings_v1",
+            "phase7_event_surprise_v1",
+            "phase7_event_window_earnings_v1",
+            "phase7_quality_event_window_overlay_v1",
+            "phase7_quality_event_surprise_confirm_v1",
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            "phase7_quality_event_reaction_segments_overlay_v1",
+            "phase7_quality_event_reaction_reversal_overlay_v1",
+        ] {
+            assert!(
+                !combo_names.contains(forbidden_base),
+                "{forbidden_base} must not enter the trainable base combo universe"
+            );
+        }
+
+        let first_six_families = config
+            .seed_trials
+            .iter()
+            .take(6)
+            .map(|trial| trial["alpha_source_family"].as_str().unwrap_or_default())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(first_six_families.contains("broad_financial"));
+        assert!(first_six_families.contains("residual_confirm"));
+        assert!(first_six_families.contains("value_recovery"));
+
+        for seed in &config.seed_trials {
+            let combo_name = seed["combo_name"].as_str().unwrap_or_default();
+            assert!(
+                is_phase7_base_trainable_alpha(combo_name),
+                "{combo_name} seed base must be trainable"
+            );
+            assert_ne!(
+                seed["alpha_source_family"], "event_reaction",
+                "stale event reaction overlays must not be part of trainable admission seeds"
+            );
+            if let Some(event_gate_combo_name) = seed["event_gate_combo_name"].as_str() {
+                assert_eq!(
+                    phase7_alpha_source_admission(event_gate_combo_name).role,
+                    Phase7AlphaSourceRole::EventGateOnly
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn professional_prediction_capacity_dual_objective_profile_bridges_return_and_tradability() {
+        let config = LayeredSearchConfig::professional_prediction_capacity_dual_objective_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            vec!["pred-p7-wf-wide-qgvrel-v1-201602-202605".to_string()]
+        );
+        assert_eq!(
+            config.top_n,
+            vec![20, 40, 60],
+            "FL should expand candidate count gradually from the positive prediction bridge"
+        );
+        assert_eq!(
+            config.max_position_pct,
+            vec![Decimal::new(15, 2), Decimal::new(10, 2), Decimal::new(8, 2)]
+        );
+        assert_eq!(
+            config.candidate_ranking_profiles,
+            vec![
+                "off".to_string(),
+                "alpha_first_low_impact_v1".to_string(),
+                "capacity_aware_alpha_liquidity_v1".to_string(),
+            ]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config.capacity_risk_budget_profiles.contains(
+            &"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()
+        ));
+        assert_eq!(
+            config.execution_schedule_profiles,
+            vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()]
+        );
+        assert_eq!(
+            config.partial_rebalance_ratio,
+            vec![Decimal::ONE, Decimal::new(35, 2), Decimal::new(25, 2)]
+        );
+
+        let first_four_profiles = config
+            .seed_trials
+            .iter()
+            .take(4)
+            .map(|trial| {
+                trial["prediction_capacity_dual_objective_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(first_four_profiles.contains(&"return_anchor_capacity_off"));
+        assert!(first_four_profiles.contains(&"alpha_first_twap15_headroom70"));
+        assert!(first_four_profiles.contains(&"capacity_aware_twap15_headroom70"));
+        assert!(first_four_profiles.contains(&"capacity_aware_twap20_blended_headroom70"));
+
+        let return_anchor = config
+            .seed_trials
+            .iter()
+            .find(|trial| {
+                trial["prediction_capacity_dual_objective_profile"] == "return_anchor_capacity_off"
+            })
+            .expect("FL should retain the original positive prediction bridge shape");
+        let original_bridge = professional_prediction_confirmed_sharpe_bridge_seed_trials()
+            .into_iter()
+            .next()
+            .expect("prediction bridge should have a return anchor");
+        assert_eq!(return_anchor["candidate_ranking"], "off");
+        assert_eq!(return_anchor["capacity_risk_budget"], "off");
+        assert_eq!(return_anchor["max_position_pct"], "0.15");
+        assert_eq!(return_anchor["partial_rebalance_ratio"], "1");
+        assert_eq!(
+            return_anchor.get("execution_schedule_profile"),
+            original_bridge.get("execution_schedule_profile"),
+            "return anchor must preserve the original prediction bridge timing fields"
+        );
+        assert_eq!(
+            return_anchor.get("capacity_penalty_strength"),
+            original_bridge.get("capacity_penalty_strength"),
+            "return anchor must not rewrite the original bridge capacity penalty"
+        );
+        assert_eq!(
+            return_anchor.get("cash_utilization"),
+            original_bridge.get("cash_utilization"),
+            "return anchor must not add fill-repair cash utilization"
+        );
+
+        let capacity_seed = config
+            .seed_trials
+            .iter()
+            .find(|trial| {
+                trial["prediction_capacity_dual_objective_profile"]
+                    == "capacity_aware_twap20_blended_headroom70"
+            })
+            .expect("FL should include a stricter capacity-aware prediction neighbor");
+        assert_eq!(
+            capacity_seed["candidate_ranking"],
+            "capacity_aware_alpha_liquidity_v1"
+        );
+        assert_eq!(
+            capacity_seed["capacity_risk_budget"],
+            "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+        );
+        assert_eq!(capacity_seed["execution_schedule_profile"], "twap_20d_v1");
+        assert_eq!(capacity_seed["partial_rebalance_ratio"], "0.25");
+        assert_eq!(capacity_seed["max_position_pct"], "0.08");
+        assert_eq!(capacity_seed["universe_profile"], "listed_non_st");
+
+        for seed in &config.seed_trials {
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_prediction_target_gross_signal_fidelity_profile_scales_exposure_only() {
+        let config =
+            LayeredSearchConfig::professional_prediction_target_gross_signal_fidelity_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            vec!["pred-p7-wf-wide-qgvrel-v1-201602-202605".to_string()]
+        );
+        assert_eq!(
+            config.max_gross_exposure,
+            vec![
+                Decimal::new(35, 2),
+                Decimal::new(50, 2),
+                Decimal::new(65, 2),
+                Decimal::new(80, 2),
+                Decimal::ONE,
+            ]
+        );
+        assert_eq!(config.candidate_ranking_profiles, vec!["off".to_string()]);
+        assert_eq!(
+            config.capacity_risk_budget_profiles,
+            vec!["off".to_string()]
+        );
+        assert_eq!(config.cash_utilization_profiles, vec!["off".to_string()]);
+        assert_eq!(
+            config.execution_schedule_profiles,
+            vec!["immediate".to_string()]
+        );
+
+        let first_four_profiles = config
+            .seed_trials
+            .iter()
+            .take(4)
+            .map(|trial| {
+                trial["prediction_target_gross_signal_fidelity_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(first_four_profiles.contains(&"gross100_return_anchor"));
+        assert!(first_four_profiles.contains(&"gross65_signal_fidelity"));
+        assert!(first_four_profiles.contains(&"gross50_signal_fidelity"));
+        assert!(first_four_profiles.contains(&"gross35_signal_fidelity"));
+
+        let original_bridge = professional_prediction_confirmed_sharpe_bridge_seed_trials()
+            .into_iter()
+            .next()
+            .expect("prediction bridge should have a return anchor");
+        let gross65 = config
+            .seed_trials
+            .iter()
+            .find(|trial| {
+                trial["prediction_target_gross_signal_fidelity_profile"]
+                    == "gross65_signal_fidelity"
+            })
+            .expect("FM should include gross65 signal-fidelity seed");
+        assert_eq!(gross65["max_gross_exposure"], "0.65");
+        assert_eq!(gross65["candidate_ranking"], "off");
+        assert_eq!(gross65["capacity_risk_budget"], "off");
+        assert_eq!(gross65["cash_utilization"], "off");
+        assert_eq!(
+            gross65.get("execution_schedule_profile"),
+            original_bridge.get("execution_schedule_profile"),
+            "FM should not change prediction bridge execution timing"
+        );
+        assert_eq!(
+            gross65["prediction_set_id"],
+            original_bridge["prediction_set_id"]
+        );
+        assert_eq!(
+            gross65["prediction_blend_weight"],
+            original_bridge["prediction_blend_weight"]
+        );
+
+        for seed in &config.seed_trials {
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_prediction_confidence_turnover_discovery_profile_gates_prediction_and_turnover()
+    {
+        let config =
+            LayeredSearchConfig::professional_prediction_confidence_turnover_discovery_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FN keeps prediction as a PIT confirmation overlay on factor_combo seeds, not as a standalone model_prediction source"
+        );
+        assert_eq!(
+            config.rebalance_days,
+            vec![120, 160, 200],
+            "FN should explore longer holding horizons instead of the high-turnover bridge default"
+        );
+        assert_eq!(
+            config.rebalance_hysteresis_pct,
+            vec![
+                Decimal::ZERO,
+                Decimal::new(5, 3),
+                Decimal::new(1, 2),
+                Decimal::new(2, 2),
+            ]
+        );
+        assert_eq!(
+            config.partial_rebalance_ratio,
+            vec![
+                Decimal::ONE,
+                Decimal::new(85, 2),
+                Decimal::new(75, 2),
+                Decimal::new(65, 2),
+            ]
+        );
+        assert_eq!(
+            config.execution_impact_budget_profiles,
+            vec![
+                "off".to_string(),
+                "impact_turnover_20pct_v1".to_string(),
+                "impact_turnover_15pct_v1".to_string(),
+            ]
+        );
+
+        let first_four_profiles = config
+            .seed_trials
+            .iter()
+            .take(4)
+            .map(|trial| {
+                trial["prediction_confidence_turnover_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(first_four_profiles.contains(&"return_anchor_confidence_off"));
+        assert!(first_four_profiles.contains(&"confidence20_turnover_smooth"));
+        assert!(first_four_profiles.contains(&"confidence30_turnover_smooth"));
+        assert!(first_four_profiles.contains(&"confidence40_low_turnover"));
+
+        let return_anchor = config
+            .seed_trials
+            .iter()
+            .find(|trial| {
+                trial["prediction_confidence_turnover_profile"] == "return_anchor_confidence_off"
+            })
+            .expect("FN should retain the FM/bridge return anchor before confidence gating");
+        let original_bridge = professional_prediction_confirmed_sharpe_bridge_seed_trials()
+            .into_iter()
+            .next()
+            .expect("prediction bridge should have a return anchor");
+        assert_eq!(
+            return_anchor.get("prediction_min_percentile"),
+            original_bridge.get("prediction_min_percentile")
+        );
+        assert_eq!(
+            return_anchor["prediction_blend_weight"],
+            original_bridge["prediction_blend_weight"]
+        );
+        assert_eq!(return_anchor["rebalance_hysteresis_pct"], "0");
+        assert_eq!(return_anchor["partial_rebalance_ratio"], "1");
+        assert_eq!(return_anchor["execution_impact_budget"], "off");
+        assert!(
+            return_anchor.get("execution_carry_policy").is_none(),
+            "off/default carry policy must not be serialized into trial parameters"
+        );
+        assert!(
+            return_anchor
+                .get("execution_rules")
+                .and_then(Value::as_object)
+                .and_then(|rules| rules.get("execution_carry_policy"))
+                .is_none(),
+            "off/default carry policy must not be serialized into execution_rules"
+        );
+
+        let confidence30 = config
+            .seed_trials
+            .iter()
+            .find(|trial| {
+                trial["prediction_confidence_turnover_profile"] == "confidence30_turnover_smooth"
+            })
+            .expect("FN should include a prediction confidence gate plus turnover smoothing seed");
+        assert_eq!(
+            confidence30["prediction_set_id"],
+            "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+        );
+        assert_eq!(confidence30["prediction_min_percentile"], "0.30");
+        assert_eq!(confidence30["prediction_blend_weight"], "0.05");
+        assert_eq!(confidence30["rebalance"], "160");
+        assert_eq!(confidence30["rebalance_hysteresis_pct"], "0.01");
+        assert_eq!(confidence30["partial_rebalance_ratio"], "0.75");
+        assert_eq!(
+            confidence30["execution_impact_budget"],
+            "impact_turnover_20pct_v1"
+        );
+        assert_eq!(confidence30["execution_carry_policy"], "roll_forward_v1");
+
+        let confidence40 = config
+            .seed_trials
+            .iter()
+            .find(|trial| {
+                trial["prediction_confidence_turnover_profile"] == "confidence40_low_turnover"
+            })
+            .expect("FN should include a stricter low-turnover confidence seed");
+        assert_eq!(confidence40["prediction_min_percentile"], "0.40");
+        assert_eq!(confidence40["rebalance"], "200");
+        assert_eq!(confidence40["partial_rebalance_ratio"], "0.65");
+        assert_eq!(
+            confidence40["execution_impact_budget"],
+            "impact_turnover_15pct_v1"
+        );
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(seed["combo_name"], "phase7_financial_quality_v1");
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_prediction_confidence_alpha_lift_profile_preserves_low_gap_structure_and_adds_alpha_lift(
+    ) {
+        let config = LayeredSearchConfig::professional_prediction_confidence_alpha_lift_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FO keeps prediction as a PIT confirmation overlay on factor_combo seeds, not as a standalone model_prediction source"
+        );
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<Vec<_>>();
+        assert!(combo_names.contains(&"phase7_financial_quality_v1"));
+        assert!(combo_names.contains(&"phase7_quality_value_recovery_confirm_v1"));
+        assert!(combo_names.contains(&"phase7_quality_event_post_return_curve_overlay_v1"));
+        assert!(combo_names.contains(&"phase7_quality_event_reaction_segments_overlay_v1"));
+        assert!(combo_names.contains(&"phase7_quality_event_reaction_reversal_overlay_v1"));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_event_window_return_sharpe_router_v4".to_string()));
+
+        let profile_names = config
+            .seed_trials
+            .iter()
+            .map(|trial| {
+                trial["prediction_confidence_alpha_lift_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(profile_names.contains(&"confidence40_quality_nonlinear_alpha_lift"));
+        assert!(profile_names.contains(&"confidence40_value_recovery_alpha_lift"));
+        assert!(profile_names.contains(&"confidence40_event_post_curve_lift"));
+        assert!(profile_names.contains(&"confidence40_event_reaction_segments_lift"));
+        assert!(profile_names.contains(&"confidence40_event_reaction_reversal_lift"));
+
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
+                && trial["prediction_confidence_alpha_lift_family"] == "nonlinear_regime"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_post_return_curve_overlay_v1"
+                && trial["prediction_confidence_alpha_lift_family"] == "event_post_curve"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_reaction_segments_overlay_v1"
+                && trial["prediction_confidence_alpha_lift_family"] == "event_reaction"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_quality_event_reaction_reversal_overlay_v1"
+                && trial["prediction_confidence_alpha_lift_family"] == "event_reaction"
+        }));
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-v1-201602-202605"
+            );
+            assert!(
+                matches!(
+                    seed["prediction_min_percentile"].as_str(),
+                    Some("0.35" | "0.40")
+                ),
+                "FO should preserve a confidence gate around FN's low-gap anchor"
+            );
+            assert!(
+                matches!(seed["rebalance"].as_str(), Some("160" | "200")),
+                "FO should keep longer holding periods to avoid rebuilding high-turnover trials"
+            );
+            assert!(
+                matches!(
+                    seed["rebalance_hysteresis_pct"].as_str(),
+                    Some("0.01" | "0.02")
+                ),
+                "FO should keep hysteresis from FN"
+            );
+            assert!(
+                matches!(
+                    seed["partial_rebalance_ratio"].as_str(),
+                    Some("0.65" | "0.75")
+                ),
+                "FO should keep partial rebalance smoothing from FN"
+            );
+            assert!(
+                matches!(
+                    seed["execution_impact_budget"].as_str(),
+                    Some("impact_turnover_15pct_v1" | "impact_turnover_20pct_v1")
+                ),
+                "FO should keep impact-aware execution budgets"
+            );
+            assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_prediction_long_horizon_low_turnover_profile_uses_h60_overlay() {
+        let config =
+            LayeredSearchConfig::professional_prediction_long_horizon_low_turnover_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FP should use long-horizon PIT prediction as an overlay in factor_combo seeds, not standalone model_prediction trials"
+        );
+        assert_eq!(
+            config.rebalance_days,
+            vec![200, 240],
+            "FP should stay on low-turnover holding periods instead of rebuilding high-turnover prediction trials"
+        );
+        assert_eq!(
+            config.rebalance_hysteresis_pct,
+            vec![Decimal::new(2, 2), Decimal::new(3, 2)]
+        );
+        assert_eq!(
+            config.partial_rebalance_ratio,
+            vec![Decimal::new(65, 2), Decimal::new(60, 2)]
+        );
+        assert_eq!(
+            config.execution_impact_budget_profiles,
+            vec!["impact_turnover_15pct_v1".to_string()]
+        );
+        assert_eq!(
+            config.execution_carry_policy_profiles,
+            vec!["roll_forward_v1".to_string()]
+        );
+
+        let profiles = config
+            .seed_trials
+            .iter()
+            .map(|trial| {
+                trial["prediction_long_horizon_low_turnover_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(profiles.contains(&"h60_confidence40_low_turnover_quality"));
+        assert!(profiles.contains(&"h60_confidence50_low_turnover_quality"));
+        assert!(profiles.contains(&"h60_confidence40_gross65_signal_fidelity"));
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605"
+            );
+            assert!(
+                matches!(
+                    seed["prediction_min_percentile"].as_str(),
+                    Some("0.40" | "0.50")
+                ),
+                "FP should require a high-confidence long-horizon prediction gate"
+            );
+            assert!(
+                matches!(seed["rebalance"].as_str(), Some("200" | "240")),
+                "FP should preserve low-turnover timing"
+            );
+            assert!(
+                matches!(
+                    seed["rebalance_hysteresis_pct"].as_str(),
+                    Some("0.02" | "0.03")
+                ),
+                "FP should keep a material hysteresis band"
+            );
+            assert!(
+                matches!(
+                    seed["partial_rebalance_ratio"].as_str(),
+                    Some("0.60" | "0.65")
+                ),
+                "FP should keep partial rebalance smoothing"
+            );
+            assert_eq!(seed["execution_impact_budget"], "impact_turnover_15pct_v1");
+            assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+
+        let gross65 = config
+            .seed_trials
+            .iter()
+            .find(|trial| {
+                trial["prediction_long_horizon_low_turnover_profile"]
+                    == "h60_confidence40_gross65_signal_fidelity"
+            })
+            .expect("FP should include a lower gross exposure signal-fidelity neighbor");
+        assert_eq!(gross65["max_gross_exposure"], "0.65");
+    }
+
+    #[test]
+    fn professional_prediction_long_horizon_regime_alpha_profile_keeps_h60_overlay_and_adds_return_sources(
+    ) {
+        let config =
+            LayeredSearchConfig::professional_prediction_long_horizon_regime_alpha_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FR should use H60 prediction as a PIT overlay, not standalone model_prediction trials"
+        );
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_event_window_return_sharpe_router_v4".to_string()));
+
+        let profiles = config
+            .seed_trials
+            .iter()
+            .map(|trial| {
+                trial["prediction_long_horizon_regime_alpha_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(profiles.contains(&"h60_value_recovery_regime_alpha"));
+        assert!(profiles.contains(&"h60_event_post_curve_regime_alpha"));
+        assert!(profiles.contains(&"h60_relative_strength_regime_alpha"));
+        assert!(
+            config.seed_trials.len() >= 8,
+            "FR should provide enough H60 overlay seeds for tiny 8-trial strict smoke without falling back to generic cartesian trials"
+        );
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605"
+            );
+            assert_eq!(seed["prediction_label_horizon_days"], 60);
+            assert!(
+                matches!(seed["rebalance"].as_str(), Some("160" | "180" | "200")),
+                "FR should stay in long-horizon, low-turnover timing"
+            );
+            assert!(
+                matches!(
+                    seed["prediction_min_percentile"].as_str(),
+                    Some("0.35" | "0.40" | "0.45")
+                ),
+                "FR should keep H60 confidence gating"
+            );
+            assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
+            assert!(
+                seed["prediction_long_horizon_regime_alpha_family"].is_string(),
+                "FR should tag alpha source family for attribution"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_prediction_h60_nonlinear_stress_discovery_profile_combines_ranking_and_fill() {
+        let config =
+            LayeredSearchConfig::professional_prediction_h60_nonlinear_stress_discovery_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FW should use H60 prediction as a PIT overlay in factor_combo seeds, not standalone model_prediction trials"
+        );
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_mixed_orthogonal_risk_memory_router_v3".to_string()));
+        assert_eq!(config.rebalance_days, vec![180, 220, 260]);
+        assert_eq!(
+            config.execution_carry_policy_profiles,
+            vec!["roll_forward_v1"]
+        );
+        assert!(config
+            .candidate_ranking_profiles
+            .contains(&"relative_strength_alpha_liquidity_v1".to_string()));
+        assert!(config
+            .candidate_ranking_profiles
+            .contains(&"alpha_first_low_impact_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config
+            .cash_utilization_profiles
+            .contains(&"stress_fill_gross_98_v1".to_string()));
+        assert!(
+            config.seed_trials.len() >= 8,
+            "FW needs enough seed trials for an 8-trial strict smoke without generic cartesian spillover"
+        );
+
+        let profiles = config
+            .seed_trials
+            .iter()
+            .map(|trial| {
+                trial["prediction_h60_nonlinear_stress_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(profiles.contains(&"h60_fex_relative_strength_rank_fill70"));
+        assert!(profiles.contains(&"h60_fex_alpha_first_value_recovery_fill60"));
+        assert!(profiles.contains(&"h60_raex_nonlinear_quality_rank_fill70"));
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605"
+            );
+            assert_eq!(seed["prediction_label_horizon_days"], 60);
+            assert!(
+                matches!(seed["rebalance"].as_str(), Some("180" | "220" | "260")),
+                "FW should stay close to H60 holding periods"
+            );
+            assert!(
+                matches!(
+                    seed["candidate_ranking"].as_str(),
+                    Some(
+                        "relative_strength_alpha_liquidity_v1"
+                            | "alpha_first_low_impact_v1"
+                            | "capacity_aware_alpha_liquidity_v1"
+                    )
+                ),
+                "FW should test train-window ranking rather than raw score order only"
+            );
+            assert!(
+                matches!(
+                    seed["capacity_risk_budget"].as_str(),
+                    Some(
+                        "capacity_stress_participation_alpha_headroom_floor_60_v1"
+                            | "capacity_stress_participation_alpha_headroom_floor_70_v1"
+                            | "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+                    )
+                ),
+                "FW should keep stress-fill-aware capacity controls in every seed"
+            );
+            assert!(
+                matches!(
+                    seed["cash_utilization"].as_str(),
+                    Some("stress_fill_gross_98_v1" | "fillable_gross_95_v1")
+                ),
+                "FW should keep final fill observable during train-window robustness"
+            );
+            assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
+            assert!(
+                seed["prediction_h60_label_family"].is_string(),
+                "FW should tag whether the intended H60 overlay is excess or risk-adjusted excess"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_prediction_h120_low_impact_stress_discovery_profile_extends_horizon_without_relaxing_gates(
+    ) {
+        let config =
+            LayeredSearchConfig::professional_prediction_h120_low_impact_stress_discovery_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FZ should use H120 prediction as a PIT overlay in factor_combo seeds, not standalone model_prediction trials"
+        );
+        assert_eq!(config.rebalance_days, vec![240, 300, 360]);
+        assert_eq!(
+            config.execution_carry_policy_profiles,
+            vec!["roll_forward_v1"]
+        );
+        assert!(config
+            .candidate_ranking_profiles
+            .contains(&"alpha_first_low_impact_v1".to_string()));
+        assert!(config
+            .candidate_ranking_profiles
+            .contains(&"capacity_aware_alpha_liquidity_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config
+            .cash_utilization_profiles
+            .contains(&"stress_fill_gross_98_v1".to_string()));
+        assert!(
+            config.seed_trials.len() >= 8,
+            "FZ needs enough seed trials for an 8-trial strict smoke without generic cartesian spillover"
+        );
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(
+                seed["prediction_set_id"],
+                "pred-p7-wf-wide-qgvrel-h120-v1-201602-202605"
+            );
+            assert_eq!(seed["prediction_label_horizon_days"], 120);
+            assert!(
+                matches!(seed["rebalance"].as_str(), Some("240" | "300" | "360")),
+                "FZ should lengthen holding/rebalance cadence with H120 labels"
+            );
+            assert!(
+                matches!(
+                    seed["candidate_ranking"].as_str(),
+                    Some("alpha_first_low_impact_v1" | "capacity_aware_alpha_liquidity_v1")
+                ),
+                "FZ should prioritize low-impact/capacity-aware ranking"
+            );
+            assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
+            assert!(
+                matches!(
+                    seed["cash_utilization"].as_str(),
+                    Some("stress_fill_gross_98_v1" | "fillable_gross_95_v1")
+                ),
+                "FZ must keep fill observability in train-window robustness"
+            );
+            assert!(
+                seed["prediction_h120_low_impact_stress_profile"].is_string(),
+                "FZ should tag H120 low-impact profile for attribution"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_train_window_nonlinear_ranking_discovery_profile_is_prediction_free_and_stress_aware(
+    ) {
+        let config =
+            LayeredSearchConfig::professional_train_window_nonlinear_ranking_discovery_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FX should not depend on standalone prediction_set trials; it is a train-window ranking rebuild profile"
+        );
+        assert!(config
+            .candidate_ranking_profiles
+            .contains(&"nonlinear_regime_alpha_liquidity_v1".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert_eq!(
+            config.execution_carry_policy_profiles,
+            vec!["roll_forward_v1"]
+        );
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config
+            .cash_utilization_profiles
+            .contains(&"stress_fill_gross_98_v1".to_string()));
+        assert!(
+            config.seed_trials.len() >= 8,
+            "FX needs enough native train-window seeds for an 8-trial strict smoke"
+        );
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(
+                seed["candidate_ranking"],
+                "nonlinear_regime_alpha_liquidity_v1"
+            );
+            assert!(seed["train_window_nonlinear_ranking_profile"].is_string());
+            assert!(
+                seed.get("prediction_set_id").is_none(),
+                "FX seeds must not smuggle H60 prediction overlays into train-window ranking trials"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_train_window_stress_fill_target_exposure_profile_is_prediction_free_and_keeps_exposure_floor(
+    ) {
+        let config =
+            LayeredSearchConfig::professional_train_window_stress_fill_target_exposure_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "GA should be native train-window construction, not a prediction overlay profile"
+        );
+        assert_eq!(config.rebalance_days, vec![240, 300, 360]);
+        assert_eq!(
+            config.cash_utilization_profiles,
+            vec!["stress_fill_gross_98_v1"]
+        );
+        assert!(config
+            .candidate_ranking_profiles
+            .contains(&"nonlinear_regime_alpha_liquidity_v1".to_string()));
+        assert!(config
+            .capacity_risk_budget_profiles
+            .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
+        assert!(config.capacity_risk_budget_profiles.contains(
+            &"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()
+        ));
+        assert!(
+            config.seed_trials.len() >= 8,
+            "GA needs enough native stress-fill target-exposure seeds for an 8-trial strict smoke"
+        );
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert_eq!(
+                seed["candidate_ranking"],
+                "nonlinear_regime_alpha_liquidity_v1"
+            );
+            assert_eq!(seed["cash_utilization"], "stress_fill_gross_98_v1");
+            assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
+            assert_eq!(seed["execution_impact_budget"], "impact_turnover_15pct_v1");
+            assert!(seed["train_window_stress_fill_target_exposure_profile"].is_string());
+            assert!(
+                matches!(
+                    seed["capacity_risk_budget"].as_str(),
+                    Some(
+                        "capacity_stress_participation_alpha_headroom_floor_60_v1"
+                            | "capacity_stress_participation_alpha_headroom_floor_70_v1"
+                            | "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+                    )
+                ),
+                "GA should force stress-fill-aware target exposure construction"
+            );
+            assert!(
+                matches!(seed["rebalance"].as_str(), Some("240" | "300")),
+                "GA seeds should use longer-hold train-window construction"
+            );
+            assert!(
+                seed.get("prediction_set_id").is_none(),
+                "GA seeds must not smuggle prediction overlays into native train-window construction"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+        }
+    }
+
+    #[test]
+    fn professional_current_event_nonlinear_alpha_discovery_profile_uses_only_current_event_sources(
+    ) {
+        let config =
+            LayeredSearchConfig::professional_current_event_nonlinear_alpha_discovery_default();
+
+        assert_eq!(
+            config.prediction_set_ids,
+            Vec::<String>::new(),
+            "FS should be a native event/nonlinear alpha profile, not another prediction overlay"
+        );
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_mixed_orthogonal_risk_memory_router_v3".to_string()));
+        assert!(config
+            .market_regime_policies
+            .contains(&"quality_event_window_return_sharpe_router_v4".to_string()));
+
+        let profiles = config
+            .seed_trials
+            .iter()
+            .map(|trial| {
+                trial["current_event_nonlinear_alpha_profile"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert!(profiles.contains(&"cm_event_surprise_boost_p75"));
+        assert!(profiles.contains(&"cm_event_surprise_boost_p90"));
+        assert!(profiles.contains(&"cl_event_window_40d_exclude_negative"));
+        assert!(profiles.contains(&"cl_residual_confirm_router"));
+        assert!(
+            config.seed_trials.len() >= 8,
+            "FS should provide enough current-event seeds for an 8-trial smoke without generic cartesian spillover"
+        );
+
+        for seed in &config.seed_trials {
+            assert_eq!(seed["signal_source"], "factor_combo");
+            assert!(
+                seed.get("prediction_set_id").is_none(),
+                "FS should not inherit H60 or short-horizon prediction overlays"
+            );
+            assert_ne!(
+                seed["combo_name"], "phase7_quality_event_surprise_confirm_v1",
+                "FS should not use the low-coverage event surprise confirmation combo as a base"
+            );
+            let serialized = seed.to_string();
+            assert!(!serialized.contains("event_reaction"));
+            assert!(!serialized.contains("post_return_curve"));
+            assert!(!serialized.contains("2017"));
+            assert!(!serialized.contains("2020"));
+            assert!(
+                seed["current_event_nonlinear_alpha_family"].is_string(),
+                "FS should tag alpha source family for attribution"
+            );
         }
     }
 
@@ -28694,15 +32856,18 @@ mod tests {
             .iter()
             .map(|combo| combo.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(combo_names.contains("phase7_event_earnings_v1"));
-        assert!(combo_names.contains("phase7_event_surprise_v1"));
-        assert!(combo_names.contains("phase7_event_window_earnings_v1"));
-        assert!(combo_names.contains("phase7_quality_event_window_overlay_v1"));
-        assert!(combo_names.contains("phase7_quality_event_surprise_confirm_v1"));
+        assert!(!combo_names.contains("phase7_event_earnings_v1"));
+        assert!(!combo_names.contains("phase7_event_surprise_v1"));
+        assert!(!combo_names.contains("phase7_event_window_earnings_v1"));
+        assert!(!combo_names.contains("phase7_quality_event_window_overlay_v1"));
+        assert!(!combo_names.contains("phase7_quality_event_surprise_confirm_v1"));
         assert!(combo_names.contains("phase7_quality_value_recovery_confirm_v1"));
-        assert!(combo_names.contains("phase7_quality_value_recovery_event_confirm_v1"));
+        assert!(!combo_names.contains("phase7_quality_value_recovery_event_confirm_v1"));
         assert!(combo_names.contains("phase7_financial_quality_v1"));
-        assert!(combo_names.contains("phase7_quality_event_confirm_v1"));
+        assert!(!combo_names.contains("phase7_quality_event_confirm_v1"));
+        assert!(combo_names.contains("phase7_quality_moneyflow_pos_5pct_v1"));
+        assert!(combo_names.contains("phase7_blend_quality_growth_v1"));
+        assert!(combo_names.contains("phase7_blend_recovery_tilt_v1"));
         assert!(config
             .style_risk_budget_profiles
             .contains(&"liquidity_volatility_balanced_v1".to_string()));
@@ -28723,37 +32888,26 @@ mod tests {
                 && trial["stop_loss_pct"] == "0.075"
                 && trial["reentry_cooldown_days"] == 30
         }));
+        for event_like_combo in [
+            "phase7_event_earnings_v1",
+            "phase7_event_surprise_v1",
+            "phase7_event_window_earnings_v1",
+            "phase7_quality_event_window_overlay_v1",
+            "phase7_quality_event_surprise_confirm_v1",
+            "phase7_quality_event_confirm_v1",
+            "phase7_quality_value_recovery_event_confirm_v1",
+        ] {
+            assert!(
+                !config
+                    .seed_trials
+                    .iter()
+                    .any(|trial| trial["combo_name"] == event_like_combo),
+                "{event_like_combo} must not be used as a base alpha in Phase 7-W trainable seeds"
+            );
+        }
         assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_event_earnings_v1"
-                && trial["score_direction"] == "descending"
-        }));
-        assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_event_earnings_v1"
-                && trial["score_direction"] == "ascending"
-        }));
-        assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_event_surprise_v1"
-                && trial["score_direction"] == "descending"
-        }));
-        assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_event_surprise_v1"
-                && trial["score_direction"] == "ascending"
-        }));
-        assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_event_window_earnings_v1"
-                && trial["score_direction"] == "descending"
-        }));
-        assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_event_window_earnings_v1"
-                && trial["score_direction"] == "ascending"
-        }));
-        assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
-                && trial["score_direction"] == "descending"
-        }));
-        assert!(config.seed_trials.iter().any(|trial| {
-            trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
-                && trial["score_direction"] == "ascending"
+            trial["event_gate_combo_name"] == "phase7_event_window_earnings_v1"
+                && trial["combo_name"] == "phase7_quality_value_recovery_confirm_v1"
         }));
 
         let plan = build_layered_search_plan(
@@ -28766,55 +32920,28 @@ mod tests {
             },
         );
 
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_event_earnings_v1"
-                && trial.parameters["score_direction"] == "descending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_event_earnings_v1"
-                && trial.parameters["score_direction"] == "ascending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_event_surprise_v1"
-                && trial.parameters["score_direction"] == "descending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_event_surprise_v1"
-                && trial.parameters["score_direction"] == "ascending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_event_window_earnings_v1"
-                && trial.parameters["score_direction"] == "descending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_event_window_earnings_v1"
-                && trial.parameters["score_direction"] == "ascending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_quality_event_window_overlay_v1"
-                && trial.parameters["score_direction"] == "descending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_quality_event_window_overlay_v1"
-                && trial.parameters["score_direction"] == "ascending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_quality_event_surprise_confirm_v1"
-                && trial.parameters["score_direction"] == "descending"
-        }));
-        assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_quality_event_surprise_confirm_v1"
-                && trial.parameters["score_direction"] == "ascending"
-        }));
+        for event_like_combo in [
+            "phase7_event_earnings_v1",
+            "phase7_event_surprise_v1",
+            "phase7_event_window_earnings_v1",
+            "phase7_quality_event_window_overlay_v1",
+            "phase7_quality_event_surprise_confirm_v1",
+            "phase7_quality_event_confirm_v1",
+            "phase7_quality_value_recovery_event_confirm_v1",
+        ] {
+            assert!(
+                !plan
+                    .trials
+                    .iter()
+                    .any(|trial| trial.parameters["combo_name"] == event_like_combo),
+                "{event_like_combo} must not be planned as a base alpha"
+            );
+        }
         assert!(plan.trials.iter().any(|trial| {
             trial.parameters["combo_name"] == "phase7_quality_value_recovery_confirm_v1"
         }));
-        assert!(plan
-            .trials
-            .iter()
-            .any(|trial| { trial.parameters["combo_name"] == "phase7_quality_event_confirm_v1" }));
         assert!(plan.trials.iter().any(|trial| {
-            trial.parameters["combo_name"] == "phase7_quality_value_recovery_event_confirm_v1"
+            trial.parameters["event_gate_combo_name"] == "phase7_event_window_earnings_v1"
         }));
     }
 
@@ -29029,6 +33156,38 @@ mod tests {
             assert_eq!(weight_sum, Decimal::ONE);
             assert!(profile.sources.len() >= 2);
         }
+    }
+
+    #[test]
+    fn phase7_alpha_source_admission_separates_trainable_base_from_sparse_event_sources() {
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_quality_cashflow_dividend_confirm_v1").role,
+            Phase7AlphaSourceRole::BaseTrainable
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_quality_value_recovery_confirm_v1").role,
+            Phase7AlphaSourceRole::BaseTrainable
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_event_surprise_v1").role,
+            Phase7AlphaSourceRole::EventGateOnly
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_quality_event_window_overlay_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_quality_event_surprise_confirm_v1").role,
+            Phase7AlphaSourceRole::Excluded
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_event_reaction_segments_20d_v1").role,
+            Phase7AlphaSourceRole::Excluded
+        );
+        assert!(
+            !is_phase7_base_trainable_alpha("phase7_event_window_earnings_v1"),
+            "sparse current event sources must stay as gates until rebuilt into broad optional overlays"
+        );
     }
 
     #[test]
