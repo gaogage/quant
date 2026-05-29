@@ -236,6 +236,8 @@ enum LabelObjective {
     FutureReturn,
     FutureExcessReturn,
     RiskAdjustedExcessReturn,
+    QualityAdjustedExcessReturn,
+    QualityAdjustedRiskAdjustedExcessReturn,
 }
 
 impl LabelObjective {
@@ -244,8 +246,12 @@ impl LabelObjective {
             None | Some("future_return") => Ok(Self::FutureReturn),
             Some("future_excess_return") => Ok(Self::FutureExcessReturn),
             Some("risk_adjusted_excess_return") => Ok(Self::RiskAdjustedExcessReturn),
+            Some("quality_adjusted_excess_return") => Ok(Self::QualityAdjustedExcessReturn),
+            Some("quality_adjusted_risk_adjusted_excess_return") => {
+                Ok(Self::QualityAdjustedRiskAdjustedExcessReturn)
+            }
             Some(other) => Err(format!(
-                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return; got {}",
+                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return; got {}",
                 other
             )),
         }
@@ -256,13 +262,27 @@ impl LabelObjective {
             Self::FutureReturn => "future_return",
             Self::FutureExcessReturn => "future_excess_return",
             Self::RiskAdjustedExcessReturn => "risk_adjusted_excess_return",
+            Self::QualityAdjustedExcessReturn => "quality_adjusted_excess_return",
+            Self::QualityAdjustedRiskAdjustedExcessReturn => {
+                "quality_adjusted_risk_adjusted_excess_return"
+            }
         }
     }
 
     fn requires_benchmark(self) -> bool {
         matches!(
             self,
-            Self::FutureExcessReturn | Self::RiskAdjustedExcessReturn
+            Self::FutureExcessReturn
+                | Self::RiskAdjustedExcessReturn
+                | Self::QualityAdjustedExcessReturn
+                | Self::QualityAdjustedRiskAdjustedExcessReturn
+        )
+    }
+
+    fn is_quality_adjusted(self) -> bool {
+        matches!(
+            self,
+            Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn
         )
     }
 }
@@ -2385,16 +2405,31 @@ fn linear_training_experiment_metrics(
 }
 
 fn label_definition_json(label_objective: LabelObjective, horizon_days: i64) -> Value {
+    let is_quality_adjusted = label_objective.is_quality_adjusted();
+    let quality_adjustment_value = if is_quality_adjusted {
+        json!({
+            "method": "trailing_volatility_and_max_drawdown_penalty",
+            "vol_lookback_days": 60,
+            "dd_lookback_days": 120,
+            "vol_floor": 0.25,
+            "dd_floor": 0.15,
+            "vol_weight": 1.5,
+            "dd_weight": 1.0
+        })
+    } else {
+        Value::Null
+    };
     json!({
         "label": label_objective.as_str(),
         "horizon_trading_days": horizon_days,
         "price": "close",
         "benchmark": if label_objective.requires_benchmark() { Some("000300.SH") } else { None::<&str> },
-        "risk_adjustment": if label_objective == LabelObjective::RiskAdjustedExcessReturn {
+        "risk_adjustment": if label_objective == LabelObjective::RiskAdjustedExcessReturn || label_objective == LabelObjective::QualityAdjustedRiskAdjustedExcessReturn {
             Some("forward_downside_volatility_floor_1pct")
         } else {
             None::<&str>
         },
+        "quality_adjustment": quality_adjustment_value,
         "point_in_time_policy": "labels are computed only inside the training window; prediction windows never contribute labels"
     })
 }
@@ -3241,6 +3276,28 @@ fn label_for_objective(
                 forward_downside_volatility(closes?, trade_date, max_label_date, horizon_days)?;
             Some((stock_return - benchmark_return) / downside_volatility.max(0.01))
         }
+        LabelObjective::QualityAdjustedExcessReturn => {
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
+            let quality = quality_adjustment(closes?, trade_date, 60, 120, 0.25, 0.15, 1.5, 1.0)?;
+            Some((stock_return - benchmark_return) * quality)
+        }
+        LabelObjective::QualityAdjustedRiskAdjustedExcessReturn => {
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
+            let downside_volatility =
+                forward_downside_volatility(closes?, trade_date, max_label_date, horizon_days)?;
+            let quality = quality_adjustment(closes?, trade_date, 60, 120, 0.25, 0.15, 1.5, 1.0)?;
+            Some((stock_return - benchmark_return) / downside_volatility.max(0.01) * quality)
+        }
     }
 }
 
@@ -3279,6 +3336,105 @@ fn forward_downside_volatility(
     }
     let mean = downside_squares.iter().sum::<f64>() / downside_squares.len() as f64;
     Some(mean.sqrt())
+}
+
+/// Trailing annualized volatility computed from daily returns over `lookback_days` prior to `trade_date`.
+/// Uses only data available at trade_date and requires a minimum of 20 valid daily returns.
+fn trailing_volatility(
+    closes: &[(NaiveDate, f64)],
+    trade_date: NaiveDate,
+    lookback_days: i64,
+) -> Option<f64> {
+    let current_idx = closes
+        .iter()
+        .position(|(date, close)| *date == trade_date && close.is_finite() && *close > 0.0)?;
+    let start_idx = current_idx.checked_sub(lookback_days as usize)?;
+    let window = &closes[start_idx..=current_idx];
+    let mut daily_returns = Vec::new();
+    for pair in window.windows(2) {
+        let prev = pair[0].1;
+        let curr = pair[1].1;
+        if !prev.is_finite() || !curr.is_finite() || prev <= 0.0 || curr <= 0.0 {
+            continue;
+        }
+        daily_returns.push((curr / prev) - 1.0);
+    }
+    if daily_returns.len() < 20 {
+        return None;
+    }
+    let mean = daily_returns.iter().sum::<f64>() / daily_returns.len() as f64;
+    let variance = daily_returns
+        .iter()
+        .map(|r| (r - mean) * (r - mean))
+        .sum::<f64>()
+        / (daily_returns.len() - 1) as f64;
+    Some(variance.sqrt() * (252_f64).sqrt())
+}
+
+/// Trailing maximum drawdown from peak over `lookback_days` prior to `trade_date`.
+/// Returns the drawdown as a positive decimal (e.g. 0.15 = 15% drawdown).
+fn trailing_max_drawdown(
+    closes: &[(NaiveDate, f64)],
+    trade_date: NaiveDate,
+    lookback_days: i64,
+) -> Option<f64> {
+    let current_idx = closes
+        .iter()
+        .position(|(date, close)| *date == trade_date && close.is_finite() && *close > 0.0)?;
+    let start_idx = current_idx.checked_sub(lookback_days as usize)?;
+    let window = &closes[start_idx..=current_idx];
+    let mut peak: f64 = 0.0;
+    let mut max_dd: f64 = 0.0;
+    for (_date, close) in window {
+        if !close.is_finite() || *close <= 0.0 {
+            continue;
+        }
+        if *close > peak {
+            peak = *close;
+        }
+        if peak > 0.0 {
+            let dd = (peak - *close) / peak;
+            if dd > max_dd {
+                max_dd = dd;
+            }
+        }
+    }
+    if peak <= 0.0 {
+        return None;
+    }
+    Some(max_dd)
+}
+
+/// Quality adjustment multiplier for label computation.
+/// Returns a value in (0.0, 1.0] where lower values indicate higher quality penalty.
+///
+/// The penalty is driven by two signals available PIT from price data:
+/// - Trailing 60-day annualized volatility (higher vol → larger penalty)
+/// - Trailing 120-day maximum drawdown (larger dd → larger penalty)
+///
+/// The adjustment formula:
+///   vol_penalty = max(0, trailing_vol - vol_floor) * vol_weight
+///   dd_penalty  = max(0, trailing_max_dd - dd_floor) * dd_weight
+///   multiplier  = 1.0 / (1.0 + vol_penalty + dd_penalty)
+///
+/// This ensures the multiplier is ≤ 1.0, so quality-adjusted labels are always
+/// conservative relative to raw excess returns.
+fn quality_adjustment(
+    closes: &[(NaiveDate, f64)],
+    trade_date: NaiveDate,
+    vol_lookback_days: i64,
+    dd_lookback_days: i64,
+    vol_floor: f64,
+    dd_floor: f64,
+    vol_weight: f64,
+    dd_weight: f64,
+) -> Option<f64> {
+    let vol = trailing_volatility(closes, trade_date, vol_lookback_days)?;
+    let max_dd = trailing_max_drawdown(closes, trade_date, dd_lookback_days)?;
+    let vol_penalty = (vol - vol_floor).max(0.0) * vol_weight;
+    let dd_penalty = (max_dd - dd_floor).max(0.0) * dd_weight;
+    let multiplier = 1.0 / (1.0 + vol_penalty + dd_penalty);
+    Some(multiplier)
 }
 
 fn fit_linear_weights(samples: &[TrainingSample], factor_count: usize) -> Vec<f64> {
@@ -4000,6 +4156,204 @@ mod tests {
         .expect("label");
 
         assert!((label - 0.21).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quality_adjusted_excess_return_penalizes_high_volatility_stocks() {
+        let days = 300;
+        let stable_closes: Vec<(NaiveDate, f64)> = (0..days)
+            .map(|i| {
+                (
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(i),
+                    10.0 + (i as f64 * 0.005),
+                )
+            })
+            .collect();
+        let volatile_closes: Vec<(NaiveDate, f64)> = (0..days)
+            .map(|i| {
+                let base = 10.0 + (i as f64 * 0.005);
+                let noise = (i as f64 * 0.3).sin() * 0.5;
+                (
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(i),
+                    base + noise,
+                )
+            })
+            .collect();
+        let benchmark_closes: Vec<(NaiveDate, f64)> = (0..days)
+            .map(|i| {
+                (
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(i),
+                    100.0 + (i as f64 * 0.003),
+                )
+            })
+            .collect();
+
+        // Use trade_date at day 150 so trailing lookback (60/120) and horizon (20) are within range
+        let trade_idx = 150usize;
+        let trade_date = stable_closes[trade_idx].0;
+        let horizon = 20i64;
+
+        let stable_label = label_for_objective(
+            LabelObjective::QualityAdjustedExcessReturn,
+            Some(&stable_closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            horizon,
+        );
+        let volatile_label = label_for_objective(
+            LabelObjective::QualityAdjustedExcessReturn,
+            Some(&volatile_closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            horizon,
+        );
+
+        assert!(stable_label.is_some(), "stable label should be computed");
+        assert!(
+            volatile_label.is_some(),
+            "volatile label should be computed"
+        );
+        let stable = stable_label.unwrap();
+        let volatile = volatile_label.unwrap();
+        // Both have similar price trends; stable has lower trailing vol,
+        // so quality adjustment penalizes the volatile stock more
+        assert!(
+            stable > volatile,
+            "stable_label={stable} should be > volatile_label={volatile}"
+        );
+    }
+
+    #[test]
+    fn quality_adjusted_risk_adjusted_excess_return_labels_are_smaller_than_raw_excess() {
+        let days = 300;
+        let closes: Vec<(NaiveDate, f64)> = (0..days)
+            .map(|i| {
+                (
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(i),
+                    10.0 + (i as f64 * 0.01),
+                )
+            })
+            .collect();
+        let benchmark_closes: Vec<(NaiveDate, f64)> = (0..days)
+            .map(|i| {
+                (
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(i),
+                    100.0 + (i as f64 * 0.003),
+                )
+            })
+            .collect();
+
+        let trade_idx = 150usize;
+        let trade_date = closes[trade_idx].0;
+        let horizon = 20i64;
+
+        let raw = label_for_objective(
+            LabelObjective::FutureExcessReturn,
+            Some(&closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            horizon,
+        )
+        .expect("raw excess return label");
+        let qa = label_for_objective(
+            LabelObjective::QualityAdjustedExcessReturn,
+            Some(&closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            horizon,
+        )
+        .expect("qa excess return label");
+        let qara = label_for_objective(
+            LabelObjective::QualityAdjustedRiskAdjustedExcessReturn,
+            Some(&closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            horizon,
+        )
+        .expect("qara label");
+
+        // Quality-adjusted should be ≤ raw excess in absolute magnitude
+        assert!(
+            qa.abs() <= raw.abs(),
+            "qa={qa} should be ≤ raw={raw} in magnitude"
+        );
+        // Both quality-adjusted labels should agree on direction with raw
+        assert!(
+            qara.is_sign_positive() == qa.is_sign_positive()
+                && qa.is_sign_positive() == raw.is_sign_positive(),
+            "qara={qara}, qa={qa}, raw={raw} should all have same sign"
+        );
+        // Quality-adjusted risk-adjusted = qa / downside_vol (can be larger due to low vol)
+        assert!(qara.is_finite() && qara != 0.0);
+    }
+
+    #[test]
+    fn label_definition_json_includes_quality_adjustment_for_new_objectives() {
+        let def = label_definition_json(LabelObjective::QualityAdjustedExcessReturn, 60);
+        assert_eq!(def["label"], "quality_adjusted_excess_return");
+        assert_eq!(def["benchmark"], "000300.SH");
+        assert!(def["quality_adjustment"].is_object());
+        assert_eq!(
+            def["quality_adjustment"]["method"],
+            "trailing_volatility_and_max_drawdown_penalty"
+        );
+
+        let def2 =
+            label_definition_json(LabelObjective::QualityAdjustedRiskAdjustedExcessReturn, 120);
+        assert_eq!(
+            def2["label"],
+            "quality_adjusted_risk_adjusted_excess_return"
+        );
+        assert_eq!(
+            def2["risk_adjustment"],
+            "forward_downside_volatility_floor_1pct"
+        );
+        assert!(def2["quality_adjustment"].is_object());
+    }
+
+    #[test]
+    fn trailing_volatility_computes_annualized_vol() {
+        let closes: Vec<(NaiveDate, f64)> = (0..=60)
+            .map(|i| {
+                (
+                    NaiveDate::from_ymd_opt(2025, 1, 1).unwrap() + chrono::Duration::days(i),
+                    10.0,
+                )
+            })
+            .collect();
+        let vol = trailing_volatility(&closes, NaiveDate::from_ymd_opt(2025, 2, 20).unwrap(), 40);
+        // Flat prices → near-zero volatility
+        assert!(vol.is_some());
+        assert!(vol.unwrap() < 0.01);
+    }
+
+    #[test]
+    fn trailing_max_drawdown_detects_drawdown() {
+        // Build a continuous daily sequence: flat at 10, then peak at 12, trough at 9, recovery to 11
+        let mut closes = Vec::new();
+        let base = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        // Index 0-79: flat at 10.0
+        for i in 0..80 {
+            closes.push((base + chrono::Duration::days(i as i64), 10.0));
+        }
+        // Index 80: peak at 12.0
+        closes.push((base + chrono::Duration::days(80), 12.0));
+        // Index 81: trough at 9.0 (drawdown 25%)
+        closes.push((base + chrono::Duration::days(81), 9.0));
+        // Index 82-99: recovery to 11.0
+        for i in 82..100 {
+            closes.push((base + chrono::Duration::days(i as i64), 11.0));
+        }
+        let trade_date = closes.last().unwrap().0;
+        let dd = trailing_max_drawdown(&closes, trade_date, 80);
+        assert!(dd.is_some(), "should compute max drawdown, got None");
+        // Max drawdown from peak 12.0 to trough 9.0 = 3.0/12.0 = 0.25
+        assert!((dd.unwrap() - 0.25).abs() < 1e-9);
     }
 
     #[test]

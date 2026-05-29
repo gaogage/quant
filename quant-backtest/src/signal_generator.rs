@@ -3662,6 +3662,7 @@ pub enum CandidateRankingProfile {
     AlphaFirstLowImpactV1,
     RelativeStrengthAlphaLiquidityV1,
     NonlinearRegimeAlphaLiquidityV1,
+    NonlinearRegimeAlphaLiquidityV2,
 }
 
 impl CandidateRankingProfile {
@@ -3692,6 +3693,12 @@ impl CandidateRankingProfile {
             | "pit-nonlinear-regime-alpha-liquidity-v1" => {
                 Ok(Self::NonlinearRegimeAlphaLiquidityV1)
             }
+            "nonlinear_regime_alpha_liquidity_v2"
+            | "nonlinear-regime-alpha-liquidity-v2"
+            | "pit_nonlinear_regime_alpha_liquidity_v2"
+            | "pit-nonlinear-regime-alpha-liquidity-v2" => {
+                Ok(Self::NonlinearRegimeAlphaLiquidityV2)
+            }
             other => Err(format!("unsupported candidate_ranking: {}", other)),
         }
     }
@@ -3703,21 +3710,36 @@ impl CandidateRankingProfile {
                 alpha_rank_weight: 0.30,
                 liquidity_rank_weight: 0.70,
                 relative_strength_rank_weight: 0.0,
+                volatility_rank_weight: 0.0,
+                use_regime_aware_weights: false,
             }),
             Self::AlphaFirstLowImpactV1 => Some(CandidateRankingParams {
                 alpha_rank_weight: 0.75,
                 liquidity_rank_weight: 0.25,
                 relative_strength_rank_weight: 0.0,
+                volatility_rank_weight: 0.0,
+                use_regime_aware_weights: false,
             }),
             Self::RelativeStrengthAlphaLiquidityV1 => Some(CandidateRankingParams {
                 alpha_rank_weight: 0.45,
                 liquidity_rank_weight: 0.25,
                 relative_strength_rank_weight: 0.30,
+                volatility_rank_weight: 0.0,
+                use_regime_aware_weights: false,
             }),
             Self::NonlinearRegimeAlphaLiquidityV1 => Some(CandidateRankingParams {
                 alpha_rank_weight: 0.58,
                 liquidity_rank_weight: 0.22,
                 relative_strength_rank_weight: 0.20,
+                volatility_rank_weight: 0.0,
+                use_regime_aware_weights: false,
+            }),
+            Self::NonlinearRegimeAlphaLiquidityV2 => Some(CandidateRankingParams {
+                alpha_rank_weight: 0.38,
+                liquidity_rank_weight: 0.22,
+                relative_strength_rank_weight: 0.15,
+                volatility_rank_weight: 0.25,
+                use_regime_aware_weights: true,
             }),
         }
     }
@@ -3732,6 +3754,8 @@ struct CandidateRankingParams {
     alpha_rank_weight: f64,
     liquidity_rank_weight: f64,
     relative_strength_rank_weight: f64,
+    volatility_rank_weight: f64,
+    use_regime_aware_weights: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -10119,6 +10143,8 @@ fn build_portfolio_weights_with_return_risk_matrices(
                 matrix,
                 average_amounts,
                 config.candidate_ranking_profile,
+                return_history,
+                config.risk_budget_lookback_days,
             )
         })
         .unwrap_or_else(|| {
@@ -10529,11 +10555,25 @@ fn rank_candidates_for_capacity(
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
     let relative_strength_ranks =
         relative_strength_rank_scores(candidates, return_history, score_day, lookback_days);
+    let volatility_ranks =
+        volatility_rank_scores(candidates, return_history, score_day, lookback_days);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
-    let alpha_weight = params.alpha_rank_weight.max(0.0);
-    let liquidity_weight = params.liquidity_rank_weight.max(0.0);
-    let relative_strength_weight = params.relative_strength_rank_weight.max(0.0);
-    let weight_sum = (alpha_weight + liquidity_weight + relative_strength_weight).max(f64::EPSILON);
+    let (alpha_weight, liquidity_weight, relative_strength_weight, volatility_weight) = if params
+        .use_regime_aware_weights
+    {
+        let regime = detect_market_regime_from_returns(return_history, score_day, lookback_days);
+        regime_adjusted_weights(params, regime)
+    } else {
+        (
+            params.alpha_rank_weight.max(0.0),
+            params.liquidity_rank_weight.max(0.0),
+            params.relative_strength_rank_weight.max(0.0),
+            params.volatility_rank_weight.max(0.0),
+        )
+    };
+    let weight_sum =
+        (alpha_weight + liquidity_weight + relative_strength_weight + volatility_weight)
+            .max(f64::EPSILON);
     let mut ranked = candidates
         .iter()
         .enumerate()
@@ -10542,9 +10582,11 @@ fn rank_candidates_for_capacity(
             let liquidity_rank = amount_ranks.get(symbol).copied().unwrap_or(0.5);
             let relative_strength_rank =
                 relative_strength_ranks.get(symbol).copied().unwrap_or(0.5);
+            let volatility_rank = volatility_ranks.get(symbol).copied().unwrap_or(0.5);
             let blended_rank = (alpha_weight * alpha_rank
                 + liquidity_weight * liquidity_rank
-                + relative_strength_weight * relative_strength_rank)
+                + relative_strength_weight * relative_strength_rank
+                + volatility_weight * volatility_rank)
                 / weight_sum;
             (idx, symbol.clone(), *score, blended_rank)
         })
@@ -10568,6 +10610,8 @@ fn rank_candidates_for_capacity_from_matrix(
     matrix: &ScoreDateReturnRiskMatrix,
     average_amounts: &HashMap<String, f64>,
     profile: CandidateRankingProfile,
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    lookback_days: usize,
 ) -> Vec<(String, f64)> {
     let Some(params) = profile.params() else {
         return candidates.to_vec();
@@ -10579,11 +10623,25 @@ fn rank_candidates_for_capacity_from_matrix(
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
     let relative_strength_ranks =
         relative_strength_rank_scores_from_matrix(candidates, matrix, score_day);
+    let volatility_ranks =
+        volatility_rank_scores(candidates, return_history, score_day, lookback_days);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
-    let alpha_weight = params.alpha_rank_weight.max(0.0);
-    let liquidity_weight = params.liquidity_rank_weight.max(0.0);
-    let relative_strength_weight = params.relative_strength_rank_weight.max(0.0);
-    let weight_sum = (alpha_weight + liquidity_weight + relative_strength_weight).max(f64::EPSILON);
+    let (alpha_weight, liquidity_weight, relative_strength_weight, volatility_weight) = if params
+        .use_regime_aware_weights
+    {
+        let regime = detect_market_regime_from_returns(return_history, score_day, lookback_days);
+        regime_adjusted_weights(params, regime)
+    } else {
+        (
+            params.alpha_rank_weight.max(0.0),
+            params.liquidity_rank_weight.max(0.0),
+            params.relative_strength_rank_weight.max(0.0),
+            params.volatility_rank_weight.max(0.0),
+        )
+    };
+    let weight_sum =
+        (alpha_weight + liquidity_weight + relative_strength_weight + volatility_weight)
+            .max(f64::EPSILON);
     let mut ranked = candidates
         .iter()
         .enumerate()
@@ -10592,9 +10650,11 @@ fn rank_candidates_for_capacity_from_matrix(
             let liquidity_rank = amount_ranks.get(symbol).copied().unwrap_or(0.5);
             let relative_strength_rank =
                 relative_strength_ranks.get(symbol).copied().unwrap_or(0.5);
+            let volatility_rank = volatility_ranks.get(symbol).copied().unwrap_or(0.5);
             let blended_rank = (alpha_weight * alpha_rank
                 + liquidity_weight * liquidity_rank
-                + relative_strength_weight * relative_strength_rank)
+                + relative_strength_weight * relative_strength_rank
+                + volatility_weight * volatility_rank)
                 / weight_sum;
             (idx, symbol.clone(), *score, blended_rank)
         })
@@ -10814,6 +10874,129 @@ fn liquidity_rank_scores(
         .enumerate()
         .map(|(rank, (_, symbol, _))| (symbol, 1.0 - (rank as f64 / denominator)))
         .collect()
+}
+
+/// Compute inverse-volatility rank scores: lower trailing volatility → higher rank.
+/// Uses the trailing volatility computation that is PIT-safe (only data at or before score_day).
+fn volatility_rank_scores(
+    candidates: &[(String, f64)],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    score_day: NaiveDate,
+    lookback_days: usize,
+) -> HashMap<String, f64> {
+    let mut symbol_vols: Vec<(String, f64)> = candidates
+        .iter()
+        .filter_map(|(symbol, _)| {
+            let closes = return_history.get(symbol)?;
+            let vol = trailing_volatility_from_closes(closes, score_day, lookback_days as i64)?;
+            Some((symbol.clone(), vol))
+        })
+        .collect();
+    // Sort by volatility ascending (lower vol = better = higher rank)
+    symbol_vols.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let denominator = symbol_vols.len().saturating_sub(1).max(1) as f64;
+    symbol_vols
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (symbol, _))| (symbol, 1.0 - (rank as f64 / denominator)))
+        .collect()
+}
+
+/// Simplified PIT trailing annualized volatility from closes data.
+fn trailing_volatility_from_closes(
+    closes: &[(NaiveDate, f64)],
+    trade_date: NaiveDate,
+    lookback_days: i64,
+) -> Option<f64> {
+    let current_idx = closes
+        .iter()
+        .position(|(date, close)| *date == trade_date && close.is_finite() && *close > 0.0)?;
+    let start_idx = current_idx.checked_sub(lookback_days as usize)?;
+    let window = &closes[start_idx..=current_idx];
+    let mut daily_returns = Vec::new();
+    for pair in window.windows(2) {
+        let prev = pair[0].1;
+        let curr = pair[1].1;
+        if !prev.is_finite() || !curr.is_finite() || prev <= 0.0 || curr <= 0.0 {
+            continue;
+        }
+        daily_returns.push((curr / prev) - 1.0);
+    }
+    if daily_returns.len() < 20 {
+        return None;
+    }
+    let mean = daily_returns.iter().sum::<f64>() / daily_returns.len() as f64;
+    let variance = daily_returns
+        .iter()
+        .map(|r| (r - mean) * (r - mean))
+        .sum::<f64>()
+        / (daily_returns.len() - 1) as f64;
+    Some(variance.sqrt() * (252_f64).sqrt())
+}
+
+/// Simple market regime detection from benchmark-like composite of candidate returns.
+fn detect_market_regime_from_returns(
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    score_day: NaiveDate,
+    lookback_days: usize,
+) -> MarketRegime {
+    // Use the average trailing return across all symbols as a proxy for market regime
+    let mut total_return: f64 = 0.0;
+    let mut count: usize = 0;
+    for (_symbol, closes) in return_history {
+        if let Some(current_idx) = closes
+            .iter()
+            .position(|(date, close)| *date == score_day && close.is_finite() && *close > 0.0)
+        {
+            if let Some(start_idx) = current_idx.checked_sub(lookback_days) {
+                if let (Some((_, current_close)), Some((_, past_close))) =
+                    (closes.get(current_idx), closes.get(start_idx))
+                {
+                    if *past_close > 0.0 {
+                        total_return += (current_close / past_close) - 1.0;
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    if count == 0 {
+        return MarketRegime::Sideways;
+    }
+    let avg_return = total_return / count as f64;
+    if avg_return > 0.10 {
+        MarketRegime::Bull
+    } else if avg_return < -0.10 {
+        MarketRegime::Bear
+    } else {
+        MarketRegime::Sideways
+    }
+}
+
+/// Adjust candidate ranking weights based on detected market regime.
+/// In bear/high_volatility markets: favor low volatility and liquidity over alpha.
+/// In bull markets: allow more alpha weight.
+/// In sideways/mixed markets: balanced approach.
+fn regime_adjusted_weights(
+    params: CandidateRankingParams,
+    regime: MarketRegime,
+) -> (f64, f64, f64, f64) {
+    let (alpha_adj, liq_adj, rs_adj, vol_adj) = match regime {
+        MarketRegime::Bull => (1.25, 0.85, 1.10, 0.80),
+        MarketRegime::Bear | MarketRegime::HighVolatility => (0.65, 1.30, 0.80, 1.40),
+        MarketRegime::Sideways | MarketRegime::Mixed => (1.0, 1.0, 1.0, 1.0),
+    };
+    (
+        (params.alpha_rank_weight * alpha_adj).max(0.0),
+        (params.liquidity_rank_weight * liq_adj).max(0.0),
+        (params.relative_strength_rank_weight * rs_adj).max(0.0),
+        (params.volatility_rank_weight * vol_adj).max(0.0),
+    )
 }
 
 fn select_uncorrelated_candidates(

@@ -347,6 +347,7 @@ struct CostCapacityPerturbationSummary {
     max_drawdown: Decimal,
     min_annual_return: Decimal,
     avg_sharpe: Decimal,
+    min_sortino: Decimal,
     min_num_trades: u64,
     max_final_cash_weight: Decimal,
     avg_final_cash_weight: Decimal,
@@ -358,6 +359,30 @@ struct CostCapacityPerturbationSummary {
     max_execution_target_gap: Decimal,
     max_execution_schedule_expired_count: usize,
     total_execution_schedule_expired_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PredictionConfidenceStressFillQualityScoreBreakdown {
+    total_score: Decimal,
+    base_score: Decimal,
+    stress_fill_objective_score: Decimal,
+    prediction_confidence_score: Decimal,
+    target_annual_return: Decimal,
+    min_annual_return: Decimal,
+    min_calmar: Decimal,
+    min_sharpe: Decimal,
+    min_sortino: Decimal,
+    pass_ratio_bonus: Decimal,
+    annual_quality_bonus: Decimal,
+    calmar_quality_bonus: Decimal,
+    sharpe_quality_bonus: Decimal,
+    sortino_quality_bonus: Decimal,
+    drawdown_tail_penalty: Decimal,
+    min_annual_shortfall: Decimal,
+    target_annual_shortfall: Decimal,
+    calmar_shortfall: Decimal,
+    sharpe_shortfall: Decimal,
+    sortino_shortfall: Decimal,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -801,7 +826,7 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
                 "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
                 "min_train_perturbed_calmar": 1.2,
                 "max_train_perturbed_drawdown_pct": 0.35,
-                "train_stress_score_profile": "prediction_confidence_stress_fill_objective_score_v1",
+                "train_stress_score_profile": "prediction_confidence_stress_fill_quality_score_v1",
                 "capacity_stress_target_calmar": 2.0,
                 "capacity_stress_target_annual_return": 0.15,
                 "min_train_perturbed_annual_return": 0.05,
@@ -3581,6 +3606,68 @@ fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFa
             "mf_lg_elg_net_amount_20d_std",
             "mf_small_sell_pressure_20d_std",
         ],
+        "phase7_gb_quality_value_recovery_low_impact_v3" => &[
+            // Financial quality (v2 base + industry-relative)
+            "fin_roe_daily_std",
+            "fin_roe_indrel_daily_std",
+            "fin_roa_daily_std",
+            "fin_roa_indrel_daily_std",
+            "fin_current_ratio_daily_std",
+            "fin_current_ratio_indrel_daily_std",
+            "fin_debt_to_assets_daily_std",
+            "fin_debt_to_assets_indrel_daily_std",
+            "fin_netprofit_margin_daily_std",
+            "fin_netprofit_margin_indrel_daily_std",
+            "fin_gross_margin_daily_std",
+            "fin_gross_margin_indrel_daily_std",
+            // Financial improvement / earnings recovery
+            "fin_netprofit_margin_yoy_delta_std",
+            "fin_gross_margin_yoy_delta_std",
+            "fin_debt_to_assets_yoy_improve_std",
+            "fin_eps_yoy_recovery_std",
+            "fin_roe_yoy_delta_std",
+            "fin_current_ratio_yoy_delta_std",
+            // Valuation
+            "val_pb_low_std",
+            "val_pe_ttm_low_std",
+            "val_ps_ttm_low_std",
+            "val_dividend_yield_ttm_std",
+            // Cashflow quality
+            "cf_ocf_to_profit_latest_std",
+            "cf_ocf_positive_latest_std",
+            "cf_ocf_profit_gap_latest_std",
+            "cf_cash_buffer_latest_std",
+            // Dividend quality
+            "div_recent_positive_std",
+            "div_paid_years_4y_std",
+            "div_stability_4y_std",
+            "div_cash_sum_4y_std",
+            // Multi-horizon momentum (5d/20d/60d)
+            "mom_5d_std",
+            "mom_20d_std",
+            "mom_60d_std",
+            "mkt_rel_mom_20d_std",
+            "mkt_rel_mom_60d_std",
+            "ind_rel_mom_20d_std",
+            "ind_rel_mom_60d_std",
+            // Multi-horizon reversal (5d/20d)
+            "rev_5d_std",
+            "rev_20d_std",
+            // Liquidity & capacity
+            "amihud_20d_std",
+            "amt_intensity_20d_std",
+            "turn_20d_std",
+            // Volatility & risk
+            "vol_20d_std",
+            "downvol_20d_std",
+            "maxdd_60d_std",
+            // Money flow
+            "mf_net_amount_5d_std",
+            "mf_elg_net_amount_5d_std",
+            "mf_net_amount_20d_std",
+            "mf_lg_elg_net_amount_20d_std",
+            "mf_small_sell_pressure_20d_std",
+        ],
         _ => &[
             "fin_roe_daily_std",
             "fin_roe_indrel_daily_std",
@@ -4054,6 +4141,7 @@ fn cost_capacity_perturbation_summary(
     let mut max_drawdown = Decimal::ZERO;
     let mut min_annual_return = Decimal::MAX;
     let mut total_sharpe = Decimal::ZERO;
+    let mut min_sortino = Decimal::MAX;
     let mut min_num_trades = u64::MAX;
     let mut max_final_cash_weight = Decimal::ZERO;
     let mut total_final_cash_weight = Decimal::ZERO;
@@ -4073,6 +4161,7 @@ fn cost_capacity_perturbation_summary(
         max_drawdown = max_drawdown.max(metrics.max_drawdown_pct);
         min_annual_return = min_annual_return.min(metrics.annual_return_pct);
         total_sharpe += metrics.sharpe_ratio;
+        min_sortino = min_sortino.min(metrics.sortino_ratio);
         min_num_trades = min_num_trades.min(metrics.num_trades as u64);
         max_final_cash_weight = max_final_cash_weight.max(metrics.final_cash_weight_pct);
         total_final_cash_weight += metrics.final_cash_weight_pct;
@@ -4094,6 +4183,7 @@ fn cost_capacity_perturbation_summary(
     if total_count == 0 {
         min_calmar = Decimal::ZERO;
         min_annual_return = Decimal::ZERO;
+        min_sortino = Decimal::ZERO;
         min_num_trades = 0;
         min_final_actual_gross_exposure = Decimal::ZERO;
         min_final_execution_fill_ratio = Decimal::ONE;
@@ -4108,6 +4198,7 @@ fn cost_capacity_perturbation_summary(
         max_drawdown,
         min_annual_return,
         avg_sharpe: total_sharpe / denominator,
+        min_sortino,
         min_num_trades,
         max_final_cash_weight,
         avg_final_cash_weight: total_final_cash_weight / denominator,
@@ -4141,6 +4232,7 @@ fn cost_capacity_perturbation_summary_from_counts(
         max_drawdown: Decimal::ZERO,
         min_annual_return: Decimal::ZERO,
         avg_sharpe: Decimal::ZERO,
+        min_sortino: Decimal::ZERO,
         min_num_trades: total_count as u64,
         max_final_cash_weight: Decimal::ZERO,
         avg_final_cash_weight: Decimal::ZERO,
@@ -4191,6 +4283,12 @@ fn train_cost_capacity_stress_score_profile(train_gate_policy: &Value) -> &'stat
         | "prediction_confidence_stress_fill"
         | "confidence_stress_fill"
         | "ml_confidence_stress_fill" => "prediction_confidence_stress_fill_objective_score_v1",
+        "prediction_confidence_stress_fill_quality_score_v1"
+        | "prediction_confidence_stress_fill_quality"
+        | "confidence_stress_fill_quality"
+        | "ml_confidence_stress_fill_quality" => {
+            "prediction_confidence_stress_fill_quality_score_v1"
+        }
         _ => "train_stress_adjusted_score_v1",
     }
 }
@@ -4495,6 +4593,104 @@ fn train_candidate_prediction_confidence_stress_fill_objective_score(
         + candidate_prediction_confidence_score(candidate)
 }
 
+fn prediction_confidence_stress_fill_quality_score_breakdown(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> PredictionConfidenceStressFillQualityScoreBreakdown {
+    let stress_fill_objective_score =
+        train_candidate_stress_fill_objective_score(candidate, summary, train_gate_policy);
+    let prediction_confidence_score = candidate_prediction_confidence_score(candidate);
+    let base_score = stress_fill_objective_score + prediction_confidence_score;
+    let target_annual_return = constraint_decimal(
+        Some(train_gate_policy),
+        "capacity_stress_target_annual_return",
+    )
+    .unwrap_or_else(|| Decimal::new(15, 2));
+    let min_annual_return =
+        constraint_decimal(Some(train_gate_policy), "min_train_perturbed_annual_return")
+            .unwrap_or_else(|| Decimal::new(5, 2));
+    let min_calmar = constraint_decimal(Some(train_gate_policy), "min_train_perturbed_calmar")
+        .unwrap_or_else(|| Decimal::new(12, 1));
+    let min_sharpe = constraint_decimal(Some(train_gate_policy), "min_train_avg_perturbed_sharpe")
+        .unwrap_or_else(|| Decimal::new(5, 1));
+    let min_sortino = constraint_decimal(Some(train_gate_policy), "min_train_perturbed_sortino")
+        .unwrap_or_else(|| Decimal::ONE);
+
+    let pass_ratio_bonus = Decimal::from(summary.pass_ratio_ppm) * Decimal::from(2);
+    let annual_quality_bonus = clamp_decimal(
+        summary.min_annual_return,
+        Decimal::from(-1),
+        Decimal::from(1),
+    ) * Decimal::from(360_000);
+    let calmar_quality_bonus =
+        clamp_decimal(summary.min_calmar, Decimal::from(-5), Decimal::from(5))
+            * Decimal::from(220_000);
+    let sharpe_quality_bonus =
+        clamp_decimal(summary.avg_sharpe, Decimal::from(-5), Decimal::from(5))
+            * Decimal::from(140_000);
+    let sortino_quality_bonus =
+        clamp_decimal(summary.min_sortino, Decimal::from(-5), Decimal::from(5))
+            * Decimal::from(120_000);
+    let drawdown_tail_penalty =
+        clamp_decimal(summary.max_drawdown, Decimal::ZERO, Decimal::ONE) * Decimal::from(260_000);
+    let min_annual_shortfall =
+        positive_decimal_gap(min_annual_return, summary.min_annual_return) * Decimal::from(760_000);
+    let target_annual_shortfall =
+        positive_decimal_gap(target_annual_return, summary.min_annual_return)
+            * Decimal::from(380_000);
+    let calmar_shortfall =
+        positive_decimal_gap(min_calmar, summary.min_calmar) * Decimal::from(340_000);
+    let sharpe_shortfall =
+        positive_decimal_gap(min_sharpe, summary.avg_sharpe) * Decimal::from(260_000);
+    let sortino_shortfall =
+        positive_decimal_gap(min_sortino, summary.min_sortino) * Decimal::from(220_000);
+    let total_score = base_score
+        + pass_ratio_bonus
+        + annual_quality_bonus
+        + calmar_quality_bonus
+        + sharpe_quality_bonus
+        + sortino_quality_bonus
+        - drawdown_tail_penalty
+        - min_annual_shortfall
+        - target_annual_shortfall
+        - calmar_shortfall
+        - sharpe_shortfall
+        - sortino_shortfall;
+
+    PredictionConfidenceStressFillQualityScoreBreakdown {
+        total_score,
+        base_score,
+        stress_fill_objective_score,
+        prediction_confidence_score,
+        target_annual_return,
+        min_annual_return,
+        min_calmar,
+        min_sharpe,
+        min_sortino,
+        pass_ratio_bonus,
+        annual_quality_bonus,
+        calmar_quality_bonus,
+        sharpe_quality_bonus,
+        sortino_quality_bonus,
+        drawdown_tail_penalty,
+        min_annual_shortfall,
+        target_annual_shortfall,
+        calmar_shortfall,
+        sharpe_shortfall,
+        sortino_shortfall,
+    }
+}
+
+fn train_candidate_prediction_confidence_stress_fill_quality_score(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> Decimal {
+    prediction_confidence_stress_fill_quality_score_breakdown(candidate, summary, train_gate_policy)
+        .total_score
+}
+
 fn train_candidate_cash_drag_fill_gap_score(
     candidate: &DiscoveryCandidate,
     summary: &CostCapacityPerturbationSummary,
@@ -4595,8 +4791,69 @@ fn train_candidate_stress_adjusted_score_for_policy(
                 train_gate_policy,
             )
         }
+        "prediction_confidence_stress_fill_quality_score_v1" => {
+            train_candidate_prediction_confidence_stress_fill_quality_score(
+                candidate,
+                summary,
+                train_gate_policy,
+            )
+        }
         _ => train_candidate_stress_adjusted_score(candidate, summary),
     }
+}
+
+fn train_candidate_stress_score_breakdown(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> Value {
+    let profile = train_cost_capacity_stress_score_profile(train_gate_policy);
+    let total_score =
+        train_candidate_stress_adjusted_score_for_policy(candidate, summary, train_gate_policy);
+    if profile != "prediction_confidence_stress_fill_quality_score_v1" {
+        return json!({
+            "profile": profile,
+            "total_score": total_score,
+            "summary": cost_capacity_perturbation_summary_json(summary),
+        });
+    }
+
+    let breakdown = prediction_confidence_stress_fill_quality_score_breakdown(
+        candidate,
+        summary,
+        train_gate_policy,
+    );
+
+    json!({
+        "profile": profile,
+        "total_score": breakdown.total_score,
+        "base_score": breakdown.base_score,
+        "summary": cost_capacity_perturbation_summary_json(summary),
+        "targets": {
+            "target_annual_return_pct": breakdown.target_annual_return,
+            "min_annual_return_pct": breakdown.min_annual_return,
+            "min_calmar": breakdown.min_calmar,
+            "min_avg_sharpe": breakdown.min_sharpe,
+            "min_sortino": breakdown.min_sortino,
+        },
+        "components": {
+            "stress_fill_objective_score": breakdown.stress_fill_objective_score,
+            "prediction_confidence_score": breakdown.prediction_confidence_score,
+            "pass_ratio_bonus": breakdown.pass_ratio_bonus,
+            "annual_quality_bonus": breakdown.annual_quality_bonus,
+            "calmar_quality_bonus": breakdown.calmar_quality_bonus,
+            "sharpe_quality_bonus": breakdown.sharpe_quality_bonus,
+            "sortino_quality_bonus": breakdown.sortino_quality_bonus,
+        },
+        "penalties": {
+            "drawdown_tail_penalty": breakdown.drawdown_tail_penalty,
+            "min_annual_shortfall": breakdown.min_annual_shortfall,
+            "target_annual_shortfall": breakdown.target_annual_shortfall,
+            "calmar_shortfall": breakdown.calmar_shortfall,
+            "sharpe_shortfall": breakdown.sharpe_shortfall,
+            "sortino_shortfall": breakdown.sortino_shortfall,
+        },
+    })
 }
 
 fn train_candidate_evaluation_order(
@@ -5893,10 +6150,27 @@ fn oos_window_json(window: &OosDiscoveryWindow) -> Value {
 fn oos_window_execution_json(execution: &OosWindowExecution, train_gate_policy: &Value) -> Value {
     let train_cost_capacity_summary =
         cost_capacity_perturbation_summary(&execution.train_cost_capacity_perturbations);
+    oos_window_execution_json_with_train_summary(
+        execution,
+        train_gate_policy,
+        &train_cost_capacity_summary,
+    )
+}
+
+fn oos_window_execution_json_with_train_summary(
+    execution: &OosWindowExecution,
+    train_gate_policy: &Value,
+    train_cost_capacity_summary: &CostCapacityPerturbationSummary,
+) -> Value {
     let train_stress_score_profile = train_cost_capacity_stress_score_profile(train_gate_policy);
     let train_stress_adjusted_score = train_candidate_stress_adjusted_score_for_policy(
         &execution.selected_candidate,
-        &train_cost_capacity_summary,
+        train_cost_capacity_summary,
+        train_gate_policy,
+    );
+    let train_stress_score_breakdown = train_candidate_stress_score_breakdown(
+        &execution.selected_candidate,
+        train_cost_capacity_summary,
         train_gate_policy,
     );
     json!({
@@ -5912,9 +6186,10 @@ fn oos_window_execution_json(execution: &OosWindowExecution, train_gate_policy: 
         "selected_candidate": discovery_candidate_json(&execution.selected_candidate),
         "train_robustness": execution.train_robustness,
         "train_cost_capacity_perturbations": execution.train_cost_capacity_perturbations.iter().map(oos_cost_capacity_perturbation_result_json).collect::<Vec<_>>(),
-        "train_cost_capacity_summary": cost_capacity_perturbation_summary_json(&train_cost_capacity_summary),
+        "train_cost_capacity_summary": cost_capacity_perturbation_summary_json(train_cost_capacity_summary),
         "train_stress_score_profile": train_stress_score_profile,
         "train_stress_adjusted_score": train_stress_adjusted_score,
+        "train_stress_score_breakdown": train_stress_score_breakdown,
         "oos_backtest_task_id": execution.oos_backtest_task_id,
         "oos_market_data_prewarm_report": execution.oos_output.market_data_prewarm_report,
         "oos_market_feature_prewarm_report": execution.oos_output.market_feature_prewarm_report,
@@ -5984,6 +6259,7 @@ fn cost_capacity_perturbation_summary_json(summary: &CostCapacityPerturbationSum
         "max_drawdown_pct": summary.max_drawdown,
         "min_annual_return_pct": summary.min_annual_return,
         "avg_sharpe": summary.avg_sharpe,
+        "min_sortino": summary.min_sortino,
         "max_final_cash_weight_pct": summary.max_final_cash_weight,
         "avg_final_cash_weight_pct": summary.avg_final_cash_weight,
         "max_final_unfilled_target_gap_pct": summary.max_final_unfilled_target_gap,
@@ -12090,6 +12366,20 @@ mod tests {
     }
 
     #[test]
+    fn train_cost_capacity_score_profile_accepts_prediction_confidence_stress_fill_quality_objective(
+    ) {
+        let policy = json!({
+            "enable_train_cost_capacity_perturbation_gate": true,
+            "train_stress_score_profile": "prediction_confidence_stress_fill_quality_score_v1"
+        });
+
+        assert_eq!(
+            train_cost_capacity_stress_score_profile(&policy),
+            "prediction_confidence_stress_fill_quality_score_v1"
+        );
+    }
+
+    #[test]
     fn cash_drag_fill_gap_score_prefers_filled_candidate_when_capacity_ties() {
         let candidate = |trial_id: &str,
                          final_cash_weight: Decimal,
@@ -12557,6 +12847,101 @@ mod tests {
         assert!(
             confirmed_score > unconfirmed_score,
             "confirmed_score={confirmed_score}, unconfirmed_score={unconfirmed_score}"
+        );
+    }
+
+    #[test]
+    fn prediction_confidence_stress_fill_quality_objective_prefers_left_tail_resilience() {
+        let candidate = |trial_id: &str,
+                         annual_return: Decimal,
+                         sharpe: Decimal,
+                         sortino: Decimal,
+                         max_drawdown: Decimal|
+         -> DiscoveryCandidate {
+            DiscoveryCandidate {
+                trial_id: trial_id.to_string(),
+                backtest_task_id: None,
+                score: Some(Decimal::new(50, 0)),
+                candidate_type: CandidateType::ReviewRequired,
+                professional_gap_score: Decimal::ZERO,
+                metrics: CandidateMetrics {
+                    annual_return,
+                    excess_return: Decimal::new(8, 2),
+                    sharpe,
+                    sortino,
+                    max_drawdown,
+                    num_trades: 260,
+                    final_cash_weight: Decimal::new(24, 2),
+                    final_actual_gross_exposure: Decimal::new(76, 2),
+                    final_unfilled_target_gap: Decimal::new(2, 2),
+                    final_execution_fill_ratio: Decimal::new(98, 2),
+                    ..CandidateMetrics::default()
+                },
+                parameters: json!({
+                    "prediction_confidence_gate_profile": "train_positive_raw_score_gate_v1",
+                    "prediction_min_score": "0.01",
+                    "prediction_min_percentile": "0.35",
+                    "prediction_set_override_source": "train_window_ml_internal"
+                }),
+            }
+        };
+        let mut high_return_fragile = cost_capacity_perturbation_summary_from_counts(2, 3);
+        high_return_fragile.min_calmar = Decimal::new(45, 2);
+        high_return_fragile.avg_calmar = Decimal::new(80, 2);
+        high_return_fragile.avg_sharpe = Decimal::new(40, 2);
+        high_return_fragile.min_annual_return = Decimal::new(-3, 2);
+        high_return_fragile.max_drawdown = Decimal::new(24, 2);
+        high_return_fragile.min_num_trades = 240;
+        high_return_fragile.max_final_cash_weight = Decimal::new(26, 2);
+        high_return_fragile.min_final_actual_gross_exposure = Decimal::new(74, 2);
+        high_return_fragile.max_final_unfilled_target_gap = Decimal::new(3, 2);
+        high_return_fragile.min_final_execution_fill_ratio = Decimal::new(97, 2);
+        let mut lower_return_resilient = high_return_fragile.clone();
+        lower_return_resilient.passed_count = 3;
+        lower_return_resilient.pass_ratio_ppm = 1_000_000;
+        lower_return_resilient.min_calmar = Decimal::new(140, 2);
+        lower_return_resilient.avg_calmar = Decimal::new(165, 2);
+        lower_return_resilient.avg_sharpe = Decimal::new(120, 2);
+        lower_return_resilient.min_annual_return = Decimal::new(9, 2);
+        lower_return_resilient.max_drawdown = Decimal::new(16, 2);
+        let policy = json!({
+            "train_stress_score_profile": "prediction_confidence_stress_fill_quality_score_v1",
+            "capacity_stress_target_annual_return": 0.15,
+            "min_train_perturbed_annual_return": 0.05,
+            "min_train_perturbed_calmar": 1.2,
+            "min_train_trade_count": 100,
+            "min_train_final_actual_gross_exposure_pct": 0.35,
+            "max_train_final_cash_weight_pct": 0.65,
+            "max_train_final_unfilled_target_gap_pct": 0.06,
+            "min_train_final_execution_fill_ratio": 0.95
+        });
+
+        let fragile_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate(
+                "high-return-fragile",
+                Decimal::new(34, 2),
+                Decimal::new(18, 1),
+                Decimal::new(22, 1),
+                Decimal::new(12, 2),
+            ),
+            &high_return_fragile,
+            &policy,
+        );
+        let resilient_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate(
+                "lower-return-resilient",
+                Decimal::new(18, 2),
+                Decimal::new(12, 1),
+                Decimal::new(17, 1),
+                Decimal::new(18, 2),
+            ),
+            &lower_return_resilient,
+            &policy,
+        );
+
+        assert!(
+            resilient_score > fragile_score,
+            "resilient_score={resilient_score}, fragile_score={fragile_score}"
         );
     }
 
@@ -20408,7 +20793,7 @@ mod tests {
             default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_gb"));
         assert_eq!(
             gate_policy["train_stress_score_profile"],
-            "prediction_confidence_stress_fill_objective_score_v1"
+            "prediction_confidence_stress_fill_quality_score_v1"
         );
         assert_eq!(
             gate_policy["min_train_final_actual_gross_exposure_pct"],
@@ -22164,6 +22549,121 @@ mod tests {
 
         assert!(json.get("oos_market_data_prewarm_report").is_some());
         assert!(json.get("oos_market_feature_prewarm_report").is_some());
+    }
+
+    #[test]
+    fn oos_window_execution_json_explains_gb_quality_train_stress_score() {
+        let candidate = DiscoveryCandidate {
+            trial_id: "trial-gb-quality".to_string(),
+            backtest_task_id: None,
+            score: Some(Decimal::new(50, 0)),
+            candidate_type: CandidateType::ReviewRequired,
+            professional_gap_score: Decimal::ZERO,
+            metrics: CandidateMetrics {
+                annual_return: Decimal::new(18, 2),
+                excess_return: Decimal::new(8, 2),
+                sharpe: Decimal::new(12, 1),
+                sortino: Decimal::new(17, 1),
+                max_drawdown: Decimal::new(18, 2),
+                num_trades: 260,
+                final_cash_weight: Decimal::new(24, 2),
+                final_actual_gross_exposure: Decimal::new(76, 2),
+                final_unfilled_target_gap: Decimal::new(2, 2),
+                final_execution_fill_ratio: Decimal::new(98, 2),
+                ..CandidateMetrics::default()
+            },
+            parameters: json!({
+                "prediction_confidence_gate_profile": "train_positive_raw_score_gate_v1",
+                "prediction_min_score": "0.01",
+                "prediction_min_percentile": "0.35",
+                "prediction_set_override_source": "train_window_ml_internal"
+            }),
+        };
+        let mut summary = cost_capacity_perturbation_summary_from_counts(3, 3);
+        summary.min_calmar = Decimal::new(140, 2);
+        summary.avg_calmar = Decimal::new(165, 2);
+        summary.avg_sharpe = Decimal::new(120, 2);
+        summary.min_sortino = Decimal::new(160, 2);
+        summary.min_annual_return = Decimal::new(9, 2);
+        summary.max_drawdown = Decimal::new(16, 2);
+        summary.min_num_trades = 240;
+        summary.max_final_cash_weight = Decimal::new(26, 2);
+        summary.min_final_actual_gross_exposure = Decimal::new(74, 2);
+        summary.max_final_unfilled_target_gap = Decimal::new(3, 2);
+        summary.min_final_execution_fill_ratio = Decimal::new(97, 2);
+        let execution = OosWindowExecution {
+            window: OosDiscoveryWindow {
+                window_index: 1,
+                validation_mode: "walk_forward".to_string(),
+                train_start: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                train_end: NaiveDate::from_ymd_opt(2022, 12, 31).unwrap(),
+                test_start: NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+                test_end: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+            },
+            train_optimization_task_id: "train-task-1".to_string(),
+            train_execution_policy: OosTrainExecutionPolicy {
+                requested_cache_mode: "shared_window",
+                cache_mode: "shared_window",
+                requested_trial_concurrency: 1,
+                trial_concurrency: 1,
+            },
+            train_batches: Vec::new(),
+            selected_candidate: candidate,
+            train_robustness: None,
+            train_cost_capacity_perturbations: Vec::new(),
+            oos_backtest_task_id: "oos-task-1".to_string(),
+            oos_output: FactorBacktestRunOutput {
+                signals_count: 0,
+                metrics: quant_backtest::metrics::BacktestMetrics::default(),
+                trades: 0,
+                equity_points: 0,
+                effective_coverage: None,
+                market_data_prewarm_report: None,
+                market_feature_prewarm_report: None,
+            },
+            oos_points: Vec::new(),
+            cost_capacity_perturbations: Vec::new(),
+        };
+        let policy = json!({
+            "train_stress_score_profile": "prediction_confidence_stress_fill_quality_score_v1",
+            "capacity_stress_target_annual_return": 0.15,
+            "min_train_perturbed_annual_return": 0.05,
+            "min_train_perturbed_calmar": 1.2,
+            "min_train_avg_perturbed_sharpe": 0.5,
+            "min_train_perturbed_sortino": 1.0,
+            "min_train_trade_count": 100,
+            "min_train_final_actual_gross_exposure_pct": 0.35,
+            "max_train_final_cash_weight_pct": 0.65,
+            "max_train_final_unfilled_target_gap_pct": 0.06,
+            "min_train_final_execution_fill_ratio": 0.95
+        });
+
+        let json = oos_window_execution_json_with_train_summary(&execution, &policy, &summary);
+        let breakdown = json["train_stress_score_breakdown"]
+            .as_object()
+            .expect("train stress score breakdown");
+
+        assert_eq!(
+            breakdown["profile"],
+            "prediction_confidence_stress_fill_quality_score_v1"
+        );
+        assert_eq!(breakdown["summary"]["pass_ratio"], 1.0);
+        assert_eq!(breakdown["summary"]["min_sortino"], "1.60");
+        assert!(breakdown["components"]["prediction_confidence_score"].is_string());
+        assert!(breakdown["components"]["pass_ratio_bonus"].is_string());
+        assert!(breakdown["components"]["annual_quality_bonus"].is_string());
+        assert!(breakdown["components"]["calmar_quality_bonus"].is_string());
+        assert!(breakdown["components"]["sharpe_quality_bonus"].is_string());
+        assert!(breakdown["components"]["sortino_quality_bonus"].is_string());
+        assert!(breakdown["penalties"]["drawdown_tail_penalty"].is_string());
+        assert!(breakdown["penalties"]["min_annual_shortfall"].is_string());
+        assert!(breakdown["penalties"]["calmar_shortfall"].is_string());
+        assert!(breakdown["penalties"]["sharpe_shortfall"].is_string());
+        assert!(breakdown["penalties"]["sortino_shortfall"].is_string());
+        assert_eq!(
+            json["train_stress_adjusted_score"],
+            breakdown["total_score"]
+        );
     }
 
     #[test]

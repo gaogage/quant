@@ -12875,7 +12875,7 @@ fn with_train_window_nonlinear_ranking_seed(
         "listed_non_st",
     );
     let seed = set_seed_score_direction(seed, score_direction);
-    let seed = with_candidate_ranking_seed(seed, "nonlinear_regime_alpha_liquidity_v1");
+    let seed = with_candidate_ranking_seed(seed, "nonlinear_regime_alpha_liquidity_v2");
     let seed = with_cash_utilization_seed(seed, cash_utilization);
     let mut seed = with_execution_impact_budget_seed(seed, execution_impact_budget);
     if let Some(object) = seed.as_object_mut() {
@@ -15781,7 +15781,7 @@ fn with_train_window_ml_stress_fill_seed(
     seed["train_window_ml_ranking_profile"] = json!(ml_profile);
     seed["train_window_ml_feature_profile"] =
         json!("phase7_gb_quality_value_recovery_low_impact_v2");
-    seed["train_window_ml_label_objective"] = json!("risk_adjusted_excess_return");
+    seed["train_window_ml_label_objective"] = json!("quality_adjusted_risk_adjusted_excess_return");
     seed["train_window_ml_label_horizon_days"] = json!(label_horizon_days);
     seed["train_window_ml_bucket_count"] = json!(bucket_count);
     seed["train_window_ml_min_samples_per_bucket"] = json!(250);
@@ -21611,7 +21611,7 @@ impl LayeredSearchConfig {
             "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
             "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
         ];
-        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v1".to_string()];
+        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v2".to_string()];
         config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
         config.candidate_risk_filter_profiles = vec![
             "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
@@ -21660,7 +21660,7 @@ impl LayeredSearchConfig {
             "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
             "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
         ];
-        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v1".to_string()];
+        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v2".to_string()];
         config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
         config.candidate_risk_filter_profiles = vec![
             "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
@@ -23730,7 +23730,7 @@ impl LayeredSearchConfig {
             "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
             "capacity_stress_participation_alpha_headroom_floor_60_v1".to_string(),
         ];
-        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v1".to_string()];
+        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v2".to_string()];
         config.candidate_risk_filter_profiles = vec![
             "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
             "soft_low_volatility_low_correlation_v1".to_string(),
@@ -27775,7 +27775,7 @@ mod tests {
         );
         assert!(config
             .candidate_ranking_profiles
-            .contains(&"nonlinear_regime_alpha_liquidity_v1".to_string()));
+            .contains(&"nonlinear_regime_alpha_liquidity_v2".to_string()));
         assert!(config
             .market_regime_policies
             .contains(&"quality_nonlinear_alpha_risk_memory_router_v3".to_string()));
@@ -27798,7 +27798,7 @@ mod tests {
             assert_eq!(seed["signal_source"], "factor_combo");
             assert_eq!(
                 seed["candidate_ranking"],
-                "nonlinear_regime_alpha_liquidity_v1"
+                "nonlinear_regime_alpha_liquidity_v2"
             );
             assert!(seed["train_window_nonlinear_ranking_profile"].is_string());
             assert!(
@@ -27829,7 +27829,7 @@ mod tests {
         );
         assert!(config
             .candidate_ranking_profiles
-            .contains(&"nonlinear_regime_alpha_liquidity_v1".to_string()));
+            .contains(&"nonlinear_regime_alpha_liquidity_v2".to_string()));
         assert!(config
             .capacity_risk_budget_profiles
             .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
@@ -27845,7 +27845,7 @@ mod tests {
             assert_eq!(seed["signal_source"], "factor_combo");
             assert_eq!(
                 seed["candidate_ranking"],
-                "nonlinear_regime_alpha_liquidity_v1"
+                "nonlinear_regime_alpha_liquidity_v2"
             );
             assert_eq!(seed["cash_utilization"], "stress_fill_gross_98_v1");
             assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
@@ -27905,7 +27905,7 @@ mod tests {
             assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
             assert_eq!(
                 seed["train_window_ml_label_objective"],
-                "risk_adjusted_excess_return"
+                "quality_adjusted_risk_adjusted_excess_return"
             );
             assert_eq!(
                 seed["train_window_ml_pit_policy"],
