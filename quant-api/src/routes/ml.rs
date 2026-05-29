@@ -238,6 +238,7 @@ enum LabelObjective {
     RiskAdjustedExcessReturn,
     QualityAdjustedExcessReturn,
     QualityAdjustedRiskAdjustedExcessReturn,
+    FundamentalQualityAdjustedExcessReturn,
 }
 
 impl LabelObjective {
@@ -250,8 +251,11 @@ impl LabelObjective {
             Some("quality_adjusted_risk_adjusted_excess_return") => {
                 Ok(Self::QualityAdjustedRiskAdjustedExcessReturn)
             }
+            Some("fundamental_quality_adjusted_excess_return") => {
+                Ok(Self::FundamentalQualityAdjustedExcessReturn)
+            }
             Some(other) => Err(format!(
-                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return; got {}",
+                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return; got {}",
                 other
             )),
         }
@@ -266,6 +270,9 @@ impl LabelObjective {
             Self::QualityAdjustedRiskAdjustedExcessReturn => {
                 "quality_adjusted_risk_adjusted_excess_return"
             }
+            Self::FundamentalQualityAdjustedExcessReturn => {
+                "fundamental_quality_adjusted_excess_return"
+            }
         }
     }
 
@@ -276,14 +283,21 @@ impl LabelObjective {
                 | Self::RiskAdjustedExcessReturn
                 | Self::QualityAdjustedExcessReturn
                 | Self::QualityAdjustedRiskAdjustedExcessReturn
+                | Self::FundamentalQualityAdjustedExcessReturn
         )
     }
 
     fn is_quality_adjusted(self) -> bool {
         matches!(
             self,
-            Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn
+            Self::QualityAdjustedExcessReturn
+                | Self::QualityAdjustedRiskAdjustedExcessReturn
+                | Self::FundamentalQualityAdjustedExcessReturn
         )
+    }
+
+    fn uses_fundamental_quality(self) -> bool {
+        matches!(self, Self::FundamentalQualityAdjustedExcessReturn)
     }
 }
 
@@ -3202,13 +3216,17 @@ fn training_samples_from_feature_matrix_rows(
         {
             continue;
         }
-        let Some(label) = label_for_objective(
+        let quality_features = label_objective
+            .uses_fundamental_quality()
+            .then(|| row.features.as_slice());
+        let Some(label) = label_for_objective_with_features(
             label_objective,
             closes_by_symbol.get(&row.symbol),
             Some(benchmark_closes).filter(|closes| !closes.is_empty()),
             row.trade_date,
             max_label_date,
             horizon_days,
+            quality_features,
         ) else {
             continue;
         };
@@ -3298,7 +3316,75 @@ fn label_for_objective(
             let quality = quality_adjustment(closes?, trade_date, 60, 120, 0.25, 0.15, 1.5, 1.0)?;
             Some((stock_return - benchmark_return) / downside_volatility.max(0.01) * quality)
         }
+        LabelObjective::FundamentalQualityAdjustedExcessReturn => {
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
+            let price_quality =
+                quality_adjustment(closes?, trade_date, 60, 120, 0.25, 0.15, 1.5, 1.0)?;
+            Some((stock_return - benchmark_return) * price_quality)
+        }
     }
+}
+
+/// Compute a fundamental quality score from a slice of PIT feature values.
+///
+/// The quality score is the average of the first `quality_feature_count` features
+/// after applying a sigmoid normalization to each. Features are expected to be
+/// standardized (z-score), so sigmoid maps roughly [-3,3] → [0.05, 0.95].
+///
+/// The quality score is in (0, 1], where higher values indicate higher quality.
+/// This ensures the multiplier is always ≤ 1.0.
+fn fundamental_quality_score(features: &[f64], quality_feature_count: usize) -> f64 {
+    let count = quality_feature_count.min(features.len());
+    if count == 0 {
+        return 1.0;
+    }
+    let sum: f64 = features[..count]
+        .iter()
+        .map(|&v| {
+            if v.is_finite() {
+                1.0 / (1.0 + (-v).exp())
+            } else {
+                0.5
+            }
+        })
+        .sum();
+    sum / count as f64
+}
+
+/// Like `label_for_objective` but accepts PIT feature values for fundamental-quality-aware labels.
+fn label_for_objective_with_features(
+    label_objective: LabelObjective,
+    closes: Option<&Vec<(NaiveDate, f64)>>,
+    benchmark_closes: Option<&Vec<(NaiveDate, f64)>>,
+    trade_date: NaiveDate,
+    max_label_date: Option<NaiveDate>,
+    horizon_days: i64,
+    quality_features: Option<&[f64]>,
+) -> Option<f64> {
+    let stock_return = future_return_label_until(closes, trade_date, max_label_date, horizon_days)?;
+    if label_objective.uses_fundamental_quality() {
+        let benchmark_return =
+            future_return_label_until(benchmark_closes, trade_date, max_label_date, horizon_days)?;
+        let price_quality = quality_adjustment(closes?, trade_date, 60, 120, 0.25, 0.15, 1.5, 1.5)?;
+        let fund_quality = quality_features
+            .map(|features| fundamental_quality_score(features, 12))
+            .unwrap_or(1.0);
+        let blended_quality = price_quality * 0.4 + fund_quality * 0.6;
+        return Some((stock_return - benchmark_return) * blended_quality);
+    }
+    label_for_objective(
+        label_objective,
+        closes,
+        benchmark_closes,
+        trade_date,
+        max_label_date,
+        horizon_days,
+    )
 }
 
 fn forward_downside_volatility(
@@ -4354,6 +4440,99 @@ mod tests {
         assert!(dd.is_some(), "should compute max drawdown, got None");
         // Max drawdown from peak 12.0 to trough 9.0 = 3.0/12.0 = 0.25
         assert!((dd.unwrap() - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fundamental_quality_score_maps_positive_features_to_high_quality() {
+        // Positive z-scores (good fundamentals) → high sigmoid → high quality
+        let features = vec![1.0, 0.5, 0.3, 0.8, 0.6, 0.0, 0.2, 0.4, -0.1, 0.1, 0.7, 0.9];
+        let score = fundamental_quality_score(&features, 12);
+        // All features are ≥ -0.1, sigmoid > 0.47, so average > 0.5
+        assert!(
+            score > 0.5,
+            "positive features should give score > 0.5, got {score}"
+        );
+        assert!(score <= 1.0, "score should be ≤ 1.0");
+    }
+
+    #[test]
+    fn fundamental_quality_score_penalizes_negative_features() {
+        // Negative z-scores (poor fundamentals) → low sigmoid → low quality
+        let features = vec![
+            -1.0, -0.5, -2.0, -0.8, -0.6, -1.5, -0.2, -0.4, -0.1, -0.9, -0.7, -0.3,
+        ];
+        let score = fundamental_quality_score(&features, 12);
+        assert!(
+            score < 0.5,
+            "negative features should give score < 0.5, got {score}"
+        );
+        assert!(score > 0.0, "score should be > 0");
+    }
+
+    #[test]
+    fn fundamental_quality_label_uses_quality_features_when_available() {
+        let days = 300;
+        let closes: Vec<(NaiveDate, f64)> = (0..days)
+            .map(|i| {
+                (
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(i),
+                    10.0 + (i as f64 * 0.005),
+                )
+            })
+            .collect();
+        let benchmark_closes: Vec<(NaiveDate, f64)> = (0..days)
+            .map(|i| {
+                (
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(i),
+                    100.0 + (i as f64 * 0.003),
+                )
+            })
+            .collect();
+        let trade_idx = 150usize;
+        let trade_date = closes[trade_idx].0;
+        let horizon = 20i64;
+
+        // With high-quality features → higher label
+        let high_quality_features: Vec<f64> = vec![1.0; 12];
+        let hq_label = label_for_objective_with_features(
+            LabelObjective::FundamentalQualityAdjustedExcessReturn,
+            Some(&closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            horizon,
+            Some(&high_quality_features),
+        );
+        // With low-quality features → lower label
+        let low_quality_features: Vec<f64> = vec![-1.0; 12];
+        let lq_label = label_for_objective_with_features(
+            LabelObjective::FundamentalQualityAdjustedExcessReturn,
+            Some(&closes),
+            Some(&benchmark_closes),
+            trade_date,
+            None,
+            horizon,
+            Some(&low_quality_features),
+        );
+
+        assert!(hq_label.is_some());
+        assert!(lq_label.is_some());
+        let hq = hq_label.unwrap();
+        let lq = lq_label.unwrap();
+        assert!(
+            hq > lq,
+            "high-quality label {hq} should be > low-quality label {lq}"
+        );
+    }
+
+    #[test]
+    fn fundamental_quality_label_parses_correctly() {
+        let obj = LabelObjective::parse(Some("fundamental_quality_adjusted_excess_return"))
+            .expect("parse");
+        assert!(obj.uses_fundamental_quality());
+        assert!(obj.requires_benchmark());
+        assert!(obj.is_quality_adjusted());
+        assert_eq!(obj.as_str(), "fundamental_quality_adjusted_excess_return");
     }
 
     #[test]

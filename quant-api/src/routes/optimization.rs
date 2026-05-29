@@ -20688,7 +20688,7 @@ mod tests {
         assert_eq!(bundle.plan.trials.len(), 8);
         assert!(bundle.plan.trials.iter().all(|trial| {
             trial.parameters["train_window_nonlinear_ranking_profile"].is_string()
-                && trial.parameters["candidate_ranking"] == "nonlinear_regime_alpha_liquidity_v1"
+                && trial.parameters["candidate_ranking"] == "nonlinear_regime_alpha_liquidity_v2"
                 && trial.parameters["signal_source"] == "factor_combo"
                 && trial.parameters.get("prediction_set_id").is_none()
         }));
@@ -20744,7 +20744,7 @@ mod tests {
         assert_eq!(bundle.plan.trials.len(), 8);
         assert!(bundle.plan.trials.iter().all(|trial| {
             trial.parameters["train_window_stress_fill_target_exposure_profile"].is_string()
-                && trial.parameters["candidate_ranking"] == "nonlinear_regime_alpha_liquidity_v1"
+                && trial.parameters["candidate_ranking"] == "nonlinear_regime_alpha_liquidity_v2"
                 && trial.parameters["signal_source"] == "factor_combo"
                 && trial.parameters["cash_utilization"] == "stress_fill_gross_98_v1"
                 && trial.parameters.get("prediction_set_id").is_none()
@@ -20810,7 +20810,7 @@ mod tests {
                 && trial.parameters["train_window_ml_feature_profile"]
                     == "phase7_gb_quality_value_recovery_low_impact_v2"
                 && trial.parameters["train_window_ml_label_objective"]
-                    == "risk_adjusted_excess_return"
+                    == "quality_adjusted_risk_adjusted_excess_return"
                 && trial.parameters["train_window_ml_pit_policy"]
                     == "train-window rolling fit; no OOS labels"
                 && trial.parameters["stress_fill_objective_profile"].is_string()
