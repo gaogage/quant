@@ -81,6 +81,8 @@ pub struct SignalConfig {
     pub candidate_ranking_profile: CandidateRankingProfile,
     /// Portfolio-level risk-contribution control applied after weights are built.
     pub risk_contribution_control_profile: RiskContributionControlProfile,
+    /// Stress-fill target exposure shaping from same-day prediction/confidence score strength.
+    pub stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile,
     /// Minimum absolute target-weight delta required to move a position on rebalance.
     /// 0.01 = 1 percentage point. 0 disables hysteresis.
     pub rebalance_hysteresis_pct: f64,
@@ -157,6 +159,8 @@ pub struct PredictionSignalConfig {
     pub candidate_ranking_profile: CandidateRankingProfile,
     /// Portfolio-level risk-contribution control applied after weights are built.
     pub risk_contribution_control_profile: RiskContributionControlProfile,
+    /// Stress-fill target exposure shaping from same-day prediction/confidence score strength.
+    pub stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile,
     /// Minimum absolute target-weight delta required to move a position on rebalance.
     pub rebalance_hysteresis_pct: f64,
     /// Fraction of the target-weight gap to apply on each rebalance.
@@ -171,6 +175,8 @@ pub struct PredictionBlendConfig {
     /// Keep only stocks whose same-day prediction percentile is at least this threshold.
     /// Percentile is computed cross-sectionally per date, with higher prediction scores better.
     pub prediction_min_percentile: Option<f64>,
+    /// Keep only stocks whose raw same-day prediction score is at least this threshold.
+    pub prediction_min_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +243,7 @@ impl Default for PredictionSignalConfig {
             candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
             candidate_ranking_profile: CandidateRankingProfile::Off,
             risk_contribution_control_profile: RiskContributionControlProfile::Off,
+            stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile::Off,
             rebalance_hysteresis_pct: 0.0,
             partial_rebalance_ratio: 1.0,
         }
@@ -3087,6 +3094,7 @@ impl Default for SignalConfig {
             candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
             candidate_ranking_profile: CandidateRankingProfile::Off,
             risk_contribution_control_profile: RiskContributionControlProfile::Off,
+            stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile::Off,
             rebalance_hysteresis_pct: 0.0,
             partial_rebalance_ratio: 1.0,
             score_candidate_pool_size: None,
@@ -3111,6 +3119,7 @@ pub enum ScoreDirection {
 pub enum PortfolioConstructionMethod {
     Heuristic,
     RiskBudget,
+    StressFillAwareRiskBudget,
     MinVariance,
 }
 
@@ -3767,6 +3776,59 @@ impl RiskContributionControlProfile {
 struct RiskContributionControlParams {
     max_single_name_contribution_pct: f64,
     iterations: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StressFillConfidenceExposureProfile {
+    #[default]
+    Off,
+    PredictionConfidenceV1,
+    PredictionConfidenceAscendingV1,
+    PredictionConfidenceCapacityHeadroomV1,
+    PredictionConfidenceAscendingCapacityHeadroomV1,
+}
+
+impl StressFillConfidenceExposureProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "off" | "none" | "disabled" => Ok(Self::Off),
+            "prediction_confidence_v1"
+            | "prediction-confidence-v1"
+            | "ml_prediction_confidence_v1"
+            | "ml-prediction-confidence-v1"
+            | "stress_fill_prediction_confidence_v1"
+            | "stress-fill-prediction-confidence-v1" => Ok(Self::PredictionConfidenceV1),
+            "prediction_confidence_ascending_v1"
+            | "prediction-confidence-ascending-v1"
+            | "ml_prediction_confidence_ascending_v1"
+            | "ml-prediction-confidence-ascending-v1"
+            | "stress_fill_prediction_confidence_ascending_v1"
+            | "stress-fill-prediction-confidence-ascending-v1" => {
+                Ok(Self::PredictionConfidenceAscendingV1)
+            }
+            "prediction_confidence_capacity_headroom_v1"
+            | "prediction-confidence-capacity-headroom-v1"
+            | "ml_prediction_confidence_capacity_headroom_v1"
+            | "ml-prediction-confidence-capacity-headroom-v1"
+            | "stress_fill_prediction_confidence_capacity_headroom_v1"
+            | "stress-fill-prediction-confidence-capacity-headroom-v1" => {
+                Ok(Self::PredictionConfidenceCapacityHeadroomV1)
+            }
+            "prediction_confidence_ascending_capacity_headroom_v1"
+            | "prediction-confidence-ascending-capacity-headroom-v1"
+            | "ml_prediction_confidence_ascending_capacity_headroom_v1"
+            | "ml-prediction-confidence-ascending-capacity-headroom-v1"
+            | "stress_fill_prediction_confidence_ascending_capacity_headroom_v1"
+            | "stress-fill-prediction-confidence-ascending-capacity-headroom-v1" => {
+                Ok(Self::PredictionConfidenceAscendingCapacityHeadroomV1)
+            }
+            other => Err(format!(
+                "unsupported stress_fill_confidence_exposure: {}",
+                other
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6181,6 +6243,7 @@ struct PortfolioConstructionConfig {
     candidate_risk_filter_profile: CandidateRiskFilterProfile,
     candidate_ranking_profile: CandidateRankingProfile,
     risk_contribution_control_profile: RiskContributionControlProfile,
+    stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile,
 }
 
 impl Default for PortfolioConstructionConfig {
@@ -6205,6 +6268,7 @@ impl Default for PortfolioConstructionConfig {
             candidate_risk_filter_profile: CandidateRiskFilterProfile::Off,
             candidate_ranking_profile: CandidateRankingProfile::Off,
             risk_contribution_control_profile: RiskContributionControlProfile::Off,
+            stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile::Off,
         }
     }
 }
@@ -6231,6 +6295,7 @@ impl From<&SignalConfig> for PortfolioConstructionConfig {
             candidate_risk_filter_profile: config.candidate_risk_filter_profile,
             candidate_ranking_profile: config.candidate_ranking_profile,
             risk_contribution_control_profile: config.risk_contribution_control_profile,
+            stress_fill_confidence_exposure_profile: config.stress_fill_confidence_exposure_profile,
         }
     }
 }
@@ -6257,14 +6322,18 @@ impl From<&PredictionSignalConfig> for PortfolioConstructionConfig {
             candidate_risk_filter_profile: config.candidate_risk_filter_profile,
             candidate_ranking_profile: config.candidate_ranking_profile,
             risk_contribution_control_profile: config.risk_contribution_control_profile,
+            stress_fill_confidence_exposure_profile: config.stress_fill_confidence_exposure_profile,
         }
     }
 }
 
 impl PortfolioConstructionConfig {
     fn uses_capacity_inputs(&self) -> bool {
-        self.portfolio_method == PortfolioConstructionMethod::RiskBudget
-            || self.style_risk_budget_profile.uses_liquidity()
+        matches!(
+            self.portfolio_method,
+            PortfolioConstructionMethod::RiskBudget
+                | PortfolioConstructionMethod::StressFillAwareRiskBudget
+        ) || self.style_risk_budget_profile.uses_liquidity()
             || self.candidate_ranking_profile.uses_capacity()
             || self.capacity_risk_budget_profile.uses_capacity()
             || (self.max_participation_rate.is_some() && self.portfolio_notional_cny.is_some())
@@ -6273,9 +6342,9 @@ impl PortfolioConstructionConfig {
 
 fn capped_portfolio_top_n(top_n: usize, method: PortfolioConstructionMethod) -> usize {
     match method {
-        PortfolioConstructionMethod::RiskBudget | PortfolioConstructionMethod::MinVariance => {
-            top_n.min(50)
-        }
+        PortfolioConstructionMethod::RiskBudget
+        | PortfolioConstructionMethod::StressFillAwareRiskBudget
+        | PortfolioConstructionMethod::MinVariance => top_n.min(50),
         PortfolioConstructionMethod::Heuristic => top_n,
     }
 }
@@ -7186,6 +7255,7 @@ fn blend_factor_prediction_scores(
         let min_prediction_percentile = blend
             .prediction_min_percentile
             .map(|value| value.clamp(0.0, 1.0));
+        let min_prediction_score = blend.prediction_min_score;
         let paired = rows
             .iter()
             .filter_map(|(symbol, factor_score)| {
@@ -7193,6 +7263,12 @@ fn blend_factor_prediction_scores(
                     prediction_percentiles.get(symbol.as_str())?;
                 if min_prediction_percentile
                     .map(|threshold| *prediction_percentile < threshold)
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
+                if min_prediction_score
+                    .map(|threshold| *prediction_score < threshold)
                     .unwrap_or(false)
                 {
                     return None;
@@ -9976,7 +10052,9 @@ fn build_portfolio_weights_with_return_risk_matrices(
             || config.risk_contribution_control_profile.params().is_some()
             || matches!(
                 config.portfolio_method,
-                PortfolioConstructionMethod::RiskBudget | PortfolioConstructionMethod::MinVariance
+                PortfolioConstructionMethod::RiskBudget
+                    | PortfolioConstructionMethod::StressFillAwareRiskBudget
+                    | PortfolioConstructionMethod::MinVariance
             );
     let uses_correlation_matrix = config.max_pairwise_correlation.is_some();
     let uses_kelly_matrix = matches!(
@@ -10147,6 +10225,28 @@ fn build_portfolio_weights_with_return_risk_matrices(
                     config,
                 )
             }),
+        PortfolioConstructionMethod::StressFillAwareRiskBudget => risk_matrix
+            .as_ref()
+            .map(|matrix| {
+                build_stress_fill_aware_risk_budget_raw_weights_from_matrix(
+                    score_day,
+                    &selected,
+                    &risk_filtered_candidates,
+                    matrix,
+                    average_amounts,
+                    config,
+                )
+            })
+            .unwrap_or_else(|| {
+                build_stress_fill_aware_risk_budget_raw_weights(
+                    score_day,
+                    &selected,
+                    &risk_filtered_candidates,
+                    return_history,
+                    average_amounts,
+                    config,
+                )
+            }),
         PortfolioConstructionMethod::MinVariance => risk_matrix
             .as_ref()
             .map(|matrix| {
@@ -10213,7 +10313,9 @@ fn build_portfolio_weights_with_return_risk_stats_matrices(
             || config.risk_contribution_control_profile.params().is_some()
             || matches!(
                 config.portfolio_method,
-                PortfolioConstructionMethod::RiskBudget | PortfolioConstructionMethod::MinVariance
+                PortfolioConstructionMethod::RiskBudget
+                    | PortfolioConstructionMethod::StressFillAwareRiskBudget
+                    | PortfolioConstructionMethod::MinVariance
             );
     let uses_correlation_matrix = config.max_pairwise_correlation.is_some();
     let uses_kelly_matrix = matches!(
@@ -10338,6 +10440,19 @@ fn build_portfolio_weights_with_return_risk_stats_matrices(
             build_risk_budget_raw_weights_from_stats_matrix(
                 score_day,
                 &selected,
+                matrix,
+                average_amounts,
+                config,
+            )
+        }
+        PortfolioConstructionMethod::StressFillAwareRiskBudget => {
+            let Some(matrix) = risk_matrix.as_deref() else {
+                return HashMap::new();
+            };
+            build_stress_fill_aware_risk_budget_raw_weights_from_stats_matrix(
+                score_day,
+                &selected,
+                &risk_filtered_candidates,
                 matrix,
                 average_amounts,
                 config,
@@ -11376,6 +11491,259 @@ fn build_risk_budget_raw_weights_from_stats_matrix(
         let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
         let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
         let raw = capacity_multiplier / risk_denominator;
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+fn alpha_rank_lookup(candidates: &[(String, f64)]) -> HashMap<String, f64> {
+    if candidates.is_empty() {
+        return HashMap::new();
+    }
+    let denominator = candidates.len().saturating_sub(1).max(1) as f64;
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, (symbol, _))| (symbol.clone(), 1.0 - (idx as f64 / denominator)))
+        .collect()
+}
+
+fn stress_fill_alpha_multiplier(symbol: &str, alpha_ranks: &HashMap<String, f64>) -> f64 {
+    alpha_ranks
+        .get(symbol)
+        .copied()
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0)
+        .max(0.05)
+        .powf(1.25)
+}
+
+fn stress_fill_confidence_lookup(candidates: &[(String, f64)]) -> HashMap<String, f64> {
+    stress_fill_confidence_lookup_for_direction(candidates, ScoreDirection::Descending)
+}
+
+fn stress_fill_confidence_lookup_for_direction(
+    candidates: &[(String, f64)],
+    score_direction: ScoreDirection,
+) -> HashMap<String, f64> {
+    let stats = score_stats(candidates.iter().map(|(_, score)| *score));
+    let finite = candidates
+        .iter()
+        .filter_map(|(symbol, score)| {
+            score.is_finite().then(|| {
+                let z_score = standard_score(*score, stats);
+                let z_score = match score_direction {
+                    ScoreDirection::Descending => z_score,
+                    ScoreDirection::Ascending => -z_score,
+                };
+                (symbol.clone(), z_score)
+            })
+        })
+        .collect::<Vec<_>>();
+    if finite.is_empty() {
+        return HashMap::new();
+    }
+
+    finite
+        .into_iter()
+        .map(|(symbol, z_score)| (symbol, (0.5 + z_score / 6.0).clamp(0.0, 1.0)))
+        .collect()
+}
+
+fn stress_fill_confidence_lookup_for_config(
+    candidates: &[(String, f64)],
+    config: &PortfolioConstructionConfig,
+) -> HashMap<String, f64> {
+    match config.stress_fill_confidence_exposure_profile {
+        StressFillConfidenceExposureProfile::Off
+        | StressFillConfidenceExposureProfile::PredictionConfidenceV1
+        | StressFillConfidenceExposureProfile::PredictionConfidenceCapacityHeadroomV1 => {
+            stress_fill_confidence_lookup(candidates)
+        }
+        StressFillConfidenceExposureProfile::PredictionConfidenceAscendingV1
+        | StressFillConfidenceExposureProfile::PredictionConfidenceAscendingCapacityHeadroomV1 => {
+            stress_fill_confidence_lookup_for_direction(candidates, ScoreDirection::Ascending)
+        }
+    }
+}
+
+fn stress_fill_capacity_headroom_multiplier(
+    symbol: &str,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> f64 {
+    let max_position = config
+        .max_position_pct
+        .to_f64()
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    if max_position <= f64::EPSILON {
+        return 1.0;
+    }
+    let participation_cap_multiplier = config
+        .capacity_risk_budget_profile
+        .params()
+        .map(|params| params.participation_cap_multiplier)
+        .unwrap_or(1.0);
+    let symbol_cap = target_weight_cap_with_multiplier(
+        symbol,
+        average_amounts,
+        config,
+        participation_cap_multiplier,
+    )
+    .to_f64()
+    .unwrap_or(max_position)
+    .clamp(0.0, max_position);
+    (symbol_cap / max_position).clamp(0.05, 1.0).powf(0.75)
+}
+
+fn stress_fill_confidence_multiplier(
+    symbol: &str,
+    confidence_scores: &HashMap<String, f64>,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> f64 {
+    match config.stress_fill_confidence_exposure_profile {
+        StressFillConfidenceExposureProfile::Off => 1.0,
+        StressFillConfidenceExposureProfile::PredictionConfidenceV1
+        | StressFillConfidenceExposureProfile::PredictionConfidenceAscendingV1 => confidence_scores
+            .get(symbol)
+            .copied()
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0)
+            .max(0.05)
+            .powf(1.50),
+        StressFillConfidenceExposureProfile::PredictionConfidenceCapacityHeadroomV1
+        | StressFillConfidenceExposureProfile::PredictionConfidenceAscendingCapacityHeadroomV1 => {
+            let confidence = confidence_scores
+                .get(symbol)
+                .copied()
+                .unwrap_or(0.5)
+                .clamp(0.0, 1.0)
+                .max(0.05)
+                .powf(1.50);
+            confidence * stress_fill_capacity_headroom_multiplier(symbol, average_amounts, config)
+        }
+    }
+}
+
+fn build_stress_fill_aware_risk_budget_raw_weights(
+    score_day: NaiveDate,
+    symbols: &[String],
+    ranked_candidates: &[(String, f64)],
+    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+    let alpha_ranks = alpha_rank_lookup(ranked_candidates);
+    let confidence_scores = stress_fill_confidence_lookup_for_config(ranked_candidates, config);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let returns = trailing_returns(
+            return_history,
+            symbol,
+            score_day,
+            config.risk_budget_lookback_days,
+        );
+        let volatility = sample_volatility(&returns).unwrap_or(0.20);
+        let concentration_penalty =
+            covariance_concentration_penalty(symbol, symbols, return_history, score_day, config);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        let alpha_multiplier = stress_fill_alpha_multiplier(symbol, &alpha_ranks);
+        let confidence_multiplier =
+            stress_fill_confidence_multiplier(symbol, &confidence_scores, average_amounts, config);
+        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
+        let raw = alpha_multiplier * confidence_multiplier * capacity_multiplier / risk_denominator;
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+#[allow(dead_code)]
+fn build_stress_fill_aware_risk_budget_raw_weights_from_matrix(
+    score_day: NaiveDate,
+    symbols: &[String],
+    ranked_candidates: &[(String, f64)],
+    matrix: &ScoreDateReturnRiskMatrix,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+    let alpha_ranks = alpha_rank_lookup(ranked_candidates);
+    let confidence_scores = stress_fill_confidence_lookup_for_config(ranked_candidates, config);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20);
+        let concentration_penalty =
+            matrix.covariance_concentration_penalty(score_day, symbol, symbols);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        let alpha_multiplier = stress_fill_alpha_multiplier(symbol, &alpha_ranks);
+        let confidence_multiplier =
+            stress_fill_confidence_multiplier(symbol, &confidence_scores, average_amounts, config);
+        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
+        let raw = alpha_multiplier * confidence_multiplier * capacity_multiplier / risk_denominator;
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+#[allow(dead_code)]
+fn build_stress_fill_aware_risk_budget_raw_weights_from_stats_matrix(
+    score_day: NaiveDate,
+    symbols: &[String],
+    ranked_candidates: &[(String, f64)],
+    matrix: &ScoreDateReturnRiskStatsMatrix,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+    let alpha_ranks = alpha_rank_lookup(ranked_candidates);
+    let confidence_scores = stress_fill_confidence_lookup_for_config(ranked_candidates, config);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20);
+        let concentration_penalty =
+            matrix.covariance_concentration_penalty(score_day, symbol, symbols);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        let alpha_multiplier = stress_fill_alpha_multiplier(symbol, &alpha_ranks);
+        let confidence_multiplier =
+            stress_fill_confidence_multiplier(symbol, &confidence_scores, average_amounts, config);
+        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
+        let raw = alpha_multiplier * confidence_multiplier * capacity_multiplier / risk_denominator;
         raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
     }
 
@@ -15259,6 +15627,7 @@ mod tests {
             factor_weight: 0.5,
             prediction_weight: 0.5,
             prediction_min_percentile: None,
+            prediction_min_score: None,
         };
 
         blend_factor_prediction_scores(
@@ -15297,6 +15666,7 @@ mod tests {
             factor_weight: 0.0,
             prediction_weight: 1.0,
             prediction_min_percentile: None,
+            prediction_min_score: None,
         };
 
         blend_factor_prediction_scores(
@@ -15339,6 +15709,7 @@ mod tests {
             factor_weight: 1.0,
             prediction_weight: 0.0,
             prediction_min_percentile: Some(0.5),
+            prediction_min_score: None,
         };
 
         blend_factor_prediction_scores(
@@ -15356,6 +15727,47 @@ mod tests {
         assert_eq!(blended.len(), 2);
         assert_eq!(blended[0].0, "MID_FACTOR_GOOD_PRED");
         assert_eq!(blended[1].0, "HIGH_FACTOR_GOOD_PRED");
+    }
+
+    #[test]
+    fn prediction_blend_can_filter_negative_raw_prediction_scores() {
+        let day = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let mut factor_scores = HashMap::from([(
+            day,
+            vec![
+                ("NEGATIVE_HIGH_FACTOR".to_string(), 10.0),
+                ("POSITIVE_LOW_FACTOR".to_string(), 1.0),
+                ("POSITIVE_HIGH_FACTOR".to_string(), 2.0),
+            ],
+        )]);
+        let prediction_scores = HashMap::from([(
+            day,
+            vec![
+                ("NEGATIVE_HIGH_FACTOR".to_string(), -0.01, None),
+                ("POSITIVE_LOW_FACTOR".to_string(), 0.00, None),
+                ("POSITIVE_HIGH_FACTOR".to_string(), 0.02, None),
+            ],
+        )]);
+        let blend = PredictionBlendConfig {
+            prediction_set_id: "pred-quality-growth".to_string(),
+            factor_weight: 1.0,
+            prediction_weight: 0.0,
+            prediction_min_percentile: None,
+            prediction_min_score: Some(0.0),
+        };
+
+        blend_factor_prediction_scores(
+            &mut factor_scores,
+            &prediction_scores,
+            &blend,
+            ScoreDirection::Descending,
+        );
+
+        let blended = factor_scores.get(&day).unwrap();
+        assert_eq!(
+            blended.iter().map(|(symbol, _)| symbol).collect::<Vec<_>>(),
+            vec!["POSITIVE_LOW_FACTOR", "POSITIVE_HIGH_FACTOR"]
+        );
     }
 
     #[test]
@@ -18007,6 +18419,278 @@ mod tests {
         assert!(gross >= Decimal::new(70, 2));
         assert!(gross < Decimal::new(90, 2));
         assert!(thin_weight <= Decimal::new(12, 2));
+    }
+
+    #[test]
+    fn stress_fill_aware_risk_budget_turns_alpha_capacity_correlation_into_exposure() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("HIGH_ALPHA_THIN_RISKY".to_string(), 1.00),
+            ("LOWER_ALPHA_DEEP_STABLE".to_string(), 0.82),
+            ("DIVERSIFIER".to_string(), 0.76),
+            ("DEEP_STABLE_2".to_string(), 0.70),
+            ("DEEP_STABLE_3".to_string(), 0.64),
+        ];
+        let mut return_history = HashMap::new();
+        return_history.insert(
+            "HIGH_ALPHA_THIN_RISKY".to_string(),
+            vec![
+                (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.080),
+                (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), -0.070),
+                (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.065),
+                (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), -0.060),
+                (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.055),
+            ],
+        );
+        return_history.insert(
+            "LOWER_ALPHA_DEEP_STABLE".to_string(),
+            vec![
+                (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.010),
+                (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), 0.012),
+                (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.009),
+                (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 0.011),
+                (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.010),
+            ],
+        );
+        return_history.insert(
+            "DIVERSIFIER".to_string(),
+            vec![
+                (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), -0.004),
+                (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), 0.003),
+                (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), -0.002),
+                (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 0.004),
+                (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), -0.001),
+            ],
+        );
+        return_history.insert(
+            "DEEP_STABLE_2".to_string(),
+            vec![
+                (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.006),
+                (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), 0.005),
+                (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.007),
+                (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 0.004),
+                (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.006),
+            ],
+        );
+        return_history.insert(
+            "DEEP_STABLE_3".to_string(),
+            vec![
+                (NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), 0.003),
+                (NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(), 0.004),
+                (NaiveDate::from_ymd_opt(2026, 1, 4).unwrap(), 0.002),
+                (NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(), 0.004),
+                (NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(), 0.003),
+            ],
+        );
+        let average_amounts = HashMap::from([
+            ("HIGH_ALPHA_THIN_RISKY".to_string(), 15_000_000.0),
+            ("LOWER_ALPHA_DEEP_STABLE".to_string(), 800_000_000.0),
+            ("DIVERSIFIER".to_string(), 700_000_000.0),
+            ("DEEP_STABLE_2".to_string(), 650_000_000.0),
+            ("DEEP_STABLE_3".to_string(), 600_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 5,
+            max_position_pct: Decimal::new(60, 2),
+            max_gross_exposure: 0.90,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            portfolio_method: PortfolioConstructionMethod::StressFillAwareRiskBudget,
+            risk_budget_lookback_days: 5,
+            capacity_penalty_strength: 2.0,
+            capacity_risk_budget_profile:
+                CapacityRiskBudgetProfile::StressParticipationBlendedAlphaHeadroomFloor70V1,
+            candidate_ranking_profile: CandidateRankingProfile::NonlinearRegimeAlphaLiquidityV1,
+            cash_utilization_profile: CashUtilizationProfile::StressFillGross98V1,
+            max_pairwise_correlation: Some(0.95),
+            correlation_lookback_days: 5,
+            ..Default::default()
+        };
+
+        let weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &HashMap::new(),
+            &config,
+        );
+        let gross = weights.values().copied().sum::<Decimal>();
+        let high_alpha_thin = weights
+            .get("HIGH_ALPHA_THIN_RISKY")
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        let lower_alpha_deep = weights
+            .get("LOWER_ALPHA_DEEP_STABLE")
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+
+        assert!(gross >= Decimal::new(70, 2));
+        assert!(lower_alpha_deep > high_alpha_thin);
+        assert!(high_alpha_thin <= Decimal::new(750, 4));
+        assert!(
+            weights
+                .values()
+                .filter(|weight| **weight > Decimal::ZERO)
+                .count()
+                >= 3
+        );
+    }
+
+    #[test]
+    fn stress_fill_confidence_exposure_profile_scales_high_confidence_fillable_names() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let candidates = vec![
+            ("HIGH_CONFIDENCE_FILLABLE".to_string(), 1.00),
+            ("LOW_CONFIDENCE_FILLABLE".to_string(), 0.12),
+            ("MEDIUM_CONFIDENCE_FILLABLE".to_string(), 0.10),
+        ];
+        let return_history = HashMap::from([
+            (
+                "HIGH_CONFIDENCE_FILLABLE".to_string(),
+                dated_returns(&[0.010, 0.011, 0.009, 0.010, 0.011]),
+            ),
+            (
+                "LOW_CONFIDENCE_FILLABLE".to_string(),
+                dated_returns(&[0.010, 0.011, 0.009, 0.010, 0.011]),
+            ),
+            (
+                "MEDIUM_CONFIDENCE_FILLABLE".to_string(),
+                dated_returns(&[0.010, 0.011, 0.009, 0.010, 0.011]),
+            ),
+        ]);
+        let average_amounts = HashMap::from([
+            ("HIGH_CONFIDENCE_FILLABLE".to_string(), 600_000_000.0),
+            ("LOW_CONFIDENCE_FILLABLE".to_string(), 600_000_000.0),
+            ("MEDIUM_CONFIDENCE_FILLABLE".to_string(), 600_000_000.0),
+        ]);
+        let base_config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::new(80, 2),
+            max_gross_exposure: 1.0,
+            portfolio_method: PortfolioConstructionMethod::StressFillAwareRiskBudget,
+            risk_budget_lookback_days: 5,
+            capacity_penalty_strength: 0.0,
+            ..Default::default()
+        };
+        let confidence_config = PortfolioConstructionConfig {
+            stress_fill_confidence_exposure_profile:
+                StressFillConfidenceExposureProfile::PredictionConfidenceV1,
+            ..base_config.clone()
+        };
+
+        let base_weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &HashMap::new(),
+            &base_config,
+        );
+        let confidence_weights = build_portfolio_weights(
+            score_day,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &HashMap::new(),
+            &confidence_config,
+        );
+
+        let high_base = base_weights["HIGH_CONFIDENCE_FILLABLE"];
+        let low_base = base_weights["LOW_CONFIDENCE_FILLABLE"];
+        let high_confidence = confidence_weights["HIGH_CONFIDENCE_FILLABLE"];
+        let low_confidence = confidence_weights["LOW_CONFIDENCE_FILLABLE"];
+
+        assert!(
+            high_confidence > high_base,
+            "high confidence target should lift from {high_base} to {high_confidence}"
+        );
+        assert!(
+            low_confidence < low_base,
+            "low confidence target should shrink from {low_base} to {low_confidence}"
+        );
+        assert!(high_confidence > low_confidence * Decimal::new(2, 0));
+    }
+
+    #[test]
+    fn stress_fill_confidence_exposure_profile_can_align_ascending_scores() {
+        let candidates = vec![
+            ("LOW_SCORE_BEST".to_string(), -1.00),
+            ("HIGH_SCORE_WEAK".to_string(), 1.00),
+        ];
+
+        let descending_lookup =
+            stress_fill_confidence_lookup_for_direction(&candidates, ScoreDirection::Descending);
+        let ascending_lookup =
+            stress_fill_confidence_lookup_for_direction(&candidates, ScoreDirection::Ascending);
+
+        assert!(
+            descending_lookup["LOW_SCORE_BEST"] < descending_lookup["HIGH_SCORE_WEAK"],
+            "descending confidence treats higher transformed score as stronger"
+        );
+        assert!(
+            ascending_lookup["LOW_SCORE_BEST"] > ascending_lookup["HIGH_SCORE_WEAK"],
+            "ascending confidence must avoid rewarding high raw scores when low is better"
+        );
+    }
+
+    #[test]
+    fn stress_fill_confidence_exposure_profile_gates_confidence_by_capacity_headroom() {
+        let score_day = NaiveDate::from_ymd_opt(2026, 1, 8).unwrap();
+        let symbols = vec![
+            "HIGH_CONFIDENCE_THIN".to_string(),
+            "MODERATE_CONFIDENCE_DEEP".to_string(),
+            "LOW_CONFIDENCE_DEEP".to_string(),
+        ];
+        let candidates = vec![
+            ("HIGH_CONFIDENCE_THIN".to_string(), -2.0),
+            ("MODERATE_CONFIDENCE_DEEP".to_string(), -1.0),
+            ("LOW_CONFIDENCE_DEEP".to_string(), 0.0),
+        ];
+        let return_history = symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.clone(),
+                    dated_returns(&[0.010, 0.011, 0.009, 0.010, 0.011]),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let average_amounts = HashMap::from([
+            ("HIGH_CONFIDENCE_THIN".to_string(), 10_000_000.0),
+            ("MODERATE_CONFIDENCE_DEEP".to_string(), 1_000_000_000.0),
+            ("LOW_CONFIDENCE_DEEP".to_string(), 1_000_000_000.0),
+        ]);
+        let config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::new(80, 2),
+            max_gross_exposure: 1.0,
+            portfolio_notional_cny: Some(100_000_000.0),
+            max_participation_rate: Some(0.05),
+            portfolio_method: PortfolioConstructionMethod::StressFillAwareRiskBudget,
+            risk_budget_lookback_days: 5,
+            capacity_penalty_strength: 0.0,
+            stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile::parse(
+                "prediction_confidence_ascending_capacity_headroom_v1",
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+
+        let raw_weights = build_stress_fill_aware_risk_budget_raw_weights(
+            score_day,
+            &symbols,
+            &candidates,
+            &return_history,
+            &average_amounts,
+            &config,
+        );
+
+        assert!(
+            raw_weights[1] > raw_weights[0],
+            "capacity-headroom gated confidence should prefer the fillable moderate-confidence name over the thin high-confidence name: {:?}",
+            raw_weights
+        );
     }
 
     #[test]

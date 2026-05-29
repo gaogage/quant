@@ -305,6 +305,10 @@ async fn main() {
             "/api/v1/quant/ml/prediction-sets/evaluate",
             post(routes::ml::evaluate_prediction_set),
         )
+        .route(
+            "/api/v1/quant/ml/prediction-sets/cache-economics/report",
+            post(routes::ml::report_prediction_set_cache_economics),
+        )
         // 组合风控
         .route(
             "/api/v1/quant/portfolio/reports/{task_id}",

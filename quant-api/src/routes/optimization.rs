@@ -25,6 +25,11 @@ use crate::routes::backtest::{
     ExecutionRulesReq, FactorBacktestRunOutput, MarketRegimeBacktestReq, RunFactorBacktestReq,
     RunPredictionBacktestReq,
 };
+use crate::routes::ml::{
+    create_walk_forward_nonlinear_quantile_ranker_inner, train_nonlinear_quantile_ranker_inner,
+    LinearFactorRef, TrainNonlinearQuantileRankerRequest,
+    WalkForwardNonlinearQuantileRankerRequest,
+};
 use crate::AppState;
 use quant_backtest::runner::{
     BacktestDataCache, BacktestDataCacheSnapshot, BacktestDataCacheStats,
@@ -306,6 +311,13 @@ struct OosWindowExecution {
     oos_output: FactorBacktestRunOutput,
     oos_points: Vec<RobustnessDailyPoint>,
     cost_capacity_perturbations: Vec<OosCostCapacityPerturbationResult>,
+}
+
+#[derive(Debug, Clone)]
+struct TrainWindowMlPredictionSets {
+    train_prediction_set_id: String,
+    test_prediction_set_id: String,
+    training_task_id: String,
 }
 
 struct OosCostCapacityPerturbationResult {
@@ -756,8 +768,53 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "train_window_stress_fill_target_exposure"
         | "stress_fill_target_exposure"
         | "phase7_train_window_stress_fill_target_exposure"
-        | "phase7_ga"
-        | "professional_current_event_nonlinear_alpha_discovery"
+        | "phase7_ga" => merge_gate_policy(
+            base,
+            &json!({
+                "enable_train_cost_capacity_perturbation_gate": true,
+                "enable_train_cost_capacity_stress_aware_selection": true,
+                "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
+                "min_train_perturbed_calmar": 1.2,
+                "max_train_perturbed_drawdown_pct": 0.35,
+                "train_stress_score_profile": "capacity_stress_return_score_v1",
+                "capacity_stress_target_calmar": 2.0,
+                "capacity_stress_target_annual_return": 0.15,
+                "min_train_perturbed_annual_return": 0.05,
+                "min_train_avg_perturbed_calmar": 1.2,
+                "min_train_trade_count": 50,
+                "min_train_final_actual_gross_exposure_pct": 0.25,
+                "max_train_final_cash_weight_pct": 0.75,
+                "max_train_final_unfilled_target_gap_pct": 0.08,
+                "min_train_final_execution_fill_ratio": 0.90,
+                "max_train_execution_schedule_expired_count": 0
+            }),
+        ),
+        "professional_train_window_ml_stress_fill_discovery"
+        | "train_window_ml_stress_fill_discovery"
+        | "ml_stress_fill_discovery"
+        | "phase7_train_window_ml_stress_fill_discovery"
+        | "phase7_gb" => merge_gate_policy(
+            base,
+            &json!({
+                "enable_train_cost_capacity_perturbation_gate": true,
+                "enable_train_cost_capacity_stress_aware_selection": true,
+                "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
+                "min_train_perturbed_calmar": 1.2,
+                "max_train_perturbed_drawdown_pct": 0.35,
+                "train_stress_score_profile": "prediction_confidence_stress_fill_objective_score_v1",
+                "capacity_stress_target_calmar": 2.0,
+                "capacity_stress_target_annual_return": 0.15,
+                "min_train_perturbed_annual_return": 0.05,
+                "min_train_avg_perturbed_calmar": 1.2,
+                "min_train_trade_count": 100,
+                "min_train_final_actual_gross_exposure_pct": 0.35,
+                "max_train_final_cash_weight_pct": 0.65,
+                "max_train_final_unfilled_target_gap_pct": 0.06,
+                "min_train_final_execution_fill_ratio": 0.95,
+                "max_train_execution_schedule_expired_count": 0
+            }),
+        ),
+        "professional_current_event_nonlinear_alpha_discovery"
         | "current_event_nonlinear_alpha_discovery"
         | "phase7_current_event_nonlinear_alpha_discovery"
         | "phase7_fs"
@@ -1862,6 +1919,14 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_train_window_stress_fill_target_exposure".to_string(),
             LayeredSearchConfig::professional_train_window_stress_fill_target_exposure_default(),
         ),
+        "professional_train_window_ml_stress_fill_discovery"
+        | "train_window_ml_stress_fill_discovery"
+        | "ml_stress_fill_discovery"
+        | "phase7_train_window_ml_stress_fill_discovery"
+        | "phase7_gb" => (
+            "professional_train_window_ml_stress_fill_discovery".to_string(),
+            LayeredSearchConfig::professional_train_window_ml_stress_fill_discovery_default(),
+        ),
         "professional_current_event_nonlinear_alpha_discovery"
         | "current_event_nonlinear_alpha_discovery"
         | "phase7_current_event_nonlinear_alpha_discovery"
@@ -2021,10 +2086,25 @@ fn build_phase7_layered_plan_bundle(
     build_phase7_layered_plan_bundle_with_trial_cap(req, resource_plan, 500)
 }
 
+#[cfg(test)]
 fn build_phase7_layered_plan_bundle_with_trial_cap(
+    req: &Phase7LayeredOptimizationRequest,
+    resource_plan: LocalResourcePlan,
+    max_trials_cap: usize,
+) -> Phase7LayeredPlanBundle {
+    build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+        req,
+        resource_plan,
+        max_trials_cap,
+        None,
+    )
+}
+
+fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
     req: &Phase7LayeredOptimizationRequest,
     mut resource_plan: LocalResourcePlan,
     max_trials_cap: usize,
+    internal_train_window_ml_prediction_set_id: Option<&str>,
 ) -> Phase7LayeredPlanBundle {
     if let Some(max_trials) = req.max_trials {
         resource_plan.max_trials = max_trials.clamp(1, max_trials_cap.max(1));
@@ -2037,6 +2117,14 @@ fn build_phase7_layered_plan_bundle_with_trial_cap(
             apply_prediction_set_override_to_seed_trials(
                 &mut config.seed_trials,
                 &config.prediction_set_ids,
+            );
+        }
+    }
+    if let Some(prediction_set_id) = internal_train_window_ml_prediction_set_id {
+        if search_profile == "professional_train_window_ml_stress_fill_discovery" {
+            apply_internal_train_window_ml_prediction_set_to_seed_trials(
+                &mut config.seed_trials,
+                prediction_set_id,
             );
         }
     }
@@ -2064,7 +2152,73 @@ fn profile_accepts_prediction_set_override(search_profile: &str) -> bool {
         search_profile,
         "professional_train_window_nonlinear_ranking_discovery"
             | "professional_train_window_stress_fill_target_exposure"
+            | "professional_train_window_ml_stress_fill_discovery"
     )
+}
+
+fn is_train_window_ml_stress_fill_profile(search_profile: Option<&str>) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_train_window_ml_stress_fill_discovery"
+            | "train_window_ml_stress_fill_discovery"
+            | "ml_stress_fill_discovery"
+            | "phase7_train_window_ml_stress_fill_discovery"
+            | "phase7_gb"
+    )
+}
+
+fn apply_internal_train_window_ml_prediction_set_to_seed_trials(
+    seed_trials: &mut [Value],
+    prediction_set_id: &str,
+) {
+    for seed in seed_trials {
+        if seed.get("train_window_ml_ranking_profile").is_none() {
+            continue;
+        }
+        let prediction_min_score = seed
+            .get("train_window_ml_prediction_min_score")
+            .and_then(Value::as_str)
+            .unwrap_or("0.00")
+            .to_string();
+        seed["prediction_set_id"] = json!(prediction_set_id);
+        seed["prediction_blend_weight"] = json!("0.20");
+        seed["prediction_min_percentile"] = json!("0.30");
+        seed["prediction_min_score"] = json!(prediction_min_score);
+        seed["prediction_set_override"] = json!(true);
+        seed["prediction_set_override_source"] = json!("train_window_ml_internal");
+        seed["train_window_ml_prediction_set_scope"] = json!("generated_per_wfa_window_train_only");
+    }
+}
+
+fn train_window_ml_oos_parameters(
+    train_parameters: &Value,
+    prediction_sets: Option<&TrainWindowMlPredictionSets>,
+) -> Result<Value, String> {
+    let Some(prediction_sets) = prediction_sets else {
+        return Ok(train_parameters.clone());
+    };
+    let mut parameters = train_parameters.clone();
+    let Some(object) = parameters.as_object_mut() else {
+        return Err("train-window ML candidate parameters must be a JSON object".into());
+    };
+    object.insert(
+        "prediction_set_id".to_string(),
+        json!(prediction_sets.test_prediction_set_id),
+    );
+    object.insert("prediction_set_override".to_string(), json!(true));
+    object.insert(
+        "prediction_set_override_source".to_string(),
+        json!("train_window_ml_internal_oos"),
+    );
+    object.insert(
+        "train_window_ml_train_prediction_set_id".to_string(),
+        json!(prediction_sets.train_prediction_set_id),
+    );
+    object.insert(
+        "train_window_ml_training_task_id".to_string(),
+        json!(prediction_sets.training_task_id),
+    );
+    Ok(parameters)
 }
 
 fn phase7_discovery_layered_request(
@@ -2352,8 +2506,30 @@ async fn insert_phase7_layered_optimization_with_trial_cap(
     resource_plan: LocalResourcePlan,
     max_trials_cap: usize,
 ) -> Result<(String, Phase7LayeredPlanBundle), String> {
+    insert_phase7_layered_optimization_with_trial_cap_and_internal_train_window_ml_prediction_set(
+        db,
+        req,
+        resource_plan,
+        max_trials_cap,
+        None,
+    )
+    .await
+}
+
+async fn insert_phase7_layered_optimization_with_trial_cap_and_internal_train_window_ml_prediction_set(
+    db: &sqlx::PgPool,
+    req: &Phase7LayeredOptimizationRequest,
+    resource_plan: LocalResourcePlan,
+    max_trials_cap: usize,
+    internal_train_window_ml_prediction_set_id: Option<&str>,
+) -> Result<(String, Phase7LayeredPlanBundle), String> {
     let bundle =
-        build_phase7_layered_plan_bundle_with_trial_cap(req, resource_plan, max_trials_cap);
+        build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+            req,
+            resource_plan,
+            max_trials_cap,
+            internal_train_window_ml_prediction_set_id,
+        );
     let task_id = format!("opt-phase7-{}", Uuid::new_v4());
     let mut tx = db
         .begin()
@@ -3107,6 +3283,8 @@ async fn execute_oos_discovery_window(
         "summary_only",
     )?;
     let train_template_for_selection = train_template.clone();
+    let train_window_ml_prediction_sets =
+        prepare_train_window_ml_prediction_sets_for_oos_window(db, req, window).await?;
     let train_req = Phase7ProfessionalDiscoveryRequest {
         strategy_version_id: req.strategy_version_id.clone(),
         data_version_id: req.data_version_id.clone(),
@@ -3127,13 +3305,17 @@ async fn execute_oos_discovery_window(
         stop_after_robust_approval: Some(false),
     };
     let layered_req = phase7_discovery_layered_request(&train_req);
-    let (train_task_id, bundle) = insert_phase7_layered_optimization_with_trial_cap(
-        db,
-        &layered_req,
-        LocalResourcePlan::local_mac(),
-        100_000,
-    )
-    .await?;
+    let (train_task_id, bundle) =
+        insert_phase7_layered_optimization_with_trial_cap_and_internal_train_window_ml_prediction_set(
+            db,
+            &layered_req,
+            LocalResourcePlan::local_mac(),
+            100_000,
+            train_window_ml_prediction_sets
+                .as_ref()
+                .map(|sets| sets.train_prediction_set_id.as_str()),
+        )
+        .await?;
     let trial_batch_limit = req
         .trial_batch_limit
         .unwrap_or(bundle.plan.batch_size as i64)
@@ -3193,11 +3375,15 @@ async fn execute_oos_discovery_window(
     )?;
     let oos_backtest_task_id = format!("oosbt-{}", Uuid::new_v4());
     let perturbation_template = test_template.clone();
+    let oos_parameters = train_window_ml_oos_parameters(
+        &selected_candidate.parameters,
+        train_window_ml_prediction_sets.as_ref(),
+    )?;
     let oos_output = execute_oos_candidate_backtest(
         db,
         req,
         test_template,
-        &selected_candidate.parameters,
+        &oos_parameters,
         &oos_backtest_task_id,
         oos_signal_cache,
         oos_backtest_cache,
@@ -3208,7 +3394,7 @@ async fn execute_oos_discovery_window(
         db,
         req,
         perturbation_template,
-        &selected_candidate.parameters,
+        &oos_parameters,
         final_promotion_gate_policy,
         oos_signal_cache,
         oos_backtest_cache,
@@ -3228,6 +3414,221 @@ async fn execute_oos_discovery_window(
         oos_points,
         cost_capacity_perturbations,
     })
+}
+
+async fn prepare_train_window_ml_prediction_sets_for_oos_window(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+    window: &OosDiscoveryWindow,
+) -> Result<Option<TrainWindowMlPredictionSets>, String> {
+    if !is_train_window_ml_stress_fill_profile(req.search_profile.as_deref()) {
+        return Ok(None);
+    }
+
+    let short_id = Uuid::new_v4().simple().to_string();
+    let short_id = &short_id[..12];
+    let train_prediction_set_id = format!("p7gb-w{}-{}-tr", window.window_index, short_id);
+    let test_prediction_set_id = format!("p7gb-w{}-{}-te", window.window_index, short_id);
+    let train_training_task_id = format!("train-p7gb-w{}-{}-tr", window.window_index, short_id);
+    let test_training_task_id = format!("train-p7gb-w{}-{}-te", window.window_index, short_id);
+    let training_task_id = format!("p7gb-w{}-{}", window.window_index, short_id);
+    let label_horizon_days = train_window_ml_label_horizon_days(window);
+    let train_lookback_days = train_window_ml_lookback_days(window, label_horizon_days);
+    let train_prediction_start =
+        window.train_start + Duration::days(train_lookback_days + label_horizon_days - 1);
+    if train_prediction_start > window.train_end {
+        return Err(format!(
+            "phase7_gb train window {} is too short for train-window ML ranking: train_start={}, train_end={}, lookback_days={}, label_horizon_days={}",
+            window.window_index,
+            window.train_start,
+            window.train_end,
+            train_lookback_days,
+            label_horizon_days
+        ));
+    }
+
+    let feature_profile = phase7_train_window_ml_feature_profile();
+    let factors = phase7_train_window_ml_factor_refs();
+    if factors.is_empty() {
+        return Err("phase7_gb train-window ML ranking factors must not be empty".into());
+    }
+
+    create_walk_forward_nonlinear_quantile_ranker_inner(
+        db,
+        WalkForwardNonlinearQuantileRankerRequest {
+            model_code: "phase7_gb_train_window_nlq_ranker".to_string(),
+            model_version: format!("w{}-{}-train", window.window_index, short_id),
+            model_version_id: Some(format!("p7gb-nlq-w{}-{}-tr", window.window_index, short_id)),
+            training_task_id: Some(train_training_task_id),
+            prediction_set_id: Some(train_prediction_set_id.clone()),
+            data_version_id: req.data_version_id.clone(),
+            feature_set_version_id: feature_profile.to_string(),
+            training_dataset_id: format!("ds-p7gb-w{}-{}-tr", window.window_index, short_id),
+            prediction_start_date: train_prediction_start.format("%Y%m%d").to_string(),
+            prediction_end_date: window.train_end.format("%Y%m%d").to_string(),
+            train_lookback_days: Some(train_lookback_days),
+            prediction_step_days: Some(20),
+            label_horizon_days: Some(label_horizon_days),
+            label_objective: Some("risk_adjusted_excess_return".to_string()),
+            min_training_samples: Some(250),
+            max_windows: None,
+            bucket_count: Some(7),
+            min_samples_per_bucket: Some(250),
+            factors: factors.clone(),
+        },
+    )
+    .await?;
+
+    train_nonlinear_quantile_ranker_inner(
+        db,
+        TrainNonlinearQuantileRankerRequest {
+            model_code: "phase7_gb_train_window_nlq_ranker".to_string(),
+            model_version: format!("w{}-{}-test", window.window_index, short_id),
+            model_version_id: Some(format!("p7gb-nlq-w{}-{}-te", window.window_index, short_id)),
+            training_task_id: Some(test_training_task_id),
+            prediction_set_id: Some(test_prediction_set_id.clone()),
+            data_version_id: req.data_version_id.clone(),
+            feature_set_version_id: feature_profile.to_string(),
+            training_dataset_id: format!("ds-p7gb-w{}-{}-te", window.window_index, short_id),
+            train_start_date: window.train_start.format("%Y%m%d").to_string(),
+            train_end_date: window.train_end.format("%Y%m%d").to_string(),
+            prediction_start_date: window.test_start.format("%Y%m%d").to_string(),
+            prediction_end_date: window.test_end.format("%Y%m%d").to_string(),
+            label_horizon_days: Some(label_horizon_days),
+            label_objective: Some("risk_adjusted_excess_return".to_string()),
+            bucket_count: Some(7),
+            min_samples_per_bucket: Some(250),
+            factors,
+        },
+    )
+    .await?;
+
+    Ok(Some(TrainWindowMlPredictionSets {
+        train_prediction_set_id,
+        test_prediction_set_id,
+        training_task_id,
+    }))
+}
+
+fn train_window_ml_label_horizon_days(window: &OosDiscoveryWindow) -> i64 {
+    let train_days = (window.train_end - window.train_start).num_days().max(1);
+    45.min((train_days / 4).max(5)).max(5)
+}
+
+fn train_window_ml_lookback_days(window: &OosDiscoveryWindow, label_horizon_days: i64) -> i64 {
+    let train_days = (window.train_end - window.train_start).num_days().max(1);
+    let max_lookback = (train_days - label_horizon_days - 5).max(30);
+    252.min(max_lookback).max(30)
+}
+
+fn phase7_train_window_ml_feature_profile() -> &'static str {
+    "phase7_gb_quality_value_recovery_low_impact_v2"
+}
+
+fn phase7_train_window_ml_factor_refs() -> Vec<LinearFactorRef> {
+    phase7_train_window_ml_factor_refs_for_profile(phase7_train_window_ml_feature_profile())
+}
+
+fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFactorRef> {
+    let factor_codes: &[&str] = match profile {
+        "phase7_gb_quality_value_recovery_low_impact_v2" => &[
+            "fin_roe_daily_std",
+            "fin_roe_indrel_daily_std",
+            "fin_roa_daily_std",
+            "fin_roa_indrel_daily_std",
+            "fin_current_ratio_daily_std",
+            "fin_current_ratio_indrel_daily_std",
+            "fin_debt_to_assets_daily_std",
+            "fin_debt_to_assets_indrel_daily_std",
+            "fin_netprofit_margin_daily_std",
+            "fin_netprofit_margin_indrel_daily_std",
+            "fin_gross_margin_daily_std",
+            "fin_gross_margin_indrel_daily_std",
+            "fin_netprofit_margin_yoy_delta_std",
+            "fin_gross_margin_yoy_delta_std",
+            "fin_debt_to_assets_yoy_improve_std",
+            "fin_eps_yoy_recovery_std",
+            "fin_roe_yoy_delta_std",
+            "fin_current_ratio_yoy_delta_std",
+            "val_pb_low_std",
+            "val_pe_ttm_low_std",
+            "val_ps_ttm_low_std",
+            "val_dividend_yield_ttm_std",
+            "cf_ocf_to_profit_latest_std",
+            "cf_ocf_positive_latest_std",
+            "cf_ocf_profit_gap_latest_std",
+            "cf_cash_buffer_latest_std",
+            "div_recent_positive_std",
+            "div_paid_years_4y_std",
+            "div_stability_4y_std",
+            "div_cash_sum_4y_std",
+            "mom_20d_std",
+            "mom_60d_std",
+            "mkt_rel_mom_20d_std",
+            "mkt_rel_mom_60d_std",
+            "ind_rel_mom_20d_std",
+            "ind_rel_mom_60d_std",
+            "rev_20d_std",
+            "amihud_20d_std",
+            "amt_intensity_20d_std",
+            "turn_20d_std",
+            "vol_20d_std",
+            "downvol_20d_std",
+            "maxdd_60d_std",
+            "mf_net_amount_5d_std",
+            "mf_elg_net_amount_5d_std",
+            "mf_net_amount_20d_std",
+            "mf_lg_elg_net_amount_20d_std",
+            "mf_small_sell_pressure_20d_std",
+        ],
+        _ => &[
+            "fin_roe_daily_std",
+            "fin_roe_indrel_daily_std",
+            "fin_roa_indrel_daily_std",
+            "fin_netprofit_margin_daily_std",
+            "fin_netprofit_margin_indrel_daily_std",
+            "fin_gross_margin_daily_std",
+            "fin_gross_margin_yoy_delta_std",
+            "fin_debt_to_assets_yoy_improve_std",
+            "fin_eps_yoy_recovery_std",
+            "fin_roe_yoy_delta_std",
+            "fin_current_ratio_yoy_delta_std",
+            "val_pb_low_std",
+            "val_pe_ttm_low_std",
+            "val_ps_ttm_low_std",
+            "val_dividend_yield_ttm_std",
+            "cf_ocf_to_profit_latest_std",
+            "cf_ocf_positive_latest_std",
+            "cf_ocf_profit_gap_latest_std",
+            "cf_cash_buffer_latest_std",
+            "div_recent_positive_std",
+            "div_paid_years_4y_std",
+            "div_stability_4y_std",
+            "mom_20d_std",
+            "mom_60d_std",
+            "mkt_rel_mom_20d_std",
+            "mkt_rel_mom_60d_std",
+            "ind_rel_mom_20d_std",
+            "ind_rel_mom_60d_std",
+            "rev_20d_std",
+            "amihud_20d_std",
+            "amt_intensity_20d_std",
+            "turn_20d_std",
+            "vol_20d_std",
+            "downvol_20d_std",
+            "maxdd_60d_std",
+            "mf_lg_elg_net_amount_20d_std",
+            "mf_small_sell_pressure_20d_std",
+        ],
+    };
+
+    factor_codes
+        .iter()
+        .map(|factor_code| LinearFactorRef {
+            factor_code: (*factor_code).to_string(),
+            factor_version: "1.0.0".to_string(),
+        })
+        .collect()
 }
 
 async fn execute_oos_cost_capacity_perturbations(
@@ -3782,6 +4183,14 @@ fn train_cost_capacity_stress_score_profile(train_gate_policy: &Value) -> &'stat
         | "capacity_stress_return"
         | "capacity_return"
         | "stress_return" => "capacity_stress_return_score_v1",
+        "stress_fill_objective_score_v1"
+        | "stress_fill_objective"
+        | "fill_objective"
+        | "stress_fill" => "stress_fill_objective_score_v1",
+        "prediction_confidence_stress_fill_objective_score_v1"
+        | "prediction_confidence_stress_fill"
+        | "confidence_stress_fill"
+        | "ml_confidence_stress_fill" => "prediction_confidence_stress_fill_objective_score_v1",
         _ => "train_stress_adjusted_score_v1",
     }
 }
@@ -3972,6 +4381,120 @@ fn train_execution_quality_penalty(
     penalty
 }
 
+fn train_candidate_stress_fill_objective_score(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> Decimal {
+    let base = train_candidate_capacity_stress_return_score(candidate, summary, train_gate_policy);
+    let min_exposure_limit = constraint_decimal(
+        Some(train_gate_policy),
+        "min_train_final_actual_gross_exposure_pct",
+    )
+    .unwrap_or_else(|| Decimal::new(35, 2));
+    let max_cash_limit =
+        constraint_decimal(Some(train_gate_policy), "max_train_final_cash_weight_pct")
+            .unwrap_or_else(|| Decimal::new(65, 2));
+    let max_gap_limit = constraint_decimal(
+        Some(train_gate_policy),
+        "max_train_final_unfilled_target_gap_pct",
+    )
+    .unwrap_or_else(|| Decimal::new(6, 2));
+    let min_fill_limit = constraint_decimal(
+        Some(train_gate_policy),
+        "min_train_final_execution_fill_ratio",
+    )
+    .unwrap_or_else(|| Decimal::new(95, 2));
+
+    let actual_exposure = candidate
+        .metrics
+        .final_actual_gross_exposure
+        .min(summary.min_final_actual_gross_exposure);
+    let cash_weight = candidate
+        .metrics
+        .final_cash_weight
+        .max(summary.max_final_cash_weight);
+    let unfilled_gap = candidate
+        .metrics
+        .final_unfilled_target_gap
+        .max(summary.max_final_unfilled_target_gap);
+    let fill_ratio = candidate
+        .metrics
+        .final_execution_fill_ratio
+        .min(summary.min_final_execution_fill_ratio);
+
+    let tradable_exposure_bonus =
+        clamp_decimal(actual_exposure, Decimal::ZERO, Decimal::ONE) * Decimal::from(260_000);
+    let fill_ratio_bonus =
+        clamp_decimal(fill_ratio, Decimal::ZERO, Decimal::ONE) * Decimal::from(180_000);
+    let cash_efficiency_bonus =
+        positive_decimal_gap(max_cash_limit, cash_weight) * Decimal::from(120_000);
+    let exposure_shortfall_penalty =
+        positive_decimal_gap(min_exposure_limit, actual_exposure) * Decimal::from(1_200_000);
+    let cash_overrun_penalty =
+        positive_decimal_gap(cash_weight, max_cash_limit) * Decimal::from(900_000);
+    let gap_overrun_penalty =
+        positive_decimal_gap(unfilled_gap, max_gap_limit) * Decimal::from(1_100_000);
+    let fill_shortfall_penalty =
+        positive_decimal_gap(min_fill_limit, fill_ratio) * Decimal::from(950_000);
+
+    base + tradable_exposure_bonus + fill_ratio_bonus + cash_efficiency_bonus
+        - exposure_shortfall_penalty
+        - cash_overrun_penalty
+        - gap_overrun_penalty
+        - fill_shortfall_penalty
+}
+
+fn candidate_prediction_confidence_score(candidate: &DiscoveryCandidate) -> Decimal {
+    let Some(parameters) = candidate.parameters.as_object() else {
+        return Decimal::ZERO;
+    };
+    let has_train_window_internal_prediction = parameters
+        .get("prediction_set_override_source")
+        .and_then(Value::as_str)
+        .map(|source| source == "train_window_ml_internal")
+        .unwrap_or(false);
+    let confidence_gate_bonus = parameters
+        .get("prediction_confidence_gate_profile")
+        .and_then(Value::as_str)
+        .filter(|profile| *profile == "train_positive_raw_score_gate_v1")
+        .map(|_| Decimal::from(180_000))
+        .unwrap_or(Decimal::ZERO);
+    let internal_prediction_bonus = if has_train_window_internal_prediction {
+        Decimal::from(120_000)
+    } else {
+        Decimal::ZERO
+    };
+    let min_score = decimal_from_json(parameters.get("prediction_min_score"));
+    let min_score_bonus = min_score
+        .map(|score| {
+            clamp_decimal(score, Decimal::new(-5, 2), Decimal::new(5, 2)) * Decimal::from(3_000_000)
+        })
+        .unwrap_or(Decimal::ZERO);
+    let min_score_absence_penalty = if min_score.is_some() {
+        Decimal::ZERO
+    } else {
+        Decimal::from(150_000)
+    };
+    let percentile_bonus = decimal_from_json(parameters.get("prediction_min_percentile"))
+        .map(|percentile| {
+            clamp_decimal(percentile, Decimal::ZERO, Decimal::ONE) * Decimal::from(160_000)
+        })
+        .unwrap_or(Decimal::ZERO);
+
+    confidence_gate_bonus + internal_prediction_bonus + min_score_bonus + percentile_bonus
+        - min_score_absence_penalty
+}
+
+fn train_candidate_prediction_confidence_stress_fill_objective_score(
+    candidate: &DiscoveryCandidate,
+    summary: &CostCapacityPerturbationSummary,
+    train_gate_policy: &Value,
+) -> Decimal {
+    train_candidate_stress_fill_objective_score(candidate, summary, train_gate_policy)
+        + candidate_prediction_confidence_score(candidate)
+}
+
 fn train_candidate_cash_drag_fill_gap_score(
     candidate: &DiscoveryCandidate,
     summary: &CostCapacityPerturbationSummary,
@@ -4061,6 +4584,16 @@ fn train_candidate_stress_adjusted_score_for_policy(
         }
         "cash_drag_fill_gap_score_v1" => {
             train_candidate_cash_drag_fill_gap_score(candidate, summary, train_gate_policy)
+        }
+        "stress_fill_objective_score_v1" => {
+            train_candidate_stress_fill_objective_score(candidate, summary, train_gate_policy)
+        }
+        "prediction_confidence_stress_fill_objective_score_v1" => {
+            train_candidate_prediction_confidence_stress_fill_objective_score(
+                candidate,
+                summary,
+                train_gate_policy,
+            )
         }
         _ => train_candidate_stress_adjusted_score(candidate, summary),
     }
@@ -8502,6 +9035,7 @@ fn build_factor_trial_request(
         prediction_set_id: optional_string("prediction_set_id")?,
         prediction_blend_weight: optional_f64_value("prediction_blend_weight")?,
         prediction_min_percentile: optional_f64_value("prediction_min_percentile")?,
+        prediction_min_score: optional_f64_value("prediction_min_score")?,
         event_gate_combo_name: optional_string("event_gate_combo_name")?,
         event_gate_version: string_value("event_gate_version", Some("1.0.0"))?,
         event_gate_mode: optional_string("event_gate_mode")?,
@@ -8533,6 +9067,7 @@ fn build_factor_trial_request(
         candidate_risk_filter: optional_string("candidate_risk_filter")?,
         candidate_ranking: optional_string("candidate_ranking")?,
         risk_contribution_control: optional_string("risk_contribution_control")?,
+        stress_fill_confidence_exposure: optional_string("stress_fill_confidence_exposure")?,
         rebalance_hysteresis_pct: optional_f64_value("rebalance_hysteresis_pct")?,
         partial_rebalance_ratio: optional_f64_value("partial_rebalance_ratio")?,
         score_candidate_pool_size: match params
@@ -8827,6 +9362,7 @@ fn build_prediction_trial_request(
         candidate_risk_filter: optional_string("candidate_risk_filter")?,
         candidate_ranking: optional_string("candidate_ranking")?,
         risk_contribution_control: optional_string("risk_contribution_control")?,
+        stress_fill_confidence_exposure: optional_string("stress_fill_confidence_exposure")?,
         rebalance_hysteresis_pct: optional_f64_value("rebalance_hysteresis_pct")?,
         partial_rebalance_ratio: optional_f64_value("partial_rebalance_ratio")?,
         cost_model: optional_cost_model_from_maps(params, template)?,
@@ -11528,6 +12064,32 @@ mod tests {
     }
 
     #[test]
+    fn train_cost_capacity_score_profile_accepts_stress_fill_objective() {
+        let policy = json!({
+            "enable_train_cost_capacity_perturbation_gate": true,
+            "train_stress_score_profile": "stress_fill_objective_score_v1"
+        });
+
+        assert_eq!(
+            train_cost_capacity_stress_score_profile(&policy),
+            "stress_fill_objective_score_v1"
+        );
+    }
+
+    #[test]
+    fn train_cost_capacity_score_profile_accepts_prediction_confidence_stress_fill_objective() {
+        let policy = json!({
+            "enable_train_cost_capacity_perturbation_gate": true,
+            "train_stress_score_profile": "prediction_confidence_stress_fill_objective_score_v1"
+        });
+
+        assert_eq!(
+            train_cost_capacity_stress_score_profile(&policy),
+            "prediction_confidence_stress_fill_objective_score_v1"
+        );
+    }
+
+    #[test]
     fn cash_drag_fill_gap_score_prefers_filled_candidate_when_capacity_ties() {
         let candidate = |trial_id: &str,
                          final_cash_weight: Decimal,
@@ -11829,6 +12391,172 @@ mod tests {
         assert!(
             tradable_score > low_exposure_score,
             "tradable_score={tradable_score}, low_exposure_score={low_exposure_score}"
+        );
+    }
+
+    #[test]
+    fn stress_fill_objective_score_prefers_filled_exposure_over_cashized_return() {
+        let candidate = |trial_id: &str,
+                         annual_return: Decimal,
+                         num_trades: u64,
+                         final_cash_weight: Decimal,
+                         final_actual_gross_exposure: Decimal,
+                         final_unfilled_target_gap: Decimal,
+                         final_execution_fill_ratio: Decimal|
+         -> DiscoveryCandidate {
+            DiscoveryCandidate {
+                trial_id: trial_id.to_string(),
+                backtest_task_id: None,
+                score: Some(Decimal::new(50, 0)),
+                candidate_type: CandidateType::ReviewRequired,
+                professional_gap_score: Decimal::ZERO,
+                metrics: CandidateMetrics {
+                    annual_return,
+                    excess_return: Decimal::new(8, 2),
+                    sharpe: Decimal::new(12, 1),
+                    sortino: Decimal::new(18, 1),
+                    max_drawdown: Decimal::new(20, 2),
+                    num_trades,
+                    final_cash_weight,
+                    final_actual_gross_exposure,
+                    final_unfilled_target_gap,
+                    final_execution_fill_ratio,
+                    ..CandidateMetrics::default()
+                },
+                parameters: json!({}),
+            }
+        };
+        let mut cashized_summary = cost_capacity_perturbation_summary_from_counts(3, 3);
+        cashized_summary.min_calmar = Decimal::new(160, 2);
+        cashized_summary.avg_calmar = Decimal::new(180, 2);
+        cashized_summary.avg_sharpe = Decimal::new(130, 2);
+        cashized_summary.min_annual_return = Decimal::new(18, 2);
+        cashized_summary.max_drawdown = Decimal::new(18, 2);
+        cashized_summary.min_num_trades = 80;
+        cashized_summary.max_final_cash_weight = Decimal::new(82, 2);
+        cashized_summary.min_final_actual_gross_exposure = Decimal::new(18, 2);
+        cashized_summary.max_final_unfilled_target_gap = Decimal::new(18, 2);
+        cashized_summary.min_final_execution_fill_ratio = Decimal::new(78, 2);
+        let mut filled_summary = cashized_summary.clone();
+        filled_summary.min_annual_return = Decimal::new(11, 2);
+        filled_summary.min_num_trades = 240;
+        filled_summary.max_final_cash_weight = Decimal::new(22, 2);
+        filled_summary.min_final_actual_gross_exposure = Decimal::new(78, 2);
+        filled_summary.max_final_unfilled_target_gap = Decimal::new(2, 2);
+        filled_summary.min_final_execution_fill_ratio = Decimal::new(98, 2);
+        let policy = json!({
+            "train_stress_score_profile": "stress_fill_objective_score_v1",
+            "capacity_stress_target_annual_return": 0.15,
+            "min_train_perturbed_annual_return": 0.05,
+            "min_train_trade_count": 50,
+            "min_train_final_actual_gross_exposure_pct": 0.35,
+            "max_train_final_cash_weight_pct": 0.65,
+            "max_train_final_unfilled_target_gap_pct": 0.06,
+            "min_train_final_execution_fill_ratio": 0.95
+        });
+
+        let cashized_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate(
+                "cashized-high-return",
+                Decimal::new(30, 2),
+                80,
+                Decimal::new(82, 2),
+                Decimal::new(18, 2),
+                Decimal::new(18, 2),
+                Decimal::new(78, 2),
+            ),
+            &cashized_summary,
+            &policy,
+        );
+        let filled_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate(
+                "filled-lower-return",
+                Decimal::new(18, 2),
+                240,
+                Decimal::new(22, 2),
+                Decimal::new(78, 2),
+                Decimal::new(2, 2),
+                Decimal::new(98, 2),
+            ),
+            &filled_summary,
+            &policy,
+        );
+
+        assert!(
+            filled_score > cashized_score,
+            "filled_score={filled_score}, cashized_score={cashized_score}"
+        );
+    }
+
+    #[test]
+    fn prediction_confidence_stress_fill_objective_prefers_positive_prediction_gate() {
+        let candidate = |trial_id: &str, parameters: Value| -> DiscoveryCandidate {
+            DiscoveryCandidate {
+                trial_id: trial_id.to_string(),
+                backtest_task_id: None,
+                score: Some(Decimal::new(50, 0)),
+                candidate_type: CandidateType::ReviewRequired,
+                professional_gap_score: Decimal::ZERO,
+                metrics: CandidateMetrics {
+                    annual_return: Decimal::new(16, 2),
+                    excess_return: Decimal::new(8, 2),
+                    sharpe: Decimal::new(12, 1),
+                    sortino: Decimal::new(19, 1),
+                    max_drawdown: Decimal::new(18, 2),
+                    num_trades: 240,
+                    final_cash_weight: Decimal::new(24, 2),
+                    final_actual_gross_exposure: Decimal::new(76, 2),
+                    final_unfilled_target_gap: Decimal::new(2, 2),
+                    final_execution_fill_ratio: Decimal::new(98, 2),
+                    ..CandidateMetrics::default()
+                },
+                parameters,
+            }
+        };
+        let mut summary = cost_capacity_perturbation_summary_from_counts(3, 3);
+        summary.min_calmar = Decimal::new(150, 2);
+        summary.avg_calmar = Decimal::new(180, 2);
+        summary.avg_sharpe = Decimal::new(130, 2);
+        summary.min_annual_return = Decimal::new(10, 2);
+        summary.max_drawdown = Decimal::new(18, 2);
+        summary.min_num_trades = 220;
+        summary.max_final_cash_weight = Decimal::new(26, 2);
+        summary.min_final_actual_gross_exposure = Decimal::new(74, 2);
+        summary.max_final_unfilled_target_gap = Decimal::new(3, 2);
+        summary.min_final_execution_fill_ratio = Decimal::new(97, 2);
+        let policy = json!({
+            "train_stress_score_profile": "prediction_confidence_stress_fill_objective_score_v1",
+            "capacity_stress_target_annual_return": 0.15,
+            "min_train_perturbed_annual_return": 0.05,
+            "min_train_trade_count": 50,
+            "min_train_final_actual_gross_exposure_pct": 0.35,
+            "max_train_final_cash_weight_pct": 0.65,
+            "max_train_final_unfilled_target_gap_pct": 0.06,
+            "min_train_final_execution_fill_ratio": 0.95
+        });
+
+        let unconfirmed_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate("unconfirmed", json!({})),
+            &summary,
+            &policy,
+        );
+        let confirmed_score = train_candidate_stress_adjusted_score_for_policy(
+            &candidate(
+                "positive-confirmed",
+                json!({
+                    "prediction_confidence_gate_profile": "train_positive_raw_score_gate_v1",
+                    "prediction_min_score": "0.01",
+                    "prediction_min_percentile": "0.30",
+                    "prediction_set_override_source": "train_window_ml_internal"
+                }),
+            ),
+            &summary,
+            &policy,
+        );
+
+        assert!(
+            confirmed_score > unconfirmed_score,
+            "confirmed_score={confirmed_score}, unconfirmed_score={unconfirmed_score}"
         );
     }
 
@@ -12274,7 +13002,8 @@ mod tests {
     fn random_search_choice_sampling_does_not_collapse_power_of_two_choices() {
         let search_space = json!({
             "prediction_blend_weight": {"type": "choice", "values": [0.0, 0.02, 0.05, 0.1]},
-            "prediction_min_percentile": {"type": "choice", "values": [null, 0.1, 0.2, 0.3]}
+            "prediction_min_percentile": {"type": "choice", "values": [null, 0.1, 0.2, 0.3]},
+            "prediction_min_score": {"type": "choice", "values": [null, -0.01, 0.0, 0.01]}
         });
 
         let trials = generate_trial_parameters(&search_space, 20260520, 16).expect("trial params");
@@ -12282,13 +13011,17 @@ mod tests {
             .iter()
             .map(|params| {
                 format!(
-                    "{}|{}",
+                    "{}|{}|{}",
                     params
                         .get("prediction_blend_weight")
                         .map(Value::to_string)
                         .unwrap_or_else(|| "missing".into()),
                     params
                         .get("prediction_min_percentile")
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "missing".into()),
+                    params
+                        .get("prediction_min_score")
                         .map(Value::to_string)
                         .unwrap_or_else(|| "missing".into())
                 )
@@ -12364,6 +13097,7 @@ mod tests {
             "time_stop_days": "120",
             "reentry_cooldown_days": "10"
         });
+        params["prediction_min_score"] = json!(0.0);
         params["execution_schedule_profile"] = json!("twap_5d_v1");
         params["execution_carry_policy"] = json!("roll_forward_v1");
         params["return_risk_feature_cache_mode"] = json!("stats_matrix_experimental");
@@ -12421,6 +13155,7 @@ mod tests {
             Some("pred-quality-growth-v1")
         );
         assert_eq!(req.prediction_blend_weight, Some(0.35));
+        assert_eq!(req.prediction_min_score, Some(0.0));
         assert_eq!(
             req.event_gate_combo_name.as_deref(),
             Some("phase7_event_window_earnings_v1")
@@ -19637,6 +20372,218 @@ mod tests {
             trial.parameters["capacity_risk_budget"]
                 == "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
         }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_train_window_ml_stress_fill_discovery_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "full-market-2016-v1".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20160201",
+                "end_date": "20260515",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["must-not-override-train-window-ml".to_string()]),
+            max_trials: Some(8),
+            search_profile: Some("phase7_gb".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_train_window_ml_stress_fill_discovery"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "GB must not accept full-history or request-level prediction_set overrides"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_gb"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "prediction_confidence_stress_fill_objective_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_final_actual_gross_exposure_pct"],
+            json!(0.35)
+        );
+        assert_eq!(gate_policy["max_train_final_cash_weight_pct"], json!(0.65));
+        assert_eq!(
+            gate_policy["min_train_final_execution_fill_ratio"],
+            json!(0.95)
+        );
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["train_window_ml_ranking_profile"].is_string()
+                && trial.parameters["train_window_ml_feature_profile"]
+                    == "phase7_gb_quality_value_recovery_low_impact_v2"
+                && trial.parameters["train_window_ml_label_objective"]
+                    == "risk_adjusted_excess_return"
+                && trial.parameters["train_window_ml_pit_policy"]
+                    == "train-window rolling fit; no OOS labels"
+                && trial.parameters["stress_fill_objective_profile"].is_string()
+                && trial.parameters["signal_source"] == "factor_combo"
+                && trial.parameters["portfolio_method"] == "stress_fill_aware_risk_budget"
+                && trial.parameters["stress_fill_portfolio_construction"]
+                    == "ml_score_capacity_correlation_risk_budget_target_exposure_v1"
+                && trial.parameters["stress_fill_confidence_exposure"]
+                    == "prediction_confidence_ascending_capacity_headroom_v1"
+                && trial.parameters["cash_utilization"] == "stress_fill_gross_98_v1"
+                && trial.parameters["prediction_confidence_gate_profile"]
+                    == "train_positive_raw_score_gate_v1"
+                && trial.parameters["train_window_ml_prediction_min_score"].is_string()
+                && trial.parameters.get("prediction_min_score").is_none()
+                && trial.parameters.get("prediction_set_id").is_none()
+        }));
+        assert!(bundle.plan.trials.iter().any(|trial| {
+            trial.parameters["train_window_ml_ranking_profile"]
+                == "nlq_ranker_rae_h45_bucket7_fill95"
+                && trial.parameters["capacity_risk_budget"]
+                    == "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
+        }));
+    }
+
+    #[test]
+    fn internal_train_window_ml_prediction_override_only_applies_to_ml_seeds() {
+        let mut seed_trials = vec![
+            json!({
+                "signal_source": "factor_combo",
+                "train_window_ml_ranking_profile": "nlq_ranker_rae_h45_bucket7_fill95",
+                "stress_fill_objective_profile": "gb_quality",
+                "train_window_ml_prediction_min_score": "0.01"
+            }),
+            json!({
+                "signal_source": "factor_combo",
+                "prediction_set_id": "existing-static-prediction"
+            }),
+        ];
+
+        apply_internal_train_window_ml_prediction_set_to_seed_trials(
+            &mut seed_trials,
+            "p7gb-train-window-001",
+        );
+
+        assert_eq!(seed_trials[0]["prediction_set_id"], "p7gb-train-window-001");
+        assert_eq!(seed_trials[0]["prediction_blend_weight"], "0.20");
+        assert_eq!(seed_trials[0]["prediction_min_percentile"], "0.30");
+        assert_eq!(seed_trials[0]["prediction_min_score"], "0.01");
+        assert_eq!(
+            seed_trials[0]["prediction_set_override_source"],
+            "train_window_ml_internal"
+        );
+        assert_eq!(
+            seed_trials[1]["prediction_set_id"],
+            "existing-static-prediction"
+        );
+        assert!(seed_trials[1]
+            .get("prediction_set_override_source")
+            .is_none());
+    }
+
+    #[test]
+    fn train_window_ml_oos_parameters_swap_to_test_prediction_set() {
+        let train_parameters = json!({
+            "signal_source": "factor_combo",
+            "combo_name": "phase7_financial_quality_v1",
+            "prediction_set_id": "p7gb-train-window-001",
+            "prediction_set_override_source": "train_window_ml_internal"
+        });
+        let sets = TrainWindowMlPredictionSets {
+            train_prediction_set_id: "p7gb-train-window-001".to_string(),
+            test_prediction_set_id: "p7gb-test-window-001".to_string(),
+            training_task_id: "train-p7gb-window-001".to_string(),
+        };
+
+        let oos_parameters =
+            train_window_ml_oos_parameters(&train_parameters, Some(&sets)).expect("oos params");
+
+        assert_eq!(oos_parameters["prediction_set_id"], "p7gb-test-window-001");
+        assert_eq!(
+            oos_parameters["train_window_ml_train_prediction_set_id"],
+            "p7gb-train-window-001"
+        );
+        assert_eq!(
+            oos_parameters["train_window_ml_training_task_id"],
+            "train-p7gb-window-001"
+        );
+        assert_eq!(
+            oos_parameters["prediction_set_override_source"],
+            "train_window_ml_internal_oos"
+        );
+    }
+
+    #[test]
+    fn train_window_ml_factor_refs_use_materialized_pit_atomic_features() {
+        let factors = phase7_train_window_ml_factor_refs_for_profile(
+            phase7_train_window_ml_feature_profile(),
+        );
+
+        assert_eq!(
+            phase7_train_window_ml_feature_profile(),
+            "phase7_gb_quality_value_recovery_low_impact_v2"
+        );
+        assert!(factors.len() >= 45);
+        assert!(factors
+            .iter()
+            .all(|factor| factor.factor_version == "1.0.0"));
+        assert!(factors
+            .iter()
+            .all(|factor| !factor.factor_code.starts_with("phase7_")));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "fin_roe_daily_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "fin_current_ratio_indrel_daily_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "fin_debt_to_assets_indrel_daily_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "fin_netprofit_margin_yoy_delta_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "fin_roa_daily_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "val_pb_low_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "cf_ocf_to_profit_latest_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "amihud_20d_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "val_pe_ttm_low_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "fin_roe_yoy_delta_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "mkt_rel_mom_60d_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "div_stability_4y_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "div_cash_sum_4y_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "mf_net_amount_5d_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "mf_elg_net_amount_5d_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "mf_small_sell_pressure_20d_std"));
     }
 
     #[test]

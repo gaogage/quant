@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use sqlx::{Postgres, QueryBuilder};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::{Duration as StdDuration, Instant};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -129,6 +130,24 @@ pub struct EvaluatePredictionSetRequest {
     pub min_trade_count: Option<i64>,
     pub max_drawdown: Option<f64>,
     pub min_excess_return: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PredictionSetCacheEconomicsReportRequest {
+    pub prediction_set_ids: Vec<String>,
+    pub persist_report: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct PredictionSetCacheEconomicsInput {
+    prediction_set_id: String,
+    status: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    metadata: Value,
+    prediction_rows: i64,
+    symbol_count: i64,
+    trading_day_count: i64,
 }
 
 struct NormalizedLinearPredictionSetRequest {
@@ -304,6 +323,34 @@ struct TrainingFeatureMatrixRow {
 }
 
 #[derive(Debug, Clone)]
+struct FeatureMatrixWindowCache {
+    rows: Vec<TrainingFeatureMatrixRow>,
+}
+
+impl FeatureMatrixWindowCache {
+    fn new(mut rows: Vec<TrainingFeatureMatrixRow>) -> Self {
+        rows.sort_by(|left, right| {
+            left.trade_date
+                .cmp(&right.trade_date)
+                .then_with(|| left.symbol.cmp(&right.symbol))
+        });
+        Self { rows }
+    }
+
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn slice(&self, start_date: NaiveDate, end_date: NaiveDate) -> Vec<TrainingFeatureMatrixRow> {
+        self.rows
+            .iter()
+            .filter(|row| row.trade_date >= start_date && row.trade_date <= end_date)
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
 struct TrainingSample {
     features: Vec<f64>,
     label: f64,
@@ -372,6 +419,16 @@ pub async fn evaluate_prediction_set(
     Json(req): Json<EvaluatePredictionSetRequest>,
 ) -> impl IntoResponse {
     match evaluate_prediction_set_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn report_prediction_set_cache_economics(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PredictionSetCacheEconomicsReportRequest>,
+) -> impl IntoResponse {
+    match build_prediction_set_cache_economics_report(&state.db, &req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -714,10 +771,11 @@ async fn create_walk_forward_linear_prediction_set_inner(
     }))
 }
 
-async fn create_walk_forward_nonlinear_quantile_ranker_inner(
+pub(crate) async fn create_walk_forward_nonlinear_quantile_ranker_inner(
     db: &sqlx::PgPool,
     req: WalkForwardNonlinearQuantileRankerRequest,
 ) -> Result<Value, String> {
+    let started_at = Instant::now();
     let req = normalize_walk_forward_nonlinear_quantile_ranker_request(&req)?;
     let linear = &req.linear;
     let windows = build_walk_forward_windows(linear)?;
@@ -725,6 +783,42 @@ async fn create_walk_forward_nonlinear_quantile_ranker_inner(
         return Err("walk-forward nonlinear request produced no windows".into());
     }
 
+    let matrix_start_date = windows
+        .iter()
+        .map(|window| window.train_start_date.min(window.prediction_start_date))
+        .min()
+        .unwrap_or(linear.prediction_start_date);
+    let matrix_end_date = windows
+        .iter()
+        .map(|window| window.train_end_date.max(window.prediction_end_date))
+        .max()
+        .unwrap_or(linear.prediction_end_date);
+    let matrix_req = NormalizedLinearPredictionSetRequest {
+        model_code: linear.model_code.clone(),
+        model_version: linear.model_version.clone(),
+        model_version_id: linear.model_version_id.clone(),
+        prediction_set_id: linear.prediction_set_id.clone(),
+        data_version_id: linear.data_version_id.clone(),
+        feature_set_version_id: linear.feature_set_version_id.clone(),
+        training_dataset_id: linear.training_dataset_id.clone(),
+        start_date: matrix_start_date,
+        end_date: matrix_end_date,
+        factors: linear
+            .factors
+            .iter()
+            .map(|factor| LinearFactorWeight {
+                factor_code: factor.factor_code.clone(),
+                factor_version: factor.factor_version.clone(),
+                weight: 1.0,
+            })
+            .collect(),
+    };
+    let load_started_at = Instant::now();
+    let feature_matrix_cache =
+        FeatureMatrixWindowCache::new(load_prediction_feature_matrix_rows(db, &matrix_req).await?);
+    let load_elapsed = load_started_at.elapsed();
+
+    let scoring_started_at = Instant::now();
     let mut all_rows = Vec::new();
     let mut summaries = Vec::new();
     for window in &windows {
@@ -745,7 +839,11 @@ async fn create_walk_forward_nonlinear_quantile_ranker_inner(
             label_objective: linear.label_objective,
             factors: linear.factors.clone(),
         };
-        let samples = load_training_samples(db, &training_req).await?;
+        let training_feature_rows =
+            feature_matrix_cache.slice(window.train_start_date, window.train_end_date);
+        let samples =
+            load_training_samples_from_feature_rows(db, &training_req, training_feature_rows)
+                .await?;
         let required_samples = linear
             .min_training_samples
             .max(req.bucket_count * req.min_samples_per_bucket);
@@ -792,27 +890,8 @@ async fn create_walk_forward_nonlinear_quantile_ranker_inner(
                 continue;
             }
         };
-        let prediction_req = NormalizedLinearPredictionSetRequest {
-            model_code: linear.model_code.clone(),
-            model_version: linear.model_version.clone(),
-            model_version_id: linear.model_version_id.clone(),
-            prediction_set_id: linear.prediction_set_id.clone(),
-            data_version_id: linear.data_version_id.clone(),
-            feature_set_version_id: linear.feature_set_version_id.clone(),
-            training_dataset_id: linear.training_dataset_id.clone(),
-            start_date: window.prediction_start_date,
-            end_date: window.prediction_end_date,
-            factors: linear
-                .factors
-                .iter()
-                .map(|factor| LinearFactorWeight {
-                    factor_code: factor.factor_code.clone(),
-                    factor_version: factor.factor_version.clone(),
-                    weight: 1.0,
-                })
-                .collect(),
-        };
-        let feature_rows = load_prediction_feature_matrix_rows(db, &prediction_req).await?;
+        let feature_rows =
+            feature_matrix_cache.slice(window.prediction_start_date, window.prediction_end_date);
         let mut rows = nonlinear_prediction_rows_from_feature_matrix_rows(
             &linear.prediction_set_id,
             feature_rows,
@@ -833,6 +912,7 @@ async fn create_walk_forward_nonlinear_quantile_ranker_inner(
             model: Some(model),
         });
     }
+    let scoring_elapsed = scoring_started_at.elapsed();
 
     if all_rows.is_empty() {
         return Err("walk-forward nonlinear ranker produced no prediction rows".into());
@@ -880,10 +960,41 @@ async fn create_walk_forward_nonlinear_quantile_ranker_inner(
         "model_type": "walk_forward_nonlinear_quantile_ranker",
         "training_task_id": linear.training_task_id,
         "prediction_set_id": linear.prediction_set_id,
+        "feature_matrix_cache": feature_matrix_cache_metadata(
+            "request_window",
+            matrix_start_date,
+            matrix_end_date,
+            feature_matrix_cache.row_count(),
+        ),
         "window_count": summaries.len(),
         "completed_windows": completed_windows,
         "skipped_windows": skipped_windows,
         "prediction_rows": all_rows.len(),
+        "prediction_insert_telemetry": prediction_insert_telemetry(&all_rows),
+        "prediction_generation_telemetry": prediction_generation_telemetry(
+            "walk_forward_nonlinear_quantile_ranker",
+            summaries.len(),
+            completed_windows,
+            skipped_windows,
+            all_rows.len(),
+            started_at.elapsed(),
+            vec![
+                prediction_progress_stage(
+                    "load_feature_matrix_cache",
+                    1,
+                    1,
+                    feature_matrix_cache.row_count(),
+                    load_elapsed,
+                ),
+                prediction_progress_stage(
+                    "fit_and_score_windows",
+                    summaries.len(),
+                    summaries.len(),
+                    all_rows.len(),
+                    scoring_elapsed,
+                ),
+            ],
+        ),
         "windows": window_json,
         "point_in_time_policy": "each window trains on dates <= prediction_start_date - label_horizon_days; model_prediction.available_at = trade_date",
     });
@@ -1078,6 +1189,9 @@ async fn create_walk_forward_nonlinear_quantile_ranker_inner(
         "completed_windows": completed_windows,
         "skipped_windows": skipped_windows,
         "bucket_count": req.bucket_count,
+        "feature_matrix_cache": metadata["feature_matrix_cache"],
+        "prediction_insert_telemetry": metadata["prediction_insert_telemetry"],
+        "prediction_generation_telemetry": metadata["prediction_generation_telemetry"],
         "prediction_hash": prediction_hash,
         "artifact_hash": artifact_hash,
     }))
@@ -1106,6 +1220,7 @@ async fn create_walk_forward_nonlinear_quantile_ranker_inner(
         "status": status,
         "prediction_hash": prediction_hash,
         "experiment_run_id": experiment_run_id,
+        "prediction_generation_telemetry": metadata["prediction_generation_telemetry"],
         "windows": summaries,
     }))
 }
@@ -1385,10 +1500,11 @@ async fn train_linear_model_inner(
     }))
 }
 
-async fn train_nonlinear_quantile_ranker_inner(
+pub(crate) async fn train_nonlinear_quantile_ranker_inner(
     db: &sqlx::PgPool,
     req: TrainNonlinearQuantileRankerRequest,
 ) -> Result<Value, String> {
+    let started_at = Instant::now();
     let req = normalize_nonlinear_quantile_ranker_request(&req)?;
     let training_req = NormalizedLinearTrainingRequest {
         model_code: req.model_code.clone(),
@@ -1434,12 +1550,22 @@ async fn train_nonlinear_quantile_ranker_inner(
             })
             .collect(),
     };
+    let load_started_at = Instant::now();
     let feature_rows = load_prediction_feature_matrix_rows(db, &prediction_req).await?;
+    let load_elapsed = load_started_at.elapsed();
+    let feature_matrix_cache = feature_matrix_cache_metadata(
+        "prediction_window",
+        req.prediction_start_date,
+        req.prediction_end_date,
+        feature_rows.len(),
+    );
+    let scoring_started_at = Instant::now();
     let rows = nonlinear_prediction_rows_from_feature_matrix_rows(
         &req.prediction_set_id,
         feature_rows,
         &model,
     )?;
+    let scoring_elapsed = scoring_started_at.elapsed();
     if rows.is_empty() {
         return Err("nonlinear quantile ranker found no prediction factor values".into());
     }
@@ -1458,14 +1584,39 @@ async fn train_nonlinear_quantile_ranker_inner(
     });
     let model_json = serde_json::to_value(&model)
         .map_err(|error| format!("Failed to serialize nonlinear ranker model: {}", error))?;
-    let metadata = json!({
-        "model_type": "nonlinear_quantile_ranker",
-        "training_task_id": req.training_task_id,
-        "sample_count": samples.len(),
-        "label_definition": label_definition,
-        "point_in_time_policy": "model_prediction.available_at = trade_date",
-        "model": model_json,
-    });
+    let insert_telemetry = prediction_insert_telemetry(&rows);
+    let metadata = nonlinear_quantile_ranker_prediction_set_metadata(
+        &req.training_task_id,
+        samples.len(),
+        &label_definition,
+        model_json.clone(),
+        feature_matrix_cache,
+        insert_telemetry.clone(),
+        prediction_generation_telemetry(
+            "train_only_nonlinear_quantile_ranker",
+            1,
+            1,
+            0,
+            rows.len(),
+            started_at.elapsed(),
+            vec![
+                prediction_progress_stage(
+                    "load_prediction_feature_matrix",
+                    1,
+                    1,
+                    rows.len(),
+                    load_elapsed,
+                ),
+                prediction_progress_stage(
+                    "score_prediction_window",
+                    1,
+                    1,
+                    rows.len(),
+                    scoring_elapsed,
+                ),
+            ],
+        ),
+    );
     let dataset_hash = stable_metadata_hash(&json!({
         "data_version_id": req.data_version_id,
         "feature_set_version_id": req.feature_set_version_id,
@@ -1492,6 +1643,9 @@ async fn train_nonlinear_quantile_ranker_inner(
         &metadata["model"],
         &artifact_hash,
         &prediction_hash,
+        &metadata["feature_matrix_cache"],
+        &insert_telemetry,
+        &metadata["prediction_generation_telemetry"],
     );
 
     let mut tx = db
@@ -1659,6 +1813,9 @@ async fn train_nonlinear_quantile_ranker_inner(
         "sample_count": samples.len(),
         "prediction_rows": rows.len(),
         "bucket_count": req.bucket_count,
+        "feature_matrix_cache": metadata["feature_matrix_cache"],
+        "prediction_insert_telemetry": metadata["prediction_insert_telemetry"],
+        "prediction_generation_telemetry": metadata["prediction_generation_telemetry"],
         "prediction_hash": prediction_hash,
         "experiment_run_id": experiment_run_id,
         "status": "completed",
@@ -1810,6 +1967,247 @@ async fn evaluate_prediction_set_inner(
     }))
 }
 
+async fn build_prediction_set_cache_economics_report(
+    db: &sqlx::PgPool,
+    req: &PredictionSetCacheEconomicsReportRequest,
+) -> Result<Value, String> {
+    let prediction_set_ids = normalize_prediction_set_cache_economics_request(req)?;
+    let mut inputs = Vec::with_capacity(prediction_set_ids.len());
+    for prediction_set_id in &prediction_set_ids {
+        inputs.push(load_prediction_set_cache_economics_input(db, prediction_set_id).await?);
+    }
+    let report = prediction_set_cache_economics_report_json(&inputs);
+    let experiment_run_id = if req.persist_report.unwrap_or(true) {
+        Some(persist_prediction_set_cache_economics_report(db, &prediction_set_ids, &report).await?)
+    } else {
+        None
+    };
+
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "report": report,
+    }))
+}
+
+fn normalize_prediction_set_cache_economics_request(
+    req: &PredictionSetCacheEconomicsReportRequest,
+) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    for id in &req.prediction_set_ids {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !ids.iter().any(|existing: &String| existing == trimmed) {
+            ids.push(trimmed.to_string());
+        }
+    }
+    if ids.is_empty() {
+        return Err("prediction_set_ids must not be empty".into());
+    }
+    if ids.len() > 20 {
+        return Err("prediction_set_ids supports at most 20 sets per report".into());
+    }
+    Ok(ids)
+}
+
+async fn load_prediction_set_cache_economics_input(
+    db: &sqlx::PgPool,
+    prediction_set_id: &str,
+) -> Result<PredictionSetCacheEconomicsInput, String> {
+    let row = sqlx::query_as::<_, (String, NaiveDate, NaiveDate, Option<Value>)>(
+        "SELECT status, start_date, end_date, metadata
+         FROM prediction_set
+         WHERE prediction_set_id = $1",
+    )
+    .bind(prediction_set_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("Failed to load prediction_set: {}", error))?
+    .ok_or_else(|| format!("prediction_set not found: {}", prediction_set_id))?;
+
+    let summary = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>)>(
+        "SELECT COUNT(*)::bigint,
+                COUNT(DISTINCT symbol)::bigint,
+                COUNT(DISTINCT trade_date)::bigint
+         FROM model_prediction
+         WHERE prediction_set_id = $1",
+    )
+    .bind(prediction_set_id)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to summarize model_prediction: {}", error))?;
+
+    Ok(PredictionSetCacheEconomicsInput {
+        prediction_set_id: prediction_set_id.to_string(),
+        status: row.0,
+        start_date: row.1,
+        end_date: row.2,
+        metadata: row.3.unwrap_or_else(|| json!({})),
+        prediction_rows: summary.0.unwrap_or(0),
+        symbol_count: summary.1.unwrap_or(0),
+        trading_day_count: summary.2.unwrap_or(0),
+    })
+}
+
+async fn persist_prediction_set_cache_economics_report(
+    db: &sqlx::PgPool,
+    prediction_set_ids: &[String],
+    report: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let related_entity_id = prediction_set_ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "prediction_set_group".to_string());
+    let config = json!({
+        "prediction_set_ids": prediction_set_ids,
+        "report_type": "prediction_set_cache_economics",
+        "point_in_time_scope": "prediction_set metadata and model_prediction only; no backtest/OOS metrics",
+    });
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'prediction_set_cache_economics_report', 'prediction_set_group', $2,
+                 $3, $4, 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(&related_entity_id)
+    .bind(&config)
+    .bind(report)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to insert prediction-set cache economics experiment_run: {}",
+            error
+        )
+    })?;
+    Ok(experiment_run_id)
+}
+
+fn prediction_set_cache_economics_report_json(
+    inputs: &[PredictionSetCacheEconomicsInput],
+) -> Value {
+    let sets = inputs
+        .iter()
+        .map(prediction_set_cache_economics_set_json)
+        .collect::<Vec<_>>();
+    let total_prediction_rows = inputs
+        .iter()
+        .map(|input| input.prediction_rows)
+        .sum::<i64>();
+    let missing_cache_metadata_count = sets
+        .iter()
+        .filter(|set| !set["cache_metadata_present"].as_bool().unwrap_or(false))
+        .count();
+    let missing_insert_telemetry_count = sets
+        .iter()
+        .filter(|set| !set["insert_telemetry_present"].as_bool().unwrap_or(false))
+        .count();
+    let missing_generation_telemetry_count = sets
+        .iter()
+        .filter(|set| {
+            !set["generation_telemetry_present"]
+                .as_bool()
+                .unwrap_or(false)
+        })
+        .count();
+    let max_generation_elapsed_ms = sets
+        .iter()
+        .filter_map(|set| {
+            set["prediction_generation_telemetry"]["elapsed_ms"]
+                .as_u64()
+                .or_else(|| {
+                    set["prediction_generation_telemetry"]["elapsed_ms"]
+                        .as_i64()
+                        .and_then(|value| u64::try_from(value).ok())
+                })
+        })
+        .max()
+        .unwrap_or(0);
+    let max_rows_per_trading_day = inputs
+        .iter()
+        .map(rows_per_trading_day)
+        .fold(0.0_f64, f64::max);
+    let max_rows_per_symbol = inputs.iter().map(rows_per_symbol).fold(0.0_f64, f64::max);
+    let recommendation = if missing_cache_metadata_count > 0 || missing_insert_telemetry_count > 0 {
+        "audit_uncached_prediction_sets"
+    } else if max_rows_per_trading_day >= 100_000.0 {
+        "prefer_window_cache_and_background_insert"
+    } else {
+        "cache_metadata_complete"
+    };
+    json!({
+        "prediction_set_count": inputs.len(),
+        "total_prediction_rows": total_prediction_rows,
+        "sets": sets,
+        "economics": {
+            "recommendation": recommendation,
+            "missing_cache_metadata_count": missing_cache_metadata_count,
+            "missing_insert_telemetry_count": missing_insert_telemetry_count,
+            "missing_generation_telemetry_count": missing_generation_telemetry_count,
+            "max_generation_elapsed_ms": max_generation_elapsed_ms,
+            "max_rows_per_trading_day": max_rows_per_trading_day,
+            "max_rows_per_symbol": max_rows_per_symbol,
+            "point_in_time_scope": "uses prediction_set metadata and model_prediction density only; does not read backtest/OOS metrics"
+        }
+    })
+}
+
+fn prediction_set_cache_economics_set_json(input: &PredictionSetCacheEconomicsInput) -> Value {
+    let feature_matrix_cache = input
+        .metadata
+        .get("feature_matrix_cache")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let cache_metadata_present = !feature_matrix_cache.is_null();
+    let prediction_insert_telemetry = input
+        .metadata
+        .get("prediction_insert_telemetry")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let insert_telemetry_present = !prediction_insert_telemetry.is_null();
+    let prediction_generation_telemetry = input
+        .metadata
+        .get("prediction_generation_telemetry")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let generation_telemetry_present = !prediction_generation_telemetry.is_null();
+    json!({
+        "prediction_set_id": input.prediction_set_id,
+        "status": input.status,
+        "start_date": input.start_date,
+        "end_date": input.end_date,
+        "prediction_rows": input.prediction_rows,
+        "symbol_count": input.symbol_count,
+        "trading_day_count": input.trading_day_count,
+        "rows_per_trading_day": rows_per_trading_day(input),
+        "rows_per_symbol": rows_per_symbol(input),
+        "cache_metadata_present": cache_metadata_present,
+        "feature_matrix_cache": feature_matrix_cache,
+        "insert_telemetry_present": insert_telemetry_present,
+        "prediction_insert_telemetry": prediction_insert_telemetry,
+        "generation_telemetry_present": generation_telemetry_present,
+        "prediction_generation_telemetry": prediction_generation_telemetry,
+    })
+}
+
+fn rows_per_trading_day(input: &PredictionSetCacheEconomicsInput) -> f64 {
+    if input.trading_day_count <= 0 {
+        return 0.0;
+    }
+    (input.prediction_rows as f64 / input.trading_day_count as f64).round()
+}
+
+fn rows_per_symbol(input: &PredictionSetCacheEconomicsInput) -> f64 {
+    if input.symbol_count <= 0 {
+        return 0.0;
+    }
+    (input.prediction_rows as f64 / input.symbol_count as f64).round()
+}
+
 fn linear_training_experiment_config(req: &NormalizedLinearTrainingRequest) -> Value {
     json!({
         "model_code": req.model_code,
@@ -1872,6 +2270,28 @@ fn nonlinear_quantile_ranker_experiment_config(
     })
 }
 
+fn nonlinear_quantile_ranker_prediction_set_metadata(
+    training_task_id: &str,
+    sample_count: usize,
+    label_definition: &Value,
+    model: Value,
+    feature_matrix_cache: Value,
+    prediction_insert_telemetry: Value,
+    prediction_generation_telemetry: Value,
+) -> Value {
+    json!({
+        "model_type": "nonlinear_quantile_ranker",
+        "training_task_id": training_task_id,
+        "sample_count": sample_count,
+        "label_definition": label_definition,
+        "feature_matrix_cache": feature_matrix_cache,
+        "prediction_insert_telemetry": prediction_insert_telemetry,
+        "prediction_generation_telemetry": prediction_generation_telemetry,
+        "point_in_time_policy": "model_prediction.available_at = trade_date",
+        "model": model,
+    })
+}
+
 fn walk_forward_linear_experiment_config(
     req: &NormalizedWalkForwardLinearPredictionSetRequest,
     label_definition: &Value,
@@ -1928,6 +2348,9 @@ fn nonlinear_quantile_ranker_experiment_metrics(
     model: &Value,
     artifact_hash: &str,
     prediction_hash: &str,
+    feature_matrix_cache: &Value,
+    prediction_insert_telemetry: &Value,
+    prediction_generation_telemetry: &Value,
 ) -> Value {
     json!({
         "sample_count": sample_count,
@@ -1935,6 +2358,9 @@ fn nonlinear_quantile_ranker_experiment_metrics(
         "model": model,
         "artifact_hash": artifact_hash,
         "prediction_hash": prediction_hash,
+        "feature_matrix_cache": feature_matrix_cache,
+        "prediction_insert_telemetry": prediction_insert_telemetry,
+        "prediction_generation_telemetry": prediction_generation_telemetry,
         "prediction_point_in_time_policy": "model_prediction.available_at = trade_date",
         "status": "training_and_prediction_completed"
     })
@@ -2581,7 +3007,14 @@ async fn load_training_samples(
     req: &NormalizedLinearTrainingRequest,
 ) -> Result<Vec<TrainingSample>, String> {
     let feature_rows = load_training_feature_matrix_rows(db, req).await?;
+    load_training_samples_from_feature_rows(db, req, feature_rows).await
+}
 
+async fn load_training_samples_from_feature_rows(
+    db: &sqlx::PgPool,
+    req: &NormalizedLinearTrainingRequest,
+    feature_rows: Vec<TrainingFeatureMatrixRow>,
+) -> Result<Vec<TrainingSample>, String> {
     let label_end_date = req.train_end_date + Duration::days(req.label_horizon_days + 7);
     let price_rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
         "SELECT symbol, trade_date, close::double precision
@@ -3195,7 +3628,7 @@ async fn insert_prediction_rows(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     rows: &[PredictionRow],
 ) -> Result<(), String> {
-    for chunk in rows.chunks(5_000) {
+    for chunk in rows.chunks(PREDICTION_INSERT_BATCH_SIZE) {
         let mut builder = QueryBuilder::<Postgres>::new(
             "INSERT INTO model_prediction
                (prediction_set_id, trade_date, symbol, score, probability, rank, available_at) ",
@@ -3217,6 +3650,81 @@ async fn insert_prediction_rows(
             .map_err(|error| format!("Failed to insert model_prediction rows: {}", error))?;
     }
     Ok(())
+}
+
+const PREDICTION_INSERT_BATCH_SIZE: usize = 5_000;
+
+fn prediction_insert_telemetry(rows: &[PredictionRow]) -> Value {
+    let chunk_row_counts = rows
+        .chunks(PREDICTION_INSERT_BATCH_SIZE)
+        .map(|chunk| chunk.len())
+        .collect::<Vec<_>>();
+    json!({
+        "mode": "bulk_insert",
+        "row_count": rows.len(),
+        "batch_size": PREDICTION_INSERT_BATCH_SIZE,
+        "batch_count": chunk_row_counts.len(),
+        "chunk_row_counts": chunk_row_counts,
+    })
+}
+
+fn prediction_progress_stage(
+    stage: &str,
+    total_units: usize,
+    completed_units: usize,
+    row_count: usize,
+    elapsed: StdDuration,
+) -> Value {
+    json!({
+        "stage": stage,
+        "total_units": total_units,
+        "completed_units": completed_units,
+        "row_count": row_count,
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "progress_pct": progress_pct(total_units, completed_units),
+    })
+}
+
+fn prediction_generation_telemetry(
+    operation: &str,
+    total_units: usize,
+    completed_units: usize,
+    skipped_units: usize,
+    prediction_rows: usize,
+    elapsed: StdDuration,
+    stages: Vec<Value>,
+) -> Value {
+    json!({
+        "operation": operation,
+        "total_units": total_units,
+        "completed_units": completed_units,
+        "skipped_units": skipped_units,
+        "prediction_rows": prediction_rows,
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "progress_pct": progress_pct(total_units, completed_units + skipped_units),
+        "stages": stages,
+    })
+}
+
+fn progress_pct(total_units: usize, completed_units: usize) -> f64 {
+    if total_units == 0 {
+        return 100.0;
+    }
+    ((completed_units.min(total_units) as f64 / total_units as f64) * 10_000.0).round() / 100.0
+}
+
+fn feature_matrix_cache_metadata(
+    scope: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    row_count: usize,
+) -> Value {
+    json!({
+        "scope": scope,
+        "start_date": start_date,
+        "end_date": end_date,
+        "row_count": row_count,
+    })
 }
 
 fn stable_metadata_hash(value: &Value) -> String {
@@ -3651,6 +4159,228 @@ mod tests {
         );
         assert_eq!(config["bucket_count"], 7);
         assert_eq!(config["label"]["label"], "future_excess_return");
+    }
+
+    #[test]
+    fn feature_matrix_cache_slices_train_and_prediction_windows_without_requery() {
+        let rows = vec![
+            TrainingFeatureMatrixRow {
+                symbol: "000001.SZ".into(),
+                trade_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+                features: vec![1.0, 0.1],
+            },
+            TrainingFeatureMatrixRow {
+                symbol: "000001.SZ".into(),
+                trade_date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+                features: vec![2.0, 0.2],
+            },
+            TrainingFeatureMatrixRow {
+                symbol: "000002.SZ".into(),
+                trade_date: NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+                features: vec![3.0, 0.3],
+            },
+        ];
+        let cache = FeatureMatrixWindowCache::new(rows);
+
+        let train_rows = cache.slice(
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+        );
+        let prediction_rows = cache.slice(
+            NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+        );
+
+        assert_eq!(cache.row_count(), 3);
+        assert_eq!(train_rows.len(), 2);
+        assert_eq!(prediction_rows.len(), 1);
+        assert_eq!(prediction_rows[0].symbol, "000002.SZ");
+    }
+
+    #[test]
+    fn prediction_insert_telemetry_counts_bulk_insert_batches() {
+        let rows = (0..12_001)
+            .map(|idx| {
+                build_prediction_row(
+                    "pred-telemetry",
+                    &format!("{:06}.SZ", idx),
+                    "2025-01-02",
+                    idx as f64,
+                    idx + 1,
+                )
+                .expect("prediction row")
+            })
+            .collect::<Vec<_>>();
+
+        let telemetry = prediction_insert_telemetry(&rows);
+
+        assert_eq!(telemetry["row_count"], 12_001);
+        assert_eq!(telemetry["batch_size"], 5_000);
+        assert_eq!(telemetry["batch_count"], 3);
+        assert_eq!(telemetry["chunk_row_counts"], json!([5000, 5000, 2001]));
+    }
+
+    #[test]
+    fn nonlinear_ranker_prediction_metadata_records_cache_and_insert_telemetry() {
+        let label_definition = label_definition_json(LabelObjective::RiskAdjustedExcessReturn, 45);
+        let rows = vec![
+            build_prediction_row("p7gb-test", "000001.SZ", "2025-01-02", 0.7, 1).expect("row 1"),
+            build_prediction_row("p7gb-test", "000002.SZ", "2025-01-02", 0.4, 2).expect("row 2"),
+        ];
+        let metadata = nonlinear_quantile_ranker_prediction_set_metadata(
+            "train-p7gb-test",
+            512,
+            &label_definition,
+            json!({"buckets": []}),
+            feature_matrix_cache_metadata(
+                "prediction_window",
+                NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2025, 3, 31).unwrap(),
+                20_000,
+            ),
+            prediction_insert_telemetry(&rows),
+            prediction_generation_telemetry(
+                "train_only_nonlinear_quantile_ranker",
+                1,
+                1,
+                0,
+                rows.len(),
+                std::time::Duration::from_millis(125),
+                vec![prediction_progress_stage(
+                    "score_prediction_window",
+                    1,
+                    1,
+                    rows.len(),
+                    std::time::Duration::from_millis(25),
+                )],
+            ),
+        );
+
+        assert_eq!(metadata["model_type"], "nonlinear_quantile_ranker");
+        assert_eq!(
+            metadata["feature_matrix_cache"]["scope"],
+            "prediction_window"
+        );
+        assert_eq!(metadata["feature_matrix_cache"]["row_count"], 20_000);
+        assert_eq!(metadata["prediction_insert_telemetry"]["row_count"], 2);
+        assert_eq!(metadata["prediction_insert_telemetry"]["batch_count"], 1);
+        assert_eq!(
+            metadata["prediction_generation_telemetry"]["operation"],
+            "train_only_nonlinear_quantile_ranker"
+        );
+        assert_eq!(
+            metadata["prediction_generation_telemetry"]["progress_pct"],
+            100.0
+        );
+        assert_eq!(
+            metadata["prediction_generation_telemetry"]["stages"][0]["stage"],
+            "score_prediction_window"
+        );
+    }
+
+    #[test]
+    fn prediction_generation_telemetry_records_elapsed_and_progress() {
+        let telemetry = prediction_generation_telemetry(
+            "walk_forward_nonlinear_quantile_ranker",
+            6,
+            4,
+            2,
+            253_694,
+            std::time::Duration::from_millis(12_345),
+            vec![
+                prediction_progress_stage(
+                    "load_feature_matrix_cache",
+                    1,
+                    1,
+                    923_773,
+                    std::time::Duration::from_millis(3_000),
+                ),
+                prediction_progress_stage(
+                    "fit_and_score_windows",
+                    6,
+                    6,
+                    253_694,
+                    std::time::Duration::from_millis(9_345),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            telemetry["operation"],
+            "walk_forward_nonlinear_quantile_ranker"
+        );
+        assert_eq!(telemetry["elapsed_ms"], 12_345);
+        assert_eq!(telemetry["total_units"], 6);
+        assert_eq!(telemetry["completed_units"], 4);
+        assert_eq!(telemetry["skipped_units"], 2);
+        assert_eq!(telemetry["prediction_rows"], 253_694);
+        assert_eq!(telemetry["progress_pct"], 100.0);
+        assert_eq!(telemetry["stages"][0]["row_count"], 923_773);
+    }
+
+    #[test]
+    fn prediction_cache_economics_report_flags_cached_train_and_uncached_test_sets() {
+        let train = PredictionSetCacheEconomicsInput {
+            prediction_set_id: "p7gb-w1-tr".into(),
+            status: "ready".into(),
+            start_date: NaiveDate::from_ymd_opt(2023, 10, 24).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 5, 17).unwrap(),
+            metadata: json!({
+                "feature_matrix_cache": {
+                    "scope": "request_window",
+                    "start_date": "2023-01-01",
+                    "end_date": "2024-05-18",
+                    "row_count": 923773
+                },
+                "prediction_insert_telemetry": {
+                    "mode": "bulk_insert",
+                    "row_count": 383993,
+                    "batch_size": 5000,
+                    "batch_count": 77,
+                    "chunk_row_counts": []
+                },
+                "prediction_generation_telemetry": {
+                    "operation": "walk_forward_nonlinear_quantile_ranker",
+                    "elapsed_ms": 12345,
+                    "progress_pct": 100.0,
+                    "prediction_rows": 383993
+                }
+            }),
+            prediction_rows: 383_993,
+            symbol_count: 3_094,
+            trading_day_count: 140,
+        };
+        let test = PredictionSetCacheEconomicsInput {
+            prediction_set_id: "p7gb-w1-te".into(),
+            status: "ready".into(),
+            start_date: NaiveDate::from_ymd_opt(2024, 5, 20).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 1, 24).unwrap(),
+            metadata: json!({}),
+            prediction_rows: 484_286,
+            symbol_count: 3_313,
+            trading_day_count: 164,
+        };
+
+        let report = prediction_set_cache_economics_report_json(&[train, test]);
+
+        assert_eq!(report["prediction_set_count"], 2);
+        assert_eq!(report["total_prediction_rows"], 868_279);
+        assert_eq!(report["sets"][0]["cache_metadata_present"], true);
+        assert_eq!(report["sets"][0]["generation_telemetry_present"], true);
+        assert_eq!(
+            report["sets"][0]["feature_matrix_cache"]["row_count"],
+            923_773
+        );
+        assert_eq!(report["sets"][1]["cache_metadata_present"], false);
+        assert_eq!(
+            report["economics"]["recommendation"],
+            "audit_uncached_prediction_sets"
+        );
+        assert_eq!(report["economics"]["missing_cache_metadata_count"], 1);
+        assert_eq!(report["economics"]["missing_insert_telemetry_count"], 1);
+        assert_eq!(report["economics"]["missing_generation_telemetry_count"], 1);
+        assert_eq!(report["economics"]["max_generation_elapsed_ms"], 12_345);
+        assert_eq!(report["economics"]["max_rows_per_trading_day"], 2953.0);
     }
 
     #[test]

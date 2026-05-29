@@ -28,7 +28,8 @@ use quant_backtest::signal_generator::{
     FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport, MarketFeatureSnapshotScope,
     MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig,
     ReturnRiskFeatureCacheMode, RiskContributionControlProfile, ScoreDirection, SignalConfig,
-    SignalDataCache, StyleRiskBudgetProfile, TradableUniverseProfile,
+    SignalDataCache, StressFillConfidenceExposureProfile, StyleRiskBudgetProfile,
+    TradableUniverseProfile,
 };
 
 use crate::AppState;
@@ -841,6 +842,7 @@ pub struct RunFactorBacktestReq {
     pub prediction_set_id: Option<String>,
     pub prediction_blend_weight: Option<f64>,
     pub prediction_min_percentile: Option<f64>,
+    pub prediction_min_score: Option<f64>,
     pub event_gate_combo_name: Option<String>,
     #[serde(default = "default_combo_version")]
     pub event_gate_version: String,
@@ -891,6 +893,7 @@ pub struct RunFactorBacktestReq {
     pub candidate_risk_filter: Option<String>,
     pub candidate_ranking: Option<String>,
     pub risk_contribution_control: Option<String>,
+    pub stress_fill_confidence_exposure: Option<String>,
     #[serde(default)]
     pub rebalance_hysteresis_pct: Option<f64>,
     #[serde(default)]
@@ -988,6 +991,7 @@ pub struct RunPredictionBacktestReq {
     pub candidate_risk_filter: Option<String>,
     pub candidate_ranking: Option<String>,
     pub risk_contribution_control: Option<String>,
+    pub stress_fill_confidence_exposure: Option<String>,
     #[serde(default)]
     pub rebalance_hysteresis_pct: Option<f64>,
     #[serde(default)]
@@ -1071,6 +1075,14 @@ fn parse_portfolio_method(value: &str) -> Result<PortfolioConstructionMethod, St
     match value {
         "heuristic" | "legacy" => Ok(PortfolioConstructionMethod::Heuristic),
         "risk_budget" | "risk-budget" => Ok(PortfolioConstructionMethod::RiskBudget),
+        "stress_fill_aware_risk_budget"
+        | "stress-fill-aware-risk-budget"
+        | "stress_fill_risk_budget"
+        | "stress-fill-risk-budget"
+        | "ml_stress_fill_risk_budget"
+        | "ml-stress-fill-risk-budget" => {
+            Ok(PortfolioConstructionMethod::StressFillAwareRiskBudget)
+        }
         "min_variance" | "min-variance" | "minimum_variance" | "minimum-variance" => {
             Ok(PortfolioConstructionMethod::MinVariance)
         }
@@ -1148,10 +1160,21 @@ fn parse_risk_contribution_control_profile(
         .unwrap_or(Ok(RiskContributionControlProfile::Off))
 }
 
+fn parse_stress_fill_confidence_exposure_profile(
+    value: Option<&str>,
+) -> Result<StressFillConfidenceExposureProfile, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(StressFillConfidenceExposureProfile::parse)
+        .unwrap_or(Ok(StressFillConfidenceExposureProfile::Off))
+}
+
 fn build_prediction_blend_config(
     prediction_set_id: Option<&String>,
     prediction_blend_weight: Option<f64>,
     prediction_min_percentile: Option<f64>,
+    prediction_min_score: Option<f64>,
 ) -> Result<Option<PredictionBlendConfig>, String> {
     let prediction_weight = prediction_blend_weight.unwrap_or(0.0);
     if !prediction_weight.is_finite() || !(0.0..=1.0).contains(&prediction_weight) {
@@ -1162,7 +1185,15 @@ fn build_prediction_blend_config(
             return Err("prediction_min_percentile must be between 0 and 1".into());
         }
     }
-    if prediction_weight <= f64::EPSILON && prediction_min_percentile.is_none() {
+    if let Some(min_score) = prediction_min_score {
+        if !min_score.is_finite() {
+            return Err("prediction_min_score must be finite".into());
+        }
+    }
+    if prediction_weight <= f64::EPSILON
+        && prediction_min_percentile.is_none()
+        && prediction_min_score.is_none()
+    {
         return Ok(None);
     }
     let prediction_set_id = prediction_set_id
@@ -1176,6 +1207,7 @@ fn build_prediction_blend_config(
         factor_weight: 1.0 - prediction_weight,
         prediction_weight,
         prediction_min_percentile,
+        prediction_min_score,
     }))
 }
 
@@ -1324,6 +1356,9 @@ fn build_factor_signal_config(
         parse_candidate_ranking_profile(req.candidate_ranking.as_deref())?;
     let risk_contribution_control_profile =
         parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
+    let stress_fill_confidence_exposure_profile = parse_stress_fill_confidence_exposure_profile(
+        req.stress_fill_confidence_exposure.as_deref(),
+    )?;
 
     Ok(SignalConfig {
         combo_name: req.combo_name.clone(),
@@ -1357,6 +1392,7 @@ fn build_factor_signal_config(
         candidate_risk_filter_profile,
         candidate_ranking_profile,
         risk_contribution_control_profile,
+        stress_fill_confidence_exposure_profile,
         rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
         partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
         score_candidate_pool_size: req.score_candidate_pool_size.filter(|size| *size > 0),
@@ -1365,6 +1401,7 @@ fn build_factor_signal_config(
             req.prediction_set_id.as_ref(),
             req.prediction_blend_weight,
             req.prediction_min_percentile,
+            req.prediction_min_score,
         )?,
         event_gate: build_event_gate_config(req)?,
         score_overlay: None,
@@ -2358,6 +2395,9 @@ pub(crate) async fn execute_prediction_backtest(
         parse_candidate_ranking_profile(req.candidate_ranking.as_deref())?;
     let risk_contribution_control_profile =
         parse_risk_contribution_control_profile(req.risk_contribution_control.as_deref())?;
+    let stress_fill_confidence_exposure_profile = parse_stress_fill_confidence_exposure_profile(
+        req.stress_fill_confidence_exposure.as_deref(),
+    )?;
 
     let sig_config = quant_backtest::signal_generator::PredictionSignalConfig {
         prediction_set_id: prediction_set_id.clone(),
@@ -2390,6 +2430,7 @@ pub(crate) async fn execute_prediction_backtest(
         candidate_risk_filter_profile,
         candidate_ranking_profile,
         risk_contribution_control_profile,
+        stress_fill_confidence_exposure_profile,
         rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
         partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
     };
@@ -2556,7 +2597,7 @@ mod tests {
 
     #[test]
     fn prediction_blend_requires_prediction_set_when_weight_is_positive() {
-        let err = build_prediction_blend_config(None, Some(0.25), None).unwrap_err();
+        let err = build_prediction_blend_config(None, Some(0.25), None, None).unwrap_err();
 
         assert!(err.contains("prediction_set_id"));
     }
@@ -2565,7 +2606,7 @@ mod tests {
     fn prediction_blend_weight_builds_factor_prediction_weights() {
         let prediction_set_id = " pred-quality-growth-v1 ".to_string();
 
-        let blend = build_prediction_blend_config(Some(&prediction_set_id), Some(0.35), None)
+        let blend = build_prediction_blend_config(Some(&prediction_set_id), Some(0.35), None, None)
             .expect("valid blend")
             .expect("blend enabled");
 
@@ -2573,13 +2614,14 @@ mod tests {
         assert!((blend.factor_weight - 0.65).abs() < f64::EPSILON);
         assert!((blend.prediction_weight - 0.35).abs() < f64::EPSILON);
         assert_eq!(blend.prediction_min_percentile, None);
+        assert_eq!(blend.prediction_min_score, None);
     }
 
     #[test]
     fn prediction_filter_can_enable_overlay_without_blend_weight() {
         let prediction_set_id = "pred-quality-growth-v1".to_string();
 
-        let blend = build_prediction_blend_config(Some(&prediction_set_id), None, Some(0.2))
+        let blend = build_prediction_blend_config(Some(&prediction_set_id), None, Some(0.2), None)
             .expect("valid prediction filter")
             .expect("filter enabled");
 
@@ -2587,6 +2629,22 @@ mod tests {
         assert_eq!(blend.factor_weight, 1.0);
         assert_eq!(blend.prediction_weight, 0.0);
         assert_eq!(blend.prediction_min_percentile, Some(0.2));
+        assert_eq!(blend.prediction_min_score, None);
+    }
+
+    #[test]
+    fn prediction_min_score_can_enable_overlay_without_blend_weight() {
+        let prediction_set_id = "pred-quality-growth-v1".to_string();
+
+        let blend = build_prediction_blend_config(Some(&prediction_set_id), None, None, Some(0.0))
+            .expect("valid prediction score gate")
+            .expect("score gate enabled");
+
+        assert_eq!(blend.prediction_set_id, prediction_set_id);
+        assert_eq!(blend.factor_weight, 1.0);
+        assert_eq!(blend.prediction_weight, 0.0);
+        assert_eq!(blend.prediction_min_percentile, None);
+        assert_eq!(blend.prediction_min_score, Some(0.0));
     }
 
     #[test]
@@ -2823,6 +2881,55 @@ mod tests {
         let method = parse_portfolio_method(&req.portfolio_method).expect("portfolio method");
 
         assert_eq!(method, PortfolioConstructionMethod::MinVariance);
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_stress_fill_aware_risk_budget_portfolio_method() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "portfolio_method": "stress_fill_aware_risk_budget"
+        }))
+        .expect("factor request");
+
+        let method = parse_portfolio_method(&req.portfolio_method).expect("portfolio method");
+
+        assert_eq!(
+            method,
+            PortfolioConstructionMethod::StressFillAwareRiskBudget
+        );
+    }
+
+    #[test]
+    fn run_factor_backtest_request_accepts_stress_fill_confidence_exposure_profile() {
+        let req: RunFactorBacktestReq = serde_json::from_value(json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "start_date": "20250102",
+            "end_date": "20250131",
+            "stress_fill_confidence_exposure": "prediction_confidence_v1"
+        }))
+        .expect("factor request");
+
+        let profile = parse_stress_fill_confidence_exposure_profile(
+            req.stress_fill_confidence_exposure.as_deref(),
+        )
+        .expect("stress fill confidence exposure");
+
+        assert_eq!(
+            profile,
+            StressFillConfidenceExposureProfile::PredictionConfidenceV1
+        );
+
+        let headroom_profile = parse_stress_fill_confidence_exposure_profile(Some(
+            "prediction_confidence_ascending_capacity_headroom_v1",
+        ))
+        .expect("stress fill confidence headroom exposure");
+
+        assert_eq!(
+            headroom_profile,
+            StressFillConfidenceExposureProfile::PredictionConfidenceAscendingCapacityHeadroomV1
+        );
     }
 
     #[test]
@@ -3460,6 +3567,7 @@ mod tests {
             prediction_set_id: None,
             prediction_blend_weight: None,
             prediction_min_percentile: None,
+            prediction_min_score: None,
             event_gate_combo_name: event_gate_combo_name.map(str::to_string),
             event_gate_version: "1.0.0".to_string(),
             event_gate_mode: event_gate_mode.map(str::to_string),
@@ -3492,6 +3600,7 @@ mod tests {
             candidate_risk_filter: None,
             candidate_ranking: None,
             risk_contribution_control: None,
+            stress_fill_confidence_exposure: None,
             rebalance_hysteresis_pct: None,
             partial_rebalance_ratio: None,
             score_candidate_pool_size: None,
