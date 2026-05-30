@@ -15784,7 +15784,7 @@ fn with_train_window_ml_stress_fill_seed(
     seed["train_window_ml_label_objective"] = json!("regime_conditional_excess_return");
     seed["train_window_ml_label_horizon_days"] = json!(label_horizon_days);
     seed["train_window_ml_bucket_count"] = json!(bucket_count);
-    seed["train_window_ml_min_samples_per_bucket"] = json!(250);
+    seed["train_window_ml_min_samples_per_bucket"] = json!(100);
     seed["train_window_ml_pit_policy"] = json!("train-window rolling fit; no OOS labels");
     seed["portfolio_method"] = json!("stress_fill_aware_risk_budget");
     seed["stress_fill_portfolio_construction"] =
@@ -15903,6 +15903,28 @@ fn professional_train_window_ml_stress_fill_discovery_seed_trials() -> Vec<Value
                 "soft_single_name_20pct_v1",
                 "quality_mixed_state_risk_memory_router_v14",
                 "0.01",
+            ),
+            (
+                "gb_quality_rae60_bucket15_fill95_floor70_rebalance240",
+                "nlq_ranker_rae_h60_bucket15_fill95",
+                60usize,
+                15usize,
+                "phase7_financial_quality_v1",
+                ScoreDirection::Ascending,
+                120usize,
+                240usize,
+                "0.06",
+                "0.90",
+                "2.0",
+                "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                140usize,
+                2600usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_nonlinear_alpha_risk_memory_router_v3",
+                "0.00",
             ),
         ] {
             let seed = with_train_window_stress_fill_target_exposure_seed(

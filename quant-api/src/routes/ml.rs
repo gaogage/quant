@@ -493,6 +493,20 @@ impl RegimeSplitModel {
                 .unwrap_or(model.global_label_mean);
             score += bucket_score;
         }
+        for ptable in &model.pairwise_tables {
+            let bucket_i = model.tables[ptable.factor_i]
+                .cutpoints
+                .partition_point(|c| features[ptable.factor_i] >= *c)
+                .min(model.bucket_count - 1);
+            let bucket_j = model.tables[ptable.factor_j]
+                .cutpoints
+                .partition_point(|c| features[ptable.factor_j] >= *c)
+                .min(model.bucket_count - 1);
+            let pscore = ptable.scores[bucket_i * model.bucket_count + bucket_j];
+            if pscore.is_finite() {
+                score += pscore;
+            }
+        }
         if score.is_finite() { Some(score) } else { None }
     }
 
@@ -3764,6 +3778,7 @@ struct NonlinearQuantileRanker {
     bucket_count: usize,
     min_samples_per_bucket: usize,
     tables: Vec<NonlinearQuantileFactorTable>,
+    pairwise_tables: Vec<NonlinearQuantilePairwiseTable>,
     global_label_mean: f64,
 }
 
@@ -3773,6 +3788,15 @@ struct NonlinearQuantileFactorTable {
     cutpoints: Vec<f64>,
     bucket_scores: Vec<f64>,
     bucket_counts: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NonlinearQuantilePairwiseTable {
+    factor_i: usize,
+    factor_j: usize,
+    /// Flat 2D array: scores[bucket_i * bucket_count + bucket_j]
+    scores: Vec<f64>,
+    counts: Vec<usize>,
 }
 
 fn fit_nonlinear_quantile_ranker(
@@ -3854,11 +3878,91 @@ fn fit_nonlinear_quantile_ranker(
         });
     }
 
+    // Pairwise feature interactions: select top features by label variance,
+    // compute 2D bucket tables for all pairs among them.
+    let pairwise_feature_count = 8usize.min(factor_count);
+    let mut pairwise_tables = Vec::new();
+    if factor_count >= 2 && samples.len() >= bucket_count * min_samples_per_bucket * 4 {
+        // Rank features by label-weighted variance
+        let mut factor_variances: Vec<(usize, f64)> = (0..factor_count)
+            .map(|fi| {
+                let values: Vec<f64> = samples
+                    .iter()
+                    .filter(|s| {
+                        s.features.len() == factor_count
+                            && s.label.is_finite()
+                            && s.features[fi].is_finite()
+                    })
+                    .map(|s| s.features[fi] * s.label)
+                    .collect();
+                let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+                let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                    / values.len().max(1) as f64;
+                (fi, var)
+            })
+            .collect();
+        factor_variances.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let top_features: Vec<usize> = factor_variances
+            .iter()
+            .take(pairwise_feature_count)
+            .map(|(fi, _)| *fi)
+            .collect();
+
+        for i in 0..top_features.len() {
+            for j in (i + 1)..top_features.len() {
+                let fi = top_features[i];
+                let fj = top_features[j];
+                let mut grid: Vec<Vec<Vec<f64>>> =
+                    vec![vec![Vec::new(); bucket_count]; bucket_count];
+                for sample in samples {
+                    if sample.features.len() != factor_count || !sample.label.is_finite() {
+                        continue;
+                    }
+                    let vi = sample.features[fi];
+                    let vj = sample.features[fj];
+                    if !vi.is_finite() || !vj.is_finite() {
+                        continue;
+                    }
+                    let bi = tables[fi]
+                        .cutpoints
+                        .partition_point(|c| vi >= *c)
+                        .min(bucket_count - 1);
+                    let bj = tables[fj]
+                        .cutpoints
+                        .partition_point(|c| vj >= *c)
+                        .min(bucket_count - 1);
+                    grid[bi][bj].push(sample.label);
+                }
+                let total_cells = bucket_count * bucket_count;
+                let mut scores = vec![global_label_mean; total_cells];
+                let mut counts = vec![0usize; total_cells];
+                for bi in 0..bucket_count {
+                    for bj in 0..bucket_count {
+                        let cell_labels = &grid[bi][bj];
+                        let idx = bi * bucket_count + bj;
+                        counts[idx] = cell_labels.len();
+                        if cell_labels.len() >= min_samples_per_bucket {
+                            scores[idx] =
+                                cell_labels.iter().sum::<f64>() / cell_labels.len() as f64;
+                        }
+                    }
+                }
+                pairwise_tables.push(NonlinearQuantilePairwiseTable {
+                    factor_i: fi,
+                    factor_j: fj,
+                    scores,
+                    counts,
+                });
+            }
+        }
+    }
+
     Ok(NonlinearQuantileRanker {
         factor_count,
         bucket_count,
         min_samples_per_bucket,
         tables,
+        pairwise_tables,
         global_label_mean,
     })
 }
@@ -3887,6 +3991,21 @@ fn nonlinear_prediction_rows_from_feature_matrix_rows(
                 .copied()
                 .unwrap_or(model.global_label_mean);
             score += bucket_score;
+        }
+        // Pairwise interaction scoring
+        for ptable in &model.pairwise_tables {
+            let bucket_i = model.tables[ptable.factor_i]
+                .cutpoints
+                .partition_point(|c| row.features[ptable.factor_i] >= *c)
+                .min(model.bucket_count - 1);
+            let bucket_j = model.tables[ptable.factor_j]
+                .cutpoints
+                .partition_point(|c| row.features[ptable.factor_j] >= *c)
+                .min(model.bucket_count - 1);
+            let pscore = ptable.scores[bucket_i * model.bucket_count + bucket_j];
+            if pscore.is_finite() {
+                score += pscore;
+            }
         }
         if !score.is_finite() {
             continue;
