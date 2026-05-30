@@ -3145,8 +3145,10 @@ pub enum CapacityRiskBudgetProfile {
     StressParticipationHeadroomFloor70V1,
     StressParticipationAlphaHeadroomFloor60V1,
     StressParticipationAlphaHeadroomFloor70V1,
+    StressParticipationAlphaHeadroomFloor85V1,
     StressParticipationBlendedAlphaHeadroomFloor60V1,
     StressParticipationBlendedAlphaHeadroomFloor70V1,
+    StressParticipationBlendedAlphaHeadroomFloor85V1,
 }
 
 impl CapacityRiskBudgetProfile {
@@ -3217,6 +3219,12 @@ impl CapacityRiskBudgetProfile {
             | "capacity-stress-participation-alpha-headroom-floor-70-v1" => {
                 Ok(Self::StressParticipationAlphaHeadroomFloor70V1)
             }
+            "stress_participation_alpha_headroom_floor_85_v1"
+            | "stress-participation-alpha-headroom-floor-85-v1"
+            | "capacity_stress_participation_alpha_headroom_floor_85_v1"
+            | "capacity-stress-participation-alpha-headroom-floor-85-v1" => {
+                Ok(Self::StressParticipationAlphaHeadroomFloor85V1)
+            }
             "stress_participation_blended_alpha_headroom_floor_60_v1"
             | "stress-participation-blended-alpha-headroom-floor-60-v1"
             | "capacity_stress_participation_blended_alpha_headroom_floor_60_v1"
@@ -3228,6 +3236,12 @@ impl CapacityRiskBudgetProfile {
             | "capacity_stress_participation_blended_alpha_headroom_floor_70_v1"
             | "capacity-stress-participation-blended-alpha-headroom-floor-70-v1" => {
                 Ok(Self::StressParticipationBlendedAlphaHeadroomFloor70V1)
+            }
+            "stress_participation_blended_alpha_headroom_floor_85_v1"
+            | "stress-participation-blended-alpha-headroom-floor-85-v1"
+            | "capacity_stress_participation_blended_alpha_headroom_floor_85_v1"
+            | "capacity-stress-participation-blended-alpha-headroom-floor-85-v1" => {
+                Ok(Self::StressParticipationBlendedAlphaHeadroomFloor85V1)
             }
             other => Err(format!("unsupported capacity_risk_budget: {}", other)),
         }
@@ -3375,6 +3389,24 @@ impl CapacityRiskBudgetProfile {
                     floor_refill_mode: CapacityFloorRefillMode::BlendedAlphaHeadroom,
                 })
             }
+            Self::StressParticipationAlphaHeadroomFloor85V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.14,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.85),
+                floor_refill_cap_multiplier: 1.25,
+                floor_refill_mode: CapacityFloorRefillMode::AlphaHeadroom,
+            }),
+            Self::StressParticipationBlendedAlphaHeadroomFloor85V1 => Some(CapacityRiskBudgetParams {
+                low_capacity_quantile: 0.35,
+                low_capacity_max_weight_pct: 0.14,
+                refill_gross_exposure: false,
+                participation_cap_multiplier: 0.50,
+                min_target_gross_exposure_pct: Some(0.85),
+                floor_refill_cap_multiplier: 1.25,
+                floor_refill_mode: CapacityFloorRefillMode::BlendedAlphaHeadroom,
+            }),
         }
     }
 

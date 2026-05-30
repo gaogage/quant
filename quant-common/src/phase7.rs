@@ -15927,6 +15927,28 @@ fn professional_train_window_ml_stress_fill_discovery_seed_trials() -> Vec<Value
                 "0.00",
             ),
             (
+                "gb_quality_rae45_fill95_floor85_rebalance240",
+                "nlq_ranker_rae_h45_bucket7_fill95",
+                45usize,
+                7usize,
+                "phase7_financial_quality_v1",
+                ScoreDirection::Ascending,
+                120usize,
+                240usize,
+                "0.06",
+                "0.90",
+                "2.0",
+                "capacity_stress_participation_alpha_headroom_floor_85_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                140usize,
+                2600usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_nonlinear_alpha_risk_memory_router_v3",
+                "0.00",
+            ),
+            (
                 "gb_quality_rae45_bucket10_fill95_floor70_rebalance240",
                 "nlq_ranker_rae_h45_bucket10_fill95",
                 45usize,
@@ -21697,12 +21719,21 @@ impl LayeredSearchConfig {
         config.top_n = vec![100, 120, 140];
         config.rebalance_days = vec![240, 300];
         config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2)];
-        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
+        config.max_gross_exposure = vec![
+            Decimal::new(90, 2),
+            Decimal::new(95, 2),
+            Decimal::new(100, 2),
+        ];
         config.portfolio_methods = vec!["stress_fill_aware_risk_budget".to_string()];
-        config.capacity_penalty_strength = vec![Decimal::new(200, 2), Decimal::new(250, 2)];
+        config.capacity_penalty_strength = vec![
+            Decimal::new(150, 2),
+            Decimal::new(200, 2),
+        ];
         config.capacity_risk_budget_profiles = vec![
             "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_alpha_headroom_floor_85_v1".to_string(),
             "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
+            "capacity_stress_participation_blended_alpha_headroom_floor_85_v1".to_string(),
         ];
         config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v2".to_string()];
         config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];

@@ -3881,7 +3881,7 @@ fn fit_nonlinear_quantile_ranker(
     // Pairwise feature interactions: select top features by label variance,
     // compute 2D bucket tables for all pairs among them.
     let pairwise_feature_count = 15usize.min(factor_count);
-    let pairwise_min_samples = (min_samples_per_bucket * 2).max(50);
+    let pairwise_min_samples = min_samples_per_bucket; // unified: 1x global min
     let mut pairwise_tables = Vec::new();
     if factor_count >= 2 && samples.len() >= bucket_count * min_samples_per_bucket * 4 {
         // Rank features by label-weighted variance
