@@ -161,6 +161,9 @@ pub struct PredictionSignalConfig {
     pub risk_contribution_control_profile: RiskContributionControlProfile,
     /// Stress-fill target exposure shaping from same-day prediction/confidence score strength.
     pub stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile,
+    /// Optional market-regime policy. When set, prediction signals can adjust parameters
+    /// (top_n, rebalance, cash buffer) based on the detected market state.
+    pub market_regime: Option<String>,
     /// Minimum absolute target-weight delta required to move a position on rebalance.
     pub rebalance_hysteresis_pct: f64,
     /// Fraction of the target-weight gap to apply on each rebalance.
@@ -244,6 +247,7 @@ impl Default for PredictionSignalConfig {
             candidate_ranking_profile: CandidateRankingProfile::Off,
             risk_contribution_control_profile: RiskContributionControlProfile::Off,
             stress_fill_confidence_exposure_profile: StressFillConfidenceExposureProfile::Off,
+            market_regime: None,
             rebalance_hysteresis_pct: 0.0,
             partial_rebalance_ratio: 1.0,
         }
@@ -8587,20 +8591,43 @@ fn build_rebalance_prediction_signals(
             .skip(skip_count)
             .map(|(symbol, score, _)| (symbol.clone(), *score))
             .collect();
-        if candidates.len() < config.top_n.min(5) {
+        // Regime-aware parameter adjustment for prediction signals
+        let (effective_top_n, regime_max_gross) = if config.market_regime.is_some() {
+            let regime = detect_market_regime_from_returns(
+                return_history,
+                score_day,
+                config.risk_budget_lookback_days,
+            );
+            match regime {
+                MarketRegime::Bear | MarketRegime::HighVolatility => (
+                    (config.top_n as f64 * 0.7).ceil() as usize,
+                    (config.max_gross_exposure * 0.75).max(0.5),
+                ),
+                MarketRegime::Bull => (config.top_n, config.max_gross_exposure),
+                _ => (config.top_n, config.max_gross_exposure),
+            }
+        } else {
+            (config.top_n, config.max_gross_exposure)
+        };
+        let min_candidates = effective_top_n.min(5);
+        if candidates.len() < min_candidates {
             continue;
         }
 
         let average_amounts = average_amounts_for_score_day(average_amounts_by_date, score_day);
+        let mut port_config = PortfolioConstructionConfig::from(config);
+        if regime_max_gross < config.max_gross_exposure {
+            port_config.max_gross_exposure = regime_max_gross;
+        }
         let mut target_weights = build_portfolio_weights(
             score_day,
             &candidates,
             return_history,
             &average_amounts,
             industry_by_symbol,
-            &PortfolioConstructionConfig::from(config),
+            &port_config,
         );
-        if target_weights.len() < config.top_n.min(5) {
+        if target_weights.len() < min_candidates {
             continue;
         }
         apply_rebalance_path_smoothing(

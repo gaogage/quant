@@ -239,6 +239,7 @@ enum LabelObjective {
     QualityAdjustedExcessReturn,
     QualityAdjustedRiskAdjustedExcessReturn,
     FundamentalQualityAdjustedExcessReturn,
+    RegimeConditionalExcessReturn,
 }
 
 impl LabelObjective {
@@ -254,8 +255,9 @@ impl LabelObjective {
             Some("fundamental_quality_adjusted_excess_return") => {
                 Ok(Self::FundamentalQualityAdjustedExcessReturn)
             }
+            Some("regime_conditional_excess_return") => Ok(Self::RegimeConditionalExcessReturn),
             Some(other) => Err(format!(
-                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return; got {}",
+                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return, regime_conditional_excess_return; got {}",
                 other
             )),
         }
@@ -273,6 +275,7 @@ impl LabelObjective {
             Self::FundamentalQualityAdjustedExcessReturn => {
                 "fundamental_quality_adjusted_excess_return"
             }
+            Self::RegimeConditionalExcessReturn => "regime_conditional_excess_return",
         }
     }
 
@@ -284,6 +287,7 @@ impl LabelObjective {
                 | Self::QualityAdjustedExcessReturn
                 | Self::QualityAdjustedRiskAdjustedExcessReturn
                 | Self::FundamentalQualityAdjustedExcessReturn
+                | Self::RegimeConditionalExcessReturn
         )
     }
 
@@ -293,11 +297,16 @@ impl LabelObjective {
             Self::QualityAdjustedExcessReturn
                 | Self::QualityAdjustedRiskAdjustedExcessReturn
                 | Self::FundamentalQualityAdjustedExcessReturn
+                | Self::RegimeConditionalExcessReturn
         )
     }
 
     fn uses_fundamental_quality(self) -> bool {
         matches!(self, Self::FundamentalQualityAdjustedExcessReturn)
+    }
+
+    fn uses_regime_conditioning(self) -> bool {
+        matches!(self, Self::RegimeConditionalExcessReturn)
     }
 }
 
@@ -388,6 +397,108 @@ impl FeatureMatrixWindowCache {
 struct TrainingSample {
     features: Vec<f64>,
     label: f64,
+    regime_tag: Option<MarketRegimeTag>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+enum MarketRegimeTag {
+    Bull,
+    Bear,
+    Sideways,
+}
+
+impl MarketRegimeTag {
+    fn from_benchmark_trailing(closes: &[(NaiveDate, f64)], trade_date: NaiveDate) -> Self {
+        let feature = benchmark_trailing_regime_feature(closes, trade_date);
+        if feature > 0.0 {
+            Self::Bull
+        } else if feature < 0.0 {
+            Self::Bear
+        } else {
+            Self::Sideways
+        }
+    }
+}
+
+fn benchmark_trailing_regime_feature(
+    benchmark_closes: &[(NaiveDate, f64)],
+    trade_date: NaiveDate,
+) -> f64 {
+    let Some(current_idx) = benchmark_closes
+        .iter()
+        .position(|(date, close)| *date == trade_date && close.is_finite() && *close > 0.0)
+    else {
+        return 0.0;
+    };
+    let lookback_idx = current_idx.saturating_sub(60);
+    let Some((_, lookback_close)) = benchmark_closes.get(lookback_idx) else {
+        return 0.0;
+    };
+    let Some((_, current_close)) = benchmark_closes.get(current_idx) else {
+        return 0.0;
+    };
+    if *lookback_close <= 0.0 {
+        return 0.0;
+    }
+    let trailing_return = (current_close / lookback_close) - 1.0;
+    (trailing_return / 0.10).clamp(-3.0, 3.0)
+}
+
+fn split_samples_by_regime(
+    samples: &[TrainingSample],
+) -> (Vec<TrainingSample>, Vec<TrainingSample>, Vec<TrainingSample>) {
+    let mut bull = Vec::new();
+    let mut bear = Vec::new();
+    let mut sideways = Vec::new();
+    for sample in samples {
+        match sample.regime_tag {
+            Some(MarketRegimeTag::Bull) => bull.push(sample.clone()),
+            Some(MarketRegimeTag::Bear) => bear.push(sample.clone()),
+            _ => sideways.push(sample.clone()),
+        }
+    }
+    (bull, bear, sideways)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RegimeSplitModel {
+    bull: Option<NonlinearQuantileRanker>,
+    bear: Option<NonlinearQuantileRanker>,
+    sideways: Option<NonlinearQuantileRanker>,
+    bull_samples: usize,
+    bear_samples: usize,
+    sideways_samples: usize,
+    factor_count: usize,
+}
+
+impl RegimeSplitModel {
+    fn score_row(&self, features: &[f64], regime: MarketRegimeTag) -> Option<f64> {
+        let model = match regime {
+            MarketRegimeTag::Bull => self.bull.as_ref(),
+            MarketRegimeTag::Bear => self.bear.as_ref(),
+            MarketRegimeTag::Sideways => self.sideways.as_ref(),
+        };
+        let model = model?;
+        if features.len() != model.factor_count || features.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let mut score = 0.0;
+        for table in &model.tables {
+            let feature = features[table.factor_idx];
+            let bucket_idx = table.cutpoints.partition_point(|c| feature >= *c);
+            let bucket_score = table
+                .bucket_scores
+                .get(bucket_idx)
+                .copied()
+                .unwrap_or(model.global_label_mean);
+            score += bucket_score;
+        }
+        if score.is_finite() { Some(score) } else { None }
+    }
+
+    fn any_model(&self) -> bool {
+        self.bull.is_some() || self.bear.is_some() || self.sideways.is_some()
+    }
 }
 
 struct NormalizedPredictionSetEvaluationRequest {
@@ -1558,12 +1669,57 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
         factors: req.factors.clone(),
     };
     let samples = load_training_samples(db, &training_req).await?;
+    let regime_split = req.label_objective.uses_regime_conditioning();
     let model = fit_nonlinear_quantile_ranker(
         &samples,
         req.factors.len(),
         req.bucket_count,
         req.min_samples_per_bucket,
     )?;
+    let mut regime_split_model: Option<RegimeSplitModel> = None;
+    if regime_split {
+        let (bull, bear, sideways) = split_samples_by_regime(&samples);
+        let factor_count = req.factors.len();
+        let bull_model = if bull.len() >= req.min_samples_per_bucket * 2 {
+            Some(fit_nonlinear_quantile_ranker(
+                &bull,
+                factor_count,
+                req.bucket_count,
+                req.min_samples_per_bucket,
+            )?)
+        } else {
+            None
+        };
+        let bear_model = if bear.len() >= req.min_samples_per_bucket * 2 {
+            Some(fit_nonlinear_quantile_ranker(
+                &bear,
+                factor_count,
+                req.bucket_count,
+                req.min_samples_per_bucket,
+            )?)
+        } else {
+            None
+        };
+        let sideways_model = if sideways.len() >= req.min_samples_per_bucket * 2 {
+            Some(fit_nonlinear_quantile_ranker(
+                &sideways,
+                factor_count,
+                req.bucket_count,
+                req.min_samples_per_bucket,
+            )?)
+        } else {
+            None
+        };
+        regime_split_model = Some(RegimeSplitModel {
+            bull: bull_model,
+            bear: bear_model,
+            sideways: sideways_model,
+            bull_samples: bull.len(),
+            bear_samples: bear.len(),
+            sideways_samples: sideways.len(),
+            factor_count,
+        });
+    }
     let prediction_req = NormalizedLinearPredictionSetRequest {
         model_code: req.model_code.clone(),
         model_version: req.model_version.clone(),
@@ -1594,11 +1750,35 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
         feature_rows.len(),
     );
     let scoring_started_at = Instant::now();
-    let rows = nonlinear_prediction_rows_from_feature_matrix_rows(
-        &req.prediction_set_id,
-        feature_rows,
-        &model,
-    )?;
+    let rows = if let Some(ref rsm) = regime_split_model {
+        if rsm.any_model() {
+            let benchmark_closes = load_benchmark_closes(
+                db,
+                "000300.SH",
+                req.prediction_start_date - Duration::days(120),
+                req.prediction_end_date,
+            )
+            .await?;
+            nonlinear_prediction_rows_with_regime_split(
+                &req.prediction_set_id,
+                feature_rows,
+                rsm,
+                &benchmark_closes,
+            )?
+        } else {
+            nonlinear_prediction_rows_from_feature_matrix_rows(
+                &req.prediction_set_id,
+                feature_rows,
+                &model,
+            )?
+        }
+    } else {
+        nonlinear_prediction_rows_from_feature_matrix_rows(
+            &req.prediction_set_id,
+            feature_rows,
+            &model,
+        )?
+    };
     let scoring_elapsed = scoring_started_at.elapsed();
     if rows.is_empty() {
         return Err("nonlinear quantile ranker found no prediction factor values".into());
@@ -1611,13 +1791,18 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
         "point_in_time_policy": "factor_value.available_at <= trade_date",
     });
     let hyperparameters = json!({
-        "trainer": "nonlinear_quantile_ranker_v1",
+        "trainer": if regime_split_model.is_some() { "nonlinear_quantile_ranker_regime_split_v1" } else { "nonlinear_quantile_ranker_v1" },
         "bucket_count": req.bucket_count,
         "min_samples_per_bucket": req.min_samples_per_bucket,
         "scoring": "sum_train_window_bucket_mean_label",
     });
-    let model_json = serde_json::to_value(&model)
-        .map_err(|error| format!("Failed to serialize nonlinear ranker model: {}", error))?;
+    let model_json = if let Some(ref rsm) = regime_split_model {
+        serde_json::to_value(rsm)
+            .map_err(|error| format!("Failed to serialize regime split model: {}", error))?
+    } else {
+        serde_json::to_value(&model)
+            .map_err(|error| format!("Failed to serialize nonlinear ranker model: {}", error))?
+    };
     let insert_telemetry = prediction_insert_telemetry(&rows);
     let metadata = nonlinear_quantile_ranker_prediction_set_metadata(
         &req.training_task_id,
@@ -3231,9 +3416,20 @@ fn training_samples_from_feature_matrix_rows(
             continue;
         };
         if label.is_finite() {
+            let regime_tag = if label_objective.uses_regime_conditioning()
+                && !benchmark_closes.is_empty()
+            {
+                Some(MarketRegimeTag::from_benchmark_trailing(
+                    benchmark_closes,
+                    row.trade_date,
+                ))
+            } else {
+                None
+            };
             samples.push(TrainingSample {
                 features: row.features,
                 label,
+                regime_tag,
             });
         }
     }
@@ -3326,6 +3522,15 @@ fn label_for_objective(
             let price_quality =
                 quality_adjustment(closes?, trade_date, 60, 120, 0.25, 0.15, 1.5, 1.0)?;
             Some((stock_return - benchmark_return) * price_quality)
+        }
+        LabelObjective::RegimeConditionalExcessReturn => {
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
+            Some(stock_return - benchmark_return)
         }
     }
 }
@@ -3711,6 +3916,41 @@ fn nonlinear_prediction_rows_from_feature_matrix_rows(
         }
     }
 
+    Ok(predictions)
+}
+
+fn nonlinear_prediction_rows_with_regime_split(
+    prediction_set_id: &str,
+    feature_rows: Vec<TrainingFeatureMatrixRow>,
+    split_model: &RegimeSplitModel,
+    benchmark_closes: &[(NaiveDate, f64)],
+) -> Result<Vec<PredictionRow>, String> {
+    let mut by_date: BTreeMap<NaiveDate, Vec<(String, f64)>> = BTreeMap::new();
+    for row in feature_rows {
+        let regime = MarketRegimeTag::from_benchmark_trailing(benchmark_closes, row.trade_date);
+        let Some(score) = split_model.score_row(&row.features, regime) else {
+            continue;
+        };
+        by_date
+            .entry(row.trade_date)
+            .or_default()
+            .push((row.symbol, score));
+    }
+    let mut predictions = Vec::new();
+    for (trade_date, mut rows) in by_date {
+        rows.sort_by(|left, right| {
+            right.1.total_cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+        });
+        for (idx, (symbol, score)) in rows.into_iter().enumerate() {
+            predictions.push(build_prediction_row(
+                prediction_set_id,
+                &symbol,
+                &trade_date.to_string(),
+                score,
+                (idx + 1) as i32,
+            )?);
+        }
+    }
     Ok(predictions)
 }
 
@@ -4207,11 +4447,11 @@ mod tests {
     #[test]
     fn fit_linear_weights_normalizes_covariance_scores() {
         let samples = vec![
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![1.0, 0.0],
                 label: 0.10,
             },
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![0.0, 1.0],
                 label: -0.05,
             },
@@ -5102,27 +5342,27 @@ mod tests {
     #[test]
     fn nonlinear_quantile_ranker_learns_bucket_payoffs_and_scores_prediction_rows() {
         let train_rows = vec![
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![-1.0, 0.2],
                 label: -0.02,
             },
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![-0.8, 0.1],
                 label: -0.01,
             },
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![0.1, 0.5],
                 label: 0.01,
             },
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![0.2, 0.4],
                 label: 0.02,
             },
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![0.8, -0.3],
                 label: 0.08,
             },
-            TrainingSample {
+            TrainingSample { regime_tag: None,
                 features: vec![1.0, -0.2],
                 label: 0.10,
             },

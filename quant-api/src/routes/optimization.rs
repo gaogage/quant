@@ -9650,6 +9650,7 @@ fn build_prediction_trial_request(
         mode: optional_string("mode")?.or_else(|| Some("standard".into())),
         persistence_mode: optional_string("persistence_mode")?
             .or_else(|| Some("summary_only".into())),
+        market_regime: optional_string("market_regime")?,
     })
 }
 
@@ -20810,7 +20811,7 @@ mod tests {
                 && trial.parameters["train_window_ml_feature_profile"]
                     == "phase7_gb_quality_value_recovery_low_impact_v2"
                 && trial.parameters["train_window_ml_label_objective"]
-                    == "quality_adjusted_risk_adjusted_excess_return"
+                    == "regime_conditional_excess_return"
                 && trial.parameters["train_window_ml_pit_policy"]
                     == "train-window rolling fit; no OOS labels"
                 && trial.parameters["stress_fill_objective_profile"].is_string()

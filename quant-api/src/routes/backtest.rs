@@ -1005,6 +1005,7 @@ pub struct RunPredictionBacktestReq {
     pub initial_capital: f64,
     pub mode: Option<String>,
     pub persistence_mode: Option<String>,
+    pub market_regime: Option<String>,
 }
 
 pub(crate) struct FactorBacktestRunOutput {
@@ -2431,6 +2432,7 @@ pub(crate) async fn execute_prediction_backtest(
         candidate_ranking_profile,
         risk_contribution_control_profile,
         stress_fill_confidence_exposure_profile,
+        market_regime: req.market_regime.as_ref().map(|r| r.to_string()),
         rebalance_hysteresis_pct: req.rebalance_hysteresis_pct.unwrap_or(0.0),
         partial_rebalance_ratio: req.partial_rebalance_ratio.unwrap_or(1.0),
     };

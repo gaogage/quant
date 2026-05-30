@@ -15781,7 +15781,7 @@ fn with_train_window_ml_stress_fill_seed(
     seed["train_window_ml_ranking_profile"] = json!(ml_profile);
     seed["train_window_ml_feature_profile"] =
         json!("phase7_gb_quality_value_recovery_low_impact_v2");
-    seed["train_window_ml_label_objective"] = json!("quality_adjusted_risk_adjusted_excess_return");
+    seed["train_window_ml_label_objective"] = json!("regime_conditional_excess_return");
     seed["train_window_ml_label_horizon_days"] = json!(label_horizon_days);
     seed["train_window_ml_bucket_count"] = json!(bucket_count);
     seed["train_window_ml_min_samples_per_bucket"] = json!(250);
@@ -27905,7 +27905,7 @@ mod tests {
             assert_eq!(seed["execution_carry_policy"], "roll_forward_v1");
             assert_eq!(
                 seed["train_window_ml_label_objective"],
-                "quality_adjusted_risk_adjusted_excess_return"
+                "regime_conditional_excess_return"
             );
             assert_eq!(
                 seed["train_window_ml_pit_policy"],
