@@ -821,6 +821,220 @@ async fn simulate_paper_nav_inner(
     }))
 }
 
+// ── Multi-Window Simulation ──
+
+#[derive(Debug, Deserialize)]
+pub struct MultiWindowSimRequest {
+    pub paper_account_id: String,
+    pub windows: Vec<WindowConfig>,
+    pub top_n: Option<usize>,
+    pub rebalance_freq_days: Option<usize>,
+    pub benchmark: Option<String>,
+    pub commission_pct: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WindowConfig {
+    pub prediction_set_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub max_position_pct: Option<f64>,
+}
+
+pub async fn simulate_multi_window(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MultiWindowSimRequest>,
+) -> impl IntoResponse {
+    match simulate_multi_window_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn simulate_multi_window_inner(
+    db: &sqlx::PgPool,
+    req: MultiWindowSimRequest,
+) -> Result<Value, String> {
+    let account_id = req.paper_account_id.trim().to_string();
+    let top_n = req.top_n.unwrap_or(40);
+    let reb_days = req.rebalance_freq_days.unwrap_or(20);
+    let benchmark = req.benchmark.unwrap_or_else(|| "000300.SH".into());
+    let commission = req.commission_pct.unwrap_or(0.0003);
+
+    let row = sqlx::query_as::<_, (f64,)>(
+        "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1",
+    ).bind(&account_id).fetch_optional(db).await.map_err(|e| format!("DB: {}", e))?
+    .ok_or("account not found")?;
+    let initial = row.0;
+
+    let mut nav = initial;
+    let mut peak_nav = initial;
+    let mut max_dd = 0.0f64;
+    let mut total_trades = 0usize;
+    let mut positions: HashMap<String, f64> = HashMap::new();
+    let mut cash = initial;
+    let mut window_results: Vec<Value> = Vec::new();
+
+    // Load benchmark for full range
+    let global_start = NaiveDate::parse_from_str(&req.windows[0].start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date: {}", e))?;
+    let global_end = NaiveDate::parse_from_str(&req.windows[req.windows.len()-1].end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date: {}", e))?;
+    let bench_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
+        "SELECT trade_date, close::double precision FROM market_index_daily_bar
+         WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3 AND close > 0 ORDER BY trade_date",
+    ).bind(&benchmark).bind(global_start).bind(global_end)
+    .fetch_all(db).await.map_err(|e| format!("bench: {}", e))?;
+    let bench_map: HashMap<NaiveDate, f64> = bench_rows.into_iter().collect();
+    let bench_start = bench_map.get(&global_start).copied();
+
+    for (wi, wcfg) in req.windows.iter().enumerate() {
+        let w_start = NaiveDate::parse_from_str(&wcfg.start_date, "%Y%m%d")
+            .map_err(|e| format!("window {} start: {}", wi, e))?;
+        let w_end = NaiveDate::parse_from_str(&wcfg.end_date, "%Y%m%d")
+            .map_err(|e| format!("window {} end: {}", wi, e))?;
+        let max_pos = wcfg.max_position_pct.unwrap_or(0.05);
+        let prev_nav_at_start = nav;
+
+        // Load scores for this window
+        let scores = sqlx::query_as::<_, (NaiveDate, String, f64)>(
+            "SELECT trade_date, symbol, score FROM model_prediction
+             WHERE prediction_set_id = $1 AND trade_date >= $2 AND trade_date <= $3
+               AND score IS NOT NULL ORDER BY trade_date, score DESC",
+        ).bind(&wcfg.prediction_set_id).bind(w_start).bind(w_end)
+        .fetch_all(db).await.map_err(|e| format!("w{} scores: {}", wi, e))?;
+
+        if scores.is_empty() { continue; }
+
+        let mut scores_by_date: HashMap<NaiveDate, Vec<(String, f64)>> = HashMap::new();
+        for (d, s, sc) in &scores { scores_by_date.entry(*d).or_default().push((s.clone(), *sc)); }
+        let symbols: Vec<String> = scores.iter().map(|(_, s, _)| s.clone()).collect();
+
+        let price_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
+            "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
+             WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3 AND close > 0",
+        ).bind(&symbols).bind(w_start - chrono::Duration::days(10)).bind(w_end + chrono::Duration::days(5))
+        .fetch_all(db).await.map_err(|e| format!("w{} prices: {}", wi, e))?;
+        let mut price_map: HashMap<(NaiveDate, String), f64> = HashMap::new();
+        for (d, s, p) in &price_rows { price_map.insert((*d, s.clone()), *p); }
+
+        let all_days = sqlx::query_as::<_, (NaiveDate,)>(
+            "SELECT DISTINCT trade_date FROM market_stock_daily_bar
+             WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY trade_date",
+        ).bind(w_start).bind(w_end + chrono::Duration::days(5))
+        .fetch_all(db).await.map_err(|e| format!("w{} days: {}", wi, e))?;
+        let trading_days: Vec<NaiveDate> = all_days.into_iter().map(|r| r.0).collect();
+
+        let mut next_reb = 0usize;
+        let mut w_trades = 0usize;
+
+        for day_idx in 0..trading_days.len() {
+            let today = trading_days[day_idx];
+            if today < w_start || today > w_end { continue; }
+
+            if day_idx >= next_reb {
+                let score_day = scores_by_date.keys().filter(|&&d| d <= today).max().copied();
+                if let Some(sd) = score_day {
+                    if let Some(day_scores) = scores_by_date.get(&sd) {
+                        let candidates: Vec<&(String, f64)> = day_scores.iter().take(top_n).collect();
+                        if candidates.len() >= 5 {
+                            let w = (1.0 / candidates.len() as f64).min(max_pos);
+                            let mut targets: HashMap<String, f64> = HashMap::new();
+                            for (sym, _) in &candidates { targets.insert(sym.clone(), w * nav); }
+                            // Sell non-targets
+                            let to_sell: Vec<(String, f64)> = positions.iter()
+                                .filter(|(s, _)| !targets.contains_key(*s))
+                                .map(|(s, q)| (s.clone(), *q)).collect();
+                            for (sym, shares) in to_sell {
+                                if let Some(px) = price_map.get(&(today, sym.clone())) {
+                                    cash += shares * px * (1.0 - commission);
+                                    positions.remove(&sym);
+                                    w_trades += 1;
+                                }
+                            }
+                            // Buy/adjust targets
+                            for (sym, target_val) in &targets {
+                                if let Some(px) = price_map.get(&(today, sym.clone())) {
+                                    let target_shares = target_val / px;
+                                    let current = positions.get(sym).copied().unwrap_or(0.0);
+                                    let diff = target_shares - current;
+                                    if diff.abs() * px > 100.0 {
+                                        if diff > 0.0 {
+                                            let cost = diff * px * (1.0 + commission);
+                                            if cash >= cost { cash -= cost; positions.insert(sym.clone(), current + diff); w_trades += 1; }
+                                        } else {
+                                            cash += diff.abs() * px * (1.0 - commission);
+                                            positions.insert(sym.clone(), current + diff);
+                                            w_trades += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            positions.retain(|_, v| *v > 0.0);
+                        }
+                    }
+                }
+                next_reb = day_idx + reb_days;
+            }
+
+            let mut mkt_val = 0.0f64;
+            for (sym, shares) in &positions {
+                if let Some(px) = price_map.get(&(today, sym.clone())) { mkt_val += shares * px; }
+            }
+            nav = cash + mkt_val;
+            if nav > peak_nav { peak_nav = nav; }
+            let dd = if peak_nav > 0.0 { (peak_nav - nav) / peak_nav } else { 0.0 };
+            if dd > max_dd { max_dd = dd; }
+        }
+
+        // At window end: sell all (transition cash to next window)
+        for (sym, shares) in positions.clone() {
+            let last_day = trading_days.iter().rev().find(|&&d| d <= w_end).copied().unwrap_or(w_end);
+            if let Some(px) = price_map.get(&(last_day, sym.clone())) {
+                cash += shares * px * (1.0 - commission);
+                positions.remove(&sym);
+            }
+        }
+        let w_nav = cash; // NAV = cash after selling all
+        let w_ret = if prev_nav_at_start > 0.0 { w_nav / prev_nav_at_start - 1.0 } else { 0.0 };
+        nav = w_nav;
+        total_trades += w_trades;
+
+        window_results.push(json!({
+            "window_index": wi,
+            "prediction_set_id": wcfg.prediction_set_id,
+            "start_nav": prev_nav_at_start,
+            "end_nav": w_nav,
+            "window_return": w_ret,
+            "trades": w_trades,
+        }));
+    }
+
+    let final_return = if initial > 0.0 { nav / initial - 1.0 } else { 0.0 };
+    let bench_final = bench_map.get(&global_end).copied().unwrap_or(0.0);
+
+    // Update account
+    sqlx::query(
+        "UPDATE paper_account SET current_nav=$1, peak_nav=$2, max_drawdown_pct=$3,
+         total_trades=$4, updated_at=now() WHERE paper_account_id=$5",
+    ).bind(nav).bind(peak_nav).bind(max_dd).bind(total_trades as i32).bind(&account_id)
+    .execute(db).await.map_err(|e| format!("account update: {}", e))?;
+
+    Ok(json!({
+        "paper_account_id": account_id,
+        "window_count": req.windows.len(),
+        "initial_capital": initial,
+        "final_nav": nav,
+        "cumulative_return": final_return,
+        "peak_nav": peak_nav,
+        "max_drawdown_pct": max_dd,
+        "total_trades": total_trades,
+        "windows": window_results,
+        "benchmark_return": if let Some(bs) = bench_start { bench_final / bs - 1.0 } else { 0.0 },
+        "status": "multi_window_complete"
+    }))
+}
+
 async fn create_paper_account_inner(
     db: &sqlx::PgPool,
     req: CreatePaperAccountRequest,

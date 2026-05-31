@@ -351,6 +351,10 @@ async fn main() {
             "/api/v1/quant/paper/nav/simulate",
             post(routes::paper::simulate_paper_nav),
         )
+        .route(
+            "/api/v1/quant/paper/nav/simulate-multi",
+            post(routes::paper::simulate_multi_window),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",
