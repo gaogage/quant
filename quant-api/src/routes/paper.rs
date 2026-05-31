@@ -872,6 +872,8 @@ async fn simulate_multi_window_inner(
     let mut max_dd = 0.0f64;
     let mut total_trades = 0usize;
     let mut positions: HashMap<String, f64> = HashMap::new();
+    let mut entry_prices: HashMap<String, f64> = HashMap::new();
+    let mut stop_losses = 0usize;
     let mut cash = initial;
     let mut window_results: Vec<Value> = Vec::new();
 
@@ -979,10 +981,22 @@ async fn simulate_multi_window_inner(
                                     if diff.abs() * px > 100.0 {
                                         if diff > 0.0 {
                                             let cost = diff * px * (1.0 + commission);
-                                            if cash >= cost { cash -= cost; positions.insert(sym.clone(), current + diff); w_trades += 1; }
+                                            if cash >= cost {
+                                                cash -= cost;
+                                                let new_shares = current + diff;
+                                                // Track entry price: use current price for new positions
+                                                if current == 0.0 {
+                                                    entry_prices.insert(sym.clone(), *px);
+                                                }
+                                                positions.insert(sym.clone(), new_shares);
+                                                w_trades += 1;
+                                            }
                                         } else {
                                             cash += diff.abs() * px * (1.0 - commission);
                                             positions.insert(sym.clone(), current + diff);
+                                            if current + diff <= 0.0 {
+                                                entry_prices.remove(sym);
+                                            }
                                             w_trades += 1;
                                         }
                                     }
@@ -999,7 +1013,29 @@ async fn simulate_multi_window_inner(
             for (sym, shares) in &positions {
                 if let Some(px) = price_map.get(&(today, sym.clone())) { mkt_val += shares * px; }
             }
-            nav = cash + mkt_val;
+            // Stop-loss: absolute drawdown from entry with portfolio stress filter
+            let portfolio_dd = if peak_nav > 0.0 { (peak_nav - nav) / peak_nav } else { 0.0 };
+            let mut stopped: Vec<String> = Vec::new();
+            for (sym, shares) in &positions {
+                if *shares <= 0.0 { continue; }
+                if let (Some(&entry), Some(&current)) = (entry_prices.get(sym), price_map.get(&(today, sym.clone()))) {
+                    if entry <= 0.0 { continue; }
+                    let stock_dd = 1.0 - current / entry;
+                    // Only stop if portfolio is stressed (>10% DD) AND stock is down >25%
+                    if portfolio_dd > 0.10 && stock_dd > 0.25 {
+                        cash += shares * current * (1.0 - commission);
+                        stopped.push(sym.clone());
+                        stop_losses += 1;
+                    }
+                }
+            }
+            for sym in &stopped {
+                positions.remove(sym);
+                entry_prices.remove(sym);
+            }
+            nav = cash + positions.iter()
+                .map(|(s, q)| price_map.get(&(today, s.clone())).unwrap_or(&0.0) * q)
+                .sum::<f64>();
             if nav > peak_nav { peak_nav = nav; }
             let dd = if peak_nav > 0.0 { (peak_nav - nav) / peak_nav } else { 0.0 };
             if dd > max_dd { max_dd = dd; }
@@ -1047,6 +1083,7 @@ async fn simulate_multi_window_inner(
         "peak_nav": peak_nav,
         "max_drawdown_pct": max_dd,
         "total_trades": total_trades,
+        "stop_losses": stop_losses,
         "windows": window_results,
         "benchmark_return": if let Some(bs) = bench_start { bench_final / bs - 1.0 } else { 0.0 },
         "status": "multi_window_complete"
