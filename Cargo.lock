@@ -1607,6 +1607,7 @@ dependencies = [
  "quant-common",
  "quant-data",
  "quant-factor",
+ "rayon",
  "rust_decimal",
  "serde",
  "serde_json",

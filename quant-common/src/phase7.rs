@@ -15777,11 +15777,12 @@ fn with_train_window_ml_stress_fill_seed(
     label_horizon_days: usize,
     bucket_count: usize,
     min_prediction_score: &str,
+    label_objective: &str,
 ) -> Value {
     seed["train_window_ml_ranking_profile"] = json!(ml_profile);
     seed["train_window_ml_feature_profile"] =
         json!("phase7_gb_quality_value_recovery_low_impact_v2");
-    seed["train_window_ml_label_objective"] = json!("regime_conditional_excess_return");
+    seed["train_window_ml_label_objective"] = json!(label_objective);
     seed["train_window_ml_label_horizon_days"] = json!(label_horizon_days);
     seed["train_window_ml_bucket_count"] = json!(bucket_count);
     seed["train_window_ml_min_samples_per_bucket"] = json!(100);
@@ -15948,6 +15949,74 @@ fn professional_train_window_ml_stress_fill_discovery_seed_trials() -> Vec<Value
                 "quality_nonlinear_alpha_risk_memory_router_v3",
                 "0.00",
             ),
+            // === Regime-adaptive label seeds (方案4): future_return for growth ===
+            (
+                "gb_growth_desc_top40_future_return_rebalance240",
+                "nlq_ranker_rae_h45_bucket7_fill95",
+                45usize,
+                7usize,
+                "phase7_growth_recovery_v1",
+                ScoreDirection::Descending,
+                40usize,
+                240usize,
+                "0.05",
+                "0.95",
+                "2.0",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                140usize,
+                2600usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_nonlinear_alpha_risk_memory_router_v3",
+                "0.00",
+            ),
+            (
+                "gb_growth_desc_top60_future_return_rebalance240",
+                "nlq_ranker_rae_h45_bucket7_fill95",
+                45usize,
+                7usize,
+                "phase7_growth_recovery_v1",
+                ScoreDirection::Descending,
+                60usize,
+                240usize,
+                "0.05",
+                "0.95",
+                "2.0",
+                "capacity_stress_participation_alpha_headroom_floor_70_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                140usize,
+                2600usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_15pct_v1",
+                "quality_nonlinear_alpha_risk_memory_router_v3",
+                "0.00",
+            ),
+            // === Concentrated quality seeds ===
+            (
+                "gb_quality_asc_top40_fill95_floor70_rebalance240",
+                "nlq_ranker_rae_h45_bucket7_fill95",
+                45usize,
+                7usize,
+                "phase7_financial_quality_v1",
+                ScoreDirection::Ascending,
+                40usize,
+                240usize,
+                "0.05",
+                "0.95",
+                "2.0",
+                "capacity_stress_participation_blended_alpha_headroom_floor_70_v1",
+                "twap_20d_v1",
+                Decimal::new(5, 2),
+                140usize,
+                2600usize,
+                "soft_liquidity_low_volatility_low_correlation_v1",
+                "soft_single_name_20pct_v1",
+                "quality_nonlinear_alpha_risk_memory_router_v3",
+                "0.00",
+            ),
             (
                 "gb_quality_rae45_bucket10_fill95_floor70_rebalance240",
                 "nlq_ranker_rae_h45_bucket10_fill95",
@@ -16001,6 +16070,11 @@ fn professional_train_window_ml_stress_fill_discovery_seed_trials() -> Vec<Value
                     label_horizon_days,
                     bucket_count,
                     min_prediction_score,
+                    if profile_name.contains("future_return") {
+                        "future_return"
+                    } else {
+                        "regime_conditional_excess_return"
+                    },
                 )],
             );
         }
@@ -21719,21 +21793,12 @@ impl LayeredSearchConfig {
         config.top_n = vec![100, 120, 140];
         config.rebalance_days = vec![240, 300];
         config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(6, 2)];
-        config.max_gross_exposure = vec![
-            Decimal::new(90, 2),
-            Decimal::new(95, 2),
-            Decimal::new(100, 2),
-        ];
+        config.max_gross_exposure = vec![Decimal::new(90, 2), Decimal::new(95, 2)];
         config.portfolio_methods = vec!["stress_fill_aware_risk_budget".to_string()];
-        config.capacity_penalty_strength = vec![
-            Decimal::new(150, 2),
-            Decimal::new(200, 2),
-        ];
+        config.capacity_penalty_strength = vec![Decimal::new(200, 2), Decimal::new(250, 2)];
         config.capacity_risk_budget_profiles = vec![
             "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
-            "capacity_stress_participation_alpha_headroom_floor_85_v1".to_string(),
             "capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string(),
-            "capacity_stress_participation_blended_alpha_headroom_floor_85_v1".to_string(),
         ];
         config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v2".to_string()];
         config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];

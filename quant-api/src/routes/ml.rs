@@ -2,6 +2,7 @@
 
 use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, NaiveDate};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Postgres, QueryBuilder};
@@ -240,6 +241,7 @@ enum LabelObjective {
     QualityAdjustedRiskAdjustedExcessReturn,
     FundamentalQualityAdjustedExcessReturn,
     RegimeConditionalExcessReturn,
+    GradientBoostingExcessReturn,
 }
 
 impl LabelObjective {
@@ -256,8 +258,9 @@ impl LabelObjective {
                 Ok(Self::FundamentalQualityAdjustedExcessReturn)
             }
             Some("regime_conditional_excess_return") => Ok(Self::RegimeConditionalExcessReturn),
+            Some("gradient_boosting_excess_return") => Ok(Self::GradientBoostingExcessReturn),
             Some(other) => Err(format!(
-                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return, regime_conditional_excess_return; got {}",
+                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return, regime_conditional_excess_return, gradient_boosting_excess_return; got {}",
                 other
             )),
         }
@@ -276,6 +279,7 @@ impl LabelObjective {
                 "fundamental_quality_adjusted_excess_return"
             }
             Self::RegimeConditionalExcessReturn => "regime_conditional_excess_return",
+            Self::GradientBoostingExcessReturn => "gradient_boosting_excess_return",
         }
     }
 
@@ -288,6 +292,7 @@ impl LabelObjective {
                 | Self::QualityAdjustedRiskAdjustedExcessReturn
                 | Self::FundamentalQualityAdjustedExcessReturn
                 | Self::RegimeConditionalExcessReturn
+                | Self::GradientBoostingExcessReturn
         )
     }
 
@@ -298,6 +303,7 @@ impl LabelObjective {
                 | Self::QualityAdjustedRiskAdjustedExcessReturn
                 | Self::FundamentalQualityAdjustedExcessReturn
                 | Self::RegimeConditionalExcessReturn
+                | Self::GradientBoostingExcessReturn
         )
     }
 
@@ -307,6 +313,10 @@ impl LabelObjective {
 
     fn uses_regime_conditioning(self) -> bool {
         matches!(self, Self::RegimeConditionalExcessReturn)
+    }
+
+    fn uses_gradient_boosting(self) -> bool {
+        matches!(self, Self::GradientBoostingExcessReturn)
     }
 }
 
@@ -1684,6 +1694,17 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
     };
     let samples = load_training_samples(db, &training_req).await?;
     let regime_split = req.label_objective.uses_regime_conditioning();
+    let use_gb = req.label_objective.uses_gradient_boosting();
+    let mut gb_model: Option<GradientBoostingModel> = None;
+    if use_gb {
+        gb_model = Some(fit_gradient_boosting(
+            &samples,
+            req.factors.len(),
+            50,
+            3,
+            0.1,
+        )?);
+    }
     let model = fit_nonlinear_quantile_ranker(
         &samples,
         req.factors.len(),
@@ -1786,6 +1807,8 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
                 &model,
             )?
         }
+    } else if let Some(ref gb) = gb_model {
+        nonlinear_prediction_rows_with_gb(&req.prediction_set_id, feature_rows, gb)?
     } else {
         nonlinear_prediction_rows_from_feature_matrix_rows(
             &req.prediction_set_id,
@@ -1804,13 +1827,33 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
         "factors": req.factors,
         "point_in_time_policy": "factor_value.available_at <= trade_date",
     });
-    let hyperparameters = json!({
-        "trainer": if regime_split_model.is_some() { "nonlinear_quantile_ranker_regime_split_v1" } else { "nonlinear_quantile_ranker_v1" },
-        "bucket_count": req.bucket_count,
-        "min_samples_per_bucket": req.min_samples_per_bucket,
-        "scoring": "sum_train_window_bucket_mean_label",
-    });
-    let model_json = if let Some(ref rsm) = regime_split_model {
+    let hyperparameters = if let Some(ref gb) = gb_model {
+        json!({
+            "trainer": "gradient_boosting_v1",
+            "num_trees": gb.trees.len(),
+            "learning_rate": gb.learning_rate,
+            "init_value": gb.init_value,
+            "scoring": "gradient_boosting_sum",
+        })
+    } else if regime_split_model.is_some() {
+        json!({
+            "trainer": "nonlinear_quantile_ranker_regime_split_v1",
+            "bucket_count": req.bucket_count,
+            "min_samples_per_bucket": req.min_samples_per_bucket,
+            "scoring": "sum_train_window_bucket_mean_label",
+        })
+    } else {
+        json!({
+            "trainer": "nonlinear_quantile_ranker_v1",
+            "bucket_count": req.bucket_count,
+            "min_samples_per_bucket": req.min_samples_per_bucket,
+            "scoring": "sum_train_window_bucket_mean_label",
+        })
+    };
+    let model_json = if let Some(ref gb) = gb_model {
+        serde_json::to_value(gb)
+            .map_err(|error| format!("Failed to serialize GB model: {}", error))?
+    } else if let Some(ref rsm) = regime_split_model {
         serde_json::to_value(rsm)
             .map_err(|error| format!("Failed to serialize regime split model: {}", error))?
     } else {
@@ -3546,6 +3589,15 @@ fn label_for_objective(
             )?;
             Some(stock_return - benchmark_return)
         }
+        LabelObjective::GradientBoostingExcessReturn => {
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
+            Some(stock_return - benchmark_return)
+        }
     }
 }
 
@@ -3909,8 +3961,13 @@ fn fit_nonlinear_quantile_ranker(
             .map(|(fi, _)| *fi)
             .collect();
 
-        for i in 0..top_features.len() {
-            for j in (i + 1)..top_features.len() {
+        // Build pair indices for parallel processing
+        let pair_indices: Vec<(usize, usize)> = (0..top_features.len())
+            .flat_map(|i| ((i + 1)..top_features.len()).map(move |j| (i, j)))
+            .collect();
+        let parallel_tables: Vec<NonlinearQuantilePairwiseTable> = pair_indices
+            .par_iter()
+            .filter_map(|&(i, j)| {
                 let fi = top_features[i];
                 let fj = top_features[j];
                 let mut grid: Vec<Vec<Vec<f64>>> =
@@ -3948,14 +4005,15 @@ fn fit_nonlinear_quantile_ranker(
                         }
                     }
                 }
-                pairwise_tables.push(NonlinearQuantilePairwiseTable {
+                Some(NonlinearQuantilePairwiseTable {
                     factor_i: fi,
                     factor_j: fj,
                     scores,
                     counts,
-                });
-            }
-        }
+                })
+            })
+            .collect();
+        pairwise_tables = parallel_tables;
     }
 
     Ok(NonlinearQuantileRanker {
@@ -3965,6 +4023,181 @@ fn fit_nonlinear_quantile_ranker(
         tables,
         pairwise_tables,
         global_label_mean,
+    })
+}
+
+// ── Gradient Boosting Model ──
+
+#[derive(Debug, Clone, Serialize)]
+struct GbTreeNode {
+    feature_idx: usize,
+    split_value: f64,
+    left_value: f64,
+    right_value: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GbTree {
+    nodes: Vec<GbTreeNode>,
+}
+
+impl GbTree {
+    fn predict(&self, features: &[f64]) -> f64 {
+        let mut idx = 0usize;
+        let mut prediction = 0.0;
+        for _depth in 0..4 {
+            if idx >= self.nodes.len() {
+                break;
+            }
+            let node = &self.nodes[idx];
+            if features[node.feature_idx] < node.split_value {
+                prediction = node.left_value;
+                idx = idx * 2 + 1;
+            } else {
+                prediction = node.right_value;
+                idx = idx * 2 + 2;
+            }
+        }
+        prediction
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GradientBoostingModel {
+    trees: Vec<GbTree>,
+    init_value: f64,
+    learning_rate: f64,
+    factor_count: usize,
+}
+
+impl GradientBoostingModel {
+    fn predict(&self, features: &[f64]) -> f64 {
+        if features.len() != self.factor_count
+            || features.iter().any(|v| !v.is_finite())
+        {
+            return self.init_value;
+        }
+        let mut score = self.init_value;
+        for tree in &self.trees {
+            score += self.learning_rate * tree.predict(features);
+        }
+        score
+    }
+}
+
+fn fit_gradient_boosting(
+    samples: &[TrainingSample],
+    factor_count: usize,
+    num_trees: usize,
+    max_depth: usize,
+    learning_rate: f64,
+) -> Result<GradientBoostingModel, String> {
+    if factor_count == 0 || samples.is_empty() {
+        return Err("GB: factor_count must be positive with samples".into());
+    }
+    let valid: Vec<&TrainingSample> = samples
+        .iter()
+        .filter(|s| {
+            s.features.len() == factor_count
+                && s.label.is_finite()
+                && s.features.iter().all(|v| v.is_finite())
+        })
+        .collect();
+    if valid.len() < 100 {
+        return Err(format!("GB: need >=100 valid samples, got {}", valid.len()));
+    }
+    let init_value = valid.iter().map(|s| s.label).sum::<f64>() / valid.len() as f64;
+    let mut residuals: Vec<f64> = valid.iter().map(|s| s.label - init_value).collect();
+    let mut trees = Vec::with_capacity(num_trees);
+    let n = valid.len();
+
+    for _tree_idx in 0..num_trees {
+        let mut node_queue: Vec<(usize, usize, usize)> = vec![(0, 0, n)];
+        let mut tree_nodes: Vec<Option<GbTreeNode>> = vec![None; (1 << (max_depth + 1)) - 1];
+        while let Some((ni, start, end)) = node_queue.pop() {
+            if ni >= tree_nodes.len() || end - start < 20 {
+                continue;
+            }
+            // Find best split
+            let mut best_gain = f64::NEG_INFINITY;
+            let mut best_fi = 0usize;
+            let mut best_split = 0.0f64;
+            let mut best_left_mean = 0.0;
+            let mut best_right_mean = 0.0;
+            let n_features_to_try = (factor_count as f64).sqrt().ceil() as usize;
+            for idx in 0..n_features_to_try.min(factor_count) {
+                let fi = ((tree_nodes.len() as u64).wrapping_mul(7 + ni as u64) % factor_count as u64) as usize;
+                // Randomly pick split from existing values
+                let sample_idx = start + (ni * 13 + idx * 17) % (end - start).max(1);
+                let split_val = valid[sample_idx.min(n - 1)].features[fi];
+                let mut left_sum = 0.0;
+                let mut left_cnt = 0usize;
+                let mut right_sum = 0.0;
+                let mut right_cnt = 0usize;
+                for i in start..end {
+                    let r = residuals[i];
+                    if valid[i].features[fi] < split_val {
+                        left_sum += r;
+                        left_cnt += 1;
+                    } else {
+                        right_sum += r;
+                        right_cnt += 1;
+                    }
+                }
+                if left_cnt < 10 || right_cnt < 10 {
+                    continue;
+                }
+                let left_mean = left_sum / left_cnt as f64;
+                let right_mean = right_sum / right_cnt as f64;
+                let gain = left_cnt as f64 * left_mean * left_mean
+                    + right_cnt as f64 * right_mean * right_mean;
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_fi = fi;
+                    best_split = split_val;
+                    best_left_mean = left_mean;
+                    best_right_mean = right_mean;
+                }
+            }
+            if best_gain <= 0.0 {
+                continue;
+            }
+            tree_nodes[ni] = Some(GbTreeNode {
+                feature_idx: best_fi,
+                split_value: best_split,
+                left_value: best_left_mean,
+                right_value: best_right_mean,
+            });
+            let mid = start + (end - start) / 2;
+            let left_ni = ni * 2 + 1;
+            let right_ni = ni * 2 + 2;
+            if left_ni < tree_nodes.len() {
+                node_queue.push((left_ni, start, mid));
+            }
+            if right_ni < tree_nodes.len() {
+                node_queue.push((right_ni, mid, end));
+            }
+        }
+        let nodes: Vec<GbTreeNode> = tree_nodes.into_iter().flatten().collect();
+        if nodes.is_empty() {
+            continue;
+        }
+        let tree = GbTree { nodes };
+        // Update residuals
+        for i in 0..n {
+            let pred = tree.predict(&valid[i].features);
+            residuals[i] -= learning_rate * pred;
+        }
+        trees.push(tree);
+    }
+    if trees.is_empty() {
+        return Err("GB: no trees could be fitted".into());
+    }
+    Ok(GradientBoostingModel {
+        trees,
+        init_value,
+        learning_rate,
+        factor_count,
     })
 }
 
@@ -4051,6 +4284,43 @@ fn nonlinear_prediction_rows_with_regime_split(
         let Some(score) = split_model.score_row(&row.features, regime) else {
             continue;
         };
+        by_date
+            .entry(row.trade_date)
+            .or_default()
+            .push((row.symbol, score));
+    }
+    let mut predictions = Vec::new();
+    for (trade_date, mut rows) in by_date {
+        rows.sort_by(|left, right| {
+            right.1.total_cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+        });
+        for (idx, (symbol, score)) in rows.into_iter().enumerate() {
+            predictions.push(build_prediction_row(
+                prediction_set_id,
+                &symbol,
+                &trade_date.to_string(),
+                score,
+                (idx + 1) as i32,
+            )?);
+        }
+    }
+    Ok(predictions)
+}
+
+fn nonlinear_prediction_rows_with_gb(
+    prediction_set_id: &str,
+    feature_rows: Vec<TrainingFeatureMatrixRow>,
+    gb: &GradientBoostingModel,
+) -> Result<Vec<PredictionRow>, String> {
+    let mut by_date: BTreeMap<NaiveDate, Vec<(String, f64)>> = BTreeMap::new();
+    for row in feature_rows {
+        if row.features.len() != gb.factor_count || row.features.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        let score = gb.predict(&row.features);
+        if !score.is_finite() {
+            continue;
+        }
         by_date
             .entry(row.trade_date)
             .or_default()
