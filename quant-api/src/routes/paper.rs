@@ -933,16 +933,20 @@ async fn simulate_multi_window_inner(
             if today < w_start || today > w_end { continue; }
 
             if day_idx >= next_reb {
-                // Regime-aware routing: adjust exposure based on benchmark trailing return
+                // PIT-safe regime detection: benchmark 60-day trailing return
+                // Only uses data available at 'today' (no future leakage)
                 let (eff_top_n, eff_max_pos) = {
                     let lookback = today - chrono::Duration::days(60);
                     let trailing_ret = match (bench_map.get(&today), bench_map.get(&lookback)) {
                         (Some(&curr), Some(&prev)) if prev > 0.0 => (curr / prev - 1.0) / 0.10,
                         _ => 0.0,
                     };
-                    if trailing_ret < 0.0 {
-                        // Bear market: reduce exposure 40%
-                        ((top_n as f64 * 0.6).ceil() as usize, max_pos * 0.7)
+                    if trailing_ret < -1.0 {
+                        // Deep bear: reduce exposure 50%
+                        ((top_n as f64 * 0.5).ceil() as usize, max_pos * 0.6)
+                    } else if trailing_ret < 0.0 {
+                        // Mild bear: reduce exposure 30%
+                        ((top_n as f64 * 0.7).ceil() as usize, max_pos * 0.8)
                     } else {
                         (top_n, max_pos)
                     }
