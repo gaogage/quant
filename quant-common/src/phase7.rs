@@ -15781,7 +15781,7 @@ fn with_train_window_ml_stress_fill_seed(
 ) -> Value {
     seed["train_window_ml_ranking_profile"] = json!(ml_profile);
     seed["train_window_ml_feature_profile"] =
-        json!("phase7_gb_quality_value_recovery_low_impact_v2");
+        json!("phase7_gb_quality_value_recovery_low_impact_v3");
     seed["train_window_ml_label_objective"] = json!(label_objective);
     seed["train_window_ml_label_horizon_days"] = json!(label_horizon_days);
     seed["train_window_ml_bucket_count"] = json!(bucket_count);

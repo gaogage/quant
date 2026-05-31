@@ -3667,6 +3667,12 @@ fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFa
             "mf_net_amount_20d_std",
             "mf_lg_elg_net_amount_20d_std",
             "mf_small_sell_pressure_20d_std",
+            // Event alpha (sparse but high-signal)
+            "event_express_roe_std",
+            "event_disclosure_early_days_std",
+            "event_forecast_surprise_bucket_std",
+            "event_post_return_express_20d_indrel_std",
+            "event_reaction_express_1_5d_indrel_std",
         ],
         _ => &[
             "fin_roe_daily_std",
