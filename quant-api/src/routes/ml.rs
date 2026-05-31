@@ -242,6 +242,7 @@ enum LabelObjective {
     FundamentalQualityAdjustedExcessReturn,
     RegimeConditionalExcessReturn,
     GradientBoostingExcessReturn,
+    MlpExcessReturn,
 }
 
 impl LabelObjective {
@@ -259,6 +260,7 @@ impl LabelObjective {
             }
             Some("regime_conditional_excess_return") => Ok(Self::RegimeConditionalExcessReturn),
             Some("gradient_boosting_excess_return") => Ok(Self::GradientBoostingExcessReturn),
+            Some("mlp_excess_return") => Ok(Self::MlpExcessReturn),
             Some(other) => Err(format!(
                 "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return, regime_conditional_excess_return, gradient_boosting_excess_return; got {}",
                 other
@@ -280,44 +282,22 @@ impl LabelObjective {
             }
             Self::RegimeConditionalExcessReturn => "regime_conditional_excess_return",
             Self::GradientBoostingExcessReturn => "gradient_boosting_excess_return",
+            Self::MlpExcessReturn => "mlp_excess_return",
         }
     }
 
     fn requires_benchmark(self) -> bool {
-        matches!(
-            self,
-            Self::FutureExcessReturn
-                | Self::RiskAdjustedExcessReturn
-                | Self::QualityAdjustedExcessReturn
-                | Self::QualityAdjustedRiskAdjustedExcessReturn
-                | Self::FundamentalQualityAdjustedExcessReturn
-                | Self::RegimeConditionalExcessReturn
-                | Self::GradientBoostingExcessReturn
-        )
+        matches!(self, Self::FutureExcessReturn | Self::RiskAdjustedExcessReturn
+            | Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn
+            | Self::FundamentalQualityAdjustedExcessReturn | Self::RegimeConditionalExcessReturn
+            | Self::GradientBoostingExcessReturn | Self::MlpExcessReturn)
     }
 
-    fn is_quality_adjusted(self) -> bool {
-        matches!(
-            self,
-            Self::QualityAdjustedExcessReturn
-                | Self::QualityAdjustedRiskAdjustedExcessReturn
-                | Self::FundamentalQualityAdjustedExcessReturn
-                | Self::RegimeConditionalExcessReturn
-                | Self::GradientBoostingExcessReturn
-        )
-    }
-
-    fn uses_fundamental_quality(self) -> bool {
-        matches!(self, Self::FundamentalQualityAdjustedExcessReturn)
-    }
-
-    fn uses_regime_conditioning(self) -> bool {
-        matches!(self, Self::RegimeConditionalExcessReturn)
-    }
-
-    fn uses_gradient_boosting(self) -> bool {
-        matches!(self, Self::GradientBoostingExcessReturn)
-    }
+    fn is_quality_adjusted(self) -> bool { matches!(self, Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn | Self::FundamentalQualityAdjustedExcessReturn | Self::RegimeConditionalExcessReturn | Self::GradientBoostingExcessReturn) }
+    fn uses_fundamental_quality(self) -> bool { matches!(self, Self::FundamentalQualityAdjustedExcessReturn) }
+    fn uses_regime_conditioning(self) -> bool { matches!(self, Self::RegimeConditionalExcessReturn) }
+    fn uses_gradient_boosting(self) -> bool { matches!(self, Self::GradientBoostingExcessReturn) }
+    fn uses_mlp(self) -> bool { matches!(self, Self::MlpExcessReturn) }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1696,14 +1676,12 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
     let regime_split = req.label_objective.uses_regime_conditioning();
     let use_gb = req.label_objective.uses_gradient_boosting();
     let mut gb_model: Option<GradientBoostingModel> = None;
+    let mut mlp_model: Option<MlpModel> = None;
     if use_gb {
-        gb_model = Some(fit_gradient_boosting(
-            &samples,
-            req.factors.len(),
-            100,
-            4,
-            0.05,
-        )?);
+        gb_model = Some(fit_gradient_boosting(&samples, req.factors.len(), 100, 4, 0.05)?);
+    }
+    if req.label_objective.uses_mlp() {
+        mlp_model = Some(fit_mlp(&samples, req.factors.len(), 128, 64, 100, 256, 0.001, 0.0001)?);
     }
     let model = fit_nonlinear_quantile_ranker(
         &samples,
@@ -1809,6 +1787,8 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
         }
     } else if let Some(ref gb) = gb_model {
         nonlinear_prediction_rows_with_gb(&req.prediction_set_id, feature_rows, gb)?
+    } else if let Some(ref mlp) = mlp_model {
+        nonlinear_prediction_rows_with_mlp(&req.prediction_set_id, feature_rows, mlp)?
     } else {
         nonlinear_prediction_rows_from_feature_matrix_rows(
             &req.prediction_set_id,
@@ -3589,13 +3569,8 @@ fn label_for_objective(
             )?;
             Some(stock_return - benchmark_return)
         }
-        LabelObjective::GradientBoostingExcessReturn => {
-            let benchmark_return = future_return_label_until(
-                benchmark_closes,
-                trade_date,
-                max_label_date,
-                horizon_days,
-            )?;
+        LabelObjective::GradientBoostingExcessReturn | LabelObjective::MlpExcessReturn => {
+            let benchmark_return = future_return_label_until(benchmark_closes, trade_date, max_label_date, horizon_days)?;
             Some(stock_return - benchmark_return)
         }
     }
@@ -4085,6 +4060,195 @@ impl GradientBoostingModel {
     }
 }
 
+// ── 2-Layer MLP with ReLU + Adam ──
+
+#[derive(Debug, Clone, Serialize)]
+struct MlpModel {
+    w1: Vec<Vec<f64>>, // factor_count × hidden1
+    b1: Vec<f64>,
+    w2: Vec<Vec<f64>>, // hidden1 × hidden2
+    b2: Vec<f64>,
+    w3: Vec<f64>,      // hidden2 → 1
+    b3: f64,
+    factor_count: usize,
+    hidden1: usize,
+    hidden2: usize,
+}
+
+impl MlpModel {
+    fn predict(&self, features: &[f64]) -> f64 {
+        if features.len() != self.factor_count || features.iter().any(|v| !v.is_finite()) {
+            return 0.0;
+        }
+        // Layer 1: ReLU(W1·x + b1)
+        let mut h1 = vec![0.0; self.hidden1];
+        for i in 0..self.hidden1 {
+            let mut s = self.b1[i];
+            for j in 0..self.factor_count {
+                s += self.w1[i][j] * features[j];
+            }
+            h1[i] = s.max(0.0);
+        }
+        // Layer 2: ReLU(W2·h1 + b2)
+        let mut h2 = vec![0.0; self.hidden2];
+        for i in 0..self.hidden2 {
+            let mut s = self.b2[i];
+            for j in 0..self.hidden1 {
+                s += self.w2[i][j] * h1[j];
+            }
+            h2[i] = s.max(0.0);
+        }
+        // Output: W3·h2 + b3
+        let mut out = self.b3;
+        for i in 0..self.hidden2 {
+            out += self.w3[i] * h2[i];
+        }
+        out
+    }
+}
+
+fn fit_mlp(
+    samples: &[TrainingSample],
+    factor_count: usize,
+    hidden1: usize,
+    hidden2: usize,
+    epochs: usize,
+    batch_size: usize,
+    learning_rate: f64,
+    l2_reg: f64,
+) -> Result<MlpModel, String> {
+    if factor_count == 0 || samples.len() < 100 {
+        return Err("MLP: need factor_count>0 and >=100 samples".into());
+    }
+    let valid: Vec<&TrainingSample> = samples.iter()
+        .filter(|s| s.features.len() == factor_count && s.label.is_finite() && s.features.iter().all(|v| v.is_finite()))
+        .collect();
+    let n = valid.len();
+    let val_n = (n as f64 * 0.15).ceil() as usize;
+    let train_n = n - val_n;
+
+    // Xavier init
+    let mut rng = || {
+        let x = (train_n as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (x as f64 / u64::MAX as f64) * 2.0 - 1.0
+    };
+    let scale1 = (2.0 / factor_count as f64).sqrt();
+    let scale2 = (2.0 / hidden1 as f64).sqrt();
+    let scale3 = (2.0 / hidden2 as f64).sqrt();
+
+    let mut w1: Vec<Vec<f64>> = (0..hidden1).map(|_| (0..factor_count).map(|_| rng() * scale1).collect()).collect();
+    let mut b1 = vec![0.0; hidden1];
+    let mut w2: Vec<Vec<f64>> = (0..hidden2).map(|_| (0..hidden1).map(|_| rng() * scale2).collect()).collect();
+    let mut b2 = vec![0.0; hidden2];
+    let mut w3: Vec<f64> = (0..hidden2).map(|_| rng() * scale3).collect();
+    let mut b3 = 0.0;
+
+    // Adam state
+    let beta1 = 0.9; let beta2 = 0.999; let eps = 1e-8;
+    let mut adam_m = |grad: &mut [f64], m: &mut [f64], v: &mut [f64], t: f64| {
+        for i in 0..grad.len() {
+            m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
+            v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
+            let m_hat = m[i] / (1.0 - beta1.powf(t));
+            let v_hat = v[i] / (1.0 - beta2.powf(t));
+            grad[i] = learning_rate * m_hat / (v_hat.sqrt() + eps);
+        }
+    };
+    let mut m_w1: Vec<Vec<f64>> = w1.iter().map(|r| vec![0.0; r.len()]).collect();
+    let mut v_w1: Vec<Vec<f64>> = w1.iter().map(|r| vec![0.0; r.len()]).collect();
+    let mut m_b1 = vec![0.0; hidden1]; let mut v_b1 = vec![0.0; hidden1];
+    let mut m_w2: Vec<Vec<f64>> = w2.iter().map(|r| vec![0.0; r.len()]).collect();
+    let mut v_w2: Vec<Vec<f64>> = w2.iter().map(|r| vec![0.0; r.len()]).collect();
+    let mut m_b2 = vec![0.0; hidden2]; let mut v_b2 = vec![0.0; hidden2];
+    let mut m_w3 = vec![0.0; hidden2]; let mut v_w3 = vec![0.0; hidden2];
+    let mut m_b3 = 0.0; let mut v_b3 = 0.0;
+    let mut t = 0.0;
+
+    let mut best_val_loss = f64::MAX;
+    let mut best_weights: Option<(Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>, Vec<f64>, Vec<f64>, f64)> = None;
+    let mut patience_left = 10i32;
+
+    for _epoch in 0..epochs {
+        if patience_left <= 0 { break; }
+        t += 1.0;
+        // Shuffle train indices
+        let mut indices: Vec<usize> = (0..train_n).collect();
+        for i in (1..train_n).rev() { let j = (i * 2654435761 + _epoch) % (i + 1); indices.swap(i, j); }
+
+        for batch_start in (0..train_n).step_by(batch_size) {
+            let batch_end = (batch_start + batch_size).min(train_n);
+            // Accumulate gradients
+            let mut dw1: Vec<Vec<f64>> = w1.iter().map(|r| vec![0.0; r.len()]).collect();
+            let mut db1 = vec![0.0; hidden1];
+            let mut dw2: Vec<Vec<f64>> = w2.iter().map(|r| vec![0.0; r.len()]).collect();
+            let mut db2 = vec![0.0; hidden2];
+            let mut dw3 = vec![0.0; hidden2];
+            let mut db3_grad = 0.0;
+            let batch_sz = (batch_end - batch_start) as f64;
+
+            for &idx in &indices[batch_start..batch_end] {
+                let s = valid[idx];
+                // Forward
+                let mut h1 = vec![0.0; hidden1];
+                for i in 0..hidden1 { let mut sum = b1[i]; for j in 0..factor_count { sum += w1[i][j] * s.features[j]; } h1[i] = sum.max(0.0); }
+                let mut h2 = vec![0.0; hidden2];
+                for i in 0..hidden2 { let mut sum = b2[i]; for j in 0..hidden1 { sum += w2[i][j] * h1[j]; } h2[i] = sum.max(0.0); }
+                let mut pred = b3;
+                for i in 0..hidden2 { pred += w3[i] * h2[i]; }
+                let error = pred - s.label;
+                // Backward
+                let dout = error;
+                db3_grad += dout;
+                for i in 0..hidden2 { dw3[i] += dout * h2[i]; }
+                let mut dh2 = vec![0.0; hidden2];
+                for i in 0..hidden2 { dh2[i] = if h2[i] > 0.0 { dout * w3[i] } else { 0.0 }; }
+                for i in 0..hidden2 { db2[i] += dh2[i]; for j in 0..hidden1 { dw2[i][j] += dh2[i] * h1[j]; } }
+                let mut dh1 = vec![0.0; hidden1];
+                for i in 0..hidden1 { let mut s = 0.0; for j in 0..hidden2 { s += dh2[j] * w2[j][i]; } dh1[i] = if h1[i] > 0.0 { s } else { 0.0 }; }
+                for i in 0..hidden1 { db1[i] += dh1[i]; for j in 0..factor_count { dw1[i][j] += dh1[i] * s.features[j]; } }
+            }
+            // Apply gradients with Adam + L2 reg
+            for i in 0..hidden1 {
+                for j in 0..factor_count { dw1[i][j] = dw1[i][j] / batch_sz + l2_reg * w1[i][j]; }
+                adam_m(&mut dw1[i], &mut m_w1[i], &mut v_w1[i], t);
+                for j in 0..factor_count { w1[i][j] -= dw1[i][j]; }
+                db1[i] /= batch_sz; b1[i] -= learning_rate * db1[i];
+            }
+            for i in 0..hidden2 {
+                for j in 0..hidden1 { dw2[i][j] = dw2[i][j] / batch_sz + l2_reg * w2[i][j]; }
+                adam_m(&mut dw2[i], &mut m_w2[i], &mut v_w2[i], t);
+                for j in 0..hidden1 { w2[i][j] -= dw2[i][j]; }
+                db2[i] /= batch_sz; b2[i] -= learning_rate * db2[i];
+            }
+            for i in 0..hidden2 { dw3[i] = dw3[i] / batch_sz + l2_reg * w3[i]; }
+            adam_m(&mut dw3, &mut m_w3, &mut v_w3, t);
+            for i in 0..hidden2 { w3[i] -= dw3[i]; }
+            b3 -= learning_rate * db3_grad / batch_sz;
+        }
+
+        // Validation
+        if val_n >= 20 {
+            let val_loss: f64 = (train_n..n).map(|i| {
+                let s = valid[i];
+                let mut h1 = vec![0.0; hidden1];
+                for k in 0..hidden1 { let mut sum = b1[k]; for j in 0..factor_count { sum += w1[k][j] * s.features[j]; } h1[k] = sum.max(0.0); }
+                let mut h2 = vec![0.0; hidden2];
+                for k in 0..hidden2 { let mut sum = b2[k]; for j in 0..hidden1 { sum += w2[k][j] * h1[j]; } h2[k] = sum.max(0.0); }
+                let mut pred = b3; for k in 0..hidden2 { pred += w3[k] * h2[k]; }
+                let e = pred - s.label; e * e
+            }).sum::<f64>() / val_n as f64;
+            if val_loss < best_val_loss {
+                best_val_loss = val_loss;
+                best_weights = Some((w1.clone(), b1.clone(), w2.clone(), b2.clone(), w3.clone(), b3));
+                patience_left = 10;
+            } else { patience_left -= 1; }
+        }
+    }
+
+    let (w1, b1, w2, b2, w3, b3) = best_weights.unwrap_or((w1, b1, w2, b2, w3, b3));
+    Ok(MlpModel { w1, b1, w2, b2, w3, b3, factor_count, hidden1, hidden2 })
+}
+
 fn fit_gradient_boosting(
     samples: &[TrainingSample],
     factor_count: usize,
@@ -4371,6 +4535,27 @@ fn nonlinear_prediction_rows_with_regime_split(
                 score,
                 (idx + 1) as i32,
             )?);
+        }
+    }
+    Ok(predictions)
+}
+
+fn nonlinear_prediction_rows_with_mlp(
+    prediction_set_id: &str,
+    feature_rows: Vec<TrainingFeatureMatrixRow>,
+    mlp: &MlpModel,
+) -> Result<Vec<PredictionRow>, String> {
+    let mut by_date: BTreeMap<NaiveDate, Vec<(String, f64)>> = BTreeMap::new();
+    for row in feature_rows {
+        let score = mlp.predict(&row.features);
+        if !score.is_finite() { continue; }
+        by_date.entry(row.trade_date).or_default().push((row.symbol, score));
+    }
+    let mut predictions = Vec::new();
+    for (trade_date, mut rows) in by_date {
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        for (idx, (symbol, score)) in rows.into_iter().enumerate() {
+            predictions.push(build_prediction_row(prediction_set_id, &symbol, &trade_date.to_string(), score, (idx+1) as i32)?);
         }
     }
     Ok(predictions)
