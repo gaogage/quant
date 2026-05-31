@@ -944,6 +944,44 @@ pub async fn sync_moneyflow(
     Ok(total_rows)
 }
 
+// ─── sync_moneyflow_hsgt (沪深港通北向资金) ─────────────────────
+
+pub async fn sync_moneyflow_hsgt(
+    pool: &PgPool,
+    client: &TushareClient,
+    start: &str,
+    end: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    let mut current = s;
+    let mut total = 0usize;
+    while current <= e {
+        let date_str = current.format("%Y%m%d").to_string();
+        let resp = client.moneyflow_hsgt(Some(&date_str), None, None).await?;
+        if let Some(data) = resp.data {
+            for item in data.items {
+                let date = item.first().and_then(|v| v.as_str()).unwrap_or(&date_str);
+                let nf = item.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let sf = item.get(2).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let nb = item.get(3).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let sb = item.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let d = NaiveDate::parse_from_str(date, "%Y%m%d").unwrap_or(current);
+                sqlx::query(
+                    "INSERT INTO market_moneyflow_hsgt (trade_date, north_flow, south_flow, north_balance, south_balance)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (trade_date) DO UPDATE SET north_flow=EXCLUDED.north_flow, south_flow=EXCLUDED.south_flow",
+                )
+                .bind(d).bind(nf).bind(sf).bind(nb).bind(sb)
+                .execute(pool).await?;
+                total += 1;
+            }
+        }
+        current += chrono::Duration::days(1);
+    }
+    Ok(total)
+}
+
 // ─── sync_trade_calendar ─────────────────────────────────────────
 
 pub async fn sync_trade_calendar(

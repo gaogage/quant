@@ -767,4 +767,24 @@ impl TushareClient {
         )
         .await
     }
+
+    /// 沪深港通资金流向 (North/South-bound capital flow)
+    pub async fn moneyflow_hsgt(
+        &self,
+        trade_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(d) = trade_date {
+            params.push(("trade_date", d));
+        }
+        if let Some(d) = start_date {
+            params.push(("start_date", d));
+        }
+        if let Some(d) = end_date {
+            params.push(("end_date", d));
+        }
+        self.call_api::<Vec<serde_json::Value>>("moneyflow_hsgt", params, &[]).await
+    }
 }

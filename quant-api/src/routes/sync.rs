@@ -1334,6 +1334,24 @@ pub struct SyncIndexDailyReq {
     pub data_version_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SyncHsgtRequest {
+    start_date: String,
+    end_date: String,
+}
+
+pub async fn sync_moneyflow_hsgt(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncHsgtRequest>,
+) -> impl IntoResponse {
+    let client = quant_data::tushare::client::TushareClient::from_env()
+        .expect("Tushare client init failed");
+    match quant_data::sync::sync_moneyflow_hsgt(&state.db, &client, &req.start_date, &req.end_date).await {
+        Ok(rows) => Json(json!({"code": 0, "data": {"rows_synced": rows}})),
+        Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
+    }
+}
+
 pub async fn sync_index_daily(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncIndexDailyReq>,
