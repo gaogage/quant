@@ -933,12 +933,26 @@ async fn simulate_multi_window_inner(
             if today < w_start || today > w_end { continue; }
 
             if day_idx >= next_reb {
+                // Regime-aware routing: adjust exposure based on benchmark trailing return
+                let (eff_top_n, eff_max_pos) = {
+                    let lookback = today - chrono::Duration::days(60);
+                    let trailing_ret = match (bench_map.get(&today), bench_map.get(&lookback)) {
+                        (Some(&curr), Some(&prev)) if prev > 0.0 => (curr / prev - 1.0) / 0.10,
+                        _ => 0.0,
+                    };
+                    if trailing_ret < 0.0 {
+                        // Bear market: reduce exposure 40%
+                        ((top_n as f64 * 0.6).ceil() as usize, max_pos * 0.7)
+                    } else {
+                        (top_n, max_pos)
+                    }
+                };
                 let score_day = scores_by_date.keys().filter(|&&d| d <= today).max().copied();
                 if let Some(sd) = score_day {
                     if let Some(day_scores) = scores_by_date.get(&sd) {
-                        let candidates: Vec<&(String, f64)> = day_scores.iter().take(top_n).collect();
+                        let candidates: Vec<&(String, f64)> = day_scores.iter().take(eff_top_n).collect();
                         if candidates.len() >= 5 {
-                            let w = (1.0 / candidates.len() as f64).min(max_pos);
+                            let w = (1.0 / candidates.len() as f64).min(eff_max_pos);
                             let mut targets: HashMap<String, f64> = HashMap::new();
                             for (sym, _) in &candidates { targets.insert(sym.clone(), w * nav); }
                             // Sell non-targets
