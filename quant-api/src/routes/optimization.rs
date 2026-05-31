@@ -933,6 +933,8 @@ fn default_oos_final_promotion_gate_policy(validation_mode: &str) -> Value {
     json!({
         "candidate_tier": "oos_final_promotion",
         "min_stitched_oos_calmar": 1.2,
+        "min_stitched_annual_return": 0.15,
+        "min_stitched_excess_return": 0.0,
         "min_positive_oos_window_ratio": 0.60,
         "min_oos_window_count": min_oos_window_count,
         "require_train_selection_approval": true,
@@ -2261,8 +2263,6 @@ fn phase7_discovery_layered_request(
         }),
         constraints: req.constraints.clone().or_else(|| {
             Some(json!({
-                "min_annual_return": 0.15,
-                "min_excess_return": 0.0,
                 "min_sharpe": 1.0,
                 "min_sortino": 1.5,
                 "max_drawdown": 0.35,
@@ -5999,6 +5999,13 @@ fn build_oos_gate_report(
         .count();
     let positive_ratio = ratio(positive_windows, window_results.len());
     let stitched_calmar = stitched_summary["calmar_ratio"].as_f64().unwrap_or(0.0);
+    let stitched_annual = stitched_summary["annual_return"].as_f64().unwrap_or(0.0);
+    let stitched_excess = stitched_summary["excess_return"]
+        .as_f64()
+        .or_else(|| stitched_summary["excess_return_pct"].as_f64())
+        .unwrap_or(0.0);
+    let min_stitched_annual = constraint_f64(Some(final_promotion_gate_policy), "min_stitched_annual_return").unwrap_or(0.15);
+    let min_stitched_excess = constraint_f64(Some(final_promotion_gate_policy), "min_stitched_excess_return").unwrap_or(0.0);
     let no_overlap = plan
         .windows
         .iter()
@@ -6048,6 +6055,22 @@ fn build_oos_gate_report(
                 "passed": positive_ratio >= min_positive_ratio,
                 "limit": min_positive_ratio,
                 "actual": positive_ratio,
+            })
+        },
+        {
+            json!({
+                "gate": "stitched_annual_return",
+                "passed": stitched_annual >= min_stitched_annual,
+                "limit": min_stitched_annual,
+                "actual": stitched_annual,
+            })
+        },
+        {
+            json!({
+                "gate": "stitched_excess_return",
+                "passed": stitched_excess > min_stitched_excess,
+                "limit": min_stitched_excess,
+                "actual": stitched_excess,
             })
         },
     ];
