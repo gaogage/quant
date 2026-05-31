@@ -1700,9 +1700,9 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
         gb_model = Some(fit_gradient_boosting(
             &samples,
             req.factors.len(),
-            50,
-            3,
-            0.1,
+            100,
+            4,
+            0.05,
         )?);
     }
     let model = fit_nonlinear_quantile_ranker(
@@ -4115,15 +4115,25 @@ fn fit_gradient_boosting(
     let bagging_fraction = 0.8;
     let bag_size = ((n as f64) * bagging_fraction).ceil() as usize;
 
+    // Early stopping: reserve 15% for validation
+    let val_size = (n as f64 * 0.15).ceil() as usize;
+    let val_start = n - val_size;
+    let mut best_val_loss = f64::MAX;
+    let mut trees_since_best = 0usize;
+    let patience = 10usize;
+
     for _tree_idx in 0..num_trees {
-        // Bagging: random sample of rows
-        let mut bag_indices: Vec<usize> = (0..n).collect();
-        // Simple shuffle via modular hash
-        for i in (1..n).rev() {
+        if trees_since_best >= patience {
+            break;
+        }
+        // Bagging: random sample of rows (from training portion only)
+        let train_n = n - val_size;
+        let mut bag_indices: Vec<usize> = (0..train_n).collect();
+        for i in (1..train_n).rev() {
             let j = (i * 2654435761 + _tree_idx) % (i + 1);
             bag_indices.swap(i, j);
         }
-        bag_indices.truncate(bag_size);
+        bag_indices.truncate(bag_size.min(train_n));
 
         let mut node_queue: Vec<(usize, Vec<usize>, usize)> = vec![(0, bag_indices, 0)];
         let mut tree_nodes: Vec<Option<GbTreeNode>> = vec![None; (1 << (max_depth + 1)) - 1];
@@ -4135,59 +4145,68 @@ fn fit_gradient_boosting(
             let total_mean =
                 indices.iter().map(|&i| residuals[i]).sum::<f64>() / indices.len() as f64;
 
-            // MSE gain via sufficient statistics: gain = NL*meanL² + NR*meanR² - N*total_mean²
+            // MSE gain via sufficient statistics
             let total_sq = total_mean * total_mean * indices.len() as f64;
-            let mut best_gain = 0.0f64;
-            let mut best_fi = 0usize;
-            let mut best_split = 0.0f64;
-            let mut best_left_mean = total_mean;
-            let mut best_right_mean = total_mean;
-
-            for _ in 0..n_features_sample.min(factor_count) {
-                let fi = ((tree_nodes.len() + ni * 7 + _tree_idx * 13) % factor_count) as usize;
-                let mut sorted = indices.clone();
-                sorted.sort_by(|&a, &b| {
-                    valid[a].features[fi]
-                        .partial_cmp(&valid[b].features[fi])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                let total_sum: f64 = sorted.iter().map(|&i| residuals[i]).sum();
-                let total_n = sorted.len();
-                let mut left_sum = 0.0;
-                let mut left_cnt = 0usize;
-                for (pos, &si) in sorted.iter().enumerate() {
-                    if pos < min_samples / 2 || pos >= total_n - min_samples / 2 {
+            // Rayon-parallel split search across features
+            let feature_results: Vec<(f64, usize, f64, f64, f64)> = (0..n_features_sample.min(factor_count))
+                .into_par_iter()
+                .filter_map(|_| {
+                    let fi = ((tree_nodes.len() + ni * 7 + _tree_idx * 13) % factor_count) as usize;
+                    let mut sorted = indices.clone();
+                    sorted.sort_by(|&a, &b| {
+                        valid[a].features[fi]
+                            .partial_cmp(&valid[b].features[fi])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let total_sum: f64 = sorted.iter().map(|&i| residuals[i]).sum();
+                    let total_n = sorted.len();
+                    let mut best_gain = 0.0f64;
+                    let mut best_split = 0.0f64;
+                    let mut best_left_mean = total_mean;
+                    let mut best_right_mean = total_mean;
+                    let mut left_sum = 0.0;
+                    let mut left_cnt = 0usize;
+                    for (pos, &si) in sorted.iter().enumerate() {
+                        if pos < min_samples / 2 || pos >= total_n - min_samples / 2 {
+                            left_sum += residuals[si];
+                            left_cnt += 1;
+                            continue;
+                        }
                         left_sum += residuals[si];
                         left_cnt += 1;
-                        continue;
+                        let right_cnt = total_n - left_cnt;
+                        if left_cnt < min_samples / 2 || right_cnt < min_samples / 2 {
+                            continue;
+                        }
+                        let right_sum = total_sum - left_sum;
+                        let left_mean = left_sum / left_cnt as f64;
+                        let right_mean = right_sum / right_cnt as f64;
+                        let gain = left_cnt as f64 * left_mean * left_mean
+                            + right_cnt as f64 * right_mean * right_mean
+                            - total_sq;
+                        if gain > best_gain {
+                            best_gain = gain;
+                            best_split = valid[si].features[fi];
+                            best_left_mean = left_mean;
+                            best_right_mean = right_mean;
+                        }
+                        if pos % 5 != 0 { continue; }
                     }
-                    left_sum += residuals[si];
-                    left_cnt += 1;
-                    let right_cnt = total_n - left_cnt;
-                    if left_cnt < min_samples / 2 || right_cnt < min_samples / 2 {
-                        continue;
+                    if best_gain > 0.0 {
+                        Some((best_gain, fi, best_split, best_left_mean, best_right_mean))
+                    } else {
+                        None
                     }
-                    let right_sum = total_sum - left_sum;
-                    let left_mean = left_sum / left_cnt as f64;
-                    let right_mean = right_sum / right_cnt as f64;
-                    let gain = left_cnt as f64 * left_mean * left_mean
-                        + right_cnt as f64 * right_mean * right_mean
-                        - total_sq;
-                    if gain > best_gain {
-                        best_gain = gain;
-                        best_fi = fi;
-                        best_split = valid[si].features[fi];
-                        best_left_mean = left_mean;
-                        best_right_mean = right_mean;
-                    }
-                    if pos % 5 != 0 {
-                        continue;
-                    }
-                }
-            }
-            if best_gain <= 0.0 {
-                continue;
-            }
+                })
+                .collect();
+            let best = feature_results
+                .iter()
+                .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let (_best_gain, best_fi, best_split, best_left_mean, best_right_mean) =
+                match best {
+                    Some(b) => (b.0, b.1, b.2, b.3, b.4),
+                    None => continue,
+                };
             tree_nodes[ni] = Some(GbTreeNode {
                 feature_idx: best_fi,
                 split_value: best_split,
@@ -4218,6 +4237,27 @@ fn fit_gradient_boosting(
             residuals[i] -= learning_rate * pred;
         }
         trees.push(tree);
+
+        // Early stopping: compute validation loss
+        if val_size >= 20 {
+            let val_loss: f64 = (val_start..n)
+                .map(|i| {
+                    let mut pred = init_value;
+                    for t in &trees {
+                        pred += learning_rate * t.predict(&valid[i].features);
+                    }
+                    let err = valid[i].label - pred;
+                    err * err
+                })
+                .sum::<f64>()
+                / val_size as f64;
+            if val_loss < best_val_loss {
+                best_val_loss = val_loss;
+                trees_since_best = 0;
+            } else {
+                trees_since_best += 1;
+            }
+        }
     }
     if trees.is_empty() {
         return Err("GB: no trees could be fitted".into());
