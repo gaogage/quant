@@ -3,6 +3,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use chrono::NaiveDate;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::{FromPrimitive, Zero};
 use rust_decimal::Decimal;
@@ -132,6 +133,180 @@ pub async fn paper_health(State(state): State<Arc<AppState>>) -> impl IntoRespon
             "status": if metrics.get("error").is_some() { "degraded" } else { "ok" },
             "metrics": metrics
         }
+    }))
+}
+
+// ── Daily Signal Generation for Paper Trading ──
+
+#[derive(Debug, Deserialize)]
+pub struct GeneratePaperSignalsRequest {
+    pub paper_account_id: String,
+    pub prediction_set_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub top_n: Option<usize>,
+    pub max_position_pct: Option<f64>,
+    pub rebalance_freq_days: Option<usize>,
+}
+
+pub async fn generate_paper_signals(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GeneratePaperSignalsRequest>,
+) -> impl IntoResponse {
+    match generate_paper_signals_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn generate_paper_signals_inner(
+    db: &sqlx::PgPool,
+    req: GeneratePaperSignalsRequest,
+) -> Result<Value, String> {
+    let paper_account_id = req.paper_account_id.trim().to_string();
+    let prediction_set_id = req.prediction_set_id.trim().to_string();
+    if paper_account_id.is_empty() || prediction_set_id.is_empty() {
+        return Err("paper_account_id and prediction_set_id required".into());
+    }
+    // Verify account exists
+    let account = sqlx::query_as::<_, (String, String,)>(
+        "SELECT paper_account_id, status FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(&paper_account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("DB error: {}", e))?
+    .ok_or_else(|| format!("account not found: {}", paper_account_id))?;
+    if account.1 != "active" {
+        return Err(format!("account status is {}, expected active", account.1));
+    }
+
+    let start = NaiveDate::parse_from_str(&req.start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date: {}", e))?;
+    let end = NaiveDate::parse_from_str(&req.end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date: {}", e))?;
+
+    let top_n = req.top_n.unwrap_or(40);
+    let max_position_pct = req.max_position_pct.unwrap_or(0.05);
+    let rebalance_days = req.rebalance_freq_days.unwrap_or(20);
+
+    // Load prediction scores
+    let scores = sqlx::query_as::<_, (NaiveDate, String, f64, Option<i32>)>(
+        "SELECT trade_date, symbol, score, rank
+         FROM model_prediction
+         WHERE prediction_set_id = $1
+           AND trade_date >= $2
+           AND trade_date <= $3
+           AND score IS NOT NULL
+         ORDER BY trade_date, score DESC",
+    )
+    .bind(&prediction_set_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("Failed to load predictions: {}", e))?;
+
+    if scores.is_empty() {
+        return Err("no prediction scores found for the given date range".into());
+    }
+
+    let days: Vec<NaiveDate> = {
+        let mut d = Vec::new();
+        let mut prev: Option<NaiveDate> = None;
+        for (date, _, _, _) in &scores {
+            if prev != Some(*date) {
+                d.push(*date);
+                prev = Some(*date);
+            }
+        }
+        d
+    };
+
+    let mut signal_days = 0usize;
+    let mut total_orders = 0usize;
+    let mut nav_updates = 0usize;
+
+    // Process each rebalance day
+    for (window_idx, day_window) in days.windows(2).enumerate() {
+        if window_idx % rebalance_days != 0 {
+            continue;
+        }
+        let score_day = day_window[0];
+        let exec_day = day_window[1];
+
+        // Select top-N candidates for this day
+        let day_scores: Vec<&(NaiveDate, String, f64, Option<i32>)> =
+            scores.iter().filter(|s| s.0 == score_day).take(top_n).collect();
+        if day_scores.len() < 5 {
+            continue;
+        }
+
+        signal_days += 1;
+
+        // Compute target weights (equal-weighted for simplicity)
+        let weight = if (1.0 / day_scores.len() as f64) < max_position_pct {
+            1.0 / day_scores.len() as f64
+        } else {
+            max_position_pct
+        };
+        let total_signals = day_scores.len();
+
+        // Upsert positions based on target weights
+        for (symbol, target_w) in day_scores.iter().map(|s| (&s.1, weight)) {
+            let position_id = format!("pp-{}", Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO paper_position
+                   (paper_position_id, paper_account_id, symbol, quantity, avg_cost,
+                    target_weight, last_trade_date, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, 0, $5, $6, now(), now())
+                 ON CONFLICT (paper_account_id, symbol)
+                 DO UPDATE SET target_weight = EXCLUDED.target_weight,
+                               last_trade_date = EXCLUDED.last_trade_date,
+                               updated_at = now()",
+            )
+            .bind(&position_id)
+            .bind(&paper_account_id)
+            .bind(symbol)
+            .bind(target_w) // quantity = weight (simplified)
+            .bind(target_w)
+            .bind(score_day)
+            .execute(db)
+            .await
+            .map_err(|e| format!("Failed to upsert position: {}", e))?;
+        }
+
+        // Update NAV snapshot
+        let nav_id = format!("nav-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO paper_nav_snapshot
+               (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash,
+                market_value, position_count, prediction_set_id, signal_count, created_at)
+             VALUES ($1, $2, $3, 1000000, 0, 0, $4, $5, $6, now())
+             ON CONFLICT (paper_account_id, snapshot_date) DO NOTHING",
+        )
+        .bind(&nav_id)
+        .bind(&paper_account_id)
+        .bind(score_day)
+        .bind(total_signals as i32)
+        .bind(&prediction_set_id)
+        .bind(total_signals as i32)
+        .execute(db)
+        .await
+        .map_err(|e| format!("Failed to insert NAV: {}", e))?;
+        nav_updates += 1;
+    }
+
+    Ok(json!({
+        "paper_account_id": paper_account_id,
+        "prediction_set_id": prediction_set_id,
+        "date_range": {"start": start.to_string(), "end": end.to_string()},
+        "trading_days": days.len(),
+        "signal_days": signal_days,
+        "rebalance_freq_days": rebalance_days,
+        "top_n": top_n,
+        "nav_updates": nav_updates,
+        "status": "signals_generated"
     }))
 }
 

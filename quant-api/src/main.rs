@@ -339,6 +339,10 @@ async fn main() {
             "/api/v1/quant/paper/health",
             get(routes::paper::paper_health),
         )
+        .route(
+            "/api/v1/quant/paper/signals/generate",
+            post(routes::paper::generate_paper_signals),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",
