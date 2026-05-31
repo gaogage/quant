@@ -578,6 +578,249 @@ async fn compute_paper_nav_inner(
     }))
 }
 
+// ── Full Simulation: Signals → Fills → Positions → Daily NAV ──
+
+#[derive(Debug, Deserialize)]
+pub struct SimulatePaperNavRequest {
+    pub paper_account_id: String,
+    pub prediction_set_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub top_n: Option<usize>,
+    pub rebalance_freq_days: Option<usize>,
+    pub benchmark: Option<String>,
+    pub max_position_pct: Option<f64>,
+    pub commission_pct: Option<f64>,
+}
+
+pub async fn simulate_paper_nav(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SimulatePaperNavRequest>,
+) -> impl IntoResponse {
+    match simulate_paper_nav_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn simulate_paper_nav_inner(
+    db: &sqlx::PgPool,
+    req: SimulatePaperNavRequest,
+) -> Result<Value, String> {
+    let account_id = req.paper_account_id.trim().to_string();
+    let pred_id = req.prediction_set_id.trim().to_string();
+    let start = NaiveDate::parse_from_str(&req.start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date: {}", e))?;
+    let end = NaiveDate::parse_from_str(&req.end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date: {}", e))?;
+    let top_n = req.top_n.unwrap_or(40);
+    let reb_days = req.rebalance_freq_days.unwrap_or(20);
+    let benchmark = req.benchmark.unwrap_or_else(|| "000300.SH".into());
+    let max_pos = req.max_position_pct.unwrap_or(0.05);
+    let commission = req.commission_pct.unwrap_or(0.0003);
+
+    // Load account
+    let row = sqlx::query_as::<_, (f64,)>(
+        "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(&account_id)
+    .fetch_optional(db).await.map_err(|e| format!("DB: {}", e))?
+    .ok_or("account not found")?;
+    let initial = row.0;
+
+    // Load prediction scores grouped by date
+    let scores = sqlx::query_as::<_, (NaiveDate, String, f64)>(
+        "SELECT trade_date, symbol, score FROM model_prediction
+         WHERE prediction_set_id = $1 AND trade_date >= $2 AND trade_date <= $3
+           AND score IS NOT NULL ORDER BY trade_date, score DESC",
+    )
+    .bind(&pred_id).bind(start).bind(end)
+    .fetch_all(db).await.map_err(|e| format!("scores: {}", e))?;
+    if scores.is_empty() { return Err("no prediction scores found".into()); }
+
+    // Build score lookup: date → sorted (symbol, score)
+    let mut scores_by_date: HashMap<NaiveDate, Vec<(String, f64)>> = HashMap::new();
+    for (d, s, sc) in &scores {
+        scores_by_date.entry(*d).or_default().push((s.clone(), *sc));
+    }
+
+    // Get all trading days in range
+    let all_days = sqlx::query_as::<_, (NaiveDate,)>(
+        "SELECT DISTINCT trade_date FROM market_stock_daily_bar
+         WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY trade_date",
+    )
+    .bind(start - chrono::Duration::days(30)).bind(end + chrono::Duration::days(5))
+    .fetch_all(db).await.map_err(|e| format!("days: {}", e))?;
+    let trading_days: Vec<NaiveDate> = all_days.into_iter().map(|r| r.0).collect();
+
+    // Load close prices for all symbols
+    let symbols: Vec<String> = scores.iter().map(|(_, s, _)| s.clone()).collect::<Vec<_>>();
+    let price_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
+        "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
+         WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3 AND close > 0",
+    )
+    .bind(&symbols).bind(start - chrono::Duration::days(30)).bind(end + chrono::Duration::days(5))
+    .fetch_all(db).await.map_err(|e| format!("prices: {}", e))?;
+    let mut price_map: HashMap<(NaiveDate, String), f64> = HashMap::new();
+    for (d, s, p) in &price_rows { price_map.insert((*d, s.clone()), *p); }
+
+    // Benchmark prices
+    let bench_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
+        "SELECT trade_date, close::double precision FROM market_index_daily_bar
+         WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3 AND close > 0 ORDER BY trade_date",
+    )
+    .bind(&benchmark).bind(start).bind(end)
+    .fetch_all(db).await.map_err(|e| format!("bench: {}", e))?;
+    let bench_map: HashMap<NaiveDate, f64> = bench_rows.into_iter().collect();
+
+    // State
+    let mut cash = initial;
+    let mut positions: HashMap<String, f64> = HashMap::new(); // symbol → shares
+    let mut prev_nav = initial;
+    let mut peak_nav = initial;
+    let mut max_dd = 0.0f64;
+    let mut total_trades = 0usize;
+    let mut nav_history: Vec<Value> = Vec::new();
+    let bench_start = bench_map.get(&start).copied();
+
+    let mut next_reb_idx = 0usize;
+
+    for day_idx in 0..trading_days.len() {
+        let today = trading_days[day_idx];
+
+        // Rebalance: find a score day <= today
+        if day_idx >= next_reb_idx {
+            let score_day = scores_by_date.keys()
+                .filter(|&&d| d <= today)
+                .max().copied();
+
+            if let Some(sd) = score_day {
+                if let Some(day_scores) = scores_by_date.get(&sd) {
+                    let candidates: Vec<&(String, f64)> = day_scores.iter().take(top_n).collect();
+                    if candidates.len() >= 5 {
+                        let w = (1.0 / candidates.len() as f64).min(max_pos);
+                        let mut target_values: HashMap<String, f64> = HashMap::new();
+                        for (sym, _) in &candidates {
+                            target_values.insert(sym.clone(), w * prev_nav);
+                        }
+                        // Sell positions not in target
+                        let mut to_sell: Vec<(String, f64)> = Vec::new();
+                        for (sym, shares) in &positions {
+                            if !target_values.contains_key(sym) {
+                                to_sell.push((sym.clone(), *shares));
+                            }
+                        }
+                        for (sym, shares) in to_sell {
+                            if let Some(px) = price_map.get(&(today, sym.clone())) {
+                                let proceeds = shares * px * (1.0 - commission);
+                                cash += proceeds;
+                                positions.remove(&sym);
+                                total_trades += 1;
+                            }
+                        }
+                        // Buy/adjust to target
+                        for (sym, target_val) in &target_values {
+                            if let Some(px) = price_map.get(&(today, sym.clone())) {
+                                let target_shares = target_val / px;
+                                let current_shares = positions.get(sym).copied().unwrap_or(0.0);
+                                let diff = target_shares - current_shares;
+                                if diff.abs() * px > 100.0 { // min trade size
+                                    let cost = diff.abs() * px * (1.0 + if diff > 0.0 { commission } else { 0.0 });
+                                    if diff > 0.0 && cash >= cost {
+                                        cash -= cost;
+                                        positions.insert(sym.clone(), current_shares + diff);
+                                        total_trades += 1;
+                                    } else if diff < 0.0 {
+                                        cash += diff.abs() * px * (1.0 - commission);
+                                        positions.insert(sym.clone(), current_shares + diff);
+                                        total_trades += 1;
+                                    }
+                                }
+                            }
+                        }
+                        // Clear empty positions
+                        positions.retain(|_, v| *v > 0.0);
+                    }
+                }
+            }
+            next_reb_idx = day_idx + reb_days;
+        }
+
+        // Daily mark-to-market
+        let mut mkt_val = 0.0f64;
+        for (sym, shares) in &positions {
+            if let Some(px) = price_map.get(&(today, sym.clone())) {
+                mkt_val += shares * px;
+            }
+        }
+        let nav = cash + mkt_val;
+        let daily_ret = if prev_nav > 0.0 { nav / prev_nav - 1.0 } else { 0.0 };
+        let cum_ret = if initial > 0.0 { nav / initial - 1.0 } else { 0.0 };
+        if nav > peak_nav { peak_nav = nav; }
+        let dd = if peak_nav > 0.0 { (peak_nav - nav) / peak_nav } else { 0.0 };
+        if dd > max_dd { max_dd = dd; }
+        let bench_cum = match bench_start {
+            Some(bs) => bench_map.get(&today).map(|bv| bv / bs - 1.0).unwrap_or(0.0),
+            None => 0.0,
+        };
+
+        // Write NAV snapshot every 5 days
+        if day_idx % 5 == 0 || day_idx == trading_days.len() - 1 {
+            sqlx::query(
+                "INSERT INTO paper_nav_snapshot
+                   (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value,
+                    position_count, daily_return, cumulative_return, benchmark_return, excess_return,
+                    max_drawdown, prediction_set_id, signal_count, trade_count, created_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+                 ON CONFLICT (paper_account_id, snapshot_date) DO UPDATE
+                 SET nav=EXCLUDED.nav, cash=EXCLUDED.cash, market_value=EXCLUDED.market_value,
+                     position_count=EXCLUDED.position_count, daily_return=EXCLUDED.daily_return,
+                     cumulative_return=EXCLUDED.cumulative_return, benchmark_return=EXCLUDED.benchmark_return,
+                     excess_return=EXCLUDED.excess_return, max_drawdown=EXCLUDED.max_drawdown",
+            )
+            .bind(format!("nav-{}", uuid::Uuid::new_v4()))
+            .bind(&account_id).bind(today).bind(nav).bind(cash).bind(mkt_val)
+            .bind(positions.len() as i32).bind(daily_ret).bind(cum_ret)
+            .bind(bench_cum).bind(cum_ret - bench_cum).bind(max_dd)
+            .bind(&pred_id).bind(top_n as i32).bind(total_trades as i32)
+            .execute(db).await.map_err(|e| format!("nav insert: {}", e))?;
+        }
+
+        prev_nav = nav;
+    }
+
+    // Update account
+    sqlx::query(
+        "UPDATE paper_account SET current_nav=$1, peak_nav=$2, max_drawdown_pct=$3,
+         total_trades=$4, updated_at=now() WHERE paper_account_id=$5",
+    )
+    .bind(prev_nav).bind(peak_nav).bind(max_dd).bind(total_trades as i32).bind(&account_id)
+    .execute(db).await.map_err(|e| format!("account update: {}", e))?;
+
+    let sharpe = nav_history.iter()
+        .map(|v| v["daily_return"].as_f64().unwrap_or(0.0))
+        .collect::<Vec<_>>();
+    let avg_ret = sharpe.iter().sum::<f64>() / sharpe.len().max(1) as f64;
+    let var = sharpe.iter().map(|r| (r - avg_ret).powi(2)).sum::<f64>() / sharpe.len().max(1) as f64;
+    let annual_sharpe = if var > 1e-12 { avg_ret / var.sqrt() * (252.0f64).sqrt() } else { 0.0 };
+
+    Ok(json!({
+        "paper_account_id": account_id,
+        "prediction_set_id": pred_id,
+        "date_range": {"start": start.to_string(), "end": end.to_string()},
+        "initial_capital": initial,
+        "final_nav": prev_nav,
+        "cumulative_return": if initial > 0.0 { prev_nav / initial - 1.0 } else { 0.0 },
+        "peak_nav": peak_nav,
+        "max_drawdown_pct": max_dd,
+        "total_trades": total_trades,
+        "final_positions": positions.len(),
+        "sharpe_ratio": annual_sharpe,
+        "trading_days": trading_days.len(),
+        "status": "simulation_complete"
+    }))
+}
+
 async fn create_paper_account_inner(
     db: &sqlx::PgPool,
     req: CreatePaperAccountRequest,
