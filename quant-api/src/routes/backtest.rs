@@ -1645,6 +1645,9 @@ fn build_market_regime_policy(
         "quality_bear_window_guard_v2" => {
             MarketRegimePolicy::quality_bear_window_guard_v2(benchmark)
         }
+        "north_flow_regime_confirm_v1" => {
+            MarketRegimePolicy::north_flow_regime_confirm_v1(benchmark)
+        }
         "quality_regime_alpha_switch_v1" => {
             MarketRegimePolicy::quality_regime_alpha_switch_v1(benchmark)
         }

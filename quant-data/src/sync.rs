@@ -954,19 +954,27 @@ pub async fn sync_moneyflow_hsgt(
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
     let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
-    let mut current = s;
     let mut total = 0usize;
-    while current <= e {
-        let date_str = current.format("%Y%m%d").to_string();
-        let resp = client.moneyflow_hsgt(Some(&date_str), None, None).await?;
+
+    // 按季度分批查询，避免 Tushare 单次分页限制（~300 行/页）
+    let mut batch_start = s;
+    while batch_start <= e {
+        let batch_end = (batch_start + chrono::Duration::days(92)).min(e);
+        let start_str = batch_start.format("%Y%m%d").to_string();
+        let end_str = batch_end.format("%Y%m%d").to_string();
+
+        let resp = client.moneyflow_hsgt(None, Some(&start_str), Some(&end_str)).await?;
         if let Some(data) = resp.data {
             for item in data.items {
-                let date = item.first().and_then(|v| v.as_str()).unwrap_or(&date_str);
+                let date = item.first().and_then(|v| v.as_str()).unwrap_or("");
+                if date.is_empty() {
+                    continue;
+                }
                 let nf = item.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let sf = item.get(2).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let nb = item.get(3).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let sb = item.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let d = NaiveDate::parse_from_str(date, "%Y%m%d").unwrap_or(current);
+                let d = NaiveDate::parse_from_str(date, "%Y%m%d")?;
                 sqlx::query(
                     "INSERT INTO market_moneyflow_hsgt (trade_date, north_flow, south_flow, north_balance, south_balance)
                      VALUES ($1, $2, $3, $4, $5)
@@ -977,7 +985,55 @@ pub async fn sync_moneyflow_hsgt(
                 total += 1;
             }
         }
-        current += chrono::Duration::days(1);
+        info!(?batch_start, ?batch_end, batch_rows = total, "HSGT 同步进度");
+        batch_start = batch_end + chrono::Duration::days(1);
+    }
+    Ok(total)
+}
+
+// ─── sync_margin (融资融券) ────────────────────────────────────────
+
+pub async fn sync_margin(
+    pool: &PgPool,
+    client: &TushareClient,
+    start: &str,
+    end: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    let mut total = 0usize;
+
+    // 按季度分批查询
+    let mut batch_start = s;
+    while batch_start <= e {
+        let batch_end = (batch_start + chrono::Duration::days(92)).min(e);
+        let start_str = batch_start.format("%Y%m%d").to_string();
+        let end_str = batch_end.format("%Y%m%d").to_string();
+
+        let resp = client.margin(None, Some(&start_str), Some(&end_str)).await?;
+        if let Some(data) = resp.data {
+            for item in data.items {
+                let date = item.first().and_then(|v| v.as_str()).unwrap_or("");
+                if date.is_empty() {
+                    continue;
+                }
+                let exchange = item.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let rzye = item.get(2).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))).unwrap_or(0.0);
+                let rqye = item.get(3).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))).unwrap_or(0.0);
+                let rzrqye = item.get(4).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))).unwrap_or(0.0);
+                let d = NaiveDate::parse_from_str(date, "%Y%m%d")?;
+                sqlx::query(
+                    "INSERT INTO market_margin (trade_date, exchange, rzye, rqye, rzrqye)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (trade_date, exchange) DO UPDATE SET rzye=EXCLUDED.rzye, rqye=EXCLUDED.rqye, rzrqye=EXCLUDED.rzrqye",
+                )
+                .bind(d).bind(exchange).bind(rzye).bind(rqye).bind(rzrqye)
+                .execute(pool).await?;
+                total += 1;
+            }
+        }
+        info!(?batch_start, ?batch_end, batch_rows = total, "Margin 同步进度");
+        batch_start = batch_end + chrono::Duration::days(1);
     }
     Ok(total)
 }

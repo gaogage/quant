@@ -6280,6 +6280,76 @@ impl MarketRegimePolicy {
             .map(|rule| rule.apply_to(base))
             .unwrap_or_else(|| base.clone())
     }
+
+    /// North-flow-aware regime policy: north_flow confirms bull → higher exposure;
+    /// north_flow confirms bear → defensive sleeve with tighter exposure.
+    /// Uses 42-day lookback for faster regime detection (vs 63-day default).
+    pub fn north_flow_regime_confirm_v1(benchmark: impl Into<String>) -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(
+            MarketRegime::Bull,
+            RegimeSignalRule {
+                top_n: Some(80),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(1.0),
+                score_direction: Some(ScoreDirection::Descending),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Bear,
+            RegimeSignalRule {
+                top_n: Some(25),
+                rebalance_freq_days: Some(60),
+                max_gross_exposure: Some(0.45),
+                score_direction: Some(ScoreDirection::Ascending),
+                skip_top_pct: Some(0.05),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::HighVolatility,
+            RegimeSignalRule {
+                top_n: Some(25),
+                rebalance_freq_days: Some(60),
+                max_gross_exposure: Some(0.35),
+                score_direction: Some(ScoreDirection::Ascending),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Sideways,
+            RegimeSignalRule {
+                top_n: Some(50),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.85),
+                ..Default::default()
+            },
+        );
+        rules.insert(
+            MarketRegime::Mixed,
+            RegimeSignalRule {
+                top_n: Some(50),
+                rebalance_freq_days: Some(20),
+                max_gross_exposure: Some(0.85),
+                ..Default::default()
+            },
+        );
+
+        Self {
+            benchmark: benchmark.into(),
+            lookback_days: 42,
+            min_observations: 10,
+            high_volatility_threshold: 0.26,
+            bear_return_threshold: -0.02,
+            bear_drawdown_threshold: 0.15,
+            bull_return_threshold: 0.08,
+            bull_max_drawdown: 0.12,
+            sideways_volatility_threshold: 0.10,
+            sideways_abs_return_threshold: 0.04,
+            rules,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -130,6 +130,10 @@ async fn main() {
             post(routes::sync::sync_moneyflow_hsgt),
         )
         .route(
+            "/api/v1/quant/data/sync/margin",
+            post(routes::sync::sync_margin),
+        )
+        .route(
             "/api/v1/quant/data/sync/index-daily",
             post(routes::sync::sync_index_daily),
         )

@@ -787,4 +787,25 @@ impl TushareClient {
         }
         self.call_api::<Vec<serde_json::Value>>("moneyflow_hsgt", params, &[]).await
     }
+
+    /// 融资融券交易汇总（市场整体，按日）
+    /// Tushare margin endpoint — 返回 SSE/SZSE 的融资余额/融券余额等
+    pub async fn margin(
+        &self,
+        trade_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(d) = trade_date {
+            params.push(("trade_date", d));
+        }
+        if let Some(d) = start_date {
+            params.push(("start_date", d));
+        }
+        if let Some(d) = end_date {
+            params.push(("end_date", d));
+        }
+        self.call_api::<Vec<serde_json::Value>>("margin", params, &[]).await
+    }
 }

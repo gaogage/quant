@@ -21789,6 +21789,7 @@ impl LayeredSearchConfig {
             "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
             "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
             "quality_mixed_state_risk_memory_router_v14".to_string(),
+            "north_flow_regime_confirm_v1".to_string(),
         ];
         config.top_n = vec![100, 120, 140];
         config.rebalance_days = vec![240, 300];
