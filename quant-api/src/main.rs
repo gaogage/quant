@@ -343,6 +343,10 @@ async fn main() {
             "/api/v1/quant/paper/signals/generate",
             post(routes::paper::generate_paper_signals),
         )
+        .route(
+            "/api/v1/quant/paper/nav/compute",
+            post(routes::paper::compute_paper_nav),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",

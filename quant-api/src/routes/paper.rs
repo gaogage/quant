@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::prelude::{FromPrimitive, Zero};
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::collections::HashMap;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -307,6 +308,273 @@ async fn generate_paper_signals_inner(
         "top_n": top_n,
         "nav_updates": nav_updates,
         "status": "signals_generated"
+    }))
+}
+
+// ── NAV Computation ──
+
+#[derive(Debug, Deserialize)]
+pub struct ComputePaperNavRequest {
+    pub paper_account_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub benchmark: Option<String>,
+}
+
+pub async fn compute_paper_nav(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ComputePaperNavRequest>,
+) -> impl IntoResponse {
+    match compute_paper_nav_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn compute_paper_nav_inner(
+    db: &sqlx::PgPool,
+    req: ComputePaperNavRequest,
+) -> Result<Value, String> {
+    let account_id = req.paper_account_id.trim().to_string();
+    let start = NaiveDate::parse_from_str(&req.start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date: {}", e))?;
+    let end = NaiveDate::parse_from_str(&req.end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date: {}", e))?;
+    let benchmark = req.benchmark.unwrap_or_else(|| "000300.SH".into());
+
+    // Get account snapshot dates
+    let snapshots = sqlx::query_as::<_, (String, NaiveDate, i32)>(
+        "SELECT nav_snapshot_id, snapshot_date, signal_count
+         FROM paper_nav_snapshot
+         WHERE paper_account_id = $1 AND snapshot_date >= $2 AND snapshot_date <= $3
+         ORDER BY snapshot_date",
+    )
+    .bind(&account_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("Failed to load NAV snapshots: {}", e))?;
+
+    if snapshots.is_empty() {
+        return Err("no NAV snapshots found for the given range".into());
+    }
+
+    // Get all symbols with positions from the first snapshot date
+    let snap_dates: Vec<NaiveDate> = snapshots.iter().map(|s| s.1).collect();
+    let from = snap_dates[0] - chrono::Duration::days(5);
+    let to = snap_dates[snap_dates.len() - 1] + chrono::Duration::days(5);
+
+    let position_symbols = sqlx::query_as::<_, (String,)>(
+        "SELECT DISTINCT symbol FROM paper_position
+         WHERE paper_account_id = $1 AND target_weight > 0
+         ORDER BY symbol",
+    )
+    .bind(&account_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("Failed to load position symbols: {}", e))?;
+
+    if position_symbols.is_empty() {
+        return Err("no positions found".into());
+    }
+    let symbols: Vec<String> = position_symbols.into_iter().map(|s| s.0).collect();
+
+    // Load close prices for all position symbols
+    let price_rows = sqlx::query_as::<_, (NaiveDate, String, Option<f64>)>(
+        "SELECT trade_date, symbol, close::double precision
+         FROM market_stock_daily_bar
+         WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
+           AND close IS NOT NULL
+         ORDER BY symbol, trade_date",
+    )
+    .bind(&symbols)
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("Failed to load prices: {}", e))?;
+
+    // Build price lookup
+    let mut prices: HashMap<String, HashMap<NaiveDate, f64>> = HashMap::new();
+    for (date, sym, close) in &price_rows {
+        if let Some(c) = close {
+            if *c > 0.0 {
+                prices.entry(sym.clone()).or_default().insert(*date, *c);
+            }
+        }
+    }
+
+    // Load benchmark prices
+    let bench_prices = sqlx::query_as::<_, (NaiveDate, Option<f64>)>(
+        "SELECT trade_date, close::double precision
+         FROM market_index_daily_bar
+         WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3
+         ORDER BY trade_date",
+    )
+    .bind(&benchmark)
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("Failed to load benchmark: {}", e))?;
+
+    let bench_map: HashMap<NaiveDate, f64> = bench_prices
+        .iter()
+        .filter_map(|(d, c)| c.map(|v| (*d, v)))
+        .filter(|(_, v)| *v > 0.0)
+        .collect();
+
+    // Get initial capital
+    let row = sqlx::query_as::<_, (f64,)>(
+        "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(&account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("DB: {}", e))?
+    .ok_or("account not found")?;
+    let initial_capital = row.0;
+
+    let mut prev_nav = initial_capital;
+    let mut peak_nav = initial_capital;
+    let mut max_dd = 0.0f64;
+    let mut bench_initial: Option<f64> = None;
+    let mut updated = 0usize;
+
+    // Position weights: use the snapshot date's target weight for each symbol
+    let pos_weights = sqlx::query_as::<_, (NaiveDate, String, f64)>(
+        "SELECT p.last_trade_date, p.symbol, p.target_weight::double precision
+         FROM paper_position p
+         WHERE p.paper_account_id = $1 AND p.target_weight > 0",
+    )
+    .bind(&account_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("Failed to load weights: {}", e))?;
+
+    // Map snapshot_date → symbol → weight
+    let mut weight_map: HashMap<NaiveDate, HashMap<String, f64>> = HashMap::new();
+    for (date, sym, w) in &pos_weights {
+        weight_map.entry(*date).or_default().insert(sym.clone(), *w);
+    }
+
+    for (nav_id, snap_date, sig_count) in &snapshots {
+        // Find the most recent signal date <= snapshot_date
+        let signal_date = pos_weights
+            .iter()
+            .filter(|(d, _, _)| *d <= *snap_date)
+            .map(|(d, _, _)| *d)
+            .max();
+
+        let Some(sig_date) = signal_date else { continue };
+
+        // Compute NAV: for each position, weight × initial_capital / close_price gives shares
+        let mut market_value = 0.0f64;
+        let mut pos_count = 0usize;
+
+        if let Some(sym_weights) = weight_map.get(&sig_date) {
+            for (sym, weight) in sym_weights {
+                if let Some(sym_prices) = prices.get(sym) {
+                    // Find the price closest to snap_date but not after
+                    let price = sym_prices
+                        .iter()
+                        .filter(|(d, _)| **d <= *snap_date)
+                        .max_by_key(|(d, _)| **d)
+                        .map(|(_, p)| *p);
+
+                    if let Some(px) = price {
+                        // Target market value = weight × NAV (approximate, using prev_nav)
+                        let target_value = weight * prev_nav;
+                        market_value += target_value;
+                        pos_count += 1;
+                    }
+                }
+            }
+        }
+
+        let nav = if pos_count > 0 {
+            // Scale: assume cash = nav - market_value, rebalance to target weights
+            let total_weight: f64 = weight_map
+                .get(&sig_date)
+                .map(|w| w.values().sum::<f64>())
+                .unwrap_or(0.0);
+            if total_weight > 0.0 {
+                market_value / total_weight // NAV = total_market_value / total_weight
+            } else {
+                prev_nav
+            }
+        } else {
+            prev_nav
+        };
+
+        let daily_ret = if prev_nav > 0.0 { nav / prev_nav - 1.0 } else { 0.0 };
+        let cum_ret = if initial_capital > 0.0 { nav / initial_capital - 1.0 } else { 0.0 };
+
+        if nav > peak_nav { peak_nav = nav; }
+        let dd = if peak_nav > 0.0 { (peak_nav - nav) / peak_nav } else { 0.0 };
+        if dd > max_dd { max_dd = dd; }
+
+        // Benchmark return
+        let bench_ret = if let Some(&b0) = bench_initial.as_ref() {
+            if let Some(&bv) = bench_map.get(snap_date) {
+                bv / b0 - 1.0
+            } else { 0.0 }
+        } else {
+            if let Some(&bv) = bench_map.get(snap_date) {
+                bench_initial = Some(bv);
+            }
+            0.0
+        };
+
+        sqlx::query(
+            "UPDATE paper_nav_snapshot
+             SET nav = $1, market_value = $2, position_count = $3,
+                 daily_return = $4, cumulative_return = $5,
+                 benchmark_return = $6, excess_return = $7,
+                 max_drawdown = $8
+             WHERE nav_snapshot_id = $9",
+        )
+        .bind(nav)
+        .bind(market_value)
+        .bind(pos_count as i32)
+        .bind(daily_ret)
+        .bind(cum_ret)
+        .bind(bench_ret)
+        .bind(cum_ret - bench_ret)
+        .bind(max_dd)
+        .bind(nav_id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("Failed to update NAV: {}", e))?;
+
+        prev_nav = nav;
+        updated += 1;
+    }
+
+    // Update paper_account summary
+    sqlx::query(
+        "UPDATE paper_account
+         SET current_nav = $1, peak_nav = $2, max_drawdown_pct = $3, updated_at = now()
+         WHERE paper_account_id = $4",
+    )
+    .bind(prev_nav)
+    .bind(peak_nav)
+    .bind(max_dd)
+    .bind(&account_id)
+    .execute(db)
+    .await
+    .map_err(|e| format!("Failed to update account: {}", e))?;
+
+    Ok(json!({
+        "paper_account_id": account_id,
+        "nav_snapshots_updated": updated,
+        "final_nav": prev_nav,
+        "cumulative_return": if initial_capital > 0.0 { prev_nav / initial_capital - 1.0 } else { 0.0 },
+        "peak_nav": peak_nav,
+        "max_drawdown_pct": max_dd,
+        "initial_capital": initial_capital,
+        "status": "nav_computed"
     }))
 }
 
