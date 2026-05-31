@@ -4103,60 +4103,86 @@ fn fit_gradient_boosting(
                 && s.features.iter().all(|v| v.is_finite())
         })
         .collect();
-    if valid.len() < 100 {
+    let min_samples = 100usize;
+    if valid.len() < min_samples {
         return Err(format!("GB: need >=100 valid samples, got {}", valid.len()));
     }
     let init_value = valid.iter().map(|s| s.label).sum::<f64>() / valid.len() as f64;
     let mut residuals: Vec<f64> = valid.iter().map(|s| s.label - init_value).collect();
     let mut trees = Vec::with_capacity(num_trees);
     let n = valid.len();
+    let n_features_sample = (factor_count as f64).sqrt().ceil() as usize;
+    let bagging_fraction = 0.8;
+    let bag_size = ((n as f64) * bagging_fraction).ceil() as usize;
 
     for _tree_idx in 0..num_trees {
-        let mut node_queue: Vec<(usize, usize, usize)> = vec![(0, 0, n)];
+        // Bagging: random sample of rows
+        let mut bag_indices: Vec<usize> = (0..n).collect();
+        // Simple shuffle via modular hash
+        for i in (1..n).rev() {
+            let j = (i * 2654435761 + _tree_idx) % (i + 1);
+            bag_indices.swap(i, j);
+        }
+        bag_indices.truncate(bag_size);
+
+        let mut node_queue: Vec<(usize, Vec<usize>, usize)> = vec![(0, bag_indices, 0)];
         let mut tree_nodes: Vec<Option<GbTreeNode>> = vec![None; (1 << (max_depth + 1)) - 1];
-        while let Some((ni, start, end)) = node_queue.pop() {
-            if ni >= tree_nodes.len() || end - start < 20 {
+        while let Some((ni, indices, depth)) = node_queue.pop() {
+            if ni >= tree_nodes.len() || depth >= max_depth || indices.len() < min_samples {
                 continue;
             }
-            // Find best split
-            let mut best_gain = f64::NEG_INFINITY;
+            // Total mean for gain calculation
+            let total_mean =
+                indices.iter().map(|&i| residuals[i]).sum::<f64>() / indices.len() as f64;
+
+            // MSE gain via sufficient statistics: gain = NL*meanL² + NR*meanR² - N*total_mean²
+            let total_sq = total_mean * total_mean * indices.len() as f64;
+            let mut best_gain = 0.0f64;
             let mut best_fi = 0usize;
             let mut best_split = 0.0f64;
-            let mut best_left_mean = 0.0;
-            let mut best_right_mean = 0.0;
-            let n_features_to_try = (factor_count as f64).sqrt().ceil() as usize;
-            for idx in 0..n_features_to_try.min(factor_count) {
-                let fi = ((tree_nodes.len() as u64).wrapping_mul(7 + ni as u64) % factor_count as u64) as usize;
-                // Randomly pick split from existing values
-                let sample_idx = start + (ni * 13 + idx * 17) % (end - start).max(1);
-                let split_val = valid[sample_idx.min(n - 1)].features[fi];
+            let mut best_left_mean = total_mean;
+            let mut best_right_mean = total_mean;
+
+            for _ in 0..n_features_sample.min(factor_count) {
+                let fi = ((tree_nodes.len() + ni * 7 + _tree_idx * 13) % factor_count) as usize;
+                let mut sorted = indices.clone();
+                sorted.sort_by(|&a, &b| {
+                    valid[a].features[fi]
+                        .partial_cmp(&valid[b].features[fi])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let total_sum: f64 = sorted.iter().map(|&i| residuals[i]).sum();
+                let total_n = sorted.len();
                 let mut left_sum = 0.0;
                 let mut left_cnt = 0usize;
-                let mut right_sum = 0.0;
-                let mut right_cnt = 0usize;
-                for i in start..end {
-                    let r = residuals[i];
-                    if valid[i].features[fi] < split_val {
-                        left_sum += r;
+                for (pos, &si) in sorted.iter().enumerate() {
+                    if pos < min_samples / 2 || pos >= total_n - min_samples / 2 {
+                        left_sum += residuals[si];
                         left_cnt += 1;
-                    } else {
-                        right_sum += r;
-                        right_cnt += 1;
+                        continue;
                     }
-                }
-                if left_cnt < 10 || right_cnt < 10 {
-                    continue;
-                }
-                let left_mean = left_sum / left_cnt as f64;
-                let right_mean = right_sum / right_cnt as f64;
-                let gain = left_cnt as f64 * left_mean * left_mean
-                    + right_cnt as f64 * right_mean * right_mean;
-                if gain > best_gain {
-                    best_gain = gain;
-                    best_fi = fi;
-                    best_split = split_val;
-                    best_left_mean = left_mean;
-                    best_right_mean = right_mean;
+                    left_sum += residuals[si];
+                    left_cnt += 1;
+                    let right_cnt = total_n - left_cnt;
+                    if left_cnt < min_samples / 2 || right_cnt < min_samples / 2 {
+                        continue;
+                    }
+                    let right_sum = total_sum - left_sum;
+                    let left_mean = left_sum / left_cnt as f64;
+                    let right_mean = right_sum / right_cnt as f64;
+                    let gain = left_cnt as f64 * left_mean * left_mean
+                        + right_cnt as f64 * right_mean * right_mean
+                        - total_sq;
+                    if gain > best_gain {
+                        best_gain = gain;
+                        best_fi = fi;
+                        best_split = valid[si].features[fi];
+                        best_left_mean = left_mean;
+                        best_right_mean = right_mean;
+                    }
+                    if pos % 5 != 0 {
+                        continue;
+                    }
                 }
             }
             if best_gain <= 0.0 {
@@ -4168,14 +4194,17 @@ fn fit_gradient_boosting(
                 left_value: best_left_mean,
                 right_value: best_right_mean,
             });
-            let mid = start + (end - start) / 2;
+            // Split indices
+            let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
+                .iter()
+                .partition(|&&i| valid[i].features[best_fi] < best_split);
             let left_ni = ni * 2 + 1;
             let right_ni = ni * 2 + 2;
-            if left_ni < tree_nodes.len() {
-                node_queue.push((left_ni, start, mid));
+            if !left_indices.is_empty() && left_ni < tree_nodes.len() {
+                node_queue.push((left_ni, left_indices, depth + 1));
             }
-            if right_ni < tree_nodes.len() {
-                node_queue.push((right_ni, mid, end));
+            if !right_indices.is_empty() && right_ni < tree_nodes.len() {
+                node_queue.push((right_ni, right_indices, depth + 1));
             }
         }
         let nodes: Vec<GbTreeNode> = tree_nodes.into_iter().flatten().collect();
