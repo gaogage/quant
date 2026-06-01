@@ -1010,6 +1010,7 @@ pub struct RunPredictionBacktestReq {
     pub portfolio_volatility_lookback_days: Option<usize>,
     pub portfolio_volatility_min_exposure: Option<f64>,
     pub portfolio_volatility_max_exposure: Option<f64>,
+    pub trailing_stop_pct: Option<f64>,
 }
 
 pub(crate) struct FactorBacktestRunOutput {
@@ -2493,6 +2494,7 @@ pub(crate) async fn execute_prediction_backtest(
         max_participation_rate,
         persistence_mode,
         risk_control: RiskControlConfig {
+            trailing_stop_pct: req.trailing_stop_pct.and_then(|v| Decimal::from_f64(v)),
             portfolio_volatility_target_pct: req.portfolio_volatility_target_pct.and_then(|v| Decimal::from_f64(v)),
             portfolio_volatility_lookback_days: req.portfolio_volatility_lookback_days,
             portfolio_volatility_min_exposure: req.portfolio_volatility_min_exposure.and_then(|v| Decimal::from_f64(v)),

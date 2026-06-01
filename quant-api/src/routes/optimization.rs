@@ -9820,6 +9820,7 @@ fn build_prediction_trial_request(
         portfolio_volatility_lookback_days: None,
         portfolio_volatility_min_exposure: optional_f64_value("portfolio_volatility_min_exposure")?,
         portfolio_volatility_max_exposure: optional_f64_value("portfolio_volatility_max_exposure")?,
+        trailing_stop_pct: optional_f64_value("trailing_stop_pct")?,
     })
 }
 
