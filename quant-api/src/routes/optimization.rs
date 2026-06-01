@@ -311,6 +311,9 @@ struct OosWindowExecution {
     oos_output: FactorBacktestRunOutput,
     oos_points: Vec<RobustnessDailyPoint>,
     cost_capacity_perturbations: Vec<OosCostCapacityPerturbationResult>,
+    /// When set, this window was skipped (no training candidate passed robustness gates).
+    /// The OOS fields (oos_backtest_task_id, oos_output, oos_points, etc.) are empty defaults.
+    skip_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1650,6 +1653,37 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_execution_alpha_capacity_bridge".to_string(),
             LayeredSearchConfig::professional_execution_alpha_capacity_bridge_default(),
         ),
+        "professional_simple_heuristic_discovery"
+        | "simple_heuristic_discovery"
+        | "phase7_s0" => (
+            "professional_simple_heuristic_discovery".to_string(),
+            LayeredSearchConfig::professional_simple_heuristic_discovery_default(),
+        ),
+        "professional_multi_factor_heuristic_discovery"
+        | "multi_factor_heuristic_discovery"
+        | "phase7_s2" => (
+            "professional_multi_factor_heuristic_discovery".to_string(),
+            LayeredSearchConfig::professional_multi_factor_heuristic_discovery_default(),
+        ),
+        "professional_blend_factor_heuristic_discovery"
+        | "blend_factor_heuristic_discovery"
+        | "phase7_s3" => (
+            "professional_blend_factor_heuristic_discovery".to_string(),
+            LayeredSearchConfig::professional_blend_factor_heuristic_discovery_default(),
+        ),
+        "professional_price_volume_heuristic_discovery"
+        | "price_volume_heuristic_discovery"
+        | "phase7_s4" => (
+            "professional_price_volume_heuristic_discovery".to_string(),
+            LayeredSearchConfig::professional_price_volume_heuristic_discovery_default(),
+        ),
+        "professional_simple_nlqr_discovery"
+        | "simple_nlqr_discovery"
+        | "phase7_simple_nlqr"
+        | "phase7_s1" => (
+            "professional_simple_nlqr_discovery".to_string(),
+            LayeredSearchConfig::professional_simple_nlqr_discovery_default(),
+        ),
         "professional_execution_alpha_capacity_return_frontier"
         | "execution_alpha_capacity_return_frontier"
         | "alpha_capacity_return_frontier"
@@ -2156,6 +2190,7 @@ fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_
     if let Some(prediction_set_id) = internal_train_window_ml_prediction_set_id {
         if search_profile == "professional_train_window_ml_stress_fill_discovery"
             || search_profile == "professional_ensemble_discovery"
+            || search_profile == "professional_simple_nlqr_discovery"
         {
             apply_internal_train_window_ml_prediction_set_to_seed_trials(
                 &mut config.seed_trials,
@@ -2201,6 +2236,9 @@ fn is_train_window_ml_stress_fill_profile(search_profile: Option<&str>) -> bool 
             | "phase7_gb"
             | "professional_ensemble_discovery"
             | "phase7_ensemble_v1"
+            | "professional_simple_nlqr_discovery"
+            | "phase7_simple_nlqr"
+            | "phase7_s1"
     )
 }
 
@@ -2209,6 +2247,15 @@ fn is_ensemble_profile(search_profile: Option<&str>) -> bool {
         search_profile.map(str::trim).unwrap_or_default(),
         "professional_ensemble_discovery"
             | "phase7_ensemble_v1"
+    )
+}
+
+fn is_simple_nlqr_profile(search_profile: Option<&str>) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_simple_nlqr_discovery"
+            | "phase7_simple_nlqr"
+            | "phase7_s1"
     )
 }
 
@@ -3225,7 +3272,9 @@ async fn execute_phase7_oos_walk_forward_discovery(
             &mut oos_backtest_cache,
         )
         .await?;
-        append_stitched_oos_points(&mut stitched_points, &execution.oos_points);
+        if execution.skip_reason.is_none() {
+            append_stitched_oos_points(&mut stitched_points, &execution.oos_points);
+        }
         window_results.push(oos_window_execution_json(&execution, &train_gate_policy));
         if let Some(experiment_run_id) = experiment_run_id.as_deref() {
             let stitched_summary = if stitched_points.len() >= 2 {
@@ -3394,7 +3443,7 @@ async fn execute_oos_discovery_window(
     let training_candidates = load_oos_training_candidates(db, &train_task_id, oos_top_n).await?;
     let require_train_approval = req.require_train_robustness_approval.unwrap_or(true);
     let (selected_candidate, train_robustness, train_cost_capacity_perturbations) =
-        select_oos_training_candidate(
+        match select_oos_training_candidate(
             db,
             req,
             &train_template_for_selection,
@@ -3406,7 +3455,49 @@ async fn execute_oos_discovery_window(
             &mut *train_signal_cache,
             &mut *train_backtest_cache,
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(msg)
+                if msg.contains("no training candidate passing robustness")
+                    || msg.contains("no completed training candidates") =>
+            {
+                // Window skipped — no candidate passed robustness gates.
+                // WFA methodology: individual window failures are expected and
+                // should NOT halt the entire experiment. Continue to next window.
+                return Ok(OosWindowExecution {
+                    window: window.clone(),
+                    train_optimization_task_id: train_task_id,
+                    train_execution_policy: train_execution_policy.clone(),
+                    train_batches,
+                    selected_candidate: DiscoveryCandidate {
+                        trial_id: String::new(),
+                        backtest_task_id: None,
+                        score: None,
+                        candidate_type: CandidateType::ReviewRequired,
+                        professional_gap_score: Decimal::ZERO,
+                        metrics: CandidateMetrics::default(),
+                        parameters: json!({}),
+                    },
+                    train_robustness: None,
+                    train_cost_capacity_perturbations: Vec::new(),
+                    oos_backtest_task_id: String::new(),
+                    oos_output: FactorBacktestRunOutput {
+                        signals_count: 0,
+                        metrics: quant_backtest::metrics::BacktestMetrics::default(),
+                        trades: 0,
+                        equity_points: 0,
+                        effective_coverage: None,
+                        market_data_prewarm_report: None,
+                        market_feature_prewarm_report: None,
+                    },
+                    oos_points: Vec::new(),
+                    cost_capacity_perturbations: Vec::new(),
+                    skip_reason: Some(msg),
+                });
+            }
+            Err(msg) => return Err(msg),
+        };
 
     let test_template = backtest_template_for_window(
         req.backtest_template
@@ -3456,6 +3547,7 @@ async fn execute_oos_discovery_window(
         oos_output,
         oos_points,
         cost_capacity_perturbations,
+        skip_reason: None,
     })
 }
 
@@ -3531,11 +3623,13 @@ async fn ensemble_model_params_for_window(
         // Bear market → Quality defense
         Ok(("quality_adjusted_excess_return".to_string(), 60, 10, 100))
     } else if nf_row < -1.0 {
-        // Systematic bear → Standard Bull with lower max_gross
-        // (max_gross handled at backtest level)
+        // Systematic bear → Standard Bull (max_gross reduced at backtest level)
+        Ok(("gradient_boosting_excess_return".to_string(), 60, 10, 100))
+    } else if tr_42d > 0.05 && nf_row > 0.0 {
+        // Strong bull + northbound inflow → Momentum (gradient boosting)
         Ok(("gradient_boosting_excess_return".to_string(), 60, 10, 100))
     } else {
-        // Default: Asymmetric Bull (EW3)
+        // Default: Asymmetric Bull (balanced)
         Ok(("asymmetric_excess_return".to_string(), 60, 10, 100))
     }
 }
@@ -3550,19 +3644,30 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     }
 
     let is_ensemble = is_ensemble_profile(req.search_profile.as_deref());
+    let is_simple_nlqr = is_simple_nlqr_profile(req.search_profile.as_deref());
     let short_id = Uuid::new_v4().simple().to_string();
     let short_id = &short_id[..12];
-    let prefix = if is_ensemble { "p7en" } else { "p7gb" };
+    let prefix = if is_ensemble {
+        "p7en"
+    } else if is_simple_nlqr {
+        "p7sn"
+    } else {
+        "p7gb"
+    };
     let train_prediction_set_id = format!("{}-w{}-{}-tr", prefix, window.window_index, short_id);
     let test_prediction_set_id = format!("{}-w{}-{}-te", prefix, window.window_index, short_id);
     let train_training_task_id = format!("train-{}-w{}-{}-tr", prefix, window.window_index, short_id);
     let test_training_task_id = format!("train-{}-w{}-{}-te", prefix, window.window_index, short_id);
     let training_task_id = format!("{}-w{}-{}", prefix, window.window_index, short_id);
 
-    // Ensemble: select model via PIT routing, use model-specific label/horizon
+    // Label/horizon/bucket selection
     let (label_objective, label_horizon_days, bucket_count, min_samples) =
         if is_ensemble {
             ensemble_model_params_for_window(db, window).await?
+        } else if is_simple_nlqr {
+            // Simplified NLQR: stable label, fewer buckets for better generalization
+            let h = train_window_ml_label_horizon_days(window) as usize;
+            ("future_excess_return".to_string(), h, 5usize, 50usize)
         } else {
             let h = train_window_ml_label_horizon_days(window) as usize;
             ("risk_adjusted_excess_return".to_string(), h, 7usize, 250usize)
@@ -3578,8 +3683,12 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
         ));
     }
 
-    let feature_profile = phase7_train_window_ml_feature_profile();
-    let factors = phase7_train_window_ml_factor_refs();
+    let feature_profile = phase7_train_window_ml_feature_profile_for_search(req.search_profile.as_deref());
+    let factors = if is_simple_nlqr {
+        phase7_train_window_ml_factor_refs_for_profile("phase7_simple_nlqr_core_15f_v1")
+    } else {
+        phase7_train_window_ml_factor_refs()
+    };
     if factors.is_empty() {
         return Err("train-window ML ranking factors must not be empty".into());
     }
@@ -3654,6 +3763,18 @@ fn train_window_ml_lookback_days(window: &OosDiscoveryWindow, label_horizon_days
 
 fn phase7_train_window_ml_feature_profile() -> &'static str {
     "phase7_gb_quality_value_recovery_low_impact_v5"
+}
+
+fn phase7_simple_nlqr_feature_profile() -> &'static str {
+    "phase7_simple_nlqr_core_15f_v1"
+}
+
+fn phase7_train_window_ml_feature_profile_for_search(search_profile: Option<&str>) -> &'static str {
+    if is_simple_nlqr_profile(search_profile) {
+        phase7_simple_nlqr_feature_profile()
+    } else {
+        phase7_train_window_ml_feature_profile()
+    }
 }
 
 fn phase7_train_window_ml_factor_refs() -> Vec<LinearFactorRef> {
@@ -3838,6 +3959,22 @@ fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFa
             "event_post_return_express_20d_indrel_std",
             "event_reaction_express_1_5d_indrel_std",
             // P1 新因子：北向资金情绪
+            "north_flow_std_20d",
+        ],
+        "phase7_simple_nlqr_core_15f_v1" => &[
+            // 15 core factors — simplified for WFA robustness
+            // Quality (4): fundamental profitability
+            "fin_roe_daily_std", "fin_roa_daily_std",
+            "fin_netprofit_margin_daily_std", "fin_gross_margin_daily_std",
+            // Value (3): cheapness
+            "val_pb_low_std", "val_pe_ttm_low_std", "val_dividend_yield_ttm_std",
+            // Cashflow (2): earnings quality
+            "cf_ocf_to_profit_latest_std", "cf_ocf_positive_latest_std",
+            // Momentum (3): price trend
+            "mom_20d_std", "mom_60d_std", "mkt_rel_mom_20d_std",
+            // Low risk (2): drawdown protection
+            "vol_20d_std", "maxdd_60d_std",
+            // Sentiment (1): northbound flow
             "north_flow_std_20d",
         ],
         "phase7_gb_quality_value_recovery_low_impact_v5" => &[
@@ -6433,6 +6570,15 @@ fn oos_window_execution_json_with_train_summary(
     train_gate_policy: &Value,
     train_cost_capacity_summary: &CostCapacityPerturbationSummary,
 ) -> Value {
+    if let Some(reason) = &execution.skip_reason {
+        return json!({
+            "window": oos_window_json(&execution.window),
+            "train_optimization_task_id": execution.train_optimization_task_id,
+            "train_batches": execution.train_batches,
+            "status": "skipped",
+            "skip_reason": reason,
+        });
+    }
     let train_stress_score_profile = train_cost_capacity_stress_score_profile(train_gate_policy);
     let train_stress_adjusted_score = train_candidate_stress_adjusted_score_for_policy(
         &execution.selected_candidate,
@@ -22820,6 +22966,7 @@ mod tests {
             },
             oos_points: Vec::new(),
             cost_capacity_perturbations: Vec::new(),
+            skip_reason: None,
         };
 
         let json = oos_window_execution_json(&execution, &json!({}));
@@ -22900,6 +23047,7 @@ mod tests {
             },
             oos_points: Vec::new(),
             cost_capacity_perturbations: Vec::new(),
+            skip_reason: None,
         };
         let policy = json!({
             "train_stress_score_profile": "prediction_confidence_stress_fill_quality_score_v1",

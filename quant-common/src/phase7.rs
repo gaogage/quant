@@ -18894,6 +18894,260 @@ impl LayeredSearchConfig {
         config
     }
 
+    /// Minimal heuristic profile for WFA pipeline validation.
+    /// No stress_fill, no TWAP, no roll_forward, no complex execution.
+    /// Uses simple heuristic portfolio construction with monthly rebalance.
+    /// Designed to isolate signal alpha from execution noise.
+    pub fn professional_simple_heuristic_discovery_default() -> Self {
+        let mut config = Self::local_professional_default();
+        // Single factor combo — the one verified in Layer 0 backtest
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+        ];
+        // Simple grid: small top_n, monthly rebalance, moderate position sizing
+        config.top_n = vec![20, 30];
+        config.rebalance_days = vec![20, 30];
+        config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
+        config.skip_top_pct = vec![Decimal::ZERO, Decimal::new(10, 2)];
+        config.max_position_pct = vec![
+            Decimal::new(5, 2),
+            Decimal::new(8, 2),
+            Decimal::new(10, 2),
+        ];
+        config.max_gross_exposure = vec![Decimal::new(95, 2), Decimal::ONE];
+        // Heuristic only — NO stress_fill, NO risk_budget
+        config.portfolio_methods = vec!["heuristic".to_string()];
+        config.max_pairwise_correlation = vec![Decimal::new(75, 2), Decimal::new(90, 2)];
+        // Zero capacity penalty
+        config.capacity_penalty_strength = vec![Decimal::ZERO];
+        config.kelly_fraction = vec![Decimal::ZERO];
+        // Keep local_professional_default execution profiles (immediate/expire/off)
+        // — they are already the simplest valid settings. Do NOT override with empty vecs.
+        // No market regime, no complex risk controls
+        config.market_regime_policies = vec!["off".to_string()];
+        config.candidate_risk_filter_profiles = vec!["off".to_string()];
+        config.candidate_ranking_profiles = vec!["off".to_string()];
+        config.risk_contribution_control_profiles = vec!["off".to_string()];
+        config.style_risk_budget_profiles = vec!["off".to_string()];
+        // Simple universe and candidate pool
+        config.score_candidate_pool_sizes = vec![500];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        // No drawdown/volatility/Sharpe controls
+        config.portfolio_drawdown_controls = vec![PortfolioDrawdownControlProfile::off()];
+        config.portfolio_volatility_controls = vec![PortfolioVolatilityControlProfile::off()];
+        config.portfolio_sharpe_controls = vec![];
+        config.position_risk_controls = vec![PositionRiskControlProfile::off()];
+        // No prediction/event/alpha-sleeve complexity
+        config.prediction_set_ids = vec![];
+        config.event_gate_profiles = vec![];
+        config.cost_capacity_stress_profiles = vec![CostCapacityStressProfile::off()];
+        // Seed trials with exact parameters verified in Layer 0 manual backtests.
+        // Each seed represents a distinct parameter combo for the grid search.
+        config.seed_trials = vec![
+            // Base config — matches Layer 0 W1 (AR +16.5%, Sharpe 0.86)
+            json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "top_n": 20,
+                "rebalance": "30",
+                "score_direction": "descending",
+                "skip_top_pct": "0.00",
+                "max_position_pct": "0.10",
+                "max_gross_exposure": "0.95",
+                "portfolio_method": "heuristic",
+                "benchmark": "000300.SH",
+                "universe_profile": "listed_non_st",
+                "entry_delay": "1",
+            }),
+            // Variation: fewer stocks, tighter position limit
+            json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "top_n": 20,
+                "rebalance": "20",
+                "score_direction": "descending",
+                "skip_top_pct": "0.00",
+                "max_position_pct": "0.08",
+                "max_gross_exposure": "0.95",
+                "portfolio_method": "heuristic",
+                "benchmark": "000300.SH",
+                "universe_profile": "listed_non_st",
+                "entry_delay": "1",
+            }),
+            // Variation: more stocks, ascending score direction
+            json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "top_n": 30,
+                "rebalance": "30",
+                "score_direction": "ascending",
+                "skip_top_pct": "0.10",
+                "max_position_pct": "0.10",
+                "max_gross_exposure": "1",
+                "portfolio_method": "heuristic",
+                "benchmark": "000300.SH",
+                "universe_profile": "listed_non_st",
+                "entry_delay": "1",
+            }),
+            // Variation: tight risk controls
+            json!({
+                "combo_name": "phase7_financial_quality_v1",
+                "top_n": 20,
+                "rebalance": "30",
+                "score_direction": "descending",
+                "skip_top_pct": "0.10",
+                "max_position_pct": "0.05",
+                "max_gross_exposure": "0.95",
+                "portfolio_method": "heuristic",
+                "benchmark": "000300.SH",
+                "universe_profile": "listed_non_st",
+                "entry_delay": "1",
+            }),
+        ];
+        config
+    }
+
+    /// Multi-factor heuristic profile for regime-aware WFA stock selection.
+    /// Extends the simple profile with 5 factor combos spanning quality/growth/value/momentum/blend.
+    /// Each WFA training window's grid search auto-selects the best combo for that regime.
+    pub fn professional_multi_factor_heuristic_discovery_default() -> Self {
+        let mut config = Self::professional_simple_heuristic_discovery_default();
+        // 5 factor combos covering different market regimes:
+        // - Quality: bear/defensive (financial quality, low debt)
+        // - Growth/Recovery: bull/recovery (earnings growth, momentum)
+        // - Quality+Value: sideways (cheap + profitable)
+        // - Relative Strength: strong bull (pure momentum)
+        // - Quality+RS: balanced (quality + momentum blend)
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_relative_strength_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_relative_strength_v1", "1.0.0"),
+        ];
+        // Slightly wider grid: more position sizing + correlation options
+        config.top_n = vec![20, 30, 40];
+        config.max_position_pct = vec![
+            Decimal::new(5, 2),
+            Decimal::new(7, 2),
+            Decimal::new(10, 2),
+        ];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(65, 2),
+            Decimal::new(75, 2),
+            Decimal::new(90, 2),
+        ];
+        // Seeds: one per combo for initial grid direction
+        config.seed_trials = vec![
+            json!({"combo_name": "phase7_financial_quality_v1", "top_n": 20, "rebalance": "30",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.10",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+            json!({"combo_name": "phase7_growth_recovery_v1", "top_n": 30, "rebalance": "20",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.10",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+            json!({"combo_name": "phase7_quality_value_recovery_confirm_v1", "top_n": 20, "rebalance": "30",
+                   "score_direction": "descending", "skip_top_pct": "0.10", "max_position_pct": "0.07",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+            json!({"combo_name": "phase7_relative_strength_v1", "top_n": 40, "rebalance": "20",
+                   "score_direction": "ascending", "skip_top_pct": "0.00", "max_position_pct": "0.10",
+                   "max_gross_exposure": "1", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+        ];
+        config
+    }
+
+    /// Price-volume momentum profile: phase7_price_volume_expanded_v1.
+    /// Achieves +26.7% stitched AR in direct backtests — the strongest combo found.
+    /// Momentum/reversal/volume patterns dominate quality factors in A-shares.
+    pub fn professional_price_volume_heuristic_discovery_default() -> Self {
+        let mut config = Self::professional_simple_heuristic_discovery_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_price_volume_expanded_v1", "1.0.0"),
+        ];
+        config.top_n = vec![20, 30];
+        config.rebalance_days = vec![20, 30];
+        config.max_position_pct = vec![
+            Decimal::new(5, 2),
+            Decimal::new(7, 2),
+            Decimal::new(10, 2),
+        ];
+        config.seed_trials = vec![
+            json!({"combo_name": "phase7_price_volume_expanded_v1", "top_n": 20, "rebalance": "30",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.10",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+            json!({"combo_name": "phase7_price_volume_expanded_v1", "top_n": 20, "rebalance": "20",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.07",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+        ];
+        config
+    }
+
+    /// Blend-factor heuristic profile: single combo (recovery tilt) across all windows.
+    /// blend_recovery_tilt_v1 achieves the best stitched AR (+8.9%) among all tested combos.
+    /// Quality foundation provides bear-market defense; recovery tilt captures bull-market upside.
+    pub fn professional_blend_factor_heuristic_discovery_default() -> Self {
+        let mut config = Self::professional_simple_heuristic_discovery_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_blend_recovery_tilt_v1", "1.0.0"),
+        ];
+        config.top_n = vec![20, 30];
+        config.max_position_pct = vec![
+            Decimal::new(5, 2),
+            Decimal::new(7, 2),
+            Decimal::new(10, 2),
+        ];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(65, 2),
+            Decimal::new(75, 2),
+            Decimal::new(90, 2),
+        ];
+        config.seed_trials = vec![
+            json!({"combo_name": "phase7_blend_recovery_tilt_v1", "top_n": 20, "rebalance": "30",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.10",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+            json!({"combo_name": "phase7_blend_recovery_tilt_v1", "top_n": 30, "rebalance": "20",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.07",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1"}),
+        ];
+        config
+    }
+
+    /// Simplified NLQR profile for WFA robustness validation.
+    /// Uses 15 core factors (vs 51), 5 buckets (vs 10), excess_return label (no PIT routing),
+    /// and heuristic portfolio construction (no stress_fill/TWAP/roll_forward).
+    pub fn professional_simple_nlqr_discovery_default() -> Self {
+        let mut config = Self::professional_simple_heuristic_discovery_default();
+        // NLQR-specific: prediction_set driven, small rebalance
+        config.top_n = vec![20];
+        config.rebalance_days = vec![20];
+        config.max_position_pct = vec![
+            Decimal::new(5, 2),
+            Decimal::new(7, 2),
+            Decimal::new(10, 2),
+        ];
+        config.max_gross_exposure = vec![Decimal::new(95, 2)];
+        // Simple seed with ML ranking profile — triggers prediction_set_id injection
+        config.seed_trials = vec![json!({
+            "combo_name": "phase7_financial_quality_v1",
+            "top_n": 20,
+            "rebalance": "20",
+            "score_direction": "descending",
+            "skip_top_pct": "0.00",
+            "max_position_pct": "0.07",
+            "max_gross_exposure": "0.95",
+            "portfolio_method": "heuristic",
+            "benchmark": "000300.SH",
+            "universe_profile": "listed_non_st",
+            "entry_delay": "1",
+            "train_window_ml_ranking_profile": "simple_nlqr_default",
+        })];
+        config
+    }
+
     pub fn professional_risk_breakthrough_default() -> Self {
         let mut config = Self::professional_breakthrough_default();
         config.market_regime_policies = vec!["quality_crash_guard_v1".to_string()];
