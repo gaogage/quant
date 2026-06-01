@@ -671,7 +671,6 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "execution_event_anchor_stress_bridge"
         | "event_anchor_stress_bridge"
         | "phase7_execution_event_anchor_stress_bridge"
-        | "phase7_en"
         | "professional_execution_participation_aware_event_anchor"
         | "execution_participation_aware_event_anchor"
         | "participation_aware_event_anchor"
@@ -839,7 +838,9 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
                 "max_train_execution_schedule_expired_count": 0
             }),
         ),
-        "professional_current_event_nonlinear_alpha_discovery"
+        "professional_ensemble_discovery"
+        | "phase7_ensemble_v1"
+        | "professional_current_event_nonlinear_alpha_discovery"
         | "current_event_nonlinear_alpha_discovery"
         | "phase7_current_event_nonlinear_alpha_discovery"
         | "phase7_fs"
@@ -1954,6 +1955,11 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_train_window_ml_stress_fill_discovery".to_string(),
             LayeredSearchConfig::professional_train_window_ml_stress_fill_discovery_default(),
         ),
+        "professional_ensemble_discovery"
+        | "phase7_ensemble_v1" => (
+            "professional_ensemble_discovery".to_string(),
+            LayeredSearchConfig::professional_ensemble_discovery_default(),
+        ),
         "professional_current_event_nonlinear_alpha_discovery"
         | "current_event_nonlinear_alpha_discovery"
         | "phase7_current_event_nonlinear_alpha_discovery"
@@ -2148,7 +2154,9 @@ fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_
         }
     }
     if let Some(prediction_set_id) = internal_train_window_ml_prediction_set_id {
-        if search_profile == "professional_train_window_ml_stress_fill_discovery" {
+        if search_profile == "professional_train_window_ml_stress_fill_discovery"
+            || search_profile == "professional_ensemble_discovery"
+        {
             apply_internal_train_window_ml_prediction_set_to_seed_trials(
                 &mut config.seed_trials,
                 prediction_set_id,
@@ -2191,6 +2199,16 @@ fn is_train_window_ml_stress_fill_profile(search_profile: Option<&str>) -> bool 
             | "ml_stress_fill_discovery"
             | "phase7_train_window_ml_stress_fill_discovery"
             | "phase7_gb"
+            | "professional_ensemble_discovery"
+            | "phase7_ensemble_v1"
+    )
+}
+
+fn is_ensemble_profile(search_profile: Option<&str>) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_ensemble_discovery"
+            | "phase7_ensemble_v1"
     )
 }
 
@@ -3441,6 +3459,87 @@ async fn execute_oos_discovery_window(
     })
 }
 
+/// PIT routing for ensemble: selects which NLQR model to train based on
+/// signals available at the window's test_start date (no future data).
+async fn ensemble_model_params_for_window(
+    db: &sqlx::PgPool,
+    window: &OosDiscoveryWindow,
+) -> Result<(String, usize, usize, usize), String> {
+    // Load benchmark (CSI300) returns up to test_start
+    let benchmark_start = window.test_start - Duration::days(365);
+    let bench_rows = sqlx::query_as::<_, (NaiveDate, Option<f64>)>(
+        "SELECT trade_date, pct_change::double precision
+         FROM market_index_daily_bar
+         WHERE symbol = '000300.SH'
+           AND trade_date >= $1 AND trade_date < $2
+         ORDER BY trade_date",
+    )
+    .bind(benchmark_start)
+    .bind(window.test_start)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("benchmark query failed: {}", e))?;
+
+    let bench_returns: Vec<f64> = bench_rows.iter()
+        .filter_map(|(_, r)| *r)
+        .collect();
+
+    if bench_returns.len() < 42 {
+        // Not enough data — default to EW3 (asymmetric bull)
+        return Ok(("asymmetric_excess_return".to_string(), 60, 10, 100));
+    }
+
+    // Compute 42-day trailing return
+    let tr_42d = bench_returns.iter().rev().take(42).fold(1.0, |acc, &r| acc * (1.0 + r)) - 1.0;
+
+    // Compute previous year volatility
+    let prev_year_rets: Vec<f64> = bench_returns.iter().rev().take(252).copied().collect();
+    let prev_vol = if prev_year_rets.len() >= 100 {
+        let mean = prev_year_rets.iter().sum::<f64>() / prev_year_rets.len() as f64;
+        let var = prev_year_rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (prev_year_rets.len() - 1) as f64;
+        var.sqrt() * (252.0_f64).sqrt()
+    } else {
+        0.15 // default moderate vol
+    };
+
+    // Load north_flow zscore at test_start
+    let nf_row = sqlx::query_as::<_, (Option<f64>,)>(
+        "SELECT normalized_value::double precision
+         FROM factor_value
+         WHERE factor_code = 'north_flow_std_20d'
+           AND factor_version = '1.0.0'
+           AND symbol = (SELECT symbol FROM market_stock_daily_bar WHERE trade_date >= $1 LIMIT 1)
+           AND trade_date = (
+               SELECT MAX(trade_date) FROM factor_value
+               WHERE factor_code = 'north_flow_std_20d'
+                 AND factor_version = '1.0.0'
+                 AND trade_date < $1
+           )",
+    )
+    .bind(window.test_start)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("north_flow query failed: {}", e))?
+    .and_then(|(v,)| v)
+    .unwrap_or(0.0);
+
+    // ─── PIT Routing ───
+    if prev_vol > 0.20 {
+        // High volatility → Mean-Reversion model
+        Ok(("future_return".to_string(), 5, 10, 100))
+    } else if tr_42d < -0.02 {
+        // Bear market → Quality defense
+        Ok(("quality_adjusted_excess_return".to_string(), 60, 10, 100))
+    } else if nf_row < -1.0 {
+        // Systematic bear → Standard Bull with lower max_gross
+        // (max_gross handled at backtest level)
+        Ok(("gradient_boosting_excess_return".to_string(), 60, 10, 100))
+    } else {
+        // Default: Asymmetric Bull (EW3)
+        Ok(("asymmetric_excess_return".to_string(), 60, 10, 100))
+    }
+}
+
 async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     db: &sqlx::PgPool,
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -3450,40 +3549,47 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
         return Ok(None);
     }
 
+    let is_ensemble = is_ensemble_profile(req.search_profile.as_deref());
     let short_id = Uuid::new_v4().simple().to_string();
     let short_id = &short_id[..12];
-    let train_prediction_set_id = format!("p7gb-w{}-{}-tr", window.window_index, short_id);
-    let test_prediction_set_id = format!("p7gb-w{}-{}-te", window.window_index, short_id);
-    let train_training_task_id = format!("train-p7gb-w{}-{}-tr", window.window_index, short_id);
-    let test_training_task_id = format!("train-p7gb-w{}-{}-te", window.window_index, short_id);
-    let training_task_id = format!("p7gb-w{}-{}", window.window_index, short_id);
-    let label_horizon_days = train_window_ml_label_horizon_days(window);
-    let train_lookback_days = train_window_ml_lookback_days(window, label_horizon_days);
+    let prefix = if is_ensemble { "p7en" } else { "p7gb" };
+    let train_prediction_set_id = format!("{}-w{}-{}-tr", prefix, window.window_index, short_id);
+    let test_prediction_set_id = format!("{}-w{}-{}-te", prefix, window.window_index, short_id);
+    let train_training_task_id = format!("train-{}-w{}-{}-tr", prefix, window.window_index, short_id);
+    let test_training_task_id = format!("train-{}-w{}-{}-te", prefix, window.window_index, short_id);
+    let training_task_id = format!("{}-w{}-{}", prefix, window.window_index, short_id);
+
+    // Ensemble: select model via PIT routing, use model-specific label/horizon
+    let (label_objective, label_horizon_days, bucket_count, min_samples) =
+        if is_ensemble {
+            ensemble_model_params_for_window(db, window).await?
+        } else {
+            let h = train_window_ml_label_horizon_days(window) as usize;
+            ("risk_adjusted_excess_return".to_string(), h, 7usize, 250usize)
+        };
+
+    let train_lookback_days = train_window_ml_lookback_days(window, label_horizon_days as i64);
     let train_prediction_start =
-        window.train_start + Duration::days(train_lookback_days + label_horizon_days - 1);
+        window.train_start + Duration::days(train_lookback_days + label_horizon_days as i64 - 1);
     if train_prediction_start > window.train_end {
         return Err(format!(
-            "phase7_gb train window {} is too short for train-window ML ranking: train_start={}, train_end={}, lookback_days={}, label_horizon_days={}",
-            window.window_index,
-            window.train_start,
-            window.train_end,
-            train_lookback_days,
-            label_horizon_days
+            "{} train window {} is too short for ML ranking",
+            prefix, window.window_index
         ));
     }
 
     let feature_profile = phase7_train_window_ml_feature_profile();
     let factors = phase7_train_window_ml_factor_refs();
     if factors.is_empty() {
-        return Err("phase7_gb train-window ML ranking factors must not be empty".into());
+        return Err("train-window ML ranking factors must not be empty".into());
     }
 
     create_walk_forward_nonlinear_quantile_ranker_inner(
         db,
         WalkForwardNonlinearQuantileRankerRequest {
-            model_code: "phase7_gb_train_window_nlq_ranker".to_string(),
+            model_code: format!("{}_nlq_ranker", prefix),
             model_version: format!("w{}-{}-train", window.window_index, short_id),
-            model_version_id: Some(format!("p7gb-nlq-w{}-{}-tr", window.window_index, short_id)),
+            model_version_id: Some(format!("{}-nlq-w{}-{}-tr", prefix, window.window_index, short_id)),
             training_task_id: Some(train_training_task_id),
             prediction_set_id: Some(train_prediction_set_id.clone()),
             data_version_id: req.data_version_id.clone(),
@@ -3493,12 +3599,12 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
             prediction_end_date: window.train_end.format("%Y%m%d").to_string(),
             train_lookback_days: Some(train_lookback_days),
             prediction_step_days: Some(20),
-            label_horizon_days: Some(label_horizon_days),
-            label_objective: Some("risk_adjusted_excess_return".to_string()),
+            label_horizon_days: Some(label_horizon_days as i64),
+            label_objective: Some(label_objective.clone()),
             min_training_samples: Some(250),
             max_windows: None,
-            bucket_count: Some(7),
-            min_samples_per_bucket: Some(250),
+            bucket_count: Some(bucket_count),
+            min_samples_per_bucket: Some(min_samples),
             factors: factors.clone(),
         },
     )
@@ -3507,22 +3613,22 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     train_nonlinear_quantile_ranker_inner(
         db,
         TrainNonlinearQuantileRankerRequest {
-            model_code: "phase7_gb_train_window_nlq_ranker".to_string(),
+            model_code: format!("{}_nlq_ranker", prefix),
             model_version: format!("w{}-{}-test", window.window_index, short_id),
-            model_version_id: Some(format!("p7gb-nlq-w{}-{}-te", window.window_index, short_id)),
+            model_version_id: Some(format!("{}-nlq-w{}-{}-te", prefix, window.window_index, short_id)),
             training_task_id: Some(test_training_task_id),
             prediction_set_id: Some(test_prediction_set_id.clone()),
             data_version_id: req.data_version_id.clone(),
             feature_set_version_id: feature_profile.to_string(),
-            training_dataset_id: format!("ds-p7gb-w{}-{}-te", window.window_index, short_id),
+            training_dataset_id: format!("ds-{}-w{}-{}-te", prefix, window.window_index, short_id),
             train_start_date: window.train_start.format("%Y%m%d").to_string(),
             train_end_date: window.train_end.format("%Y%m%d").to_string(),
             prediction_start_date: window.test_start.format("%Y%m%d").to_string(),
             prediction_end_date: window.test_end.format("%Y%m%d").to_string(),
-            label_horizon_days: Some(label_horizon_days),
-            label_objective: Some("risk_adjusted_excess_return".to_string()),
-            bucket_count: Some(7),
-            min_samples_per_bucket: Some(250),
+            label_horizon_days: Some(label_horizon_days as i64),
+            label_objective: Some(label_objective),
+            bucket_count: Some(bucket_count),
+            min_samples_per_bucket: Some(min_samples),
             factors,
         },
     )

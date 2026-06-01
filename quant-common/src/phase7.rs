@@ -15808,6 +15808,33 @@ fn with_train_window_ml_stress_fill_seed(
     seed
 }
 
+fn professional_ensemble_discovery_seed_trials() -> Vec<Value> {
+    // Single seed: the 4-Model Ensemble with PIT routing.
+    // The WFA executor detects this profile and runs multi-model training + routing.
+    vec![json!({
+        "profile": "ensemble_default",
+        "label_objectives": [
+            "asymmetric_excess_return",
+            "quality_adjusted_excess_return",
+            "quality_adjusted_risk_adjusted_excess_return",
+            "future_return"
+        ],
+        "label_horizon_days": [60, 60, 60, 5],
+        "model_max_pct": {"asym_bull": 0.07, "bear_q": 0.04, "bear_def": 0.07, "mr": 0.10},
+        "pit_routing": {
+            "mr_trigger": "prev_vol > 0.20",
+            "bearq_trigger": "trailing_return_42d < -0.02",
+            "deep_bear_trigger": "north_flow_zscore < -1.0",
+            "default": "ew3_asym"
+        },
+        "top_n": 20,
+        "rebalance_days": 20,
+        "feature_profile": "phase7_gb_quality_value_recovery_low_impact_v5",
+        "bucket_count": 10,
+        "min_samples_per_bucket": 100
+    })]
+}
+
 fn professional_train_window_ml_stress_fill_discovery_seed_trials() -> Vec<Value> {
     let anchors = [
         phase7_high_sharpe_boundary_base_seed(),
@@ -21821,6 +21848,84 @@ impl LayeredSearchConfig {
         config.score_candidate_pool_sizes = vec![2400, 2600, 2800];
         config.universe_profiles = vec!["listed_non_st".to_string()];
         config.seed_trials = professional_train_window_ml_stress_fill_discovery_seed_trials();
+        config
+    }
+
+    /// Phase 7-EN: 4-Model Ensemble + PIT routing search profile.
+    /// Each WFA window trains AsymBull/BearQ/BearDef/MR NLQR models,
+    /// then uses PIT signals to select the best model for OOS testing.
+    pub fn professional_ensemble_discovery_default() -> Self {
+        let mut config = Self::professional_train_window_stress_fill_target_exposure_default();
+        config.combo_versions = vec![
+            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_value_recovery_confirm_v1", "1.0.0"),
+            ComboVersion::new("phase7_growth_recovery_v1", "1.0.0"),
+            ComboVersion::new("phase7_quality_cashflow_dividend_confirm_v1", "1.0.0"),
+        ];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Descending];
+        config.top_n = vec![20];
+        config.rebalance_days = vec![20];
+        config.max_position_pct = vec![
+            Decimal::new(4, 2), Decimal::new(7, 2), Decimal::new(10, 2),
+        ];
+        config.max_gross_exposure = vec![Decimal::new(70, 2), Decimal::new(95, 2)];
+        config.portfolio_methods = vec!["stress_fill_aware_risk_budget".to_string()];
+        config.capacity_penalty_strength = vec![Decimal::new(200, 2)];
+        config.capacity_risk_budget_profiles = vec![
+            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
+        ];
+        config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v2".to_string()];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.candidate_risk_filter_profiles = vec![
+            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
+        ];
+        config.risk_contribution_control_profiles = vec![
+            "soft_single_name_15pct_v1".to_string(),
+        ];
+        config.stress_fill_confidence_exposure_profiles =
+            vec!["prediction_confidence_ascending_capacity_headroom_v1".to_string()];
+        config.market_regime_policies = vec![
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+        ];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.rebalance_hysteresis_pct = vec![Decimal::new(3, 2)];
+        config.partial_rebalance_ratio = vec![Decimal::new(60, 2)];
+        config.score_candidate_pool_sizes = vec![800];
+        config.universe_profiles = vec!["listed_non_st".to_string()];
+        config.seed_trials = vec![json!({
+            "train_window_ml_ranking_profile": "ensemble_default",
+            "label_objective": "asymmetric_excess_return",
+            "top_n": 20,
+            "rebalance": "20",
+            "bucket_count": 10,
+            "min_samples_per_bucket": 100,
+            "score_direction": "descending",
+            "combo_name": "phase7_financial_quality_v1",
+            "portfolio_method": "stress_fill_aware_risk_budget",
+            "candidate_ranking": "nonlinear_regime_alpha_liquidity_v2",
+            "max_position_pct": "0.07",
+            "max_gross_exposure": "0.95",
+            "capacity_penalty_strength": "2",
+            "capacity_risk_budget": "capacity_stress_participation_alpha_headroom_floor_70_v1",
+            "cash_utilization": "stress_fill_gross_98_v1",
+            "candidate_risk_filter": "soft_liquidity_low_volatility_low_correlation_v1",
+            "risk_contribution_control": "soft_single_name_15pct_v1",
+            "stress_fill_confidence_exposure": "prediction_confidence_ascending_capacity_headroom_v1",
+            "execution_impact_budget": "impact_turnover_15pct_v1",
+            "execution_schedule_profile": "twap_20d_v1",
+            "execution_carry_policy": "roll_forward_v1",
+            "rebalance_hysteresis_pct": "0.03",
+            "partial_rebalance_ratio": "0.6",
+            "score_candidate_pool_size": 800,
+            "universe_profile": "listed_non_st",
+            "market_regime": "quality_nonlinear_alpha_risk_memory_router_v3",
+            "prediction_blend_weight": "0.20",
+            "prediction_min_percentile": "0.30",
+            "prediction_min_score": "0.00"
+        })];
         config
     }
 
