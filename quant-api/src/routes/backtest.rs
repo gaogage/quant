@@ -944,7 +944,7 @@ pub struct MarketRegimeBacktestReq {
     pub min_observations: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct RunPredictionBacktestReq {
     pub prediction_set_id: String,
     #[serde(default = "default_prediction_strategy_version")]

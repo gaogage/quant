@@ -227,3 +227,372 @@ pub async fn portfolio_policy(
         None => Json(json!({"code": 1, "message": "portfolio policy not found"})),
     }
 }
+
+// ─── MVO Multi-Asset Backtest ───────────────────────────────────────
+
+use ndarray::Array2;
+use quant_common::mvo;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct MvoBacktestRequest {
+    /// ETF symbols for multi-asset allocation (gold, bond, sp500, nasdaq)
+    pub etf_symbols: Vec<String>,
+    /// Stock ensemble prediction set IDs per year: {"2020": "pred-xxx", ...}
+    pub stock_prediction_sets: std::collections::HashMap<String, String>,
+    /// Per-year max_position_pct overrides (optional)
+    pub stock_max_pct: Option<std::collections::HashMap<String, f64>>,
+    /// Min stock allocation (default 0.50)
+    #[serde(default = "default_min_stock")]
+    pub min_stock: f64,
+    /// MVO lookback months (default 36)
+    #[serde(default = "default_mvo_lookback")]
+    pub mvo_lookback_months: usize,
+    /// Top-N stocks per backtest (default 20)
+    #[serde(default = "default_top_n_mvo")]
+    pub top_n: usize,
+}
+
+fn default_min_stock() -> f64 { 0.50 }
+fn default_mvo_lookback() -> usize { 36 }
+fn default_top_n_mvo() -> usize { 20 }
+
+/// POST /api/v1/quant/portfolio/mvo-backtest
+///
+/// Runs Stock Ensemble backtests + MVO multi-asset allocation overlay.
+/// Returns stitched daily metrics with dynamic MVO weights.
+pub async fn mvo_backtest(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MvoBacktestRequest>,
+) -> impl IntoResponse {
+    use crate::routes::backtest::execute_prediction_backtest;
+    use crate::routes::backtest::RunPredictionBacktestReq;
+
+    let min_stock = req.min_stock.clamp(0.0, 1.0);
+    let lookback = req.mvo_lookback_months.max(12).min(60);
+
+    // Phase 1: Run stock backtests per year and collect daily NAV
+    let mut stock_nav: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    let mut years: Vec<i32> = req.stock_prediction_sets.keys()
+        .filter_map(|y| y.parse::<i32>().ok())
+        .collect();
+    years.sort();
+
+    for year in &years {
+        let pid = match req.stock_prediction_sets.get(&year.to_string()) {
+            Some(p) => p.clone(),
+            None => continue,
+        };
+        let max_pct = req.stock_max_pct.as_ref()
+            .and_then(|m| m.get(&year.to_string()).copied())
+            .unwrap_or(0.07);
+
+        let start = format!("{}0101", year);
+        let end = format!("{}1231", year);
+
+        let bt_req = RunPredictionBacktestReq {
+            prediction_set_id: pid.clone(),
+            strategy_version_id: "phase7-professional-v1".into(),
+            data_version_id: "full-market-2016-v1".into(),
+            top_n: req.top_n,
+            max_position_pct: max_pct,
+            start_date: start.clone(),
+            end_date: end.clone(),
+            rebalance: "monthly".into(),
+            score_direction: "descending".into(),
+            portfolio_method: "heuristic".into(),
+            persistence_mode: Some("full".into()),
+            max_gross_exposure: 1.0,
+            entry_delay: 0,
+            correlation_lookback_days: 60,
+            kelly_lookback_days: 60,
+            risk_budget_lookback_days: 60,
+            ..Default::default()
+        };
+
+        let task_id = format!("mvo-bt-{}-{}", year, uuid::Uuid::new_v4().simple().to_string().chars().take(8).collect::<String>());
+
+        match execute_prediction_backtest(&state.db, &task_id, bt_req).await {
+            Ok(output) => {
+                // Fetch equity curve
+                let eq_rows = sqlx::query_as::<_, (String, Option<f64>)>(
+                    "SELECT trade_date::text, portfolio_value::double precision
+                     FROM backtest_equity_curve
+                     WHERE backtest_task_id = $1
+                     ORDER BY trade_date"
+                )
+                .bind(&task_id)
+                .fetch_all(&state.db)
+                .await;
+
+                if let Ok(rows) = eq_rows {
+                    for (date, nav) in rows {
+                        if let Some(nav) = nav {
+                            if nav > 0.0 {
+                                stock_nav.insert(date, nav);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Stock backtest failed for {}: {}", year, e);
+            }
+        }
+    }
+
+    if stock_nav.is_empty() {
+        return Json(json!({"code": 1, "message": "No stock backtest data available"}));
+    }
+
+    // Phase 2: Load ETF daily prices
+    let etf_list = req.etf_symbols.iter()
+        .map(|s| format!("'{}'", s))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    if etf_list.is_empty() {
+        return Json(json!({"code": 1, "message": "No ETF symbols provided"}));
+    }
+
+    let etf_sql = format!(
+        "SELECT symbol, trade_date::text, close::double precision
+         FROM market_stock_daily_bar
+         WHERE symbol IN ({})
+         ORDER BY symbol, trade_date",
+        etf_list
+    );
+
+    let etf_rows = sqlx::query_as::<_, (String, String, Option<f64>)>(&etf_sql)
+        .fetch_all(&state.db)
+        .await;
+
+    let etf_data: std::collections::HashMap<String, std::collections::BTreeMap<String, f64>> = match etf_rows {
+        Ok(rows) => {
+            let mut map: std::collections::HashMap<String, std::collections::BTreeMap<String, f64>> = std::collections::HashMap::new();
+            for (sym, date, close) in rows {
+                if let Some(c) = close {
+                    if c > 0.0 {
+                        map.entry(sym).or_default().insert(date, c);
+                    }
+                }
+            }
+            map
+        }
+        Err(e) => {
+            return Json(json!({"code": 1, "message": format!("ETF data query failed: {}", e)}));
+        }
+    };
+
+    // Phase 3: Align stock + ETF daily data
+    let stock_dates: std::collections::BTreeSet<String> = stock_nav.keys().cloned().collect();
+    let mut common_dates: Vec<String> = Vec::new();
+    for date in &stock_dates {
+        let all_etfs_ok = req.etf_symbols.iter().all(|sym| {
+            etf_data.get(sym).and_then(|d| d.get(date)).is_some()
+        });
+        if all_etfs_ok {
+            common_dates.push(date.clone());
+        }
+    }
+    common_dates.sort();
+
+    if common_dates.len() < 60 {
+        return Json(json!({"code": 1, "message": format!("Insufficient common trading days: {}", common_dates.len())}));
+    }
+
+    // Phase 4: Compute daily returns for each asset
+    let n_assets = 1 + req.etf_symbols.len(); // stock + ETFs
+    let n_days = common_dates.len();
+
+    // Daily returns: [stock, etf1, etf2, ...]
+    let mut daily_returns: Vec<Vec<f64>> = Vec::with_capacity(n_days - 1);
+
+    let stock_prices: Vec<f64> = common_dates.iter()
+        .map(|d| stock_nav.get(d).copied().unwrap_or(1.0))
+        .collect();
+
+    let etf_prices: Vec<Vec<f64>> = req.etf_symbols.iter().map(|sym| {
+        common_dates.iter()
+            .map(|d| etf_data.get(sym).and_then(|m| m.get(d)).copied().unwrap_or(1.0))
+            .collect()
+    }).collect();
+
+    for i in 1..n_days {
+        let mut row = Vec::with_capacity(n_assets);
+        // Stock return
+        let stock_ret = if stock_prices[i-1] > 0.0 {
+            stock_prices[i] / stock_prices[i-1] - 1.0
+        } else { 0.0 };
+        row.push(stock_ret);
+        // ETF returns
+        for j in 0..req.etf_symbols.len() {
+            let ret = if etf_prices[j][i-1] > 0.0 {
+                etf_prices[j][i] / etf_prices[j][i-1] - 1.0
+            } else { 0.0 };
+            row.push(ret);
+        }
+        daily_returns.push(row);
+    }
+
+    // Phase 5: Monthly aggregation + MVO quarterly rebalancing
+    let mut monthly_rets: Vec<Vec<f64>> = Vec::new();
+    let mut month_keys: Vec<String> = Vec::new();
+    let mut current_month: Option<(String, f64, Vec<f64>)> = None; // (month_key, cum_stock, cum_etfs)
+
+    for (idx, date) in common_dates.iter().enumerate().skip(1) {
+        let month_key = date[..7].to_string();
+        let stock_ret = daily_returns[idx-1][0];
+        let etf_rets: Vec<f64> = (1..n_assets).map(|j| daily_returns[idx-1][j]).collect();
+
+        match &mut current_month {
+            Some((m, cum_s, cum_e)) if *m == month_key => {
+                *cum_s = (1.0 + *cum_s) * (1.0 + stock_ret) - 1.0;
+                for (j, r) in etf_rets.iter().enumerate() {
+                    cum_e[j] = (1.0 + cum_e[j]) * (1.0 + r) - 1.0;
+                }
+            }
+            _ => {
+                if let Some((m, cum_s, cum_e)) = current_month.take() {
+                    let mut row = vec![cum_s];
+                    row.extend(cum_e);
+                    monthly_rets.push(row);
+                    month_keys.push(m);
+                }
+                current_month = Some((month_key, stock_ret, etf_rets));
+            }
+        }
+    }
+    // Last month
+    if let Some((m, cum_s, cum_e)) = current_month {
+        let mut row = vec![cum_s];
+        row.extend(cum_e);
+        monthly_rets.push(row);
+        month_keys.push(m);
+    }
+
+    if monthly_rets.len() < lookback {
+        return Json(json!({"code": 1, "message": format!("Insufficient monthly data: {} < {}", monthly_rets.len(), lookback)}));
+    }
+
+    // Phase 6: MVO quarterly rebalancing simulation
+    let mut mvo_weights = vec![min_stock];
+    let mut remaining = 1.0 - min_stock;
+    for _ in 1..n_assets {
+        let w = remaining / (n_assets - 1) as f64;
+        mvo_weights.push(w);
+        remaining -= w;
+    }
+
+    let mut weight_history: Vec<Value> = Vec::new();
+    let mut mvo_daily_returns: Vec<f64> = Vec::new();
+
+    for (idx, date) in common_dates.iter().enumerate().skip(1) {
+        let month_key = &date[..7];
+
+        // Check if quarterly rebalance month (3, 6, 9, 12)
+        if let Some(month_num) = month_key.chars().skip(5).take(2).collect::<String>().parse::<usize>().ok() {
+            if month_num == 3 || month_num == 6 || month_num == 9 || month_num == 12 {
+                // Find the monthly data up to this point (expanding window)
+                let month_idx = month_keys.iter().position(|m| m == month_key);
+                if let Some(mi) = month_idx {
+                    if mi >= lookback {
+                        let train_start = mi - lookback;
+                        let train_data: Vec<Vec<f64>> = monthly_rets[train_start..mi].to_vec();
+                        let n_months = train_data.len();
+                        let n_cols = n_assets;
+
+                        if n_months >= 24 && n_cols > 0 {
+                            // Build ndarray from training data
+                            let mut data = Array2::<f64>::zeros((n_months, n_cols));
+                            for (r, row) in train_data.iter().enumerate() {
+                                for (c, &val) in row.iter().enumerate() {
+                                    if c < n_cols {
+                                        data[(r, c)] = val;
+                                    }
+                                }
+                            }
+
+                            if let Some(result) = mvo::mvo_allocate(&data, min_stock) {
+                                mvo_weights = result.weights.to_vec();
+                                let weight_pct: Vec<Value> = mvo_weights.iter()
+                                    .map(|&w| json!( (w * 100.0 * 100.0).round() / 100.0 ))
+                                    .collect();
+                                weight_history.push(json!({
+                                    "date": month_key,
+                                    "weights": weight_pct,
+                                    "sharpe": (result.sharpe * 100.0).round() / 100.0,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply current weights to daily returns
+        let stock_ret = daily_returns[idx-1][0];
+        let etf_ret_sum: f64 = (1..n_assets).zip(mvo_weights.iter().skip(1))
+            .map(|(j, &w)| daily_returns[idx-1][j] * w)
+            .sum();
+        let daily_ret = mvo_weights[0] * stock_ret + etf_ret_sum;
+        mvo_daily_returns.push(daily_ret);
+    }
+
+    // Phase 7: Compute metrics
+    let n = mvo_daily_returns.len() as f64;
+    if n < 60.0 {
+        return Json(json!({"code": 1, "message": "Insufficient simulation days"}));
+    }
+
+    let mean_daily = mvo_daily_returns.iter().sum::<f64>() / n;
+    let variance: f64 = mvo_daily_returns.iter().map(|r| (r - mean_daily).powi(2)).sum::<f64>() / (n - 1.0);
+    let std_daily = variance.sqrt();
+    let ann_return = (1.0 + mean_daily).powf(252.0) - 1.0;
+    let ann_vol = std_daily * (252.0_f64).sqrt();
+    let sharpe = if ann_vol > 0.0 { (ann_return - 0.02) / ann_vol } else { 0.0 };
+
+    let mut nav = 1.0_f64;
+    let mut peak = 1.0_f64;
+    let mut max_dd = 0.0_f64;
+    for &r in &mvo_daily_returns {
+        nav *= 1.0 + r;
+        peak = peak.max(nav);
+        let dd = (peak - nav) / peak;
+        max_dd = max_dd.max(dd);
+    }
+    let cumulative = nav - 1.0;
+    let calmar = if max_dd > 0.0 { ann_return / max_dd } else { 0.0 };
+
+    let downside: Vec<f64> = mvo_daily_returns.iter().filter(|&&r| r < 0.0).copied().collect();
+    let sortino = if downside.len() > 1 {
+        let ds_mean = downside.iter().sum::<f64>() / downside.len() as f64;
+        let ds_var = downside.iter().map(|r| (r - ds_mean).powi(2)).sum::<f64>() / (downside.len() - 1) as f64;
+        let ds_std = ds_var.sqrt() * (252.0_f64).sqrt();
+        if ds_std > 0.0 { (ann_return - 0.02) / ds_std } else { 0.0 }
+    } else { 0.0 };
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "trading_days": mvo_daily_returns.len(),
+            "months": monthly_rets.len(),
+            "metrics": {
+                "annual_return_pct": (ann_return * 100.0 * 100.0).round() / 100.0,
+                "annual_vol_pct": (ann_vol * 100.0 * 100.0).round() / 100.0,
+                "sharpe_ratio": (sharpe * 100.0).round() / 100.0,
+                "sortino_ratio": (sortino * 100.0).round() / 100.0,
+                "max_drawdown_pct": (max_dd * 100.0 * 100.0).round() / 100.0,
+                "calmar_ratio": (calmar * 100.0).round() / 100.0,
+                "cumulative_return_pct": (cumulative * 100.0 * 100.0).round() / 100.0,
+            },
+            "mvo_config": {
+                "min_stock_pct": min_stock,
+                "lookback_months": lookback,
+                "n_assets": n_assets,
+                "etf_symbols": req.etf_symbols,
+            },
+            "weight_history": weight_history,
+        }
+    }))
+}

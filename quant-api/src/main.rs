@@ -330,6 +330,11 @@ async fn main() {
             "/api/v1/quant/portfolio/policies/{policy_id}",
             get(routes::portfolio::portfolio_policy),
         )
+        // MVO 多资产配置
+        .route(
+            "/api/v1/quant/portfolio/mvo-backtest",
+            post(routes::portfolio::mvo_backtest),
+        )
         // 仿真交易
         .route(
             "/api/v1/quant/paper/accounts",

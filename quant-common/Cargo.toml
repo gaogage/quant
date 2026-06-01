@@ -14,3 +14,4 @@ rust_decimal.workspace = true
 reqwest.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
+ndarray.workspace = true

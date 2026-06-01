@@ -1,6 +1,7 @@
 /// Quant 系统统一错误类型
 use thiserror::Error;
 
+pub mod mvo;
 pub mod phase7;
 
 #[derive(Error, Debug)]

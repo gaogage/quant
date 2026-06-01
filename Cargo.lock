@@ -1603,6 +1603,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenv",
+ "ndarray",
  "quant-backtest",
  "quant-common",
  "quant-data",
@@ -1641,6 +1642,7 @@ name = "quant-common"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ndarray",
  "reqwest",
  "rust_decimal",
  "serde",
