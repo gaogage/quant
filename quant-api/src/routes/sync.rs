@@ -1370,6 +1370,37 @@ pub async fn sync_margin(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SyncFundDailyReq {
+    pub symbols: Vec<String>,
+    pub start_date: String,
+    pub end_date: String,
+    pub data_version_id: Option<String>,
+}
+
+pub async fn sync_fund_daily(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncFundDailyReq>,
+) -> impl IntoResponse {
+    let dv_id = req
+        .data_version_id
+        .unwrap_or_else(generated_data_version_id);
+    info!(data_version_id = %dv_id, symbols = req.symbols.len(), "同步基金日线");
+    match quant_data::sync::sync_fund_daily(
+        &state.db,
+        &state.tushare,
+        &req.symbols,
+        &req.start_date,
+        &req.end_date,
+        &dv_id,
+    )
+    .await
+    {
+        Ok(rows) => Json(json!({"code": 0, "data": {"rows_synced": rows}})),
+        Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
+    }
+}
+
 pub async fn sync_index_daily(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncIndexDailyReq>,

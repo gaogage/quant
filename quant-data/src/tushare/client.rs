@@ -186,6 +186,31 @@ impl TushareClient {
             .await
     }
 
+    /// 获取基金/ETF 日线数据，支持按代码 + 交易日期区间拉取。
+    /// Tushare fund_daily endpoint — 适用于场内 ETF/LOF
+    pub async fn fund_daily(
+        &self,
+        ts_code: Option<&str>,
+        trade_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(d) = trade_date {
+            params.push(("trade_date", d));
+        }
+        if let Some(d) = start_date {
+            params.push(("start_date", d));
+        }
+        if let Some(d) = end_date {
+            params.push(("end_date", d));
+        }
+        self.call_api::<Vec<serde_json::Value>>("fund_daily", params, &[]).await
+    }
+
     /// 获取每日基础/估值数据，支持按交易日或按单只股票区间分页拉取。
     pub async fn daily_basic(
         &self,

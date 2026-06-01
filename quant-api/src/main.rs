@@ -134,6 +134,10 @@ async fn main() {
             post(routes::sync::sync_margin),
         )
         .route(
+            "/api/v1/quant/data/sync/fund-daily",
+            post(routes::sync::sync_fund_daily),
+        )
+        .route(
             "/api/v1/quant/data/sync/index-daily",
             post(routes::sync::sync_index_daily),
         )

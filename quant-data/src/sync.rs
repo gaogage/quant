@@ -674,6 +674,98 @@ pub async fn sync_daily_basic(
     Ok(total_rows)
 }
 
+// ─── sync_fund_daily (ETF/LOF 基金日线) ──────────────────────────
+
+pub async fn sync_fund_daily(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool, &task_id, "fund_daily", "tushare",
+        Some(symbols), Some(s), Some(e), "running", None,
+    )
+    .await?;
+
+    repository::create_data_version(
+        pool, dv_id, "fund daily bars sync", "tushare",
+        &["market_stock_daily_bar"], s, e,
+    )
+    .await?;
+
+    let mut total_rows = 0usize;
+    let months = months_in_range(s, e);
+    info!("Syncing {} fund symbols across {} months", symbols.len(), months.len());
+
+    for (m_start, m_end) in &months {
+        let sd = m_start.format("%Y%m%d").to_string();
+        let ed = m_end.format("%Y%m%d").to_string();
+
+        for symbol in symbols {
+            match client
+                .fund_daily(Some(symbol), None, Some(&sd), Some(&ed))
+                .await
+            {
+                Ok(resp) => {
+                    if let Some(data) = resp.data {
+                        let maps = data.to_maps();
+                        if maps.is_empty() {
+                            continue;
+                        }
+
+                        let bars: Vec<MarketStockDailyBar> = maps
+                            .iter()
+                            .filter_map(|item| {
+                                let ts_code = get_str(item, "ts_code");
+                                Some(MarketStockDailyBar {
+                                    symbol: ts_code.to_string(),
+                                    trade_date: to_date(&get_str(item, "trade_date"))?,
+                                    open: to_decimal(get_f64(item, "open")),
+                                    high: to_decimal(get_f64(item, "high")),
+                                    low: to_decimal(get_f64(item, "low")),
+                                    close: to_decimal(get_f64(item, "close")),
+                                    pre_close: get_f64(item, "pre_close")
+                                        .and_then(|v| Decimal::from_f64_retain(v)),
+                                    change_pct: get_f64(item, "pct_chg").and_then(
+                                        |v| Decimal::from_f64_retain(v / 100.0),
+                                    ),
+                                    volume: to_decimal(get_f64(item, "vol")),
+                                    amount: to_decimal(get_f64(item, "amount")),
+                                })
+                            })
+                            .collect();
+
+                        if !bars.is_empty() {
+                            total_rows += bars.len();
+                            repository::upsert_daily_bars_batch(
+                                pool, &bars, dv_id, "tushare",
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("fund_daily failed for {} in {}-{}: {}", symbol, sd, ed, e);
+                }
+            }
+        }
+    }
+
+    repository::update_sync_task(
+        pool, &task_id, "completed",
+        total_rows as i32, total_rows as i32, 0,
+    )
+    .await?;
+    info!("fund_daily 同步完成: rows={}", total_rows);
+    Ok(total_rows)
+}
+
 // ─── sync_moneyflow ─────────────────────────────────────────────
 
 fn moneyflow_row_from_map(item: &Map<String, Value>) -> Option<MarketStockMoneyflow> {
