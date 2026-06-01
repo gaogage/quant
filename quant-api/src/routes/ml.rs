@@ -243,6 +243,7 @@ enum LabelObjective {
     RegimeConditionalExcessReturn,
     GradientBoostingExcessReturn,
     MlpExcessReturn,
+    AsymmetricExcessReturn,
 }
 
 impl LabelObjective {
@@ -261,8 +262,9 @@ impl LabelObjective {
             Some("regime_conditional_excess_return") => Ok(Self::RegimeConditionalExcessReturn),
             Some("gradient_boosting_excess_return") => Ok(Self::GradientBoostingExcessReturn),
             Some("mlp_excess_return") => Ok(Self::MlpExcessReturn),
+            Some("asymmetric_excess_return") => Ok(Self::AsymmetricExcessReturn),
             Some(other) => Err(format!(
-                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return, regime_conditional_excess_return, gradient_boosting_excess_return; got {}",
+                "label_objective must be one of future_return, future_excess_return, risk_adjusted_excess_return, quality_adjusted_excess_return, quality_adjusted_risk_adjusted_excess_return, fundamental_quality_adjusted_excess_return, regime_conditional_excess_return, gradient_boosting_excess_return, asymmetric_excess_return; got {}",
                 other
             )),
         }
@@ -283,6 +285,7 @@ impl LabelObjective {
             Self::RegimeConditionalExcessReturn => "regime_conditional_excess_return",
             Self::GradientBoostingExcessReturn => "gradient_boosting_excess_return",
             Self::MlpExcessReturn => "mlp_excess_return",
+            Self::AsymmetricExcessReturn => "asymmetric_excess_return",
         }
     }
 
@@ -290,7 +293,7 @@ impl LabelObjective {
         matches!(self, Self::FutureExcessReturn | Self::RiskAdjustedExcessReturn
             | Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn
             | Self::FundamentalQualityAdjustedExcessReturn | Self::RegimeConditionalExcessReturn
-            | Self::GradientBoostingExcessReturn | Self::MlpExcessReturn)
+            | Self::GradientBoostingExcessReturn | Self::MlpExcessReturn | Self::AsymmetricExcessReturn)
     }
 
     fn is_quality_adjusted(self) -> bool { matches!(self, Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn | Self::FundamentalQualityAdjustedExcessReturn | Self::RegimeConditionalExcessReturn | Self::GradientBoostingExcessReturn) }
@@ -3572,6 +3575,16 @@ fn label_for_objective(
         LabelObjective::GradientBoostingExcessReturn | LabelObjective::MlpExcessReturn => {
             let benchmark_return = future_return_label_until(benchmark_closes, trade_date, max_label_date, horizon_days)?;
             Some(stock_return - benchmark_return)
+        }
+        LabelObjective::AsymmetricExcessReturn => {
+            let benchmark_return = future_return_label_until(benchmark_closes, trade_date, max_label_date, horizon_days)?;
+            let excess = stock_return - benchmark_return;
+            // Asymmetric penalty: negative returns penalized 2x, positive returns unchanged
+            if excess > 0.0 {
+                Some(excess)
+            } else {
+                Some(excess * 2.0)
+            }
         }
     }
 }
