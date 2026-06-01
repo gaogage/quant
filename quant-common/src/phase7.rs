@@ -19116,6 +19116,87 @@ impl LayeredSearchConfig {
         config
     }
 
+    /// Risk-managed price_volume profile for production-grade WFA.
+    /// Three-layer risk control: stop-loss (per-position), drawdown (portfolio-level),
+    /// and volatility targeting. Designed to compress MaxDD and improve Sharpe/Calmar
+    /// while preserving the +26.7% stitched alpha of price_volume_expanded_v1.
+    pub fn professional_risk_managed_price_volume_discovery_default() -> Self {
+        let mut config = Self::professional_price_volume_heuristic_discovery_default();
+        // Layer 1: Per-position stop-loss with cooldown
+        // 7.5% stop prevents single-stock blowups; 20-day cooldown prevents whipsaw
+        config.position_risk_controls = vec![
+            PositionRiskControlProfile::stop_loss_with_cooldown(
+                "stop_loss_075_cooldown_20", Decimal::new(75, 3), 20,
+            ),
+            PositionRiskControlProfile::off(),
+        ];
+        // Layer 2: Portfolio drawdown control
+        // When DD > 8%: reduce exposure to 50%. Recovery at 30% of peak DD: restore to 70%.
+        config.portfolio_drawdown_controls = vec![
+            PortfolioDrawdownControlProfile::recover(
+                "dd_recover_8_22_50_30_70",
+                Decimal::new(8, 2),   // reduce_start_pct
+                Decimal::new(22, 2),  // reduce_full_pct
+                Decimal::new(50, 2),  // min_exposure
+                Some(252),            // peak_lookback_days
+                Decimal::new(30, 2),  // recovery_start_pct
+                Decimal::new(70, 2),  // recovery_full_pct
+                Decimal::ONE,         // recovery_boost
+            ),
+            PortfolioDrawdownControlProfile::preserve(
+                "dd_preserve_10_25_50",
+                Decimal::new(10, 2),
+                Decimal::new(25, 2),
+                Decimal::new(50, 2),
+                Some(252),
+            ),
+            PortfolioDrawdownControlProfile::off(),
+        ];
+        // Layer 3: Portfolio volatility targeting
+        // Target 18% annual vol with 120-day lookback; floor at 50% exposure
+        config.portfolio_volatility_controls = vec![
+            PortfolioVolatilityControlProfile::target(
+                "vol120_18_50_100", Decimal::new(18, 2), 120,
+                Decimal::new(50, 2), Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::target(
+                "vol120_15_50_100", Decimal::new(15, 2), 120,
+                Decimal::new(50, 2), Decimal::ONE,
+            ),
+            PortfolioVolatilityControlProfile::off(),
+        ];
+        // Concentrated portfolio: fewer stocks, higher conviction
+        config.top_n = vec![15, 20];
+        config.max_position_pct = vec![
+            Decimal::new(5, 2),
+            Decimal::new(7, 2),
+            Decimal::new(10, 2),
+        ];
+        config.max_pairwise_correlation = vec![
+            Decimal::new(60, 2),
+            Decimal::new(70, 2),
+            Decimal::new(80, 2),
+        ];
+        // Risk-managed seeds
+        config.seed_trials = vec![
+            json!({"combo_name": "phase7_price_volume_expanded_v1", "top_n": 20, "rebalance": "30",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.07",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1",
+                   "position_risk_control": "stop_loss_075_cooldown_20",
+                   "portfolio_drawdown_control": "dd_recover_8_22_50_30_70",
+                   "portfolio_volatility_control": "vol120_18_50_100"}),
+            json!({"combo_name": "phase7_price_volume_expanded_v1", "top_n": 15, "rebalance": "20",
+                   "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.05",
+                   "max_gross_exposure": "0.95", "portfolio_method": "heuristic",
+                   "benchmark": "000300.SH", "universe_profile": "listed_non_st", "entry_delay": "1",
+                   "position_risk_control": "stop_loss_075_cooldown_20",
+                   "portfolio_drawdown_control": "dd_preserve_10_25_50",
+                   "portfolio_volatility_control": "vol120_15_50_100"}),
+        ];
+        config
+    }
+
     /// Simplified NLQR profile for WFA robustness validation.
     /// Uses 15 core factors (vs 51), 5 buckets (vs 10), excess_return label (no PIT routing),
     /// and heuristic portfolio construction (no stress_fill/TWAP/roll_forward).

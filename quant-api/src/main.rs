@@ -335,6 +335,10 @@ async fn main() {
             "/api/v1/quant/portfolio/mvo-backtest",
             post(routes::portfolio::mvo_backtest),
         )
+        .route(
+            "/api/v1/quant/experiments/{experiment_run_id}/mvo-overlay",
+            post(routes::portfolio::mvo_experiment_overlay),
+        )
         // 仿真交易
         .route(
             "/api/v1/quant/paper/accounts",

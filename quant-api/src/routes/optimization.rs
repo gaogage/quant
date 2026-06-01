@@ -1677,6 +1677,12 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_price_volume_heuristic_discovery".to_string(),
             LayeredSearchConfig::professional_price_volume_heuristic_discovery_default(),
         ),
+        "professional_risk_managed_price_volume_discovery"
+        | "risk_managed_price_volume_discovery"
+        | "phase7_s5" => (
+            "professional_risk_managed_price_volume_discovery".to_string(),
+            LayeredSearchConfig::professional_risk_managed_price_volume_discovery_default(),
+        ),
         "professional_simple_nlqr_discovery"
         | "simple_nlqr_discovery"
         | "phase7_simple_nlqr"
