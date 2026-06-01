@@ -1006,6 +1006,10 @@ pub struct RunPredictionBacktestReq {
     pub mode: Option<String>,
     pub persistence_mode: Option<String>,
     pub market_regime: Option<String>,
+    pub portfolio_volatility_target_pct: Option<f64>,
+    pub portfolio_volatility_lookback_days: Option<usize>,
+    pub portfolio_volatility_min_exposure: Option<f64>,
+    pub portfolio_volatility_max_exposure: Option<f64>,
 }
 
 pub(crate) struct FactorBacktestRunOutput {
@@ -2488,7 +2492,13 @@ pub(crate) async fn execute_prediction_backtest(
         execution_max_carry_days,
         max_participation_rate,
         persistence_mode,
-        risk_control: Default::default(),
+        risk_control: RiskControlConfig {
+            portfolio_volatility_target_pct: req.portfolio_volatility_target_pct.and_then(|v| Decimal::from_f64(v)),
+            portfolio_volatility_lookback_days: req.portfolio_volatility_lookback_days,
+            portfolio_volatility_min_exposure: req.portfolio_volatility_min_exposure.and_then(|v| Decimal::from_f64(v)),
+            portfolio_volatility_max_exposure: req.portfolio_volatility_max_exposure.and_then(|v| Decimal::from_f64(v)),
+            ..RiskControlConfig::default()
+        },
     };
 
     let runner = BacktestRunner::new(db.clone());

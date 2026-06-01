@@ -9816,6 +9816,10 @@ fn build_prediction_trial_request(
         persistence_mode: optional_string("persistence_mode")?
             .or_else(|| Some("summary_only".into())),
         market_regime: optional_string("market_regime")?,
+        portfolio_volatility_target_pct: optional_f64_value("portfolio_volatility_target_pct")?,
+        portfolio_volatility_lookback_days: None,
+        portfolio_volatility_min_exposure: optional_f64_value("portfolio_volatility_min_exposure")?,
+        portfolio_volatility_max_exposure: optional_f64_value("portfolio_volatility_max_exposure")?,
     })
 }
 
