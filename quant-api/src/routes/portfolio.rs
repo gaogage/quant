@@ -606,12 +606,33 @@ pub struct MvoOverlayRequest {
     /// ETF symbols for multi-asset allocation (gold, bond, sp500, nasdaq)
     #[serde(default = "default_etf_symbols")]
     pub etf_symbols: Vec<String>,
-    /// Minimum A-share allocation (default 0.25)
+    /// Minimum A-share allocation (default 0.25). Ignored if regime_aware is true.
     #[serde(default = "default_min_stock_overlay")]
     pub min_stock: f64,
     /// MVO lookback years (default 5)
     #[serde(default = "default_mvo_lookback_years")]
     pub lookback_years: i32,
+    /// Enable PIT regime-aware MVO routing (default: false).
+    /// When true, min_stock is dynamically computed from trailing 1-year A-share return:
+    ///   trail > 15% → min_stock = 0.25 (bull)
+    ///   trail < -5% → min_stock = 0.08 (bear)
+    ///   else       → min_stock = 0.15 (normal)
+    #[serde(default)]
+    pub regime_aware: bool,
+    /// Portfolio drawdown threshold for exposure reduction (default: 0 = disabled).
+    /// When blended portfolio DD exceeds this threshold, daily returns are scaled
+    /// by dd_scale to simulate global exposure reduction.
+    /// Recommended: 0.07 (7%) with dd_scale = 0.60.
+    #[serde(default)]
+    pub dd_threshold: f64,
+    /// Scale factor applied to daily returns when DD exceeds threshold (default: 1.0).
+    /// 0.60 = reduce exposure to 60%. Only active when dd_threshold > 0.
+    #[serde(default = "default_dd_scale")]
+    pub dd_scale: f64,
+}
+
+fn default_dd_scale() -> f64 {
+    1.0
 }
 
 fn default_etf_symbols() -> Vec<String> {
@@ -681,8 +702,9 @@ pub async fn mvo_experiment_overlay(
         };
 
         // Compute MVO weights using data available at test_start (PIT-compliant)
+        // regime_aware: dynamically sets min_stock from trailing A-share return
         let weights = match compute_mvo_weights_pit(
-            &etf_prices, &all_symbols, test_start_date, lookback_years, min_stock,
+            &etf_prices, &all_symbols, test_start_date, lookback_years, min_stock, req.regime_aware,
         ) {
             Some(w) => w,
             None => {
@@ -717,6 +739,12 @@ pub async fn mvo_experiment_overlay(
         if first_nav <= 0.0 {
             continue;
         }
+
+        // DD control state: track peak NAV for drawdown computation
+        let dd_enabled = req.dd_threshold > 0.0 && req.dd_scale < 1.0;
+        let dd_recover_threshold = req.dd_threshold * 0.5;
+        let mut peak_blended_nav = prev_end_nav;
+        let mut dd_active = false;
 
         for i in 0..sorted_dates.len() {
             let date = sorted_dates[i];
@@ -755,14 +783,40 @@ pub async fn mvo_experiment_overlay(
             }
 
             // Weighted blend
-            let blend_ret: f64 = weights
+            let mut blend_ret: f64 = weights
                 .iter()
                 .zip(daily_rets.iter())
                 .map(|(w, r)| w * r)
                 .sum();
 
+            // Portfolio DD control: scale down returns when drawdown exceeds threshold
+            if dd_enabled {
+                let current_dd = if peak_blended_nav > 0.0 {
+                    (peak_blended_nav - all_blended_nav.last().copied().unwrap_or(peak_blended_nav))
+                        / peak_blended_nav
+                } else {
+                    0.0
+                };
+                if current_dd > req.dd_threshold {
+                    dd_active = true;
+                } else if current_dd < dd_recover_threshold {
+                    dd_active = false;
+                }
+                if dd_active {
+                    blend_ret *= req.dd_scale;
+                }
+            }
+
             all_stock_nav.push(all_stock_nav[all_stock_nav.len() - 1] * (1.0 + stock_ret));
             all_blended_nav.push(all_blended_nav[all_blended_nav.len() - 1] * (1.0 + blend_ret));
+
+            // Update peak NAV for DD tracking
+            if dd_enabled {
+                let current_blended = *all_blended_nav.last().unwrap_or(&peak_blended_nav);
+                if current_blended > peak_blended_nav {
+                    peak_blended_nav = current_blended;
+                }
+            }
         }
 
         prev_end_nav = *all_stock_nav.last().unwrap_or(&1.0);
@@ -785,6 +839,9 @@ pub async fn mvo_experiment_overlay(
                 "lookback_years": lookback_years,
                 "etf_symbols": etf_symbols,
                 "n_assets": 1 + etf_symbols.len(),
+                "regime_aware": req.regime_aware,
+                "dd_threshold": req.dd_threshold,
+                "dd_scale": req.dd_scale,
             },
             "stock_only": stock_metrics,
             "mvo_blended": blended_metrics,
@@ -922,15 +979,63 @@ async fn load_mvo_etf_prices(
     Ok(prices)
 }
 
+/// PIT-compliant trailing return computation for regime detection.
+/// Computes the trailing N-month return of HS300 up to `ref_date`.
+fn compute_trailing_return(
+    etf_prices: &PriceMap,
+    ref_date: NaiveDate,
+    months: i32,
+) -> Option<f64> {
+    let lookback_days = (months * 21) as i64;
+    let lookback_start = ref_date - chrono::Duration::days(lookback_days);
+
+    let hs300 = etf_prices.get("000300.SH")?;
+    let dates: Vec<&String> = hs300
+        .keys()
+        .filter(|d| *d >= &lookback_start.format("%Y-%m-%d").to_string() && *d < &ref_date.format("%Y-%m-%d").to_string())
+        .collect();
+
+    if dates.len() < 50 {
+        return None;
+    }
+
+    let first_price = hs300.get(*dates.first()?).copied()?;
+    let last_price = hs300.get(*dates.last()?).copied()?;
+    if first_price <= 0.0 {
+        return None;
+    }
+
+    Some(last_price / first_price - 1.0)
+}
+
+/// Compute regime-aware min_stock from trailing A-share return.
+/// PIT-compliant: only uses data available at ref_date.
+fn regime_aware_min_stock(etf_prices: &PriceMap, ref_date: NaiveDate) -> f64 {
+    match compute_trailing_return(etf_prices, ref_date, 12) {
+        Some(trail) if trail > 0.15 => 0.25, // Bull: more equity
+        Some(trail) if trail < -0.05 => 0.08, // Bear: defensive
+        _ => 0.15,                              // Normal
+    }
+}
+
 /// PIT-compliant MVO weight computation.
 /// Uses expanding window of monthly returns up to `test_start`.
+/// If `regime_aware` is true, `min_stock` is dynamically computed from
+/// trailing 1-year A-share return (PIT-compliant).
 fn compute_mvo_weights_pit(
     etf_prices: &PriceMap,
     symbols: &[String],
     test_start: NaiveDate,
     lookback_years: i32,
     min_stock: f64,
+    regime_aware: bool,
 ) -> Option<Vec<f64>> {
+    // Regime-aware: dynamically compute min_stock from trailing A-share return
+    let effective_min_stock = if regime_aware {
+        regime_aware_min_stock(etf_prices, test_start)
+    } else {
+        min_stock
+    };
     let lookback_start = test_start - chrono::Duration::days(lookback_years as i64 * 365);
     let start_str = lookback_start.format("%Y-%m-%d").to_string();
     let end_str = test_start.format("%Y-%m-%d").to_string();
@@ -996,7 +1101,7 @@ fn compute_mvo_weights_pit(
     let arr = Array2::from_shape_vec((n_rows, n_cols), flat).ok()?;
 
     // Run MVO optimization
-    let result = mvo::mvo_allocate(&arr, min_stock)?;
+    let result = mvo::mvo_allocate(&arr, effective_min_stock)?;
     Some(result.weights.to_vec())
 }
 
