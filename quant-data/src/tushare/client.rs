@@ -845,4 +845,25 @@ impl TushareClient {
         }
         self.call_api::<Vec<serde_json::Value>>("margin", params, &[]).await
     }
+
+    /// 股票曾用名 / 名称变更历史
+    /// Tushare namechange endpoint — 返回 ts_code, name, start_date, end_date, change_reason
+    pub async fn namechange(
+        &self,
+        ts_code: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(c) = ts_code {
+            params.push(("ts_code", c));
+        }
+        if let Some(d) = start_date {
+            params.push(("start_date", d));
+        }
+        if let Some(d) = end_date {
+            params.push(("end_date", d));
+        }
+        self.call_api::<Vec<serde_json::Value>>("namechange", params, &[]).await
+    }
 }

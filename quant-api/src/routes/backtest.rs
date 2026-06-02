@@ -256,22 +256,7 @@ async fn resolve_effective_factor_coverage(
 }
 
 fn effective_factor_coverage_sql(universe_profile: TradableUniverseProfile) -> String {
-    let (join_sql, filter_sql) = match universe_profile {
-        TradableUniverseProfile::All => ("", ""),
-        TradableUniverseProfile::ListedNonSt => (
-            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
-            "\n           AND ms.list_status = 'L' AND COALESCE(ms.is_st, false) = false",
-        ),
-        TradableUniverseProfile::MainBoardNonSt => (
-            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
-            "\n           AND ms.list_status = 'L'
-           AND COALESCE(ms.is_st, false) = false
-           AND ms.exchange IN ('SSE', 'SZSE')
-           AND COALESCE(ms.market, '') NOT ILIKE '%创业%'
-           AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
-           AND COALESCE(ms.market, '') NOT ILIKE '%北交%'",
-        ),
-    };
+    let (join_sql, filter_sql) = build_universe_filter(universe_profile);
 
     format!(
         "SELECT mfv.trade_date, COUNT(*)::bigint AS score_rows
@@ -286,6 +271,38 @@ fn effective_factor_coverage_sql(universe_profile: TradableUniverseProfile) -> S
          ORDER BY mfv.trade_date ASC
          LIMIT 1"
     )
+}
+
+fn build_universe_filter(profile: TradableUniverseProfile) -> (&'static str, String) {
+    // PIT 合规 ST 过滤：使用 market_stock_name_history，
+    // 仅排除在 trade_date 当时已经进入 ST 状态的股票（不会用未来数据）
+    let pit_st_not_in = "\n           AND mfv.symbol NOT IN (
+               SELECT symbol FROM market_stock_name_history
+               WHERE is_st = true
+                 AND start_date <= mfv.trade_date
+                 AND (end_date IS NULL OR end_date >= mfv.trade_date))";
+
+    match profile {
+        TradableUniverseProfile::All => ("", String::new()),
+        TradableUniverseProfile::ListedNonSt => (
+            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
+            format!(
+                "\n           AND ms.list_status = 'L'{}",
+                pit_st_not_in
+            ),
+        ),
+        TradableUniverseProfile::MainBoardNonSt => (
+            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
+            format!(
+                "\n           AND ms.list_status = 'L'
+           AND ms.exchange IN ('SSE', 'SZSE')
+           AND ms.symbol NOT LIKE '300%SZ'
+           AND ms.symbol NOT LIKE '301%SZ'
+           AND ms.symbol NOT LIKE '688%SH'{}",
+                pit_st_not_in
+            ),
+        ),
+    }
 }
 
 async fn resolve_warmup_start_date(

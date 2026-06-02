@@ -138,6 +138,14 @@ async fn main() {
             post(routes::sync::sync_fund_basic),
         )
         .route(
+            "/api/v1/quant/data/sync/namechange",
+            post(routes::sync::sync_namechange),
+        )
+        .route(
+            "/api/v1/quant/data/sync/historical",
+            post(routes::sync::sync_historical),
+        )
+        .route(
             "/api/v1/quant/data/sync/fund-daily",
             post(routes::sync::sync_fund_daily),
         )
@@ -359,6 +367,10 @@ async fn main() {
         .route(
             "/api/v1/quant/portfolio/mvo-backtest",
             post(routes::portfolio::mvo_backtest),
+        )
+        .route(
+            "/api/v1/quant/backtests/{task_id}/mvo-simulate",
+            post(routes::portfolio::mvo_simulate),
         )
         .route(
             "/api/v1/quant/experiments/{experiment_run_id}/mvo-overlay",

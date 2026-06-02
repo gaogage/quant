@@ -4,9 +4,12 @@
 //! 收盘 (15:30):     推送钉钉持仓摘要 (每日一次)
 //! 历史批量同步:     API 手动触发 (quant-sync-daily)
 //!
+//! MVO 策略: Ledoit-Wolf + Grid Search 季度调仓 (自动发现权重)
 //! 启动时通过 tokio::spawn 在后台运行，每 60 秒检查一次。
 
-use chrono::{Local, NaiveDate, Timelike};
+use chrono::{Datelike, Local, NaiveDate, Timelike};
+use ndarray::Array2;
+use quant_common::mvo;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -18,10 +21,16 @@ fn short_id() -> String {
 
 struct DailyState {
     date: Option<NaiveDate>,
-    last_sync_minute: Option<u32>,    // 上次盘中数据同步的分钟数
-    signals_generated: bool,           // 今日是否已生成交易信号
-    dingtalk_sent: bool,               // 今日是否已推送钉钉
-    cleanup_done: bool,                // 今日是否已完成过期数据清理
+    last_sync_minute: Option<u32>,
+    signals_generated: bool,
+    dingtalk_sent: bool,
+    cleanup_done: bool,
+}
+
+/// MVO 权重缓存（季度更新）
+struct MvoWeightCache {
+    quarter: String,              // e.g. "2026-Q2"
+    weights: Vec<f64>,            // [A股, 黄金, 国债, SP500, 纳指]
 }
 
 /// 启动后台调度器。
@@ -34,19 +43,35 @@ pub fn start_scheduler(db: PgPool, port: u16) {
             dingtalk_sent: false,
             cleanup_done: false,
         }));
+        let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] 已启动: 盘中9:30-15:00实时同步+交易, 15:30钉钉推送");
+        info!("[scheduler] 已启动: LW-MVO自动发现+季度调仓, 盘中9:30-15:00实时同步+交易, 15:30钉钉推送");
 
         loop {
             interval.tick().await;
-            if let Err(e) = run_tick(&db, &state, port).await {
+            if let Err(e) = run_tick(&db, &state, &mvo_cache, port).await {
                 error!("[scheduler] 任务失败: {}", e);
             }
         }
     });
 }
 
-async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, port: u16) -> Result<(), String> {
+/// 获取当前日期对应的最优 WFA 参数（从已完成的实验中提取）
+async fn get_current_wfa_params(db: &PgPool, date: NaiveDate) -> Result<serde_json::Value, String> {
+    let row = sqlx::query_as::<_, (serde_json::Value,)>(
+        "SELECT parameters FROM wfa_strategy_params
+         WHERE test_start <= $1 AND test_end >= $1
+         ORDER BY score DESC NULLS LAST LIMIT 1",
+    )
+    .bind(date)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("wfa params: {e}"))?;
+
+    Ok(row.map(|(p,)| p).unwrap_or_default())
+}
+
+async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16) -> Result<(), String> {
     let now = Local::now();
     let today = now.date_naive();
     let hour = now.time().hour();
@@ -111,8 +136,8 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, port: u16) -> Res
             };
 
             if should_generate {
-                info!("[scheduler] 生成交易信号...");
-                match generate_paper_signals_for_all(db, port, today).await {
+                info!("[scheduler] 生成交易信号 (LW-MVO)...");
+                match generate_paper_signals_for_all(db, mvo_cache, port, today).await {
                     Ok(_) => {
                         let mut st = state.lock().await;
                         st.signals_generated = true;
@@ -168,6 +193,219 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, port: u16) -> Res
         }
     }
 
+    // ── 季度 WFA 自动优化 (每季度第一个交易日) ──
+    let is_first_trading_day_of_quarter = {
+        let m = today.month();
+        let is_q_start = matches!(m, 1 | 4 | 7 | 10);
+        if !is_q_start {
+            false
+        } else {
+            // 检查是否是该季度第一个交易日
+            sqlx::query_as::<_, (Option<bool>,)>(
+                "SELECT is_open FROM market_trade_calendar WHERE trade_date = $1",
+            )
+            .bind(today)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|(v,)| v)
+            .unwrap_or(false)
+        }
+    };
+
+    if is_first_trading_day_of_quarter && hour >= 16 {
+        let quarter = format!("{}-Q{}", today.year(), (today.month() - 1) / 3 + 1);
+        match check_and_trigger_wfa(db, port, &quarter, today).await {
+            Ok(Some(msg)) => info!("[scheduler] WFA: {}", msg),
+            Ok(None) => {}
+            Err(e) => warn!("[scheduler] WFA check failed: {}", e),
+        }
+    }
+
+    Ok(())
+}
+
+/// 检查是否需要触发 WFA 优化，如果需要则启动实验。
+/// 返回 Some(msg) 表示执行了操作，None 表示跳过。
+async fn check_and_trigger_wfa(
+    db: &PgPool, port: u16, quarter: &str, today: NaiveDate,
+) -> Result<Option<String>, String> {
+    // 检查已有该季度的 WFA 参数
+    let existing = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM wfa_strategy_params WHERE test_start <= $1 AND test_end >= $1",
+    )
+    .bind(today)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("wfa query: {e}"))?;
+
+    if existing.0 > 0 {
+        return Ok(None); // 已有参数，跳过
+    }
+
+    // 检查是否有正在运行的实验
+    let running = sqlx::query_as::<_, (String,)>(
+        "SELECT experiment_run_id FROM experiment_run
+         WHERE experiment_type = 'phase7_oos_walk_forward_discovery'
+           AND status IN ('running', 'queued')
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("exp query: {e}"))?;
+
+    if running.is_some() {
+        // 检查是否可以从已完成的实验提取参数
+        try_extract_wfa_params(db).await?;
+        return Ok(Some("已有实验运行中，已尝试提取参数".into()));
+    }
+
+    // 检查最近一次实验完成时间（避免过于频繁）
+    let recent = sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>,)>(
+        "SELECT created_at FROM experiment_run
+         WHERE experiment_type = 'phase7_oos_walk_forward_discovery'
+           AND status = 'completed'
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("recent query: {e}"))?;
+
+    if let Some((last_time,)) = recent {
+        let days_since = (chrono::Utc::now() - last_time).num_days();
+        if days_since < 30 {
+            // 尝试从最近的实验提取参数
+            try_extract_wfa_params(db).await?;
+            return Ok(Some(format!("最近实验 {} 天前，跳过新建", days_since)));
+        }
+    }
+
+    // 启动新的 WFA 实验
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{}", port);
+    let resp = client
+        .post(format!("{}/api/v1/quant/optimizations/phase7-oos-walk-forward-discovery", base))
+        .json(&serde_json::json!({
+            "data_version_id": "research-full-2016-2026-20260515",
+            "strategy_version_id": "phase7-professional-v1",
+            "search_profile": "professional_simple_heuristic_discovery_default",
+            "start_date": "20160201",
+            "end_date": today.format("%Y%m%d").to_string(),
+            "oos_top_n": 2,
+            "execution_mode": "background",
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("HTTP: {e}"))?;
+
+    if resp.status().is_success() {
+        Ok(Some(format!("新 WFA 实验已启动 (quarter={})", quarter)))
+    } else {
+        Err(format!("WFA 启动失败: {}", resp.status()))
+    }
+}
+
+/// 从已完成的 WFA 实验中提取最优参数
+async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
+    // 找到最近完成的实验
+    let exp_id = sqlx::query_as::<_, (String,)>(
+        "SELECT experiment_run_id FROM experiment_run
+         WHERE experiment_type = 'phase7_oos_walk_forward_discovery'
+           AND status = 'completed'
+         ORDER BY completed_at DESC NULLS LAST LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("exp: {e}"))?
+    .map(|(id,)| id);
+
+    let Some(exp_id) = exp_id else { return Ok(()); };
+
+    // 检查是否已提取过
+    let already = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM wfa_strategy_params WHERE experiment_run_id = $1",
+    )
+    .bind(&exp_id)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("check: {e}"))?;
+
+    if already.0 > 0 {
+        return Ok(());
+    }
+
+    // 获取该实验的所有 optimization tasks
+    let tasks = sqlx::query_as::<_, (String, i32)>(
+        "SELECT o.optimization_task_id, (o.walk_forward_config->>'window_index')::int
+         FROM optimization_task o
+         WHERE o.walk_forward_config->>'experiment_run_id' = $1
+           AND o.status = 'completed'
+         ORDER BY (o.walk_forward_config->>'window_index')::int",
+    )
+    .bind(&exp_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("tasks: {e}"))?;
+
+    let mut extracted = 0;
+    for (task_id, window_idx) in &tasks {
+        // 找 best_trial
+        let trial = sqlx::query_as::<_, (String, Option<serde_json::Value>, Option<rust_decimal::Decimal>)>(
+            "SELECT t.trial_id, t.parameters, t.score
+             FROM optimization_trial t
+             WHERE t.optimization_task_id = $1 AND t.status = 'completed'
+             ORDER BY t.score DESC NULLS LAST LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("trial: {e}"))?;
+
+        if let Some((trial_id, Some(params), score)) = trial {
+            // 从 walk_forward_config 获取窗口日期
+            let wf: Option<serde_json::Value> = sqlx::query_as::<_, (Option<serde_json::Value>,)>(
+                "SELECT walk_forward_config FROM optimization_task WHERE optimization_task_id = $1",
+            )
+            .bind(task_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|(v,)| v);
+
+            let test_start = wf.as_ref()
+                .and_then(|w| w.get("test_start").and_then(|v| v.as_str()))
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+            let test_end = wf.as_ref()
+                .and_then(|w| w.get("test_end").and_then(|v| v.as_str()))
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+
+            if let (Some(ts), Some(te)) = (test_start, test_end) {
+                sqlx::query(
+                    "INSERT INTO wfa_strategy_params (experiment_run_id, window_index, test_start, test_end, parameters, score)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (experiment_run_id, window_index) DO UPDATE
+                     SET parameters = EXCLUDED.parameters, score = EXCLUDED.score",
+                )
+                .bind(&exp_id)
+                .bind(window_idx)
+                .bind(ts)
+                .bind(te)
+                .bind(&params)
+                .bind(score.map(|s| s.to_string().parse::<f64>().unwrap_or(0.0)))
+                .execute(db)
+                .await
+                .map_err(|e| format!("insert wfa: {e}"))?;
+                extracted += 1;
+                info!("[scheduler] WFA 参数已提取: window={} trial={}", window_idx, &trial_id[..32.min(trial_id.len())]);
+            }
+        }
+    }
+
+    if extracted > 0 {
+        info!("[scheduler] WFA 参数提取完成: {} 个窗口", extracted);
+    }
     Ok(())
 }
 
@@ -209,9 +447,9 @@ async fn sync_intraday_data(port: u16, date: NaiveDate) -> Result<(), String> {
     Ok(())
 }
 
-/// 为所有活跃模拟账号生成交易信号。
+/// 为所有活跃模拟账号生成交易信号（使用 LW-MVO 自动发现权重）。
 async fn generate_paper_signals_for_all(
-    db: &PgPool, port: u16, date: NaiveDate,
+    db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate,
 ) -> Result<(), String> {
     let accounts = sqlx::query_as::<_, (String, String)>(
         "SELECT paper_account_id, name FROM paper_account
@@ -239,19 +477,65 @@ async fn generate_paper_signals_for_all(
         let client = reqwest::Client::new();
         let base = format!("http://localhost:{}", port);
 
+        // 获取当前 WFA 最优参数（如有），合并到默认参数
+        let wfa_params = get_current_wfa_params(db, date).await.unwrap_or_default();
+
+        let combo_name = wfa_params.get("combo_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("phase7_price_volume_expanded_v1");
+        let top_n = wfa_params.get("top_n")
+            .and_then(|v| v.as_u64()).unwrap_or(15) as usize;
+        let portfolio_method = wfa_params.get("portfolio_method")
+            .and_then(|v| v.as_str()).unwrap_or("heuristic");
+        let score_direction = wfa_params.get("score_direction")
+            .and_then(|v| v.as_str()).unwrap_or("descending");
+        let max_pos = wfa_params.get("max_position_pct")
+            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.10);
+        let skip_top = wfa_params.get("skip_top_pct")
+            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let max_exposure = wfa_params.get("max_gross_exposure")
+            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.95);
+        let stop_loss = wfa_params.get("stop_loss_pct")
+            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+        let event_gate_combo = wfa_params.get("event_gate_combo_name")
+            .and_then(|v| v.as_str());
+        let event_gate_mode = wfa_params.get("event_gate_mode")
+            .and_then(|v| v.as_str());
+        let event_gate_score_dir = wfa_params.get("event_gate_score_direction")
+            .and_then(|v| v.as_str());
+        let risk_filter = wfa_params.get("candidate_risk_filter")
+            .and_then(|v| v.as_str());
+        let max_corr = wfa_params.get("max_pairwise_correlation")
+            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+        let rebalance_freq = wfa_params.get("rebalance")
+            .and_then(|v| v.as_str()).unwrap_or("monthly");
+
+        let wfa_used = wfa_params.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+        if wfa_used {
+            info!("[paper] 使用 WFA 优化参数: combo={} top_n={} method={}", combo_name, top_n, portfolio_method);
+        }
+
+        let mut body = serde_json::json!({
+            "combo_name": combo_name, "version": "1.0.0",
+            "strategy_version_id": "phase7-professional-v1",
+            "data_version_id": "research-full-2016-2026-20260515",
+            "top_n": top_n, "rebalance": rebalance_freq, "max_position_pct": max_pos,
+            "max_gross_exposure": max_exposure, "score_direction": score_direction,
+            "portfolio_method": portfolio_method, "benchmark": "000300.SH",
+            "skip_top_pct": skip_top, "entry_delay": 1,
+            "universe_profile": "main_board_non_st",
+            "start_date": start, "end_date": end
+        });
+        if let Some(sl) = stop_loss { body["stop_loss_pct"] = serde_json::json!(sl); }
+        if let Some(eg) = event_gate_combo { body["event_gate_combo_name"] = serde_json::json!(eg); }
+        if let Some(em) = event_gate_mode { body["event_gate_mode"] = serde_json::json!(em); }
+        if let Some(es) = event_gate_score_dir { body["event_gate_score_direction"] = serde_json::json!(es); }
+        if let Some(rf) = risk_filter { body["candidate_risk_filter"] = serde_json::json!(rf); }
+        if let Some(mc) = max_corr { body["max_pairwise_correlation"] = serde_json::json!(mc); }
+
         let resp = client
             .post(format!("{}/api/v1/quant/backtests/run-factor", base))
-            .json(&serde_json::json!({
-                "combo_name": "phase7_price_volume_expanded_v1", "version": "1.0.0",
-                "strategy_version_id": "phase7-professional-v1",
-                "data_version_id": "research-full-2016-2026-20260515",
-                "top_n": 15, "rebalance": "monthly", "max_position_pct": 0.10,
-                "max_gross_exposure": 0.95, "score_direction": "descending",
-                "portfolio_method": "heuristic", "benchmark": "000300.SH",
-                "skip_top_pct": 0.0, "entry_delay": 1,
-                "universe_profile": "main_board_non_st",
-                "start_date": start, "end_date": end
-            })).send().await;
+            .json(&body).send().await;
 
         let task_id = match resp {
             Ok(r) => r.json::<serde_json::Value>().await.ok()
@@ -261,7 +545,7 @@ async fn generate_paper_signals_for_all(
         };
         let Some(task_id) = task_id else { continue };
 
-        match sync_positions_from_backtest(db, account_id, &task_id, date).await {
+        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date).await {
             Ok(n) => info!("[paper] {} 同步 {} 个持仓", name, n),
             Err(e) => error!("[paper] {} 持仓同步失败: {}", name, e),
         }
@@ -270,7 +554,9 @@ async fn generate_paper_signals_for_all(
 }
 
 async fn sync_positions_from_backtest(
-    db: &PgPool, account_id: &str, task_id: &str, date: NaiveDate,
+    db: &PgPool, account_id: &str, task_id: &str,
+    mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
+    date: NaiveDate,
 ) -> Result<usize, String> {
     let positions = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
         "SELECT symbol, quantity, market_value FROM backtest_position
@@ -285,9 +571,21 @@ async fn sync_positions_from_backtest(
         "SELECT initial_capital FROM paper_account WHERE paper_account_id = $1"
     ).bind(account_id).fetch_one(db).await.map_err(|e| format!("cap: {}", e))?;
 
-    // ── MVO Regime Detection ──
-    let (mvo_a_pct, mvo_gold_pct, mvo_bond_pct, mvo_sp500_pct, mvo_nq_pct) =
-        compute_mvo_allocation(db, date).await;
+    // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
+    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.08).await;
+
+    // ── 体制检测 + 降仓 ──
+    let regime_exposure = detect_regime_exposure(db, date).await;
+    let mvo_a_pct = mvo_weights[0] * regime_exposure;
+    let mvo_gold_pct = mvo_weights[1] * regime_exposure;
+    let mvo_bond_pct = mvo_weights[2] * regime_exposure;
+    let mvo_sp500_pct = mvo_weights[3] * regime_exposure;
+    let mvo_nq_pct = mvo_weights[4] * regime_exposure;
+    let cash_pct = 1.0 - regime_exposure; // 现金/货币基金
+
+    if regime_exposure < 0.99 {
+        info!("[Regime] 降仓至 {:.0}%, 现金 {:.0}%", regime_exposure * 100.0, cash_pct * 100.0);
+    }
 
     let a_share_capital = initial_cap * rust_decimal::Decimal::from_f64_retain(mvo_a_pct).unwrap_or(rust_decimal::Decimal::from_f64_retain(0.25).unwrap());
     let total_stock_mv: rust_decimal::Decimal = positions.iter()
@@ -320,13 +618,17 @@ async fn sync_positions_from_backtest(
             .bind(&pid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).bind(rust_decimal::Decimal::from_f64_retain(mvo_a_pct / positions.len() as f64).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("pos:{}",e))?;
     }
 
-    // Create ETF positions (MVO allocation)
-    let etf_allocations = vec![
+    // Create ETF positions (MVO allocation + 现金/货币基金)
+    let mut etf_allocations = vec![
         ("518880.SH", "黄金ETF", mvo_gold_pct),
         ("511010.SH", "国债ETF", mvo_bond_pct),
         ("513500.SH", "标普500", mvo_sp500_pct),
         ("513100.SH", "纳指ETF", mvo_nq_pct),
     ];
+    // 体制降仓时加入货币基金
+    if cash_pct > 0.01 {
+        etf_allocations.push(("511880.SH", "银华日利(现金)", cash_pct));
+    }
 
     for (etf_symbol, _etf_name, alloc_pct) in &etf_allocations {
         if *alloc_pct <= 0.0 { continue; }
@@ -359,10 +661,10 @@ async fn sync_positions_from_backtest(
     Ok(positions.len() + etf_allocations.iter().filter(|(_,_,p)| *p > 0.0).count())
 }
 
-/// PIT-compliant MVO allocation: regime detection from trailing 1-year A-share return.
-/// Returns (a_share, gold, bond, sp500, nasdaq) percentages.
-async fn compute_mvo_allocation(db: &PgPool, date: NaiveDate) -> (f64, f64, f64, f64, f64) {
-    // Get trailing 1-year HS300 return
+/// 体制检测：Trailing 12-month CSI300 return。
+/// 深熊（12月跌 >10%）：仓位降至 60%，规避系统性风险。
+/// 其余时间：满仓，让 LW-MVO 自主调配。
+async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
     let trail: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
         "WITH dates AS (
             SELECT trade_date, close::double precision FROM market_index_daily_bar
@@ -371,10 +673,211 @@ async fn compute_mvo_allocation(db: &PgPool, date: NaiveDate) -> (f64, f64, f64,
     ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
 
     match trail {
-        Some(t) if t > 0.15 => (0.25, 0.35, 0.15, 0.00, 0.25), // Bull: A 25% Gold 35% Bond 15% NASDAQ 25%
-        Some(t) if t < -0.05 => (0.08, 0.10, 0.72, 0.00, 0.10), // Bear: heavy bonds
-        _ =>                      (0.15, 0.30, 0.30, 0.05, 0.20), // Normal
+        Some(t) if t < -0.10 => {
+            info!("[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%", t * 100.0);
+            0.60
+        }
+        _ => 1.00, // 满仓
     }
+}
+
+/// LW-MVO 自动发现权重：Ledoit-Wolf shrinkage + Grid Search 季度调仓。
+/// 返回 (a_share, gold, bond, sp500, nasdaq) 权重（和为 1.0）。
+/// ETF 从实际有数据的日期开始纳入 MVO 计算。
+async fn compute_lw_mvo_weights(
+    db: &PgPool,
+    date: NaiveDate,
+    cache: &Mutex<Option<MvoWeightCache>>,
+    min_stock: f64,
+) -> Vec<f64> {
+    let quarter = format!("{}-Q{}", date.year(), (date.month() - 1) / 3 + 1);
+
+    // 检查缓存（同季度不重复计算）
+    {
+        let guard = cache.lock().await;
+        if let Some(ref c) = *guard {
+            if c.quarter == quarter {
+                return c.weights.clone();
+            }
+        }
+    }
+
+    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH"];
+
+    // 获取过去 36 个月的月度收益数据
+    let lookback_start = date - chrono::Duration::days(36 * 31); // ~3 years
+
+    // A 股月度收益（从 backtest_equity_curve 获取）
+    let a_monthly = get_monthly_returns(db, lookback_start, date, "A_SHARE").await;
+
+    // Adaptive MVO: 根据近期 A 股表现动态调整 min_stock
+    let adaptive_min_stock = if a_monthly.len() >= 6 {
+        let trail_6m: f64 = a_monthly[..6].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+        if trail_6m > 0.15 {
+            info!("[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> 0.20", trail_6m * 100.0, min_stock);
+            0.20
+        } else if trail_6m < -0.05 {
+            info!("[MVO] Adaptive: bear detected (6m={:.1}%), min_stock {} -> 0.05", trail_6m * 100.0, min_stock);
+            0.05
+        } else {
+            min_stock
+        }
+    } else {
+        min_stock
+    };
+
+    let default_weights = vec![adaptive_min_stock, 0.30, 0.40, 0.05, 0.25 - adaptive_min_stock];
+
+    let mut weights = default_weights.clone();
+
+    if a_monthly.len() < 12 {
+        let mut guard = cache.lock().await;
+        *guard = Some(MvoWeightCache { quarter, weights: weights.clone() });
+        return weights;
+    }
+
+    // ETF 月度收益
+    let mut all_monthly: Vec<Vec<f64>> = Vec::new();
+    let mut valid_etf_count = 0;
+    let mut etf_monthly_data: Vec<Vec<f64>> = Vec::new();
+
+    for sym in &etf_symbols {
+        let mrets = get_monthly_returns(db, lookback_start, date, sym).await;
+        etf_monthly_data.push(mrets);
+        if !etf_monthly_data.last().unwrap().is_empty() {
+            valid_etf_count += 1;
+        }
+    }
+
+    // 构建训练数据（对齐月份）
+    let n_months = a_monthly.len();
+    for i in 0..n_months {
+        let mut row = vec![a_monthly[i]];
+        for j in 0..4 {
+            if i < etf_monthly_data[j].len() {
+                row.push(etf_monthly_data[j][i]);
+            } else {
+                row.push(0.0);
+            }
+        }
+        // 过滤异常值
+        if row.iter().all(|r| r.abs() < 1.0) {
+            all_monthly.push(row);
+        }
+    }
+
+    if all_monthly.len() >= 12 && valid_etf_count >= 2 {
+        let n_assets = 5usize;
+        let n_rows = all_monthly.len();
+        let flat: Vec<f64> = all_monthly.iter().flatten().copied().collect();
+
+        if let Some(arr) = Array2::from_shape_vec((n_rows, n_assets), flat).ok() {
+            if let Some(result) = mvo::mvo_allocate(&arr, adaptive_min_stock) {
+                let w = result.weights.to_vec();
+                info!(
+                    quarter = %quarter,
+                    a = %(w[0] * 100.0).round(),
+                    gold = %(w[1] * 100.0).round(),
+                    bond = %(w[2] * 100.0).round(),
+                    sp500 = %(w[3] * 100.0).round(),
+                    nq = %(w[4] * 100.0).round(),
+                    sharpe = %(result.sharpe * 100.0).round() / 100.0,
+                    "LW-MVO 权重已更新"
+                );
+                weights = w;
+            }
+        }
+    }
+
+    let mut guard = cache.lock().await;
+    *guard = Some(MvoWeightCache { quarter, weights: weights.clone() });
+    weights
+}
+
+/// 获取某个资产的月度收益率序列（最新在前）
+async fn get_monthly_returns(
+    db: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+    symbol: &str,
+) -> Vec<f64> {
+    if symbol == "A_SHARE" {
+        // A 股：从 backtest_equity_curve 的最新任务获取
+        let rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
+            "SELECT trade_date, portfolio_value FROM backtest_equity_curve
+             WHERE task_id = (SELECT task_id FROM backtest_equity_curve
+                              WHERE trade_date >= $1 AND trade_date <= $2
+                              GROUP BY task_id ORDER BY COUNT(*) DESC LIMIT 1)
+             ORDER BY trade_date",
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+
+        return daily_to_monthly_returns(&rows);
+    }
+
+    // ETF：从 market_stock_daily_bar 获取
+    let rows: Vec<(NaiveDate, rust_decimal::Decimal)> = sqlx::query_as(
+        "SELECT trade_date, close FROM market_stock_daily_bar
+         WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3
+         ORDER BY trade_date",
+    )
+    .bind(symbol)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    daily_to_monthly_returns(&rows)
+}
+
+/// 日线价格 → 月度收益
+fn daily_to_monthly_returns(rows: &[(NaiveDate, rust_decimal::Decimal)]) -> Vec<f64> {
+    if rows.len() < 2 {
+        return vec![];
+    }
+
+    let mut monthly: Vec<f64> = Vec::new();
+    let mut current_month = rows[0].0.month();
+    let mut current_year = rows[0].0.year();
+    let mut month_start_val: Option<f64> = None;
+    let mut month_end_val: f64 = 0.0;
+
+    for (d, val) in rows {
+        let v = val.to_string().parse::<f64>().unwrap_or(0.0);
+        if v <= 0.0 {
+            continue;
+        }
+
+        if d.month() != current_month || d.year() != current_year {
+            // 保存上月收益
+            if let Some(start_v) = month_start_val {
+                if start_v > 0.0 && month_end_val > 0.0 {
+                    monthly.push(month_end_val / start_v - 1.0);
+                }
+            }
+            current_month = d.month();
+            current_year = d.year();
+            month_start_val = Some(v);
+        }
+        if month_start_val.is_none() {
+            month_start_val = Some(v);
+        }
+        month_end_val = v;
+    }
+
+    // 最后一个月
+    if let Some(start_v) = month_start_val {
+        if start_v > 0.0 && month_end_val > 0.0 {
+            monthly.push(month_end_val / start_v - 1.0);
+        }
+    }
+
+    monthly
 }
 
 /// 收盘后推送钉钉持仓摘要（所有活跃模拟账号）。

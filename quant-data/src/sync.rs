@@ -2660,6 +2660,142 @@ pub async fn sync_repurchase(
     Ok(total_rows)
 }
 
+// ─── sync_namechange (ST 历史 PIT 合规) ──────────────────────────
+
+/// 同步股票名称变更历史，构建 PIT 合规的 ST 判断数据。
+/// 从 Tushare namechange API 获取所有名称变更记录，提取 ST 期间。
+pub async fn sync_namechange(
+    pool: &PgPool,
+    client: &TushareClient,
+) -> Result<usize, String> {
+    // 获取 1990 年至今的所有名称变更
+    let resp = client
+        .namechange(None, Some("19900101"), None)
+        .await
+        .map_err(|e| format!("namechange API 调用失败: {}", e))?;
+
+    let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
+    let mut total = 0usize;
+    let mut st_changes = 0usize;
+
+    for item in &maps {
+        let ts_code = item["ts_code"].as_str().unwrap_or("");
+        let name = item["name"].as_str().unwrap_or("");
+        let start_date_str = item["start_date"].as_str().unwrap_or("");
+        let end_date_str = item["end_date"].as_str().or(Some("")).unwrap_or("");
+        let reason = item["change_reason"].as_str().unwrap_or("");
+
+        if ts_code.is_empty() || start_date_str.is_empty() {
+            continue;
+        }
+
+        let start_date = NaiveDate::parse_from_str(start_date_str, "%Y%m%d")
+            .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1990, 1, 1).unwrap());
+        let end_date = if end_date_str.is_empty() || end_date_str == "None" {
+            None
+        } else {
+            NaiveDate::parse_from_str(end_date_str, "%Y%m%d").ok()
+        };
+
+        // 判断该名称是否为 ST（名称含 ST 但不是退市）
+        let is_st = name.contains("ST") && !name.starts_with("退市");
+
+        sqlx::query(
+            r#"INSERT INTO market_stock_name_history (symbol, name, start_date, end_date, change_reason, is_st)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(ts_code)
+        .bind(name)
+        .bind(start_date)
+        .bind(end_date)
+        .bind(reason)
+        .bind(is_st)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("插入名称变更失败 {}: {}", ts_code, e))?;
+
+        total += 1;
+        if is_st {
+            st_changes += 1;
+        }
+    }
+
+    info!(total, st_changes, "ST 名称变更历史同步完成");
+
+    // 同时更新 market_stock 的 is_st 标记（当前状态）
+    let updated = sqlx::query(
+        r#"UPDATE market_stock ms SET is_st = true
+           FROM (
+               SELECT DISTINCT symbol FROM market_stock_name_history
+               WHERE is_st = true
+                 AND (end_date IS NULL OR end_date >= CURRENT_DATE)
+           ) st
+           WHERE ms.symbol = st.symbol"#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("更新当前ST标记失败: {}", e))?;
+
+    info!(updated = updated.rows_affected(), "已更新 market_stock.is_st 当前状态");
+
+    Ok(total)
+}
+
+/// 获取 PIT 合规的 ST 股票列表（用于回测过滤条件）。
+/// 参数 `as_of_date`: 回测时间点，仅返回该日期之前已进入 ST 的股票。
+pub async fn get_st_symbols_at_date(
+    pool: &PgPool,
+    as_of_date: NaiveDate,
+) -> Result<Vec<String>, String> {
+    let rows = sqlx::query_as!(
+        MarketStSymbol,
+        r#"SELECT DISTINCT symbol FROM market_stock_name_history
+           WHERE is_st = true
+             AND start_date <= $1
+             AND (end_date IS NULL OR end_date >= $1)"#,
+        as_of_date,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("查询 ST 列表失败: {}", e))?;
+    Ok(rows.into_iter().map(|r| r.symbol).collect())
+}
+
+/// 获取 PIT 合规的非 ST 主板股票列表（用于回测 universe）。
+/// 排除：ST 股票、创业板（300xxx.SZ）、科创板（688xxx.SH）
+pub async fn get_pit_main_board_non_st_symbols(
+    pool: &PgPool,
+    as_of_date: NaiveDate,
+) -> Result<Vec<String>, String> {
+    let rows = sqlx::query_as!(
+        MarketStSymbol,
+        r#"SELECT ms.symbol FROM market_stock ms
+           WHERE ms.list_status = 'L'
+             AND ms.list_date <= $1
+             AND ms.symbol NOT LIKE '300%SZ'
+             AND ms.symbol NOT LIKE '301%SZ'
+             AND ms.symbol NOT LIKE '688%SH'
+             AND ms.symbol NOT IN (
+                 SELECT symbol FROM market_stock_name_history
+                 WHERE is_st = true
+                   AND start_date <= $1
+                   AND (end_date IS NULL OR end_date >= $1)
+             )
+           ORDER BY ms.symbol"#,
+        as_of_date,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("查询主板非ST列表失败: {}", e))?;
+    Ok(rows.into_iter().map(|r| r.symbol).collect())
+}
+
+// 内部辅助结构体
+struct MarketStSymbol {
+    symbol: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

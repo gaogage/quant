@@ -3595,3 +3595,58 @@ pub async fn sync_fund_basic(
         Err(e) => Json(json!({"code": 1, "message": e})),
     }
 }
+
+/// POST /api/v1/quant/data/sync/namechange
+///
+/// 同步股票名称变更历史（ST 状态 PIT 合规数据）
+pub async fn sync_namechange(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match quant_data::sync::sync_namechange(&state.db, &state.tushare).await {
+        Ok(count) => Json(json!({"code": 0, "data": {"count": count}})),
+        Err(e) => Json(json!({"code": 1, "message": e})),
+    }
+}
+
+/// POST /api/v1/quant/data/sync/historical
+///
+/// 补齐历史数据（2006-2015），参数：start_date、end_date
+#[derive(Debug, serde::Deserialize)]
+pub struct SyncHistoricalRequest {
+    pub start_date: String, // YYYYMMDD
+    pub end_date: String,   // YYYYMMDD
+}
+
+pub async fn sync_historical(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncHistoricalRequest>,
+) -> impl IntoResponse {
+    let db = &state.db;
+    let client = &state.tushare;
+    let empty_symbols: Vec<String> = vec![];
+
+    let mut results = Vec::new();
+
+    // 1. 日线行情
+    info!("[sync-hist] 同步日线行情 {} → {}", req.start_date, req.end_date);
+    match quant_data::sync::sync_daily_bars(db, client, &empty_symbols, &req.start_date, &req.end_date, "daily-hist").await {
+        Ok(n) => results.push(format!("daily_bar: {} 条", n)),
+        Err(e) => results.push(format!("daily_bar 失败: {}", e)),
+    }
+
+    // 2. 复权因子
+    info!("[sync-hist] 同步复权因子");
+    match quant_data::sync::sync_adj_factor(db, client, &empty_symbols, &req.start_date, &req.end_date, "adj-hist").await {
+        Ok(n) => results.push(format!("adj_factor: {} 条", n)),
+        Err(e) => results.push(format!("adj_factor 失败: {}", e)),
+    }
+
+    // 3. 日线基础
+    info!("[sync-hist] 同步日线基础指标");
+    match quant_data::sync::sync_daily_basic(db, client, &empty_symbols, &req.start_date, &req.end_date, "basic-hist").await {
+        Ok(n) => results.push(format!("daily_basic: {} 条", n)),
+        Err(e) => results.push(format!("daily_basic 失败: {}", e)),
+    }
+
+    Json(json!({"code": 0, "data": {"results": results}}))
+}
