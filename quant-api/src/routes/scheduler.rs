@@ -713,12 +713,13 @@ async fn compute_lw_mvo_weights(
     // Adaptive MVO: 根据近期 A 股表现动态调整 min_stock
     let adaptive_min_stock = if a_monthly.len() >= 6 {
         let trail_6m: f64 = a_monthly[..6].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
-        if trail_6m > 0.15 {
+        if trail_6m < -0.05 {
+            // 因子失效检测：A股因子近6月持续亏损 → 放开A股约束, 让LW-MVO自由配置ETF
+            info!("[MVO] Factor failure detected (6m={:.1}%), min_stock {} -> 0.00, switching to ETF defense", trail_6m * 100.0, min_stock);
+            0.00
+        } else if trail_6m > 0.15 {
             info!("[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> 0.20", trail_6m * 100.0, min_stock);
             0.20
-        } else if trail_6m < -0.05 {
-            info!("[MVO] Adaptive: bear detected (6m={:.1}%), min_stock {} -> 0.05", trail_6m * 100.0, min_stock);
-            0.05
         } else {
             min_stock
         }
