@@ -4141,7 +4141,7 @@ fn fit_mlp(
     let train_n = n - val_n;
 
     // Xavier init
-    let mut rng = || {
+    let rng = || {
         let x = (train_n as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (x as f64 / u64::MAX as f64) * 2.0 - 1.0
     };
@@ -4158,7 +4158,7 @@ fn fit_mlp(
 
     // Adam state
     let beta1 = 0.9; let beta2 = 0.999; let eps = 1e-8;
-    let mut adam_m = |grad: &mut [f64], m: &mut [f64], v: &mut [f64], t: f64| {
+    let adam_m = |grad: &mut [f64], m: &mut [f64], v: &mut [f64], t: f64| {
         for i in 0..grad.len() {
             m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
             v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
@@ -4169,12 +4169,12 @@ fn fit_mlp(
     };
     let mut m_w1: Vec<Vec<f64>> = w1.iter().map(|r| vec![0.0; r.len()]).collect();
     let mut v_w1: Vec<Vec<f64>> = w1.iter().map(|r| vec![0.0; r.len()]).collect();
-    let mut m_b1 = vec![0.0; hidden1]; let mut v_b1 = vec![0.0; hidden1];
+    let _m_b1 = vec![0.0; hidden1]; let _v_b1 = vec![0.0; hidden1];
     let mut m_w2: Vec<Vec<f64>> = w2.iter().map(|r| vec![0.0; r.len()]).collect();
     let mut v_w2: Vec<Vec<f64>> = w2.iter().map(|r| vec![0.0; r.len()]).collect();
-    let mut m_b2 = vec![0.0; hidden2]; let mut v_b2 = vec![0.0; hidden2];
+    let _m_b2 = vec![0.0; hidden2]; let _v_b2 = vec![0.0; hidden2];
     let mut m_w3 = vec![0.0; hidden2]; let mut v_w3 = vec![0.0; hidden2];
-    let mut m_b3 = 0.0; let mut v_b3 = 0.0;
+    let _m_b3 = 0.0; let _v_b3 = 0.0;
     let mut t = 0.0;
 
     let mut best_val_loss = f64::MAX;

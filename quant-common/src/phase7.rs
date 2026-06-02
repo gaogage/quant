@@ -15808,6 +15808,7 @@ fn with_train_window_ml_stress_fill_seed(
     seed
 }
 
+#[allow(dead_code)]
 fn professional_ensemble_discovery_seed_trials() -> Vec<Value> {
     // Single seed: the 4-Model Ensemble with PIT routing.
     // The WFA executor detects this profile and runs multi-model training + routing.

@@ -225,7 +225,7 @@ async fn generate_paper_signals_inner(
     };
 
     let mut signal_days = 0usize;
-    let mut total_orders = 0usize;
+    let _total_orders = 0usize;
     let mut nav_updates = 0usize;
 
     // Process each rebalance day
@@ -234,7 +234,7 @@ async fn generate_paper_signals_inner(
             continue;
         }
         let score_day = day_window[0];
-        let exec_day = day_window[1];
+        let _exec_day = day_window[1];
 
         // Select top-N candidates for this day
         let day_scores: Vec<&(NaiveDate, String, f64, Option<i32>)> =
@@ -459,7 +459,7 @@ async fn compute_paper_nav_inner(
         weight_map.entry(*date).or_default().insert(sym.clone(), *w);
     }
 
-    for (nav_id, snap_date, sig_count) in &snapshots {
+    for (nav_id, snap_date, _sig_count) in &snapshots {
         // Find the most recent signal date <= snapshot_date
         let signal_date = pos_weights
             .iter()
@@ -483,7 +483,7 @@ async fn compute_paper_nav_inner(
                         .max_by_key(|(d, _)| **d)
                         .map(|(_, p)| *p);
 
-                    if let Some(px) = price {
+                    if let Some(_px) = price {
                         // Target market value = weight × NAV (approximate, using prev_nav)
                         let target_value = weight * prev_nav;
                         market_value += target_value;
@@ -680,7 +680,7 @@ async fn simulate_paper_nav_inner(
     let mut peak_nav = initial;
     let mut max_dd = 0.0f64;
     let mut total_trades = 0usize;
-    let mut nav_history: Vec<Value> = Vec::new();
+    let nav_history: Vec<Value> = Vec::new();
     let bench_start = bench_map.get(&start).copied();
 
     let mut next_reb_idx = 0usize;
@@ -1009,9 +1009,9 @@ async fn simulate_multi_window_inner(
                 next_reb = day_idx + reb_days;
             }
 
-            let mut mkt_val = 0.0f64;
+            let mut _mkt_val = 0.0f64;
             for (sym, shares) in &positions {
-                if let Some(px) = price_map.get(&(today, sym.clone())) { mkt_val += shares * px; }
+                if let Some(px) = price_map.get(&(today, sym.clone())) { _mkt_val += shares * px; }
             }
             // Stop-loss: absolute drawdown from entry with portfolio stress filter
             let portfolio_dd = if peak_nav > 0.0 { (peak_nav - nav) / peak_nav } else { 0.0 };

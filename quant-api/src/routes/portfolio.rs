@@ -632,6 +632,7 @@ pub struct MvoOverlayRequest {
     /// MVO rebalance frequency: "annual" (default), "semi_annual", "quarterly".
     /// More frequent rebalancing allows faster regime response but may increase noise.
     #[serde(default = "default_rebalance_freq")]
+    #[allow(dead_code)]
     pub rebalance: String,
 }
 
