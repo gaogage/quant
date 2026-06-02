@@ -1,8 +1,11 @@
 pub mod backtest;
+pub mod cleanup;
 pub mod factors;
 pub mod ml;
 pub mod optimization;
 pub mod paper;
 pub mod portfolio;
+pub mod dingtalk;
+pub mod scheduler;
 /// API 路由
 pub mod sync;

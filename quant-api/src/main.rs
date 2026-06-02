@@ -134,6 +134,10 @@ async fn main() {
             post(routes::sync::sync_margin),
         )
         .route(
+            "/api/v1/quant/data/sync/fund-basic",
+            post(routes::sync::sync_fund_basic),
+        )
+        .route(
             "/api/v1/quant/data/sync/fund-daily",
             post(routes::sync::sync_fund_daily),
         )
@@ -148,6 +152,27 @@ async fn main() {
         .route(
             "/api/v1/quant/data/quality-check",
             post(routes::sync::quality_check),
+        )
+        // 数据清理
+        .route(
+            "/api/v1/quant/data/cleanup/stats",
+            get(routes::cleanup::cleanup_stats),
+        )
+        .route(
+            "/api/v1/quant/data/cleanup/preview",
+            post(routes::cleanup::cleanup_preview),
+        )
+        .route(
+            "/api/v1/quant/data/cleanup",
+            post(routes::cleanup::execute_cleanup),
+        )
+        .route(
+            "/api/v1/quant/data/cleanup/backtest-tasks/{task_id}/keep",
+            post(routes::cleanup::mark_backtest_kept),
+        )
+        .route(
+            "/api/v1/quant/data/cleanup/expired-stats",
+            get(routes::cleanup::expired_stats),
         )
         .route("/api/v1/quant/data/stats", get(routes::sync::data_stats))
         .route(
@@ -349,6 +374,10 @@ async fn main() {
             post(routes::paper::create_paper_account),
         )
         .route(
+            "/api/v1/quant/paper/accounts/{account_id}/notify-position",
+            post(routes::paper::notify_position),
+        )
+        .route(
             "/api/v1/quant/paper/accounts/{account_id}",
             get(routes::paper::paper_account_summary),
         )
@@ -441,8 +470,11 @@ async fn main() {
             "/api/v1/quant/optimizations/{optimization_task_id}/trials/{trial_id}/robustness-gates",
             post(routes::optimization::evaluate_optimization_trial_robustness),
         )
-        .layer(trace_layer)
-        .with_state(state);
+        .layer(trace_layer);
+
+    // 提取 db 用于后台调度器 (必须在 with_state 之前, 因为 state 会被 move)
+    let db_for_scheduler = state.db.clone();
+    let app = app.with_state(state);
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -450,6 +482,9 @@ async fn main() {
         .unwrap_or(8080);
     let addr = format!("0.0.0.0:{}", port);
     info!(%addr, "Quant API 启动");
+
+    // 启动后台调度器（数据同步 + 模拟交易）
+    routes::scheduler::start_scheduler(db_for_scheduler, port);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

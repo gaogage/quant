@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 quant-common.workspace = true
 ndarray.workspace = true
+reqwest.workspace = true
 rayon = "1"
 quant-data.workspace = true
 quant-backtest.workspace = true

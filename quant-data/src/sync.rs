@@ -674,6 +674,50 @@ pub async fn sync_daily_basic(
     Ok(total_rows)
 }
 
+// ─── sync_fund_basic (ETF/LOF 基本信息) ─────────────────────────
+
+/// 同步基金/ETF 基本信息到 market_stock 表。
+/// 从 Tushare fund_basic 接口拉取名称、类型、管理人。
+pub async fn sync_fund_basic(
+    pool: &PgPool,
+    client: &TushareClient,
+) -> Result<usize, String> {
+    // E: 交易所 ETF, L: LOF
+    let markets = ["E", "L"];
+    let mut total = 0usize;
+
+    for market in &markets {
+        let resp = client
+            .fund_basic(Some(market))
+            .await
+            .map_err(|e| format!("fund_basic {}: {}", market, e))?;
+
+        let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
+        for item in &maps {
+            let ts_code = item["ts_code"].as_str().unwrap_or("");
+            let name = item["name"].as_str().unwrap_or(ts_code);
+            let fund_type = item["fund_type"].as_str().unwrap_or("");
+            let status = item["status"].as_str().unwrap_or("");
+
+            if ts_code.is_empty() || status == "D" { continue; } // skip delisted
+
+            sqlx::query(
+                "INSERT INTO market_stock (symbol, name, exchange, list_status, is_st)
+                 VALUES ($1, $2, 'SSE', 'L', false)
+                 ON CONFLICT (symbol) DO UPDATE SET name = EXCLUDED.name",
+            )
+            .bind(ts_code)
+            .bind(format!("{} ({})", name, fund_type))
+            .execute(pool)
+            .await
+            .map_err(|e| format!("insert failed: {}", e))?;
+            total += 1;
+        }
+    }
+
+    Ok(total)
+}
+
 // ─── sync_fund_daily (ETF/LOF 基金日线) ──────────────────────────
 
 pub async fn sync_fund_daily(

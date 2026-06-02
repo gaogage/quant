@@ -188,6 +188,18 @@ impl TushareClient {
 
     /// 获取基金/ETF 日线数据，支持按代码 + 交易日期区间拉取。
     /// Tushare fund_daily endpoint — 适用于场内 ETF/LOF
+    /// 获取基金/ETF 基本信息（名称、类型、管理人）。Tushare fund_basic 接口。
+    pub async fn fund_basic(
+        &self,
+        market: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(m) = market {
+            params.push(("market", m));
+        }
+        self.call_api::<Vec<serde_json::Value>>("fund_basic", params, &["ts_code", "name", "management", "found_date", "fund_type", "market", "status"]).await
+    }
+
     pub async fn fund_daily(
         &self,
         ts_code: Option<&str>,

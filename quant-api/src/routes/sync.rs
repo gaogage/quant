@@ -3583,3 +3583,15 @@ mod tests {
         assert_eq!(sync_task_cancel_transition("cancelled"), None);
     }
 }
+
+/// POST /api/v1/quant/data/sync/fund-basic
+///
+/// 同步 ETF/LOF 基金基本信息（名称、类型、管理人）到 market_stock 表。
+pub async fn sync_fund_basic(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match quant_data::sync::sync_fund_basic(&state.db, &state.tushare).await {
+        Ok(count) => Json(json!({"code": 0, "data": {"count": count}})),
+        Err(e) => Json(json!({"code": 1, "message": e})),
+    }
+}

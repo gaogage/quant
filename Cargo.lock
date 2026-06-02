@@ -1609,6 +1609,7 @@ dependencies = [
  "quant-data",
  "quant-factor",
  "rayon",
+ "reqwest",
  "rust_decimal",
  "serde",
  "serde_json",
