@@ -3383,6 +3383,76 @@ async fn execute_oos_discovery_window(
     let train_template_for_selection = train_template.clone();
     let train_window_ml_prediction_sets =
         prepare_train_window_ml_prediction_sets_for_oos_window(db, req, window).await?;
+
+    // Fixed-params WFA mode: skip grid search, use seed parameters directly for OOS.
+    // Controlled by env var QUANT_WFA_FIXED_PARAMS=true.
+    // Eliminates per-window training overfitting at the cost of not adapting
+    // parameters to each window's specific regime.
+    let fixed_params_enabled = std::env::var("QUANT_WFA_FIXED_PARAMS")
+        .map(|v| v.to_lowercase() == "true" || v == "1")
+        .unwrap_or(false);
+
+    if fixed_params_enabled && train_window_ml_prediction_sets.is_none() {
+        // Resolve the search config to get the first seed trial's parameters
+        let (_profile_name, search_config) =
+            phase7_search_config(req.search_profile.as_deref());
+        let seed_params = search_config.seed_trials.first()
+            .cloned()
+            .unwrap_or_else(|| {
+                // Fallback: use the proven price_volume fixed params
+                json!({
+                    "combo_name": "phase7_price_volume_expanded_v1",
+                    "top_n": 15, "rebalance": "30",
+                    "score_direction": "descending", "skip_top_pct": "0.00",
+                    "max_position_pct": "0.10", "max_gross_exposure": "0.95",
+                    "portfolio_method": "heuristic", "benchmark": "000300.SH",
+                    "universe_profile": "listed_non_st", "entry_delay": "1"
+                })
+            });
+
+        let test_template = backtest_template_for_window(
+            req.backtest_template
+                .clone()
+                .unwrap_or_else(default_phase7_backtest_template),
+            window.test_start,
+            window.test_end,
+            "summary_only",
+        )?;
+        let oos_backtest_task_id = format!("oosbt-{}", Uuid::new_v4());
+        let oos_parameters = train_window_ml_oos_parameters(
+            &seed_params,
+            train_window_ml_prediction_sets.as_ref(),
+        )?;
+        let oos_output = execute_oos_candidate_backtest(
+            db, req, test_template.clone(), &oos_parameters,
+            &oos_backtest_task_id, oos_signal_cache, oos_backtest_cache,
+        ).await?;
+        let oos_points = load_oos_equity_points(db, &oos_backtest_task_id).await?;
+
+        return Ok(OosWindowExecution {
+            window: window.clone(),
+            train_optimization_task_id: format!("fixed-{}", Uuid::new_v4().simple()),
+            train_execution_policy: train_execution_policy.clone(),
+            train_batches: vec![json!({"mode": "fixed_params", "enabled": true})],
+            selected_candidate: DiscoveryCandidate {
+                trial_id: "fixed-params".to_string(),
+                backtest_task_id: None,
+                score: None,
+                candidate_type: CandidateType::ReviewRequired,
+                professional_gap_score: Decimal::ZERO,
+                metrics: CandidateMetrics::default(),
+                parameters: seed_params,
+            },
+            train_robustness: None,
+            train_cost_capacity_perturbations: Vec::new(),
+            oos_backtest_task_id,
+            oos_output,
+            oos_points,
+            cost_capacity_perturbations: Vec::new(),
+            skip_reason: None,
+        });
+    }
+
     let train_req = Phase7ProfessionalDiscoveryRequest {
         strategy_version_id: req.strategy_version_id.clone(),
         data_version_id: req.data_version_id.clone(),

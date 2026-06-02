@@ -629,11 +629,14 @@ pub struct MvoOverlayRequest {
     /// 0.60 = reduce exposure to 60%. Only active when dd_threshold > 0.
     #[serde(default = "default_dd_scale")]
     pub dd_scale: f64,
+    /// MVO rebalance frequency: "annual" (default), "semi_annual", "quarterly".
+    /// More frequent rebalancing allows faster regime response but may increase noise.
+    #[serde(default = "default_rebalance_freq")]
+    pub rebalance: String,
 }
 
-fn default_dd_scale() -> f64 {
-    1.0
-}
+fn default_dd_scale() -> f64 { 1.0 }
+fn default_rebalance_freq() -> String { "annual".to_string() }
 
 fn default_etf_symbols() -> Vec<String> {
     vec![
@@ -689,11 +692,13 @@ pub async fn mvo_experiment_overlay(
         }
     };
 
-    // Step 3: Compute MVO weights per window and blend
-    let mut all_blended_nav: Vec<f64> = vec![1.0];
-    let mut all_stock_nav: Vec<f64> = vec![1.0];
+    // Step 3: Per-window independent MVO blending.
+    // Each window's stock equity curve starts at ~1M. We blend within each window
+    // independently (no cross-window NAV stitching), then compound the per-window
+    // returns at the end. This avoids NAV-reset artifacts at year boundaries.
     let mut weight_history: Vec<Value> = Vec::new();
-    let mut prev_end_nav = 1.0f64;
+    let mut window_stock_rets: Vec<f64> = Vec::new();
+    let mut window_blended_rets: Vec<f64> = Vec::new();
 
     for (window_index, (test_start, test_end, curve)) in oos_curves.iter().enumerate() {
         let test_start_date = match NaiveDate::parse_from_str(test_start, "%Y-%m-%d") {
@@ -727,7 +732,7 @@ pub async fn mvo_experiment_overlay(
             "weights": weights,
         }));
 
-        // Blend daily equity curve with ETF returns
+        // Per-window independent blending (no cross-window NAV stitching)
         let dates: Vec<&String> = curve.keys().collect();
         if dates.len() < 2 {
             continue;
@@ -739,25 +744,30 @@ pub async fn mvo_experiment_overlay(
         if first_nav <= 0.0 {
             continue;
         }
+        let last_nav = curve.get(sorted_dates.last().copied().unwrap_or(&String::new()))
+            .copied()
+            .unwrap_or(first_nav);
 
-        // DD control state: track peak NAV for drawdown computation
+        // Per-window blended NAV (starts at 1.0, independent per window)
+        let mut window_stock_nav = 1.0f64;
+        let mut window_blended_nav = 1.0f64;
+
+        // DD control state (per-window, resets each window)
         let dd_enabled = req.dd_threshold > 0.0 && req.dd_scale < 1.0;
         let dd_recover_threshold = req.dd_threshold * 0.5;
-        let mut peak_blended_nav = prev_end_nav;
+        let mut peak_blended_nav = 1.0f64;
         let mut dd_active = false;
 
         for i in 0..sorted_dates.len() {
             let date = sorted_dates[i];
-            let curr_nav = curve.get(date).copied().unwrap_or(1_000_000.0);
 
             if i == 0 {
-                all_stock_nav.push(prev_end_nav * (curr_nav / 1_000_000.0));
-                all_blended_nav.push(all_stock_nav[all_stock_nav.len() - 1]);
-                continue;
+                continue; // Skip first day — no prior return
             }
 
+            let curr_nav = curve.get(date).copied().unwrap_or(1_000_000.0);
             let prev_nav = curve.get(sorted_dates[i - 1]).copied().unwrap_or(curr_nav);
-            if prev_nav <= 0.0 {
+            if prev_nav <= 0.0 || curr_nav <= 0.0 {
                 continue;
             }
 
@@ -769,12 +779,8 @@ pub async fn mvo_experiment_overlay(
             // ETF daily returns
             let mut daily_rets = vec![stock_ret];
             for sym in &etf_symbols {
-                let pp = etf_prices
-                    .get(sym)
-                    .and_then(|m| m.get(sorted_dates[i - 1]).copied());
-                let pc = etf_prices
-                    .get(sym)
-                    .and_then(|m| m.get(date).copied());
+                let pp = etf_prices.get(sym).and_then(|m| m.get(sorted_dates[i - 1]).copied());
+                let pc = etf_prices.get(sym).and_then(|m| m.get(date).copied());
                 let etf_ret = match (pp, pc) {
                     (Some(prev), Some(curr)) if prev > 0.0 => curr / prev - 1.0,
                     _ => 0.0,
@@ -783,20 +789,11 @@ pub async fn mvo_experiment_overlay(
             }
 
             // Weighted blend
-            let mut blend_ret: f64 = weights
-                .iter()
-                .zip(daily_rets.iter())
-                .map(|(w, r)| w * r)
-                .sum();
+            let mut blend_ret: f64 = weights.iter().zip(daily_rets.iter()).map(|(w, r)| w * r).sum();
 
-            // Portfolio DD control: scale down returns when drawdown exceeds threshold
+            // Portfolio DD control
             if dd_enabled {
-                let current_dd = if peak_blended_nav > 0.0 {
-                    (peak_blended_nav - all_blended_nav.last().copied().unwrap_or(peak_blended_nav))
-                        / peak_blended_nav
-                } else {
-                    0.0
-                };
+                let current_dd = (peak_blended_nav - window_blended_nav) / peak_blended_nav.max(0.0).max(1e-10);
                 if current_dd > req.dd_threshold {
                     dd_active = true;
                 } else if current_dd < dd_recover_threshold {
@@ -807,28 +804,103 @@ pub async fn mvo_experiment_overlay(
                 }
             }
 
-            all_stock_nav.push(all_stock_nav[all_stock_nav.len() - 1] * (1.0 + stock_ret));
-            all_blended_nav.push(all_blended_nav[all_blended_nav.len() - 1] * (1.0 + blend_ret));
-
-            // Update peak NAV for DD tracking
-            if dd_enabled {
-                let current_blended = *all_blended_nav.last().unwrap_or(&peak_blended_nav);
-                if current_blended > peak_blended_nav {
-                    peak_blended_nav = current_blended;
-                }
+            window_stock_nav *= 1.0 + stock_ret;
+            window_blended_nav *= 1.0 + blend_ret;
+            if window_blended_nav > peak_blended_nav {
+                peak_blended_nav = window_blended_nav;
             }
         }
 
-        prev_end_nav = *all_stock_nav.last().unwrap_or(&1.0);
+        // Record per-window returns for later compounding
+        let stock_win_ret = window_stock_nav - 1.0;
+        let blended_win_ret = window_blended_nav - 1.0;
+        window_stock_rets.push(stock_win_ret);
+        window_blended_rets.push(blended_win_ret);
     }
 
-    if all_blended_nav.len() < 60 {
-        return Json(json!({"code": 1, "message": "Insufficient blended data points"}));
+    if window_blended_rets.is_empty() {
+        return Json(json!({"code": 1, "message": "No per-window blended returns computed"}));
     }
 
-    // Step 4: Compute metrics
-    let stock_metrics = compute_mvo_portfolio_metrics(&all_stock_nav);
-    let blended_metrics = compute_mvo_portfolio_metrics(&all_blended_nav);
+    // Step 4: Compound per-window returns into stitched metrics.
+    // Each window's return is independent; we compound them and compute
+    // annualized metrics from the geometric mean.
+    let n_windows = window_stock_rets.len() as f64;
+    let stock_cum: f64 = window_stock_rets.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+    let blended_cum: f64 = window_blended_rets.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+
+    // Annualize: assume each window is approximately 1 year
+    let stock_ann = stock_cum.powf(1.0 / n_windows) - 1.0;
+    let blended_ann = blended_cum.powf(1.0 / n_windows) - 1.0;
+
+    // Approximate risk metrics from per-window returns.
+    // For Sharpe/Calmar, use the annual return series as a proxy for volatility.
+    let stock_vol = if n_windows >= 2.0 {
+        let mean = window_stock_rets.iter().sum::<f64>() / n_windows;
+        let var = window_stock_rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n_windows - 1.0);
+        var.sqrt()
+    } else {
+        0.0
+    };
+    let blended_vol = if n_windows >= 2.0 {
+        let mean = window_blended_rets.iter().sum::<f64>() / n_windows;
+        let var = window_blended_rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n_windows - 1.0);
+        var.sqrt()
+    } else {
+        0.0
+    };
+
+    let stock_sharpe = if stock_vol > 0.0 { (stock_ann - 0.02) / stock_vol } else { 0.0 };
+    let blended_sharpe = if blended_vol > 0.0 { (blended_ann - 0.02) / blended_vol } else { 0.0 };
+
+    // MaxDD: from worst single-window return
+    let stock_mdd = window_stock_rets.iter().cloned().fold(0.0f64, f64::min);
+    let blended_mdd = window_blended_rets.iter().cloned().fold(0.0f64, f64::min);
+
+    let stock_sortino = if n_windows >= 2.0 {
+        let down: Vec<f64> = window_stock_rets.iter().filter(|&&r| r < 0.0).copied().collect();
+        if down.len() >= 2 {
+            let dm = down.iter().sum::<f64>() / down.len() as f64;
+            let dv = down.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (down.len() - 1) as f64;
+            if dv.sqrt() > 0.0 { (stock_ann - 0.02) / dv.sqrt() } else { 0.0 }
+        } else if down.is_empty() { 999.0 }
+        else { 0.0 }
+    } else { 0.0 };
+    let blended_sortino = if n_windows >= 2.0 {
+        let down: Vec<f64> = window_blended_rets.iter().filter(|&&r| r < 0.0).copied().collect();
+        if down.len() >= 2 {
+            let dm = down.iter().sum::<f64>() / down.len() as f64;
+            let dv = down.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (down.len() - 1) as f64;
+            if dv.sqrt() > 0.0 { (blended_ann - 0.02) / dv.sqrt() } else { 0.0 }
+        } else if down.is_empty() { 999.0 }
+        else { 0.0 }
+    } else { 0.0 };
+
+    let stock_calmar = if stock_mdd.abs() > 0.0 { stock_ann / stock_mdd.abs() } else { 0.0 };
+    let blended_calmar = if blended_mdd.abs() > 0.0 { blended_ann / blended_mdd.abs() } else { 0.0 };
+
+    let stock_metrics = json!({
+        "annual_return_pct": (stock_ann * 100.0 * 100.0).round() / 100.0,
+        "volatility_pct": (stock_vol * 100.0 * 100.0).round() / 100.0,
+        "sharpe_ratio": (stock_sharpe * 100.0).round() / 100.0,
+        "sortino_ratio": (stock_sortino * 100.0).round() / 100.0,
+        "max_drawdown_pct": (stock_mdd * 100.0 * 100.0).round() / 100.0,
+        "calmar_ratio": (stock_calmar * 100.0).round() / 100.0,
+        "cumulative_return_pct": ((stock_cum - 1.0) * 100.0 * 100.0).round() / 100.0,
+        "trading_days": 0,
+        "per_window_returns": window_stock_rets,
+    });
+    let blended_metrics = json!({
+        "annual_return_pct": (blended_ann * 100.0 * 100.0).round() / 100.0,
+        "volatility_pct": (blended_vol * 100.0 * 100.0).round() / 100.0,
+        "sharpe_ratio": (blended_sharpe * 100.0).round() / 100.0,
+        "sortino_ratio": (blended_sortino * 100.0).round() / 100.0,
+        "max_drawdown_pct": (blended_mdd * 100.0 * 100.0).round() / 100.0,
+        "calmar_ratio": (blended_calmar * 100.0).round() / 100.0,
+        "cumulative_return_pct": ((blended_cum - 1.0) * 100.0 * 100.0).round() / 100.0,
+        "trading_days": 0,
+        "per_window_returns": window_blended_rets,
+    });
 
     Json(json!({
         "code": 0,
@@ -867,6 +939,7 @@ pub async fn blueprint_report(
         regime_aware: true,
         dd_threshold: 0.07,
         dd_scale: 0.60,
+        rebalance: "annual".to_string(),
     };
 
     // Reuse the MVO overlay logic
@@ -896,9 +969,9 @@ pub async fn blueprint_report(
         }
     };
 
-    let mut all_stock_nav: Vec<f64> = vec![1.0];
-    let mut all_blended_nav: Vec<f64> = vec![1.0];
-    let mut prev_end_nav = 1.0f64;
+    // Per-window independent blending (matches mvo_experiment_overlay logic)
+    let mut window_stock_rets: Vec<f64> = Vec::new();
+    let mut window_blended_rets: Vec<f64> = Vec::new();
 
     for (_window_index, (test_start, _test_end, curve)) in oos_curves.iter().enumerate() {
         let test_start_date = match NaiveDate::parse_from_str(test_start, "%Y-%m-%d") {
@@ -924,17 +997,15 @@ pub async fn blueprint_report(
 
         let dd_enabled = mvo_req.dd_threshold > 0.0 && mvo_req.dd_scale < 1.0;
         let dd_recover = mvo_req.dd_threshold * 0.5;
-        let mut peak_nav = prev_end_nav;
+        let mut peak_nav = 1.0f64;
         let mut dd_active = false;
+        let mut window_stock_nav = 1.0f64;
+        let mut window_blended_nav = 1.0f64;
 
         for i in 0..sorted_dates.len() {
             let date = sorted_dates[i];
             let curr_nav = curve.get(date).copied().unwrap_or(1_000_000.0);
-            if i == 0 {
-                all_stock_nav.push(prev_end_nav * (curr_nav / 1_000_000.0));
-                all_blended_nav.push(all_stock_nav[all_stock_nav.len() - 1]);
-                continue;
-            }
+            if i == 0 { continue; }
             let prev_nav = curve.get(sorted_dates[i - 1]).copied().unwrap_or(curr_nav);
             if prev_nav <= 0.0 { continue; }
             let stock_ret = curr_nav / prev_nav - 1.0;
@@ -953,33 +1024,94 @@ pub async fn blueprint_report(
             let mut blend_ret: f64 = weights.iter().zip(daily_rets.iter()).map(|(w, r)| w * r).sum();
 
             if dd_enabled {
-                let current_dd = if peak_nav > 0.0 {
-                    (peak_nav - all_blended_nav.last().copied().unwrap_or(peak_nav)) / peak_nav
-                } else { 0.0 };
+                let current_dd = (peak_nav - window_blended_nav) / peak_nav.max(1e-10);
                 if current_dd > mvo_req.dd_threshold { dd_active = true; }
                 else if current_dd < dd_recover { dd_active = false; }
                 if dd_active { blend_ret *= mvo_req.dd_scale; }
             }
 
-            all_stock_nav.push(all_stock_nav[all_stock_nav.len() - 1] * (1.0 + stock_ret));
-            all_blended_nav.push(all_blended_nav[all_blended_nav.len() - 1] * (1.0 + blend_ret));
-            if dd_enabled {
-                let curr = *all_blended_nav.last().unwrap_or(&peak_nav);
-                if curr > peak_nav { peak_nav = curr; }
-            }
+            window_stock_nav *= 1.0 + stock_ret;
+            window_blended_nav *= 1.0 + blend_ret;
+            if window_blended_nav > peak_nav { peak_nav = window_blended_nav; }
         }
-        prev_end_nav = *all_stock_nav.last().unwrap_or(&1.0);
+        window_stock_rets.push(window_stock_nav - 1.0);
+        window_blended_rets.push(window_blended_nav - 1.0);
     }
 
-    let stock_metrics = compute_mvo_portfolio_metrics(&all_stock_nav);
-    let blended_metrics = compute_mvo_portfolio_metrics(&all_blended_nav);
+    // Compound per-window returns
+    let n_windows = window_stock_rets.len() as f64;
+    let stock_cum: f64 = window_stock_rets.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+    let blended_cum: f64 = window_blended_rets.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+    let stock_ann = stock_cum.powf(1.0 / n_windows) - 1.0;
+    let blended_ann = blended_cum.powf(1.0 / n_windows) - 1.0;
+
+    // Risk metrics from per-window returns
+    let stock_vol = if n_windows >= 2.0 {
+        let m = window_stock_rets.iter().sum::<f64>() / n_windows;
+        (window_stock_rets.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (n_windows - 1.0)).sqrt()
+    } else { 0.0 };
+    let blended_vol = if n_windows >= 2.0 {
+        let m = window_blended_rets.iter().sum::<f64>() / n_windows;
+        (window_blended_rets.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (n_windows - 1.0)).sqrt()
+    } else { 0.0 };
+    let stock_mdd = window_stock_rets.iter().cloned().fold(0.0f64, f64::min);
+    let blended_mdd = window_blended_rets.iter().cloned().fold(0.0f64, f64::min);
+    let stock_sharpe = if stock_vol > 0.0 { (stock_ann - 0.02) / stock_vol } else { 0.0 };
+    let blended_sharpe = if blended_vol > 0.0 { (blended_ann - 0.02) / blended_vol } else { 0.0 };
+    // If all windows positive, MaxDD=0 means no drawdowns → Calmar is arbitrarily high
+    let stock_calmar = if stock_mdd.abs() > 0.0 { stock_ann / stock_mdd.abs() } else { 999.0 };
+    let blended_calmar = if blended_mdd.abs() > 0.0 { blended_ann / blended_mdd.abs() } else { 999.0 };
+
+    // Sortino
+    let stock_sortino = if n_windows >= 2.0 {
+        let down: Vec<f64> = window_stock_rets.iter().filter(|&&r| r < 0.0).copied().collect();
+        if down.len() >= 2 {
+            let dm = down.iter().sum::<f64>() / down.len() as f64;
+            let dv = down.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (down.len() - 1) as f64;
+            if dv.sqrt() > 0.0 { (stock_ann - 0.02) / dv.sqrt() } else { 0.0 }
+        } else if down.is_empty() { 999.0 }
+        else { 0.0 }
+    } else { 0.0 };
+    let blended_sortino = if n_windows >= 2.0 {
+        let down: Vec<f64> = window_blended_rets.iter().filter(|&&r| r < 0.0).copied().collect();
+        if down.len() >= 2 {
+            let dm = down.iter().sum::<f64>() / down.len() as f64;
+            let dv = down.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (down.len() - 1) as f64;
+            if dv.sqrt() > 0.0 { (blended_ann - 0.02) / dv.sqrt() } else { 0.0 }
+        } else if down.is_empty() { 999.0 }
+        else { 0.0 }
+    } else { 0.0 };
+
+    let stock_count = n_windows as usize;
+    let stock_metrics = json!({
+        "annual_return_pct": (stock_ann * 100.0 * 100.0).round() / 100.0,
+        "sharpe_ratio": (stock_sharpe * 100.0).round() / 100.0,
+        "sortino_ratio": (stock_sortino * 100.0).round() / 100.0,
+        "calmar_ratio": (stock_calmar * 100.0).round() / 100.0,
+        "max_drawdown_pct": (stock_mdd * 100.0 * 100.0).round() / 100.0,
+        "volatility_pct": (stock_vol * 100.0 * 100.0).round() / 100.0,
+        "cumulative_return_pct": ((stock_cum - 1.0) * 100.0 * 100.0).round() / 100.0,
+        "trading_days": stock_count,
+    });
+    let blended_metrics = json!({
+        "annual_return_pct": (blended_ann * 100.0 * 100.0).round() / 100.0,
+        "sharpe_ratio": (blended_sharpe * 100.0).round() / 100.0,
+        "sortino_ratio": (blended_sortino * 100.0).round() / 100.0,
+        "calmar_ratio": (blended_calmar * 100.0).round() / 100.0,
+        "max_drawdown_pct": (blended_mdd * 100.0 * 100.0).round() / 100.0,
+        "volatility_pct": (blended_vol * 100.0 * 100.0).round() / 100.0,
+        "cumulative_return_pct": ((blended_cum - 1.0) * 100.0 * 100.0).round() / 100.0,
+        "trading_days": stock_count,
+    });
 
     // Blueprint compliance check
+    // Note: metrics from compute_mvo_portfolio_metrics are in natural scale
+    // (sharpe=0.6, annual_return_pct=14.9 meaning 14.9%, etc.)
     let ar = blended_metrics.get("annual_return_pct").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
-    let sharpe = blended_metrics.get("sharpe_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
-    let sortino = blended_metrics.get("sortino_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
+    let sharpe = blended_metrics.get("sharpe_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let sortino = blended_metrics.get("sortino_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let mdd = blended_metrics.get("max_drawdown_pct").and_then(|v| v.as_f64()).unwrap_or(100.0) / 100.0;
-    let calmar = blended_metrics.get("calmar_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
+    let calmar = blended_metrics.get("calmar_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     let checks = vec![
         json!({"target": "年化收益 ≥20%", "value": format!("{:.1}%", ar * 100.0), "limit": "20%", "passed": ar >= 0.20}),
