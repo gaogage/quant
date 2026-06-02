@@ -339,6 +339,10 @@ async fn main() {
             "/api/v1/quant/experiments/{experiment_run_id}/mvo-overlay",
             post(routes::portfolio::mvo_experiment_overlay),
         )
+        .route(
+            "/api/v1/quant/experiments/{experiment_run_id}/blueprint-report",
+            get(routes::portfolio::blueprint_report),
+        )
         // 仿真交易
         .route(
             "/api/v1/quant/paper/accounts",

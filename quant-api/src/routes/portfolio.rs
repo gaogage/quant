@@ -850,6 +850,167 @@ pub async fn mvo_experiment_overlay(
     }))
 }
 
+/// GET /api/v1/quant/experiments/{experiment_run_id}/blueprint-report
+///
+/// One-click blueprint compliance report. Runs MVO overlay with optimal
+/// production settings (regime-aware + DD control) and returns a structured
+/// pass/fail report against all 5 blueprint elite targets.
+pub async fn blueprint_report(
+    State(state): State<Arc<AppState>>,
+    Path(experiment_run_id): Path<String>,
+) -> impl IntoResponse {
+    // Use optimal blueprint MVO settings
+    let mvo_req = MvoOverlayRequest {
+        etf_symbols: default_etf_symbols(),
+        min_stock: 0.25,
+        lookback_years: 5,
+        regime_aware: true,
+        dd_threshold: 0.07,
+        dd_scale: 0.60,
+    };
+
+    // Reuse the MVO overlay logic
+    let min_stock = mvo_req.min_stock.clamp(0.0, 1.0);
+    let lookback_years = mvo_req.lookback_years.max(2).min(10);
+    let etf_symbols = if mvo_req.etf_symbols.is_empty() {
+        default_etf_symbols()
+    } else {
+        mvo_req.etf_symbols.clone()
+    };
+
+    let oos_curves = match load_oos_equity_curves(&state.db, &experiment_run_id).await {
+        Ok(curves) if curves.is_empty() => {
+            return Json(json!({"code": 1, "message": "No OOS equity curves found"}));
+        }
+        Ok(curves) => curves,
+        Err(e) => {
+            return Json(json!({"code": 1, "message": format!("Failed to load OOS curves: {}", e)}));
+        }
+    };
+
+    let all_symbols = build_mvo_symbol_list(&etf_symbols);
+    let etf_prices = match load_mvo_etf_prices(&state.db, &all_symbols).await {
+        Ok(prices) => prices,
+        Err(e) => {
+            return Json(json!({"code": 1, "message": format!("Failed to load ETF prices: {}", e)}));
+        }
+    };
+
+    let mut all_stock_nav: Vec<f64> = vec![1.0];
+    let mut all_blended_nav: Vec<f64> = vec![1.0];
+    let mut prev_end_nav = 1.0f64;
+
+    for (_window_index, (test_start, _test_end, curve)) in oos_curves.iter().enumerate() {
+        let test_start_date = match NaiveDate::parse_from_str(test_start, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let weights = match compute_mvo_weights_pit(
+            &etf_prices, &all_symbols, test_start_date, lookback_years, min_stock, true,
+        ) {
+            Some(w) => w,
+            None => {
+                let mut w = vec![1.0f64];
+                w.extend(std::iter::repeat(0.0f64).take(etf_symbols.len()));
+                w
+            }
+        };
+
+        let dates: Vec<&String> = curve.keys().collect();
+        if dates.len() < 2 { continue; }
+        let mut sorted_dates: Vec<&String> = dates.clone();
+        sorted_dates.sort();
+
+        let dd_enabled = mvo_req.dd_threshold > 0.0 && mvo_req.dd_scale < 1.0;
+        let dd_recover = mvo_req.dd_threshold * 0.5;
+        let mut peak_nav = prev_end_nav;
+        let mut dd_active = false;
+
+        for i in 0..sorted_dates.len() {
+            let date = sorted_dates[i];
+            let curr_nav = curve.get(date).copied().unwrap_or(1_000_000.0);
+            if i == 0 {
+                all_stock_nav.push(prev_end_nav * (curr_nav / 1_000_000.0));
+                all_blended_nav.push(all_stock_nav[all_stock_nav.len() - 1]);
+                continue;
+            }
+            let prev_nav = curve.get(sorted_dates[i - 1]).copied().unwrap_or(curr_nav);
+            if prev_nav <= 0.0 { continue; }
+            let stock_ret = curr_nav / prev_nav - 1.0;
+            if stock_ret.abs() > 0.5 { continue; }
+
+            let mut daily_rets = vec![stock_ret];
+            for sym in &etf_symbols {
+                let pp = etf_prices.get(sym).and_then(|m| m.get(sorted_dates[i - 1]).copied());
+                let pc = etf_prices.get(sym).and_then(|m| m.get(date).copied());
+                daily_rets.push(match (pp, pc) {
+                    (Some(p), Some(c)) if p > 0.0 => c / p - 1.0,
+                    _ => 0.0,
+                });
+            }
+
+            let mut blend_ret: f64 = weights.iter().zip(daily_rets.iter()).map(|(w, r)| w * r).sum();
+
+            if dd_enabled {
+                let current_dd = if peak_nav > 0.0 {
+                    (peak_nav - all_blended_nav.last().copied().unwrap_or(peak_nav)) / peak_nav
+                } else { 0.0 };
+                if current_dd > mvo_req.dd_threshold { dd_active = true; }
+                else if current_dd < dd_recover { dd_active = false; }
+                if dd_active { blend_ret *= mvo_req.dd_scale; }
+            }
+
+            all_stock_nav.push(all_stock_nav[all_stock_nav.len() - 1] * (1.0 + stock_ret));
+            all_blended_nav.push(all_blended_nav[all_blended_nav.len() - 1] * (1.0 + blend_ret));
+            if dd_enabled {
+                let curr = *all_blended_nav.last().unwrap_or(&peak_nav);
+                if curr > peak_nav { peak_nav = curr; }
+            }
+        }
+        prev_end_nav = *all_stock_nav.last().unwrap_or(&1.0);
+    }
+
+    let stock_metrics = compute_mvo_portfolio_metrics(&all_stock_nav);
+    let blended_metrics = compute_mvo_portfolio_metrics(&all_blended_nav);
+
+    // Blueprint compliance check
+    let ar = blended_metrics.get("annual_return_pct").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
+    let sharpe = blended_metrics.get("sharpe_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
+    let sortino = blended_metrics.get("sortino_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
+    let mdd = blended_metrics.get("max_drawdown_pct").and_then(|v| v.as_f64()).unwrap_or(100.0) / 100.0;
+    let calmar = blended_metrics.get("calmar_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0) / 100.0;
+
+    let checks = vec![
+        json!({"target": "年化收益 ≥20%", "value": format!("{:.1}%", ar * 100.0), "limit": "20%", "passed": ar >= 0.20}),
+        json!({"target": "Sharpe >1.5", "value": format!("{:.2}", sharpe), "limit": "1.5", "passed": sharpe > 1.5}),
+        json!({"target": "Sortino >1.8", "value": format!("{:.2}", sortino), "limit": "1.8", "passed": sortino > 1.8}),
+        json!({"target": "MaxDD <35%", "value": format!("{:.1}%", mdd.abs() * 100.0), "limit": "35%", "passed": mdd.abs() < 0.35}),
+        json!({"target": "Calmar >2.0", "value": format!("{:.2}", calmar), "limit": "2.0", "passed": calmar > 2.0}),
+    ];
+    let passed_count = checks.iter().filter(|c| c["passed"].as_bool().unwrap_or(false)).count();
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "experiment_run_id": experiment_run_id,
+            "blueprint_targets": {
+                "annual_return": "≥20%",
+                "sharpe": ">1.5",
+                "sortino": ">1.8",
+                "max_drawdown": "<35%",
+                "calmar": ">2.0",
+            },
+            "stock_only": stock_metrics,
+            "mvo_blended": blended_metrics,
+            "checks": checks,
+            "passed": passed_count,
+            "total": 5,
+            "all_passed": passed_count == 5,
+        }
+    }))
+}
+
 type EquityCurve = std::collections::BTreeMap<String, f64>;
 type PriceMap = std::collections::HashMap<String, std::collections::BTreeMap<String, f64>>;
 
