@@ -1437,6 +1437,68 @@ fn mvo_sim_default_leverage_mult() -> f64 { 1.0 }
 ///
 /// 对已完成回测叠加 Ledoit-Wolf MVO 多资产配置，模拟完整绩效。
 /// ETF 数据从有数据的日期开始使用（PIT 合规）。
+/// 计算组合绩效指标
+fn compute_portfolio_metrics(rets: &[f64]) -> Value {
+    let n = rets.len() as f64;
+    if n < 60.0 { return json!({"error": "insufficient data"}); }
+
+    let mean = rets.iter().sum::<f64>() / n;
+    let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let std = var.sqrt();
+    let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
+    let ann_vol = std * (252.0_f64).sqrt();
+    let sharpe = if ann_vol > 0.0 { (ann_ret - 0.02) / ann_vol } else { 0.0 };
+
+    let mut nav = 1.0_f64; let mut peak = 1.0_f64; let mut max_dd = 0.0_f64;
+    for r in rets { nav *= 1.0 + r; peak = peak.max(nav); max_dd = max_dd.max((peak - nav) / peak); }
+    let cumulative = nav - 1.0;
+    let calmar = if max_dd > 0.0 { ann_ret / max_dd } else { 0.0 };
+
+    let downside: Vec<f64> = rets.iter().filter(|&&r| r < 0.0).copied().collect();
+    let down_std = if downside.len() > 1 {
+        let down_mean = downside.iter().sum::<f64>() / downside.len() as f64;
+        (downside.iter().map(|r| (r - down_mean).powi(2)).sum::<f64>() / (downside.len() - 1) as f64).sqrt()
+    } else { 0.0 };
+    let sortino = if down_std > 0.0 { (ann_ret - 0.02) / (down_std * (252.0_f64).sqrt()) } else { 0.0 };
+    let pos = rets.iter().filter(|&&r| r > 0.0).count();
+    let win_rate = pos as f64 / n;
+
+    json!({
+        "trading_days": n as usize, "annual_return_pct": (ann_ret * 1000.0).round() / 10.0,
+        "cumulative_return_pct": (cumulative * 1000.0).round() / 10.0,
+        "volatility_pct": (ann_vol * 1000.0).round() / 10.0,
+        "sharpe_ratio": (sharpe * 100.0).round() / 100.0, "sortino_ratio": (sortino * 100.0).round() / 100.0,
+        "max_drawdown_pct": (max_dd * 1000.0).round() / 10.0, "calmar_ratio": (calmar * 100.0).round() / 100.0,
+        "win_rate_pct": (win_rate * 1000.0).round() / 10.0,
+    })
+}
+
+/// 从日收益计算逐年收益
+fn compute_yearly_returns(daily_returns: &[(NaiveDate, Vec<f64>)], mvo_rets: &[f64], mvo_start_idx: usize) -> Vec<Value> {
+    let mut yearly: Vec<Value> = Vec::new();
+    let mut yr_nav: f64 = 1.0;
+    let mut prev_yr: Option<String> = None;
+    let mut yr_start_nav: f64 = 1.0;
+
+    for (idx, &r) in mvo_rets.iter().enumerate() {
+        let di = mvo_start_idx + idx;
+        if di < daily_returns.len() {
+            let yr = format!("{}", daily_returns[di].0.format("%Y"));
+            if prev_yr.as_deref() != Some(&yr) {
+                if let Some(py) = prev_yr {
+                    yearly.push(json!({"year": py, "return_pct": ((yr_nav / yr_start_nav - 1.0) * 1000.0).round() / 10.0}));
+                }
+                yr_start_nav = yr_nav; prev_yr = Some(yr);
+            }
+        }
+        yr_nav *= 1.0 + r;
+    }
+    if let Some(py) = prev_yr {
+        yearly.push(json!({"year": py, "return_pct": ((yr_nav / yr_start_nav - 1.0) * 1000.0).round() / 10.0}));
+    }
+    yearly
+}
+
 pub async fn mvo_simulate(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -1672,87 +1734,9 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
     let mvo_rets = &v15_rets[mvo_start_idx..];
     let a_rets = &a_only_daily_rets;
 
-    let compute_metrics = |rets: &[f64]| -> Value {
-        let n = rets.len() as f64;
-        if n < 60.0 { return json!({"error": "insufficient data"}); }
-
-        let mean = rets.iter().sum::<f64>() / n;
-        let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        let std = var.sqrt();
-        let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
-        let ann_vol = std * (252.0_f64).sqrt();
-        let sharpe = if ann_vol > 0.0 { (ann_ret - 0.02) / ann_vol } else { 0.0 };
-
-        let mut nav = 1.0_f64;
-        let mut peak = 1.0_f64;
-        let mut max_dd = 0.0_f64;
-        for r in rets {
-            nav *= 1.0 + r;
-            peak = peak.max(nav);
-            let dd = (peak - nav) / peak;
-            max_dd = max_dd.max(dd);
-        }
-        let cumulative = nav - 1.0;
-        let calmar = if max_dd > 0.0 { ann_ret / max_dd } else { 0.0 };
-
-        let downside: Vec<f64> = rets.iter().filter(|&&r| r < 0.0).copied().collect();
-        let down_std = if downside.len() > 1 {
-            let down_mean = downside.iter().sum::<f64>() / downside.len() as f64;
-            (downside.iter().map(|r| (r - down_mean).powi(2)).sum::<f64>() / (downside.len() - 1) as f64).sqrt()
-        } else { 0.0 };
-        let sortino = if down_std > 0.0 { (ann_ret - 0.02) / (down_std * (252.0_f64).sqrt()) } else { 0.0 };
-
-        let pos = rets.iter().filter(|&&r| r > 0.0).count();
-        let win_rate = pos as f64 / n;
-
-        json!({
-            "trading_days": n as usize,
-            "annual_return_pct": (ann_ret * 1000.0).round() / 10.0,
-            "cumulative_return_pct": (cumulative * 1000.0).round() / 10.0,
-            "volatility_pct": (ann_vol * 1000.0).round() / 10.0,
-            "sharpe_ratio": (sharpe * 100.0).round() / 100.0,
-            "sortino_ratio": (sortino * 100.0).round() / 100.0,
-            "max_drawdown_pct": (max_dd * 1000.0).round() / 10.0,
-            "calmar_ratio": (calmar * 100.0).round() / 100.0,
-            "win_rate_pct": (win_rate * 1000.0).round() / 10.0,
-        })
-    };
-
-    let mvo_metrics = compute_metrics(mvo_rets);
-    let a_metrics = compute_metrics(a_rets);
-
-    // 计算逐年收益 (从 daily_returns 对应的日期提取年度 NAV)
-    let mut yearly_returns: Vec<Value> = Vec::new();
-    let mut yr_nav: f64 = 1.0;
-    let mut prev_yr: Option<String> = None;
-    let mut yr_start_nav: f64 = 1.0;
-
-    for (idx, &r) in mvo_rets.iter().enumerate() {
-        let mvo_idx = mvo_start_idx + idx;
-        if mvo_idx < daily_returns.len() {
-            let yr = format!("{}", daily_returns[mvo_idx].0.format("%Y"));
-            if prev_yr.as_deref() != Some(&yr) {
-                if let Some(py) = prev_yr {
-                    let yr_ret = (yr_nav / yr_start_nav - 1.0) * 100.0;
-                    yearly_returns.push(json!({
-                        "year": py,
-                        "return_pct": (yr_ret * 10.0).round() / 10.0,
-                    }));
-                }
-                yr_start_nav = yr_nav;
-                prev_yr = Some(yr);
-            }
-        }
-        yr_nav *= 1.0 + r;
-    }
-    // Last year
-    if let Some(py) = prev_yr {
-        let yr_ret = (yr_nav / yr_start_nav - 1.0) * 100.0;
-        yearly_returns.push(json!({
-            "year": py,
-            "return_pct": (yr_ret * 10.0).round() / 10.0,
-        }));
-    }
+    let mvo_metrics = compute_portfolio_metrics(mvo_rets);
+    let a_metrics = compute_portfolio_metrics(a_rets);
+    let yearly_returns = compute_yearly_returns(&daily_returns, mvo_rets, mvo_start_idx);
 
     let first_date = daily_returns.first().map(|(d, _)| d.format("%Y-%m-%d").to_string());
     let last_date = daily_returns.last().map(|(d, _)| d.format("%Y-%m-%d").to_string());
