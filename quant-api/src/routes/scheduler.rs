@@ -680,6 +680,12 @@ async fn sync_positions_from_backtest(
     if germany_pct > 0.005 {
         etf_allocations.push(("513030.SH", "德国ETF", germany_pct));
     }
+    // 商品ETF卫星配置: 有色(3%) + 豆粕(3%), 低相关性提供通胀对冲
+    let commodity_pct = 0.03; // 各3%
+    if commodity_pct > 0.001 {
+        etf_allocations.push(("159980.SZ", "有色ETF", commodity_pct));
+        etf_allocations.push(("159985.SZ", "豆粕ETF", commodity_pct));
+    }
     // 体制降仓时加入货币基金
     if cash_pct > 0.01 {
         etf_allocations.push(("511880.SH", "银华日利(现金)", cash_pct));
@@ -757,7 +763,7 @@ async fn compute_lw_mvo_weights(
         }
     }
 
-    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "513030.SH"];
+    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "513030.SH", "159980.SZ", "159985.SZ"];
 
     // 获取过去 36 个月的月度收益数据
     let lookback_start = date - chrono::Duration::days(36 * 31); // ~3 years
