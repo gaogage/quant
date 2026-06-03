@@ -61,6 +61,14 @@ pub struct MvoWeights {
     pub rho: f64,
 }
 
+// ── MVO Constants ──────────────────────────────────────────────
+
+/// Risk-free rate (2% annual)
+const RISK_FREE: f64 = 0.02;
+/// Grid search step size (5%)
+const GRID_STEP: f64 = 0.05;
+/// Maximum single-asset allocation (75%)
+const MAX_SINGLE: f64 = 0.75;
 // ── Grid Search (shared by optimize_mvo and mvo_allocate_with_target) ──────
 
 enum GridObjective {
@@ -81,10 +89,8 @@ fn grid_search_5asset(
     max_single: f64,
     objective: GridObjective,
 ) -> GridSearchResult {
-    let risk_free = 0.02;
-    let step = 0.05;
-    let steps = ((1.0 / step) as i32) + 1;
-    let step_values: Vec<f64> = (0..steps).map(|i| i as f64 * step).collect();
+    let steps = ((1.0 / GRID_STEP) as i32) + 1;
+    let step_values: Vec<f64> = (0..steps).map(|i| i as f64 * GRID_STEP).collect();
 
     let mut best_sharpe = f64::NEG_INFINITY;
     let mut fallback_weights: Option<Array1<f64>> = None;
@@ -109,7 +115,7 @@ fn grid_search_5asset(
                     let w_sum = weights.sum();
                     let w = &weights / w_sum;
 
-                    let port_mu = w.dot(mu_annual) - risk_free;
+                    let port_mu = w.dot(mu_annual) - RISK_FREE;
                     let port_var = w.dot(&cov.dot(&w));
                     if port_var <= 0.0 { continue; }
                     let sharpe = port_mu / port_var.sqrt();
@@ -126,7 +132,7 @@ fn grid_search_5asset(
                             target_weights = fallback_weights.clone();
                         }
                         GridObjective::MinVariance { target } => {
-                            if port_mu >= target - risk_free && port_var < best_var {
+                            if port_mu >= target - RISK_FREE && port_var < best_var {
                                 best_var = port_var;
                                 target_weights = Some(w);
                             }
@@ -161,7 +167,7 @@ pub fn optimize_mvo(
         return None;
     }
 
-    let result = grid_search_5asset(mu_annual, cov, min_stock, 0.75, GridObjective::MaxSharpe);
+    let result = grid_search_5asset(mu_annual, cov, min_stock, MAX_SINGLE, GridObjective::MaxSharpe);
     result.weights.map(|w| MvoWeights {
         weights: w,
         sharpe: result.best_sharpe,
@@ -197,7 +203,7 @@ pub fn mvo_allocate_with_target(
     let n_assets = monthly_returns.ncols();
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
 
-    let result = grid_search_5asset(&mu, &cov, min_stock, 0.75, GridObjective::MinVariance { target: return_target });
+    let result = grid_search_5asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target });
     result.weights.map(|w| MvoWeights {
         weights: w,
         sharpe: result.best_sharpe,

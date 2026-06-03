@@ -1479,14 +1479,20 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
     let etf_sym2 = req.etf_symbols.get(2).cloned().unwrap_or_default();
     let etf_sym3 = req.etf_symbols.get(3).cloned().unwrap_or_default();
 
+    // ETF数据起始日期: 回测起始日 - MVO回看期 - 1年缓冲, 最早不早于2013-03-25(首只ETF上市)
+    let etf_start = a_nav.first().map(|(d, _)| {
+        (*d - chrono::Duration::days(lookback as i64 * 31 + 365)).max(NaiveDate::from_ymd_opt(2013, 3, 25).unwrap())
+    }).unwrap_or(NaiveDate::from_ymd_opt(2013, 3, 25).unwrap());
+
     let etf_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
         "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
-         WHERE symbol IN ($1, $2, $3, $4) AND trade_date >= '2013-01-01' ORDER BY trade_date",
+         WHERE symbol IN ($1, $2, $3, $4) AND trade_date >= $5 ORDER BY trade_date",
     )
     .bind(&etf_sym0)
     .bind(&etf_sym1)
     .bind(&etf_sym2)
     .bind(&etf_sym3)
+    .bind(etf_start)
     .fetch_all(db)
     .await
     .map_err(|e| format!("加载 ETF 数据失败: {e}"))?;
