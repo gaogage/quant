@@ -451,8 +451,8 @@ async fn sync_intraday_data(port: u16, date: NaiveDate) -> Result<(), String> {
 async fn generate_paper_signals_for_all(
     db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate,
 ) -> Result<(), String> {
-    let accounts = sqlx::query_as::<_, (String, String, bool, String, f64)>(
-        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(signal_source, 'factor'), COALESCE(leverage_multiplier, 1.0) FROM paper_account
+    let accounts = sqlx::query_as::<_, (String, String, bool, String, f64, String)>(
+        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(signal_source, 'factor'), COALESCE(leverage_multiplier, 1.0), COALESCE(leverage_mode, 'fixed') FROM paper_account
          WHERE status = 'active' AND account_type = 'simulated'",
     )
     .fetch_all(db).await
@@ -460,11 +460,12 @@ async fn generate_paper_signals_for_all(
 
     if accounts.is_empty() { return Ok(()); }
 
-    for (account_id, name, leverage_enabled, signal_source, leverage_multiplier) in &accounts {
+    for (account_id, name, leverage_enabled, signal_source, leverage_multiplier, leverage_mode) in &accounts {
         let leverage_enabled = *leverage_enabled;
         let leverage_multiplier = *leverage_multiplier;
+        let leverage_mode = leverage_mode.as_str();
         let signal_source = signal_source.as_str();
-        info!("[paper] {} ({}) leverage={}x signal={}", name, account_id, leverage_multiplier, signal_source);
+        info!("[paper] {} ({}) leverage={}x mode={} signal={}", name, account_id, leverage_multiplier, leverage_mode, signal_source);
 
         // 检查今日是否已有交易
         let done: (i64,) = sqlx::query_as(
@@ -584,12 +585,61 @@ async fn generate_paper_signals_for_all(
         };
         let Some(task_id) = task_id else { continue };
 
-        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, leverage_enabled, leverage_multiplier).await {
+        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, leverage_enabled, leverage_multiplier, leverage_mode).await {
             Ok(n) => info!("[paper] {} 同步 {} 个持仓", name, n),
             Err(e) => error!("[paper] {} 持仓同步失败: {}", name, e),
         }
     }
     Ok(())
+}
+
+/// 波动率目标杠杆：根据 trailing 60日组合NAV变化计算波动率，动态调整杠杆。
+/// 目标年化波动率 20%，杠杆 = 20% / trailing_vol，clamp [0.5, 2.0]。
+async fn compute_vol_target_leverage(db: &PgPool, account_id: &str) -> f64 {
+    let target_vol = 0.20;
+    let rows = sqlx::query_as::<_, (rust_decimal::Decimal,)>(
+        "SELECT nav FROM paper_nav_snapshot
+         WHERE paper_account_id = $1
+         ORDER BY snapshot_date DESC LIMIT 61",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let navs: Vec<f64> = rows.iter()
+        .map(|(n,)| n.to_string().parse::<f64>().unwrap_or(0.0))
+        .filter(|&v| v > 0.0)
+        .collect();
+
+    if navs.len() < 21 {
+        return 1.0; // 数据不足
+    }
+
+    // 计算日收益率
+    let mut rets = Vec::new();
+    for i in 1..navs.len() {
+        if navs[i-1] > 0.0 {
+            rets.push(navs[i] / navs[i-1] - 1.0);
+        }
+    }
+
+    if rets.len() < 20 {
+        return 1.0;
+    }
+
+    let n = rets.len() as f64;
+    let mean = rets.iter().sum::<f64>() / n;
+    let variance = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let daily_vol = variance.sqrt();
+    let annual_vol = daily_vol * (252.0_f64).sqrt();
+
+    if annual_vol < 0.05 {
+        return 1.0;
+    }
+
+    let lev = target_vol / annual_vol;
+    lev.clamp(0.5, 2.0)
 }
 
 async fn sync_positions_from_backtest(
@@ -598,6 +648,7 @@ async fn sync_positions_from_backtest(
     date: NaiveDate,
     leverage_enabled: bool,
     leverage_multiplier: f64,
+    leverage_mode: &str,
 ) -> Result<usize, String> {
     let positions = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
         "SELECT symbol, quantity, market_value FROM backtest_position
@@ -640,8 +691,15 @@ async fn sync_positions_from_backtest(
 
     // 杠杆：regime green(>0.9) + leverage_enabled → 使用配置的倍率
     let leverage_mult = if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
-        info!("[paper] Leverage {}x applied for {}", leverage_multiplier, account_id);
-        rust_decimal::Decimal::from_f64_retain(leverage_multiplier).unwrap_or(rust_decimal::Decimal::ONE)
+        if leverage_mode == "vol_target" {
+            // 波动率目标杠杆: 目标20%年化波动率, 根据trailing 60日实际波动率动态调整
+            let vol_lev = compute_vol_target_leverage(db, account_id).await;
+            info!("[paper] Vol-target leverage {:.2}x applied for {}", vol_lev, account_id);
+            rust_decimal::Decimal::from_f64_retain(vol_lev).unwrap_or(rust_decimal::Decimal::ONE)
+        } else {
+            info!("[paper] Fixed leverage {}x applied for {}", leverage_multiplier, account_id);
+            rust_decimal::Decimal::from_f64_retain(leverage_multiplier).unwrap_or(rust_decimal::Decimal::ONE)
+        }
     } else {
         rust_decimal::Decimal::ONE
     };
@@ -681,10 +739,15 @@ async fn sync_positions_from_backtest(
         etf_allocations.push(("513030.SH", "德国ETF", germany_pct));
     }
     // 商品ETF卫星配置: 有色(3%) + 豆粕(3%), 低相关性提供通胀对冲
-    let commodity_pct = 0.03; // 各3%
+    let commodity_pct = 0.03;
     if commodity_pct > 0.001 {
         etf_allocations.push(("159980.SZ", "有色ETF", commodity_pct));
         etf_allocations.push(("159985.SZ", "豆粕ETF", commodity_pct));
+    }
+    // 10年国债ETF: 2%卫星配置, 更高收益的债券选择
+    let bond10y_pct = 0.02;
+    if bond10y_pct > 0.001 {
+        etf_allocations.push(("511260.SH", "十年国债ETF", bond10y_pct));
     }
     // 体制降仓时加入货币基金
     if cash_pct > 0.01 {
