@@ -451,8 +451,8 @@ async fn sync_intraday_data(port: u16, date: NaiveDate) -> Result<(), String> {
 async fn generate_paper_signals_for_all(
     db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate,
 ) -> Result<(), String> {
-    let accounts = sqlx::query_as::<_, (String, String, bool)>(
-        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false) FROM paper_account
+    let accounts = sqlx::query_as::<_, (String, String, bool, String, f64)>(
+        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(signal_source, 'factor'), COALESCE(leverage_multiplier, 1.0) FROM paper_account
          WHERE status = 'active' AND account_type = 'simulated'",
     )
     .fetch_all(db).await
@@ -460,9 +460,11 @@ async fn generate_paper_signals_for_all(
 
     if accounts.is_empty() { return Ok(()); }
 
-    for (account_id, name, leverage_enabled) in &accounts {
+    for (account_id, name, leverage_enabled, signal_source, leverage_multiplier) in &accounts {
         let leverage_enabled = *leverage_enabled;
-        info!("[paper] {} ({}) leverage={}", name, account_id, leverage_enabled);
+        let leverage_multiplier = *leverage_multiplier;
+        let signal_source = signal_source.as_str();
+        info!("[paper] {} ({}) leverage={}x signal={}", name, account_id, leverage_multiplier, signal_source);
 
         // 检查今日是否已有交易
         let done: (i64,) = sqlx::query_as(
@@ -510,10 +512,20 @@ async fn generate_paper_signals_for_all(
             .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
         let rebalance_freq = wfa_params.get("rebalance")
             .and_then(|v| v.as_str()).unwrap_or("monthly");
+        // WFA 高级风控参数
+        let vol_control = wfa_params.get("portfolio_volatility_control").and_then(|v| v.as_str());
+        let dd_control = wfa_params.get("portfolio_drawdown_control").and_then(|v| v.as_str());
+        let risk_contribution = wfa_params.get("risk_contribution_control").and_then(|v| v.as_str());
+        let partial_rebalance = wfa_params.get("partial_rebalance_ratio")
+            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+        let risk_budget_days = wfa_params.get("risk_budget_lookback_days")
+            .and_then(|v| v.as_u64());
+        let event_gate_min = wfa_params.get("event_gate_min_score")
+            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
 
         let wfa_used = wfa_params.as_object().map(|o| !o.is_empty()).unwrap_or(false);
         if wfa_used {
-            info!("[paper] 使用 WFA 优化参数: combo={} top_n={} method={}", combo_name, top_n, portfolio_method);
+            info!("[paper] WFA params: combo={} top_n={} method={}", combo_name, top_n, portfolio_method);
         }
 
         let mut body = serde_json::json!({
@@ -533,10 +545,36 @@ async fn generate_paper_signals_for_all(
         if let Some(es) = event_gate_score_dir { body["event_gate_score_direction"] = serde_json::json!(es); }
         if let Some(rf) = risk_filter { body["candidate_risk_filter"] = serde_json::json!(rf); }
         if let Some(mc) = max_corr { body["max_pairwise_correlation"] = serde_json::json!(mc); }
+        if let Some(vc) = vol_control { body["portfolio_volatility_control"] = serde_json::json!(vc); }
+        if let Some(dc) = dd_control { body["portfolio_drawdown_control"] = serde_json::json!(dc); }
+        if let Some(rc) = risk_contribution { body["risk_contribution_control"] = serde_json::json!(rc); }
+        if let Some(pr) = partial_rebalance { body["partial_rebalance_ratio"] = serde_json::json!(pr); }
+        if let Some(rbd) = risk_budget_days { body["risk_budget_lookback_days"] = serde_json::json!(rbd); }
+        if let Some(egm) = event_gate_min { body["event_gate_min_score"] = serde_json::json!(egm); }
 
-        let resp = client
-            .post(format!("{}/api/v1/quant/backtests/run-factor", base))
-            .json(&body).send().await;
+        // 信号源路由: factor(默认) 或 prediction(ML)
+        let is_prediction = signal_source == "prediction";
+        let prediction_set_id = "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605";
+
+        let resp = if is_prediction {
+            client
+                .post(format!("{}/api/v1/quant/backtests/run-prediction", base))
+                .json(&serde_json::json!({
+                    "prediction_set_id": prediction_set_id,
+                    "strategy_version_id": "phase7-professional-v1",
+                    "data_version_id": "research-full-2016-2026-20260515",
+                    "top_n": 15, "rebalance": "monthly", "max_position_pct": 0.10,
+                    "max_gross_exposure": 0.95, "score_direction": "descending",
+                    "portfolio_method": "heuristic", "benchmark": "000300.SH",
+                    "skip_top_pct": 0.0, "entry_delay": 1,
+                    "universe_profile": "main_board_non_st",
+                    "start_date": start, "end_date": end
+                })).send().await
+        } else {
+            client
+                .post(format!("{}/api/v1/quant/backtests/run-factor", base))
+                .json(&body).send().await
+        };
 
         let task_id = match resp {
             Ok(r) => r.json::<serde_json::Value>().await.ok()
@@ -546,7 +584,7 @@ async fn generate_paper_signals_for_all(
         };
         let Some(task_id) = task_id else { continue };
 
-        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, leverage_enabled).await {
+        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, leverage_enabled, leverage_multiplier).await {
             Ok(n) => info!("[paper] {} 同步 {} 个持仓", name, n),
             Err(e) => error!("[paper] {} 持仓同步失败: {}", name, e),
         }
@@ -559,6 +597,7 @@ async fn sync_positions_from_backtest(
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
     date: NaiveDate,
     leverage_enabled: bool,
+    leverage_multiplier: f64,
 ) -> Result<usize, String> {
     let positions = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
         "SELECT symbol, quantity, market_value FROM backtest_position
@@ -599,10 +638,10 @@ async fn sync_positions_from_backtest(
         rust_decimal::Decimal::ONE
     };
 
-    // 杠杆：regime green(>0.9) + leverage_enabled → 1.3x
-    let leverage_mult = if leverage_enabled && regime_exposure > 0.9 {
-        info!("[paper] Leverage 1.3x applied for {}", account_id);
-        rust_decimal::Decimal::from_f64_retain(1.3).unwrap_or(rust_decimal::Decimal::ONE)
+    // 杠杆：regime green(>0.9) + leverage_enabled → 使用配置的倍率
+    let leverage_mult = if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
+        info!("[paper] Leverage {}x applied for {}", leverage_multiplier, account_id);
+        rust_decimal::Decimal::from_f64_retain(leverage_multiplier).unwrap_or(rust_decimal::Decimal::ONE)
     } else {
         rust_decimal::Decimal::ONE
     };
