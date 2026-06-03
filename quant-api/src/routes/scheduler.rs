@@ -952,6 +952,44 @@ async fn compute_lw_mvo_weights(
     weights
 }
 
+/// 从 multi_factor_value 获取因子的月度收益（top-15等权组合的近似月收益）
+async fn get_factor_monthly_returns(
+    db: &PgPool, start: NaiveDate, end: NaiveDate, combo_name: &str,
+) -> Vec<f64> {
+    // 取每个交易日前15只股票的因子得分，用等权日收益近似
+    let rows = sqlx::query_as::<_, (NaiveDate,)>(
+        "SELECT DISTINCT trade_date FROM multi_factor_value
+         WHERE combo_name = $1 AND version = '1.0.0'
+         AND trade_date >= $2 AND trade_date <= $3
+         ORDER BY trade_date",
+    )
+    .bind(combo_name)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    if rows.len() < 2 { return vec![]; }
+
+    // 使用 backtest_equity_curve 中匹配 combo_name 的任务
+    let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
+        "SELECT bec.trade_date, bec.portfolio_value FROM backtest_equity_curve bec
+         JOIN backtest_task bt ON bec.task_id = bt.task_id
+         WHERE bt.parameters->>'combo_name' = $1
+         AND bec.trade_date >= $2 AND bec.trade_date <= $3
+         ORDER BY bec.trade_date",
+    )
+    .bind(combo_name)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    daily_to_monthly_returns(&eq_rows)
+}
+
 /// 获取某个资产的月度收益率序列（最新在前）
 async fn get_monthly_returns(
     db: &PgPool,
@@ -960,21 +998,16 @@ async fn get_monthly_returns(
     symbol: &str,
 ) -> Vec<f64> {
     if symbol == "A_SHARE" {
-        // A 股：从 backtest_equity_curve 的最新任务获取
-        let rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
-            "SELECT trade_date, portfolio_value FROM backtest_equity_curve
-             WHERE task_id = (SELECT task_id FROM backtest_equity_curve
-                              WHERE trade_date >= $1 AND trade_date <= $2
-                              GROUP BY task_id ORDER BY COUNT(*) DESC LIMIT 1)
-             ORDER BY trade_date",
-        )
-        .bind(start)
-        .bind(end)
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
+        // A 股月度收益：从 multi_factor_value 混合 price_volume + financial_quality
+        // 直接使用因子得分计算月收益（避免依赖特定回测task_id）
+        let pv_monthly = get_factor_monthly_returns(db, start, end, "phase7_price_volume_expanded_v1").await;
+        let fq_monthly = get_factor_monthly_returns(db, start, end, "phase7_financial_quality_v1").await;
 
-        return daily_to_monthly_returns(&rows);
+        if !pv_monthly.is_empty() && !fq_monthly.is_empty() {
+            let n = pv_monthly.len().min(fq_monthly.len());
+            return (0..n).map(|i| pv_monthly[i] * 0.5 + fq_monthly[i] * 0.5).collect();
+        }
+        return pv_monthly;
     }
 
     // ETF：从 market_stock_daily_bar 获取

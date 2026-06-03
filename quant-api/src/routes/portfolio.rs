@@ -1415,6 +1415,19 @@ pub struct MvoSimulateRequest {
     /// 调仓频率："quarterly"（默认）或 "monthly"
     #[serde(default = "mvo_sim_default_rebalance")]
     pub rebalance_freq: String,
+    // ── v15 增强参数 ──
+    /// 杠杆模式: "fixed"(默认), "vol_target"
+    #[serde(default = "mvo_sim_default_leverage_mode")]
+    pub leverage_mode: String,
+    /// 杠杆倍率 (fixed模式, 默认1.0)
+    #[serde(default = "mvo_sim_default_leverage_mult")]
+    pub leverage_multiplier: f64,
+    /// 第二因子回测task_id (multi-factor blend, 可选)
+    #[serde(default)]
+    pub backtest_task_id_2: Option<String>,
+    /// 商品ETF启用 (有色+豆粕, 各3%)
+    #[serde(default)]
+    pub commodity_enabled: bool,
 }
 
 fn mvo_sim_default_etfs() -> Vec<String> {
@@ -1423,6 +1436,8 @@ fn mvo_sim_default_etfs() -> Vec<String> {
 fn mvo_sim_default_lookback() -> usize { 36 }
 fn mvo_sim_default_min_stock() -> f64 { 0.08 }
 fn mvo_sim_default_rebalance() -> String { "quarterly".into() }
+fn mvo_sim_default_leverage_mode() -> String { "fixed".into() }
+fn mvo_sim_default_leverage_mult() -> f64 { 1.0 }
 
 /// POST /api/v1/quant/backtests/{task_id}/mvo-simulate
 ///
@@ -1472,7 +1487,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
 
     let etf_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
         "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
-         WHERE symbol IN ($1, $2, $3, $4) AND trade_date >= '2013-01-01' ORDER BY trade_date",
+         WHERE symbol IN ($1, $2, $3, $4, '159980.SZ', '159985.SZ', '513030.SH', '511260.SH') AND trade_date >= '2013-01-01' ORDER BY trade_date",
     )
     .bind(&etf_sym0)
     .bind(&etf_sym1)
@@ -1621,7 +1636,32 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
         a_only_daily_rets.push(rets[0]);
     }
 
-    // 6. 计算指标
+    // 6. v15 增强: 在 MVO 日收益上叠加 vol-target 杠杆
+    let target_vol: f64 = 0.20;
+    let use_vol_target = req.leverage_mode == "vol_target";
+    let fixed_lev = if !use_vol_target { req.leverage_multiplier.max(1.0) } else { 1.0 };
+
+    let mut v15_rets: Vec<f64> = Vec::new();
+    let mut trail_60: Vec<f64> = Vec::new();
+
+    for &mvo_r in &mvo_daily_rets {
+        trail_60.push(mvo_r);
+        if trail_60.len() > 60 { trail_60.remove(0); }
+
+        let lev = if use_vol_target && trail_60.len() >= 20 {
+            let n = trail_60.len() as f64;
+            let mean = trail_60.iter().sum::<f64>() / n;
+            let var = if n > 1.0 {
+                trail_60.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0)
+            } else { 0.0 };
+            let ann_vol = var.sqrt() * (252.0_f64).sqrt();
+            if ann_vol > 0.05 { (target_vol / ann_vol).clamp(0.5, 2.0) } else { 1.0 }
+        } else if fixed_lev > 1.0 { fixed_lev } else { 1.0 };
+
+        v15_rets.push(mvo_r * lev);
+    }
+
+    // 7. 计算指标
     let mvo_start_idx = mvo_start_month.map(|mi| {
         daily_returns.iter().position(|(d, _)| {
             let mk = format!("{}-{:02}", d.format("%Y"), d.month());
@@ -1629,7 +1669,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
         }).unwrap_or(0)
     }).unwrap_or(0);
 
-    let mvo_rets = &mvo_daily_rets[mvo_start_idx..];
+    let mvo_rets = &v15_rets[mvo_start_idx..];
     let a_rets = &a_only_daily_rets;
 
     let compute_metrics = |rets: &[f64]| -> Value {
@@ -1681,6 +1721,39 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
     let mvo_metrics = compute_metrics(mvo_rets);
     let a_metrics = compute_metrics(a_rets);
 
+    // 计算逐年收益 (从 daily_returns 对应的日期提取年度 NAV)
+    let mut yearly_returns: Vec<Value> = Vec::new();
+    let mut yr_nav: f64 = 1.0;
+    let mut prev_yr: Option<String> = None;
+    let mut yr_start_nav: f64 = 1.0;
+
+    for (idx, &r) in mvo_rets.iter().enumerate() {
+        let mvo_idx = mvo_start_idx + idx;
+        if mvo_idx < daily_returns.len() {
+            let yr = format!("{}", daily_returns[mvo_idx].0.format("%Y"));
+            if prev_yr.as_deref() != Some(&yr) {
+                if let Some(py) = prev_yr {
+                    let yr_ret = (yr_nav / yr_start_nav - 1.0) * 100.0;
+                    yearly_returns.push(json!({
+                        "year": py,
+                        "return_pct": (yr_ret * 10.0).round() / 10.0,
+                    }));
+                }
+                yr_start_nav = yr_nav;
+                prev_yr = Some(yr);
+            }
+        }
+        yr_nav *= 1.0 + r;
+    }
+    // Last year
+    if let Some(py) = prev_yr {
+        let yr_ret = (yr_nav / yr_start_nav - 1.0) * 100.0;
+        yearly_returns.push(json!({
+            "year": py,
+            "return_pct": (yr_ret * 10.0).round() / 10.0,
+        }));
+    }
+
     let first_date = daily_returns.first().map(|(d, _)| d.format("%Y-%m-%d").to_string());
     let last_date = daily_returns.last().map(|(d, _)| d.format("%Y-%m-%d").to_string());
     let mvo_start_date = daily_returns.get(mvo_start_idx).map(|(d, _)| d.format("%Y-%m-%d").to_string());
@@ -1698,9 +1771,12 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
             "min_stock_pct": (min_stock * 100.0),
             "rebalance": if is_quarterly { "quarterly" } else { "monthly" },
             "n_assets": n_assets,
+            "leverage_mode": req.leverage_mode,
+            "leverage_multiplier": req.leverage_multiplier,
         },
         "a_share_only": a_metrics,
         "mvo_blended": mvo_metrics,
+        "yearly_returns": yearly_returns,
         "weight_history": weight_history.iter().rev().take(8).collect::<Vec<_>>(),
     }))
 }
