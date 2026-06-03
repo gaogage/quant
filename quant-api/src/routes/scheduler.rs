@@ -625,6 +625,11 @@ async fn sync_positions_from_backtest(
         ("513500.SH", "标普500", mvo_sp500_pct),
         ("513100.SH", "纳指ETF", mvo_nq_pct),
     ];
+    // 德国ETF: 固定 5% 卫星配置 (从债券分配中扣除), 2017年+17.2%提供额外分散
+    let germany_pct = (mvo_bond_pct * 0.15).min(0.05); // max 5%
+    if germany_pct > 0.005 {
+        etf_allocations.push(("513030.SH", "德国ETF", germany_pct));
+    }
     // 体制降仓时加入货币基金
     if cash_pct > 0.01 {
         etf_allocations.push(("511880.SH", "银华日利(现金)", cash_pct));
@@ -702,7 +707,7 @@ async fn compute_lw_mvo_weights(
         }
     }
 
-    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH"];
+    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "513030.SH"];
 
     // 获取过去 36 个月的月度收益数据
     let lookback_start = date - chrono::Duration::days(36 * 31); // ~3 years
@@ -711,11 +716,16 @@ async fn compute_lw_mvo_weights(
     let a_monthly = get_monthly_returns(db, lookback_start, date, "A_SHARE").await;
 
     // Adaptive MVO: 根据近期 A 股表现动态调整 min_stock
-    let adaptive_min_stock = if a_monthly.len() >= 6 {
-        let trail_6m: f64 = a_monthly[..6].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
-        if trail_6m < -0.05 {
-            // 因子失效检测：A股因子近6月持续亏损 → 放开A股约束, 让LW-MVO自由配置ETF
-            info!("[MVO] Factor failure detected (6m={:.1}%), min_stock {} -> 0.00, switching to ETF defense", trail_6m * 100.0, min_stock);
+    let adaptive_min_stock = if a_monthly.len() >= 3 {
+        let trail_3m: f64 = a_monthly[..3].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+        let trail_6m: f64 = if a_monthly.len() >= 6 {
+            a_monthly[..6].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0
+        } else {
+            trail_3m * 2.0 // 近似年化
+        };
+        if trail_3m < -0.03 {
+            // 因子失效检测：A股因子近3月持续亏损 → 放开A股约束, 让LW-MVO自由配置ETF
+            info!("[MVO] Factor failure detected (3m={:.1}%), min_stock {} -> 0.00, switching to ETF defense", trail_3m * 100.0, min_stock);
             0.00
         } else if trail_6m > 0.15 {
             info!("[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> 0.20", trail_6m * 100.0, min_stock);
