@@ -3626,6 +3626,127 @@ pub async fn sync_suspension(
     }
 }
 
+/// POST /api/v1/quant/data/sync/limit
+#[derive(Debug, serde::Deserialize)]
+pub struct SyncLimitListRequest {
+    pub trade_date: String, // YYYYMMDD
+}
+
+pub async fn sync_limit_list(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncLimitListRequest>,
+) -> impl IntoResponse {
+    match quant_data::sync::sync_limit_list(&state.db, &state.tushare, &req.trade_date).await {
+        Ok(count) => Json(json!({"code": 0, "data": {"count": count}})),
+        Err(e) => Json(json!({"code": 1, "message": e})),
+    }
+}
+
+/// POST /api/v1/quant/data/sync/suspension/backfill
+///
+/// 批量回填停牌历史数据（按交易日历逐日同步）
+#[derive(Debug, serde::Deserialize)]
+pub struct BackfillRequest {
+    pub start_date: String, // YYYYMMDD
+    pub end_date: String,   // YYYYMMDD
+}
+
+pub async fn sync_suspension_backfill(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BackfillRequest>,
+) -> impl IntoResponse {
+    let trade_dates: Vec<String> = match sqlx::query_as::<_, (String,)>(
+        "SELECT to_char(trade_date, 'YYYYMMDD') FROM market_trade_calendar
+         WHERE trade_date >= $1::date AND trade_date <= $2::date AND is_open = true
+         ORDER BY trade_date",
+    )
+    .bind(&req.start_date)
+    .bind(&req.end_date)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows.into_iter().map(|(d,)| d).collect(),
+        Err(e) => return Json(json!({"code": 1, "message": format!("查询交易日历: {}", e)})),
+    };
+
+    let mut total = 0usize;
+    let mut failed = 0usize;
+    let total_days = trade_dates.len();
+
+    for (i, d) in trade_dates.iter().enumerate() {
+        match quant_data::sync::sync_suspension(&state.db, &state.tushare, d).await {
+            Ok(n) => total += n,
+            Err(e) => {
+                tracing::warn!("[{}/{}] {} 停牌同步失败: {}", i + 1, total_days, d, e);
+                failed += 1;
+            }
+        }
+        // 速率控制: Tushare 限流
+        if (i + 1) % 10 == 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "total_days": total_days,
+            "total_records": total,
+            "failed_days": failed,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/data/sync/limit/backfill
+pub async fn sync_limit_backfill(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BackfillRequest>,
+) -> impl IntoResponse {
+    let trade_dates: Vec<String> = match sqlx::query_as::<_, (String,)>(
+        "SELECT to_char(trade_date, 'YYYYMMDD') FROM market_trade_calendar
+         WHERE trade_date >= $1::date AND trade_date <= $2::date AND is_open = true
+         ORDER BY trade_date",
+    )
+    .bind(&req.start_date)
+    .bind(&req.end_date)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows.into_iter().map(|(d,)| d).collect(),
+        Err(e) => return Json(json!({"code": 1, "message": format!("查询交易日历: {}", e)})),
+    };
+
+    let mut total = 0usize;
+    let mut failed = 0usize;
+    let total_days = trade_dates.len();
+
+    for (i, d) in trade_dates.iter().enumerate() {
+        match quant_data::sync::sync_limit_list(&state.db, &state.tushare, d).await {
+            Ok(n) => {
+                total += n;
+                tracing::info!("[{}/{}] {} 涨跌停: {} 条", i + 1, total_days, d, n);
+            }
+            Err(e) => {
+                tracing::warn!("[{}/{}] {} 涨跌停同步失败: {}", i + 1, total_days, d, e);
+                failed += 1;
+            }
+        }
+        // limit_list_d API 限流 1次/分钟, 每次调用后等65秒
+        if i + 1 < total_days {
+            tokio::time::sleep(std::time::Duration::from_secs(65)).await;
+        }
+    }
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "total_days": total_days,
+            "total_records": total,
+            "failed_days": failed,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/data/sync/historical
 ///
 /// 补齐历史数据（2006-2015），参数：start_date、end_date

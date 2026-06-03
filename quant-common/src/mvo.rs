@@ -89,59 +89,109 @@ fn grid_search_5asset(
     max_single: f64,
     objective: GridObjective,
 ) -> GridSearchResult {
-    let steps = ((1.0 / GRID_STEP) as i32) + 1;
-    let step_values: Vec<f64> = (0..steps).map(|i| i as f64 * GRID_STEP).collect();
+    grid_search_n_asset(mu_annual, cov, min_stock, max_single, objective, GRID_STEP)
+}
+
+/// Generic N-asset grid search with configurable grid step.
+/// Uses recursive enumeration for any number of assets.
+/// For N assets: O(step_count^(N-1)) combinations.
+/// Recommended grid_step: 5% for ≤5 assets, 10% for 6-8 assets.
+fn grid_search_n_asset(
+    mu_annual: &Array1<f64>,
+    cov: &Array2<f64>,
+    min_stock: f64,
+    max_single: f64,
+    objective: GridObjective,
+    grid_step: f64,
+) -> GridSearchResult {
+    let n_assets = mu_annual.len();
+    if n_assets < 2 {
+        return GridSearchResult { weights: None, best_sharpe: f64::NEG_INFINITY };
+    }
+
+    let steps = ((1.0 / grid_step) as i32) + 1;
+    let step_values: Vec<f64> = (0..steps).map(|i| i as f64 * grid_step).collect();
 
     let mut best_sharpe = f64::NEG_INFINITY;
     let mut fallback_weights: Option<Array1<f64>> = None;
     let mut best_var = f64::INFINITY;
     let mut target_weights: Option<Array1<f64>> = None;
+    let mut current = vec![0.0f64; n_assets];
 
-    for &w0 in &step_values {
-        if w0 < min_stock || w0 > max_single { continue; }
-        let rem1 = 1.0 - w0;
-        for &w1 in &step_values {
-            if w1 > rem1 + 0.001 || w1 > max_single { continue; }
-            let rem2 = rem1 - w1;
-            for &w2 in &step_values {
-                if w2 > rem2 + 0.001 || w2 > max_single { continue; }
-                let rem3 = rem2 - w2;
-                for &w3 in &step_values {
-                    if w3 > rem3 + 0.001 || w3 > max_single { continue; }
-                    let w4 = rem3 - w3;
-                    if w4 < -0.001 || w4 > max_single { continue; }
+    // Recursive search: enumerate weights for assets 0..n_assets-1, last asset is remainder
+    fn search_level(
+        level: usize,
+        n_assets: usize,
+        remaining: f64,
+        min_stock: f64,
+        max_single: f64,
+        step_values: &[f64],
+        current: &mut [f64],
+        mu_annual: &Array1<f64>,
+        cov: &Array2<f64>,
+        best_sharpe: &mut f64,
+        fallback_weights: &mut Option<Array1<f64>>,
+        best_var: &mut f64,
+        target_weights: &mut Option<Array1<f64>>,
+        objective: &GridObjective,
+    ) {
+        if level == n_assets - 1 {
+            // Last asset: remainder
+            let w_last = remaining.max(0.0);
+            if w_last > max_single + 0.001 { return; }
+            current[level] = w_last;
 
-                    let weights = Array1::from_vec(vec![w0, w1, w2, w3, w4.max(0.0)]);
-                    let w_sum = weights.sum();
-                    let w = &weights / w_sum;
+            let weights = Array1::from_vec(current.to_vec());
+            let w_sum = weights.sum();
+            if w_sum <= 0.0 { return; }
+            let w = &weights / w_sum;
 
-                    let port_mu = w.dot(mu_annual) - RISK_FREE;
-                    let port_var = w.dot(&cov.dot(&w));
-                    if port_var <= 0.0 { continue; }
-                    let sharpe = port_mu / port_var.sqrt();
+            let port_mu = w.dot(mu_annual) - RISK_FREE;
+            let port_var = w.dot(&cov.dot(&w));
+            if port_var <= 0.0 { return; }
+            let sharpe = port_mu / port_var.sqrt();
 
-                    // Always track max-Sharpe fallback
-                    if sharpe > best_sharpe {
-                        best_sharpe = sharpe;
-                        fallback_weights = Some(w.clone());
-                    }
+            if sharpe > *best_sharpe {
+                *best_sharpe = sharpe;
+                *fallback_weights = Some(w.clone());
+            }
 
-                    // Handle objective-specific logic
-                    match &objective {
-                        GridObjective::MaxSharpe => {
-                            target_weights = fallback_weights.clone();
-                        }
-                        GridObjective::MinVariance { target } => {
-                            if port_mu >= target - RISK_FREE && port_var < best_var {
-                                best_var = port_var;
-                                target_weights = Some(w);
-                            }
-                        }
+            match objective {
+                GridObjective::MaxSharpe => {
+                    *target_weights = fallback_weights.clone();
+                }
+                GridObjective::MinVariance { target } => {
+                    if port_mu >= target - RISK_FREE && port_var < *best_var {
+                        *best_var = port_var;
+                        *target_weights = Some(w);
                     }
                 }
             }
+            return;
+        }
+
+        // First asset (stock) must be >= min_stock
+        let min_val = if level == 0 { min_stock.min(max_single) } else { 0.0 };
+        let max_val = remaining.min(max_single);
+
+        for &sv in step_values {
+            if sv < min_val - 0.001 || sv > max_val + 0.001 { continue; }
+            current[level] = sv;
+            search_level(
+                level + 1, n_assets, remaining - sv,
+                min_stock, max_single, step_values, current,
+                mu_annual, cov, best_sharpe, fallback_weights,
+                best_var, target_weights, objective,
+            );
         }
     }
+
+    search_level(
+        0, n_assets, 1.0,
+        min_stock, max_single, &step_values, &mut current,
+        mu_annual, cov, &mut best_sharpe, &mut fallback_weights,
+        &mut best_var, &mut target_weights, &objective,
+    );
 
     GridSearchResult {
         weights: target_weights.or(fallback_weights),
@@ -204,6 +254,27 @@ pub fn mvo_allocate_with_target(
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
 
     let result = grid_search_5asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target });
+    result.weights.map(|w| MvoWeights {
+        weights: w,
+        sharpe: result.best_sharpe,
+        rho,
+    })
+}
+
+/// MVO with return target and configurable grid step (for N > 5 assets).
+/// Uses recursive grid search with `grid_step` (e.g. 0.10 for 8-asset optimization).
+pub fn mvo_allocate_with_target_n(
+    monthly_returns: &Array2<f64>,
+    min_stock: f64,
+    return_target: f64,
+    grid_step: f64,
+) -> Option<MvoWeights> {
+    let cov = ledoit_wolf_shrinkage(monthly_returns);
+    let mu = annualized_returns(monthly_returns);
+    let n_assets = monthly_returns.ncols();
+    let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
+
+    let result = grid_search_n_asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target }, grid_step);
     result.weights.map(|w| MvoWeights {
         weights: w,
         sharpe: result.best_sharpe,

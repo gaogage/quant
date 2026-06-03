@@ -896,7 +896,7 @@ pub struct RunFactorBacktestReq {
     pub max_pairwise_correlation: Option<f64>,
     #[serde(default = "default_correlation_lookback_days")]
     pub correlation_lookback_days: usize,
-    #[serde(default)]
+    #[serde(default = "default_kelly_fraction")] // P0: 启用Kelly得分加权
     pub kelly_fraction: f64,
     #[serde(default = "default_kelly_lookback_days")]
     pub kelly_lookback_days: usize,
@@ -923,7 +923,7 @@ pub struct RunFactorBacktestReq {
     pub rebalance_hysteresis_pct: Option<f64>,
     #[serde(default)]
     pub partial_rebalance_ratio: Option<f64>,
-    #[serde(default)]
+    #[serde(default = "default_score_candidate_pool_size")] // P0: 扩大候选池
     pub score_candidate_pool_size: Option<usize>,
     pub universe_profile: Option<String>,
     pub effective_coverage: Option<EffectiveCoverageReq>,
@@ -994,7 +994,7 @@ pub struct RunPredictionBacktestReq {
     pub max_pairwise_correlation: Option<f64>,
     #[serde(default = "default_correlation_lookback_days")]
     pub correlation_lookback_days: usize,
-    #[serde(default)]
+    #[serde(default = "default_kelly_fraction")] // P0
     pub kelly_fraction: f64,
     #[serde(default = "default_kelly_lookback_days")]
     pub kelly_lookback_days: usize,
@@ -1061,10 +1061,10 @@ fn default_data_version() -> String {
     "debug-data".into()
 }
 fn default_top_n() -> usize {
-    20
+    40 // P0: 20→40, 提升分散度
 }
 fn default_rebalance() -> String {
-    "monthly".into()
+    "biweekly".into() // P0: monthly→biweekly, 更好捕获短期信号
 }
 fn default_entry_delay() -> usize {
     0
@@ -1077,6 +1077,12 @@ fn default_correlation_lookback_days() -> usize {
 }
 fn default_kelly_lookback_days() -> usize {
     60
+}
+fn default_kelly_fraction() -> f64 {
+    0.25 // P0: 启用得分加权 (Kelly), 替代等权
+}
+fn default_score_candidate_pool_size() -> Option<usize> {
+    Some(200) // P0: 扩大候选池至200
 }
 fn default_max_gross_exposure() -> f64 {
     1.0

@@ -146,6 +146,18 @@ async fn main() {
             post(routes::sync::sync_suspension),
         )
         .route(
+            "/api/v1/quant/data/sync/suspension/backfill",
+            post(routes::sync::sync_suspension_backfill),
+        )
+        .route(
+            "/api/v1/quant/data/sync/limit",
+            post(routes::sync::sync_limit_list),
+        )
+        .route(
+            "/api/v1/quant/data/sync/limit/backfill",
+            post(routes::sync::sync_limit_backfill),
+        )
+        .route(
             "/api/v1/quant/data/sync/historical",
             post(routes::sync::sync_historical),
         )

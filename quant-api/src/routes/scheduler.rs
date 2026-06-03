@@ -104,7 +104,7 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<M
                 let mut st = state.lock().await;
                 st.traded_today = true;
             }
-            info!("[scheduler] 14:45 日频调仓 (v15 LW-MVO)...");
+            info!("[scheduler] 14:45 日频调仓 (v16 LW-MVO 7-asset)...");
             // 先同步当日行情数据
             sync_daily_data_for_today(port, today).await?;
             // 生成信号 + 调仓
@@ -422,11 +422,11 @@ async fn sync_daily_data_for_today(port: u16, date: NaiveDate) -> Result<(), Str
         }))
         .send().await;
 
-    // ETF 日线
+    // ETF 日线 (v16: 精简7资产 — 黄金+国债+SP500+NASDAQ+有色+豆粕)
     let _ = client
         .post(format!("{}/api/v1/quant/data/sync/fund-daily", base))
         .json(&serde_json::json!({
-            "symbols": ["518880.SH","511010.SH","513100.SH","513500.SH","513030.SH","159980.SZ","159985.SZ","511260.SH"],
+            "symbols": ["518880.SH","511010.SH","513100.SH","513500.SH","159980.SZ","159985.SZ"],
             "start_date": date_str, "end_date": date_str
         }))
         .send().await;
@@ -470,6 +470,7 @@ async fn sync_eod_data(db: &PgPool, port: u16, date: NaiveDate) -> Result<(), St
 
     // 因子重算 (等数据同步完成后)
     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    // v16核心: 量价因子combo
     let _ = client
         .post(format!("{}/api/v1/quant/factors/phase7-price-volume-backfill/background", base))
         .json(&serde_json::json!({
@@ -477,6 +478,7 @@ async fn sync_eod_data(db: &PgPool, port: u16, date: NaiveDate) -> Result<(), St
             "combo_name": "phase7_price_volume_expanded_v1"
         }))
         .send().await;
+    // v16核心: 财务质量因子combo
     let _ = client
         .post(format!("{}/api/v1/quant/factors/phase7-financial-quality-backfill/background", base))
         .json(&serde_json::json!({
@@ -486,7 +488,21 @@ async fn sync_eod_data(db: &PgPool, port: u16, date: NaiveDate) -> Result<(), St
         .send().await;
     info!("[scheduler] 因子重算已触发");
 
-    // 数据完整性检查
+    // ── 涨跌停数据同步 (先尝试, 失败重试, 再失败告警) ──
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    let limit_ok = sync_limit_with_retry(db, &client, &base, &date_str).await;
+    if !limit_ok {
+        warn!("[scheduler] ⚠ 涨跌停数据同步失败 (已重试), 将发送告警");
+    }
+
+    // ── ML预测数据检查+补齐 ──
+    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    let pred_ok = ensure_prediction_coverage(db, &client, &base, &date_str, date).await;
+    if !pred_ok {
+        warn!("[scheduler] ⚠ ML预测数据补齐失败, v16将降级为纯因子选股");
+    }
+
+    // 数据完整性检查 (含告警)
     run_data_quality_check(db).await;
 
     Ok(())
@@ -505,24 +521,22 @@ async fn run_data_quality_check(db: &PgPool) {
     let today = chrono::Utc::now().date_naive();
 
     // 检查各表最后数据日期 (A股日线排除停牌股, 避免误报)
-    let checks: Vec<(&str, &str, &str, Option<&str>)> = vec![
-        ("A股日线", "market_stock_daily_bar d", "d.trade_date",
+    let checks: Vec<(&str, &str, Option<&str>)> = vec![
+        ("A股日线", "market_stock_daily_bar d",
          Some("d.symbol NOT IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = d.trade_date AND suspend_type = 'S')")),
-        ("复权因子", "market_adjustment_factor", "trade_date", None),
-        ("日线基础", "market_stock_daily_basic", "trade_date", None),
-        ("因子(pv)", "multi_factor_value", "trade_date AND combo_name='phase7_price_volume_expanded_v1'", None),
-        ("CSI300指数", "market_index_daily_bar", "trade_date AND symbol='000300.SH'", None),
+        ("复权因子", "market_adjustment_factor", None),
+        ("日线基础", "market_stock_daily_basic", None),
+        ("因子(pv)", "multi_factor_value",
+         Some("combo_name = 'phase7_price_volume_expanded_v1'")),
+        ("CSI300指数", "market_index_daily_bar",
+         Some("symbol = '000300.SH'")),
     ];
 
     let mut gaps: Vec<String> = Vec::new();
-    for (name, table, date_filter, exclude_filter) in &checks {
-        let where_clause = if let Some(excl) = exclude_filter {
-            format!("{} AND {}", date_filter, excl)
-        } else {
-            date_filter.to_string()
-        };
+    for (name, table, exclude_filter) in &checks {
+        let where_sql = exclude_filter.unwrap_or("TRUE");
         let sql = format!(
-            "SELECT MAX(trade_date)::text FROM {} WHERE {}", table, where_clause
+            "SELECT MAX(trade_date)::text FROM {} WHERE {}", table, where_sql
         );
         let max_date: Option<(String,)> = sqlx::query_as(&sql).fetch_optional(db).await.ok().flatten();
 
@@ -558,7 +572,113 @@ async fn run_data_quality_check(db: &PgPool) {
     .execute(db).await;
 }
 
-/// 发送数据质量告警到钉钉 (所有活跃账号)
+/// 涨跌停数据同步 (日终清空旧数据, 重新拉取收盘后最终状态)
+async fn sync_limit_with_retry(db: &PgPool, client: &reqwest::Client, base: &str, date_str: &str) -> bool {
+    // 日终时先清空当日旧数据 (14:45盘中可能已拉取过, 收盘后可能有变化)
+    let d = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d").unwrap();
+    let _ = sqlx::query("DELETE FROM market_stock_limit WHERE trade_date = $1")
+        .bind(d).execute(db).await;
+    info!("[scheduler] 已清空当日涨跌停旧数据, 重新拉取收盘后最终状态");
+
+    // 第一次尝试
+    info!("[scheduler] 同步涨跌停数据 {}...", date_str);
+    let resp = client
+        .post(format!("{}/api/v1/quant/data/sync/limit", base))
+        .json(&serde_json::json!({"trade_date": date_str}))
+        .send().await;
+
+    match resp {
+        Ok(r) => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            if body.get("code").and_then(|c| c.as_i64()) == Some(0) {
+                let count: i64 = sqlx::query_as::<_, (i64,)>(
+                    "SELECT COUNT(*) FROM market_stock_limit WHERE trade_date = $1"
+                ).bind(d).fetch_optional(db).await.ok().flatten().map(|(c,)| c).unwrap_or(0);
+                info!("[scheduler] 涨跌停数据同步成功 ({} 条)", count);
+                return true;
+            }
+            warn!("[scheduler] 涨跌停首次同步失败: {:?}, 65秒后重试...", body.get("message"));
+        }
+        Err(e) => warn!("[scheduler] 涨跌停首次同步网络错误: {}, 65秒后重试...", e),
+    }
+
+    // 重试 (等65秒, Tushare限流1次/分钟)
+    tokio::time::sleep(tokio::time::Duration::from_secs(65)).await;
+    let retry = client
+        .post(format!("{}/api/v1/quant/data/sync/limit", base))
+        .json(&serde_json::json!({"trade_date": date_str}))
+        .send().await;
+
+    match retry {
+        Ok(r) => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            if body.get("code").and_then(|c| c.as_i64()) == Some(0) {
+                info!("[scheduler] 涨跌停重试成功");
+                return true;
+            }
+            warn!("[scheduler] 涨跌停重试仍失败: {:?}", body.get("message"));
+        }
+        Err(e) => warn!("[scheduler] 涨跌停重试网络错误: {}", e),
+    }
+
+    false
+}
+
+/// 确保ML预测数据覆盖到当前日期
+/// 策略: gap≤1天→正常; gap>1天→触发后台训练生成; 无法生成→降级纯因子
+async fn ensure_prediction_coverage(db: &PgPool, client: &reqwest::Client, base: &str, _date_str: &str, date: chrono::NaiveDate) -> bool {
+    let pred_set = "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605";
+
+    // 检查最新预测日期
+    let max_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1"
+    ).bind(pred_set).fetch_optional(db).await.ok().flatten();
+
+    let gap = match max_date {
+        Some((max_d,)) => (date - max_d).num_days(),
+        None => 999,
+    };
+
+    if gap <= 1 {
+        info!("[scheduler] ML预测数据正常 (最新={:?}, gap={}天)", max_date.map(|(d,)| d), gap);
+        return true;
+    }
+
+    warn!("[scheduler] ⚠ ML预测数据过期: gap={}天, 触发后台训练补齐...", gap);
+
+    // 触发NLQR walk-forward prediction set 创建 (后台异步, 可能需要数分钟到数小时)
+    // 日终触发, 次日14:45调仓时检查是否ready
+    let triggered = client
+        .post(format!("{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", base))
+        .json(&serde_json::json!({
+            "model_code": "nlqr_mr",
+            "model_version": "1.0.0",
+            "data_version_id": "research-full-2016-2026-20260515",
+            "feature_set_version_id": "phase7-wf-wide-qgvrel-h60-v1",
+            "training_dataset_id": "phase7-wf-wide-qgvrel-h60-v1",
+            "prediction_set_id": format!("pred-nlqr_mr_eod_{}", date.format("%Y%m%d").to_string()),
+            "prediction_start_date": date.format("%Y%m%d").to_string(),
+            "prediction_end_date": (date + chrono::Duration::days(30)).format("%Y%m%d").to_string(),
+            "bucket_count": 10,
+            "min_samples_per_bucket": 100
+        }))
+        .send().await;
+
+    match triggered {
+        Ok(r) => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            if body.get("code").and_then(|c| c.as_i64()) == Some(0) {
+                info!("[scheduler] ML预测后台训练已触发, 预计次日就绪. 当前v16暂时降级纯因子");
+            } else {
+                warn!("[scheduler] ML预测训练触发失败: {:?}", body.get("message"));
+            }
+        }
+        Err(e) => warn!("[scheduler] ML预测训练触发网络错误: {}", e),
+    }
+
+    // 返回false: v16当前调仓降级为纯因子选股, 等预测数据ready后自动恢复
+    false
+}
 async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
     let accounts = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT name, dingtalk_webhook_url FROM paper_account WHERE status='active' AND dingtalk_webhook_url IS NOT NULL"
@@ -690,11 +810,46 @@ async fn generate_paper_signals_for_all(
         if let Some(rbd) = risk_budget_days { body["risk_budget_lookback_days"] = serde_json::json!(rbd); }
         if let Some(egm) = event_gate_min { body["event_gate_min_score"] = serde_json::json!(egm); }
 
-        // 信号源路由: factor(默认) 或 prediction(ML)
+        // 信号源路由: factor(默认) / prediction(ML) / prediction_blend(v16: 因子+ML混合)
         let is_prediction = signal_source == "prediction";
-        let prediction_set_id = "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605";
+        let is_prediction_blend = signal_source == "prediction_blend";
 
-        let resp = if is_prediction {
+        // v16: 使用宽域 prediction set (2016-2026), 检查数据是否可用
+        let prediction_set_id = if is_prediction || is_prediction_blend {
+            // 检查prediction数据是否覆盖当前日期
+            let pred_ok: bool = sqlx::query_as::<_, (i64,)>(
+                "SELECT COUNT(*) FROM model_prediction WHERE prediction_set_id = 'pred-p7-wf-wide-qgvrel-h60-v1-201602-202605' AND trade_date = $1"
+            ).bind(date).fetch_optional(db).await.ok().flatten().map(|(c,)| c > 0).unwrap_or(false);
+
+            if pred_ok {
+                Some("pred-p7-wf-wide-qgvrel-h60-v1-201602-202605")
+            } else {
+                warn!("[paper] ⚠ prediction数据未覆盖{}, v16降级为纯因子选股", date);
+                None
+            }
+        } else {
+            None
+        };
+
+        let resp = if is_prediction_blend {
+            // v16: 因子+ML混合 — run-factor + prediction_blend
+            let mut blend_body = body.clone();
+            if let Some(pid) = prediction_set_id {
+                blend_body["prediction_set_id"] = serde_json::json!(pid);
+                blend_body["prediction_blend_weight"] = serde_json::json!(0.5);
+            }
+            // v16 专用参数
+            if !wfa_used {
+                blend_body["top_n"] = serde_json::json!(30);
+                blend_body["rebalance"] = serde_json::json!("biweekly");
+                blend_body["kelly_fraction"] = serde_json::json!(0.25);
+                blend_body["score_candidate_pool_size"] = serde_json::json!(200);
+            }
+            info!("[paper] v16 prediction_blend: set={:?}", prediction_set_id);
+            client
+                .post(format!("{}/api/v1/quant/backtests/run-factor", base))
+                .json(&blend_body).send().await
+        } else if is_prediction {
             client
                 .post(format!("{}/api/v1/quant/backtests/run-prediction", base))
                 .json(&serde_json::json!({
@@ -810,6 +965,8 @@ async fn sync_positions_from_backtest(
     let mvo_bond_pct = mvo_weights[2] * regime_exposure;
     let mvo_sp500_pct = mvo_weights[3] * regime_exposure;
     let mvo_nq_pct = mvo_weights[4] * regime_exposure;
+    let mvo_color_pct = mvo_weights.get(5).copied().unwrap_or(0.03) * regime_exposure;
+    let mvo_meal_pct = mvo_weights.get(6).copied().unwrap_or(0.03) * regime_exposure;
     let cash_pct = 1.0 - regime_exposure; // 现金/货币基金
 
     if regime_exposure < 0.99 {
@@ -863,29 +1020,15 @@ async fn sync_positions_from_backtest(
             .bind(&pid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).bind(rust_decimal::Decimal::from_f64_retain(mvo_a_pct / positions.len() as f64).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("pos:{}",e))?;
     }
 
-    // Create ETF positions (MVO allocation + 现金/货币基金)
+    // v16: 7资产MVO Grid Search统一优化 (精简相关性冗余)
     let mut etf_allocations = vec![
         ("518880.SH", "黄金ETF", mvo_gold_pct),
         ("511010.SH", "国债ETF", mvo_bond_pct),
         ("513500.SH", "标普500", mvo_sp500_pct),
         ("513100.SH", "纳指ETF", mvo_nq_pct),
+        ("159980.SZ", "有色ETF", mvo_color_pct),
+        ("159985.SZ", "豆粕ETF", mvo_meal_pct),
     ];
-    // 德国ETF: 固定 5% 卫星配置 (从债券分配中扣除), 2017年+17.2%提供额外分散
-    let germany_pct = (mvo_bond_pct * 0.15).min(0.05); // max 5%
-    if germany_pct > 0.005 {
-        etf_allocations.push(("513030.SH", "德国ETF", germany_pct));
-    }
-    // 商品ETF卫星配置: 有色(3%) + 豆粕(3%), 低相关性提供通胀对冲
-    let commodity_pct = 0.03;
-    if commodity_pct > 0.001 {
-        etf_allocations.push(("159980.SZ", "有色ETF", commodity_pct));
-        etf_allocations.push(("159985.SZ", "豆粕ETF", commodity_pct));
-    }
-    // 10年国债ETF: 2%卫星配置, 更高收益的债券选择
-    let bond10y_pct = 0.02;
-    if bond10y_pct > 0.001 {
-        etf_allocations.push(("511260.SH", "十年国债ETF", bond10y_pct));
-    }
     // 体制降仓时加入货币基金
     if cash_pct > 0.01 {
         etf_allocations.push(("511880.SH", "银华日利(现金)", cash_pct));
@@ -963,7 +1106,12 @@ async fn compute_lw_mvo_weights(
         }
     }
 
-    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "513030.SH", "159980.SZ", "159985.SZ"];
+    // v16: 7资产MVO — 精简后相关性独立的资产池
+    // 国债ETF+十年国债(corr=0.865)合并保留国债ETF
+    // 德国ETF移除(冗余), 银华日利仅在体制降仓时加入
+    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "159980.SZ", "159985.SZ"];
+    // 对应: 黄金, 国债, SP500, NASDAQ, 有色, 豆粕
+    let n_total_assets = 1 + etf_symbols.len(); // A股 + 6 ETFs = 7
 
     // 获取过去 36 个月的月度收益数据
     let lookback_start = date - chrono::Duration::days(36 * 31); // ~3 years
@@ -977,10 +1125,9 @@ async fn compute_lw_mvo_weights(
         let trail_6m: f64 = if a_monthly.len() >= 6 {
             a_monthly[..6].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0
         } else {
-            trail_3m * 2.0 // 近似年化
+            trail_3m * 2.0
         };
         if trail_3m < -0.03 {
-            // 因子失效检测：A股因子近3月持续亏损 → 放开A股约束, 让LW-MVO自由配置ETF
             info!("[MVO] Factor failure detected (3m={:.1}%), min_stock {} -> 0.00, switching to ETF defense", trail_3m * 100.0, min_stock);
             0.00
         } else if trail_6m > 0.15 {
@@ -993,7 +1140,7 @@ async fn compute_lw_mvo_weights(
         min_stock
     };
 
-    // Kelly-inspired A股仓位缩放: 因子IR高→加仓, IR低→减仓
+    // Kelly-inspired A股仓位缩放
     let kelly_scale = if adaptive_min_stock > 0.0 && a_monthly.len() >= 6 {
         let trail_rets: Vec<f64> = a_monthly[..6].to_vec();
         let n = trail_rets.len() as f64;
@@ -1002,7 +1149,6 @@ async fn compute_lw_mvo_weights(
             let variance = trail_rets.iter().map(|r| (r - avg).powi(2)).sum::<f64>() / (n - 1.0);
             let monthly_ir = if variance > 0.0 { avg / variance.sqrt() } else { 0.0 };
             let annual_ir = monthly_ir * (12.0_f64).sqrt();
-            // Map IR to position scalar: IR=0→0.5x, IR=0.5→1.0x, IR=1.0→1.5x
             (0.5 + annual_ir).clamp(0.3, 1.5)
         } else {
             1.0
@@ -1012,7 +1158,8 @@ async fn compute_lw_mvo_weights(
     };
     let adaptive_min_stock = (adaptive_min_stock * kelly_scale).min(0.75);
 
-    let default_weights = vec![adaptive_min_stock, 0.30, 0.40, 0.05, 0.25 - adaptive_min_stock];
+    // 7资产默认权重 (数据不足时的fallback): A股,黄金,国债,SP500,NASDAQ,有色,豆粕
+    let default_weights = vec![adaptive_min_stock, 0.25, 0.35, 0.05, 0.15, 0.03, 0.03, 0.14 - adaptive_min_stock];
 
     let mut weights = default_weights.clone();
 
@@ -1022,52 +1169,45 @@ async fn compute_lw_mvo_weights(
         return weights;
     }
 
-    // ETF 月度收益
-    let mut all_monthly: Vec<Vec<f64>> = Vec::new();
-    let mut valid_etf_count = 0;
+    // 所有ETF月度收益
     let mut etf_monthly_data: Vec<Vec<f64>> = Vec::new();
-
+    let mut valid_etf_count = 0;
     for sym in &etf_symbols {
         let mrets = get_monthly_returns(db, lookback_start, date, sym).await;
+        if !mrets.is_empty() { valid_etf_count += 1; }
         etf_monthly_data.push(mrets);
-        if !etf_monthly_data.last().unwrap().is_empty() {
-            valid_etf_count += 1;
-        }
     }
 
-    // 构建训练数据（对齐月份）
+    // 构建8资产训练数据
+    let mut all_monthly: Vec<Vec<f64>> = Vec::new();
     let n_months = a_monthly.len();
     for i in 0..n_months {
         let mut row = vec![a_monthly[i]];
-        for j in 0..4 {
+        for j in 0..etf_symbols.len() {
             if i < etf_monthly_data[j].len() {
                 row.push(etf_monthly_data[j][i]);
             } else {
                 row.push(0.0);
             }
         }
-        // 过滤异常值
         if row.iter().all(|r| r.abs() < 1.0) {
             all_monthly.push(row);
         }
     }
 
     if all_monthly.len() >= 12 && valid_etf_count >= 2 {
-        let n_assets = 5usize;
         let n_rows = all_monthly.len();
         let flat: Vec<f64> = all_monthly.iter().flatten().copied().collect();
 
-        if let Some(arr) = Array2::from_shape_vec((n_rows, n_assets), flat).ok() {
-            // Dynamic Return Target: trailing CSI300 return + 5% (PIT-compliant)
+        if let Some(arr) = Array2::from_shape_vec((n_rows, n_total_assets), flat).ok() {
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
-                (trail_12m + 0.05).clamp(0.08, 0.18) // floor 8%, cap 18%
+                (trail_12m + 0.05).clamp(0.08, 0.18)
             } else {
                 0.12
             };
-            // Asset pre-filter: exclude assets with trailing return < 3% from MVO
-            // This naturally reduces bond allocation when bonds underperform
-            if let Some(result) = mvo::mvo_allocate_with_target(&arr, adaptive_min_stock, dynamic_target) {
+            // v16: 8资产统一Grid Search (10%步长, O(11^7)≈19M组合)
+            if let Some(result) = mvo::mvo_allocate_with_target_n(&arr, adaptive_min_stock, dynamic_target, 0.10) {
                 let w = result.weights.to_vec();
                 info!(
                     quarter = %quarter,
@@ -1076,8 +1216,10 @@ async fn compute_lw_mvo_weights(
                     bond = %(w[2] * 100.0).round(),
                     sp500 = %(w[3] * 100.0).round(),
                     nq = %(w[4] * 100.0).round(),
+                    color = %(w[5] * 100.0).round(),
+                    meal = %(w[6] * 100.0).round(),
                     sharpe = %(result.sharpe * 100.0).round() / 100.0,
-                    "LW-MVO 权重已更新"
+                    "v16 7-asset MVO 权重已更新"
                 );
                 weights = w;
             }
