@@ -451,8 +451,8 @@ async fn sync_intraday_data(port: u16, date: NaiveDate) -> Result<(), String> {
 async fn generate_paper_signals_for_all(
     db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate,
 ) -> Result<(), String> {
-    let accounts = sqlx::query_as::<_, (String, String)>(
-        "SELECT paper_account_id, name FROM paper_account
+    let accounts = sqlx::query_as::<_, (String, String, bool)>(
+        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false) FROM paper_account
          WHERE status = 'active' AND account_type = 'simulated'",
     )
     .fetch_all(db).await
@@ -460,8 +460,9 @@ async fn generate_paper_signals_for_all(
 
     if accounts.is_empty() { return Ok(()); }
 
-    for (account_id, name) in &accounts {
-        info!("[paper] {} ({})", name, account_id);
+    for (account_id, name, leverage_enabled) in &accounts {
+        let leverage_enabled = *leverage_enabled;
+        info!("[paper] {} ({}) leverage={}", name, account_id, leverage_enabled);
 
         // 检查今日是否已有交易
         let done: (i64,) = sqlx::query_as(
@@ -545,7 +546,7 @@ async fn generate_paper_signals_for_all(
         };
         let Some(task_id) = task_id else { continue };
 
-        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date).await {
+        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, leverage_enabled).await {
             Ok(n) => info!("[paper] {} 同步 {} 个持仓", name, n),
             Err(e) => error!("[paper] {} 持仓同步失败: {}", name, e),
         }
@@ -557,6 +558,7 @@ async fn sync_positions_from_backtest(
     db: &PgPool, account_id: &str, task_id: &str,
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
     date: NaiveDate,
+    leverage_enabled: bool,
 ) -> Result<usize, String> {
     let positions = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
         "SELECT symbol, quantity, market_value FROM backtest_position
@@ -591,11 +593,20 @@ async fn sync_positions_from_backtest(
     let total_stock_mv: rust_decimal::Decimal = positions.iter()
         .filter_map(|(_, _, mv)| *mv)
         .sum();
-    let scale = if total_stock_mv > rust_decimal::Decimal::ZERO {
+    let base_scale = if total_stock_mv > rust_decimal::Decimal::ZERO {
         a_share_capital / total_stock_mv
     } else {
         rust_decimal::Decimal::ONE
     };
+
+    // 杠杆：regime green(>0.9) + leverage_enabled → 1.3x
+    let leverage_mult = if leverage_enabled && regime_exposure > 0.9 {
+        info!("[paper] Leverage 1.3x applied for {}", account_id);
+        rust_decimal::Decimal::from_f64_retain(1.3).unwrap_or(rust_decimal::Decimal::ONE)
+    } else {
+        rust_decimal::Decimal::ONE
+    };
+    let scale = base_scale * leverage_mult;
 
     // Create A-share positions (scaled by MVO weight)
     for (symbol, qty, mkt_val) in &positions {
