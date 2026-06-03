@@ -1422,12 +1422,6 @@ pub struct MvoSimulateRequest {
     /// 杠杆倍率 (fixed模式, 默认1.0)
     #[serde(default = "mvo_sim_default_leverage_mult")]
     pub leverage_multiplier: f64,
-    /// 第二因子回测task_id (multi-factor blend, 可选)
-    #[serde(default)]
-    pub backtest_task_id_2: Option<String>,
-    /// 商品ETF启用 (有色+豆粕, 各3%)
-    #[serde(default)]
-    pub commodity_enabled: bool,
 }
 
 fn mvo_sim_default_etfs() -> Vec<String> {
@@ -1487,7 +1481,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
 
     let etf_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
         "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
-         WHERE symbol IN ($1, $2, $3, $4, '159980.SZ', '159985.SZ', '513030.SH', '511260.SH') AND trade_date >= '2013-01-01' ORDER BY trade_date",
+         WHERE symbol IN ($1, $2, $3, $4) AND trade_date >= '2013-01-01' ORDER BY trade_date",
     )
     .bind(&etf_sym0)
     .bind(&etf_sym1)
