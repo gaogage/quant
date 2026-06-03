@@ -737,6 +737,25 @@ async fn compute_lw_mvo_weights(
         min_stock
     };
 
+    // Kelly-inspired A股仓位缩放: 因子IR高→加仓, IR低→减仓
+    let kelly_scale = if adaptive_min_stock > 0.0 && a_monthly.len() >= 6 {
+        let trail_rets: Vec<f64> = a_monthly[..6].to_vec();
+        let n = trail_rets.len() as f64;
+        let avg = trail_rets.iter().sum::<f64>() / n;
+        if n > 1.0 {
+            let variance = trail_rets.iter().map(|r| (r - avg).powi(2)).sum::<f64>() / (n - 1.0);
+            let monthly_ir = if variance > 0.0 { avg / variance.sqrt() } else { 0.0 };
+            let annual_ir = monthly_ir * (12.0_f64).sqrt();
+            // Map IR to position scalar: IR=0→0.5x, IR=0.5→1.0x, IR=1.0→1.5x
+            (0.5 + annual_ir).clamp(0.3, 1.5)
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let adaptive_min_stock = (adaptive_min_stock * kelly_scale).min(0.75);
+
     let default_weights = vec![adaptive_min_stock, 0.30, 0.40, 0.05, 0.25 - adaptive_min_stock];
 
     let mut weights = default_weights.clone();
