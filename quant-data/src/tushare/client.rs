@@ -866,4 +866,34 @@ impl TushareClient {
         }
         self.call_api::<Vec<serde_json::Value>>("namechange", params, &[]).await
     }
+
+    /// 股票停牌信息
+    /// Tushare suspend_d endpoint — 返回 ts_code, trade_date, suspend_type
+    pub async fn suspend_d(
+        &self,
+        trade_date: Option<&str>,
+        ts_code: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(d) = trade_date { params.push(("trade_date", d)); }
+        if let Some(c) = ts_code { params.push(("ts_code", c)); }
+        if let Some(d) = start_date { params.push(("start_date", d)); }
+        if let Some(d) = end_date { params.push(("end_date", d)); }
+        self.call_api::<Vec<serde_json::Value>>("suspend_d", params, &[]).await
+    }
+
+    /// 涨跌停列表
+    /// Tushare limit_list_d endpoint — 返回当日涨跌停股票
+    pub async fn limit_list_d(
+        &self,
+        trade_date: Option<&str>,
+        ts_code: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(d) = trade_date { params.push(("trade_date", d)); }
+        if let Some(c) = ts_code { params.push(("ts_code", c)); }
+        self.call_api::<Vec<serde_json::Value>>("limit_list_d", params, &[]).await
+    }
 }

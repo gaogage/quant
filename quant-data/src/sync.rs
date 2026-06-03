@@ -2742,6 +2742,117 @@ pub async fn sync_namechange(
     Ok(total)
 }
 
+// ─── sync_suspension (停牌数据同步) ──────────────────────────
+
+/// 同步股票停牌/复牌信息。
+/// 从 Tushare suspend_d API 获取当日停牌股票列表。
+pub async fn sync_suspension(
+    pool: &PgPool,
+    client: &TushareClient,
+    trade_date: &str,
+) -> Result<usize, String> {
+    let resp = client
+        .suspend_d(Some(trade_date), None, None, None)
+        .await
+        .map_err(|e| format!("suspend_d API: {}", e))?;
+
+    let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
+    let mut total = 0usize;
+
+    // 先清除当日旧数据
+    let d = NaiveDate::parse_from_str(trade_date, "%Y%m%d")
+        .map_err(|e| format!("日期解析: {}", e))?;
+    sqlx::query("DELETE FROM market_stock_suspension WHERE trade_date = $1")
+        .bind(d)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("清除旧数据: {}", e))?;
+
+    for item in &maps {
+        let ts_code = item["ts_code"].as_str().unwrap_or("");
+        let s_type = item["suspend_type"].as_str().unwrap_or("");
+
+        if ts_code.is_empty() { continue; }
+
+        sqlx::query(
+            "INSERT INTO market_stock_suspension (symbol, trade_date, suspend_type)
+             VALUES ($1, $2, $3) ON CONFLICT (symbol, trade_date) DO NOTHING",
+        )
+        .bind(ts_code)
+        .bind(d)
+        .bind(s_type)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("insert: {}", e))?;
+        total += 1;
+    }
+
+    // 更新 market_stock 的 is_suspended 标记
+    let updated = sqlx::query(
+        "UPDATE market_stock SET is_suspended = true
+         WHERE symbol IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = $1 AND suspend_type = 'S')",
+    )
+    .bind(d)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("更新停牌标记: {}", e))?;
+
+    info!(total, updated = updated.rows_affected(), date = trade_date, "停牌数据同步完成");
+    Ok(total)
+}
+
+/// 获取指定日期停牌的股票列表 (用于选股过滤)
+pub async fn get_suspended_symbols(
+    pool: &PgPool,
+    trade_date: NaiveDate,
+) -> Result<Vec<String>, String> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT symbol FROM market_stock_suspension WHERE trade_date = $1 AND suspend_type = 'S'",
+    )
+    .bind(trade_date)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("查询停牌: {}", e))?;
+    Ok(rows.into_iter().map(|(s,)| s).collect())
+}
+
+// ─── sync_limit_list (涨跌停数据同步) ──────────────────────────
+
+pub async fn sync_limit_list(
+    pool: &PgPool,
+    client: &TushareClient,
+    trade_date: &str,
+) -> Result<usize, String> {
+    let resp = client
+        .limit_list_d(Some(trade_date), None)
+        .await
+        .map_err(|e| format!("limit_list_d API: {}", e))?;
+
+    let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
+    let mut total = 0usize;
+
+    let d = NaiveDate::parse_from_str(trade_date, "%Y%m%d")
+        .map_err(|e| format!("日期解析: {}", e))?;
+
+    // 清除当日旧数据
+    sqlx::query("DELETE FROM market_stock_limit WHERE trade_date = $1")
+        .bind(d).execute(pool).await.map_err(|e| format!("清除: {}", e))?;
+
+    for item in &maps {
+        let ts_code = item["ts_code"].as_str().unwrap_or("");
+        if ts_code.is_empty() { continue; }
+
+        sqlx::query(
+            "INSERT INTO market_stock_limit (symbol, trade_date) VALUES ($1, $2) ON CONFLICT (symbol, trade_date) DO NOTHING",
+        )
+        .bind(ts_code).bind(d).execute(pool).await.map_err(|e| format!("insert: {}", e))?;
+        total += 1;
+    }
+
+    info!(total, date = trade_date, "涨跌停数据同步完成");
+    Ok(total)
+}
+
 /// 获取 PIT 合规的 ST 股票列表（用于回测过滤条件）。
 /// 参数 `as_of_date`: 回测时间点，仅返回该日期之前已进入 ST 的股票。
 pub async fn get_st_symbols_at_date(

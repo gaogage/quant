@@ -3608,6 +3608,24 @@ pub async fn sync_namechange(
     }
 }
 
+/// POST /api/v1/quant/data/sync/suspension
+///
+/// 同步当日停牌股票数据
+#[derive(Debug, serde::Deserialize)]
+pub struct SyncSuspensionRequest {
+    pub trade_date: String, // YYYYMMDD
+}
+
+pub async fn sync_suspension(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncSuspensionRequest>,
+) -> impl IntoResponse {
+    match quant_data::sync::sync_suspension(&state.db, &state.tushare, &req.trade_date).await {
+        Ok(count) => Json(json!({"code": 0, "data": {"count": count}})),
+        Err(e) => Json(json!({"code": 1, "message": e})),
+    }
+}
+
 /// POST /api/v1/quant/data/sync/historical
 ///
 /// 补齐历史数据（2006-2015），参数：start_date、end_date

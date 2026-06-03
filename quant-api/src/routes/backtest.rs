@@ -298,7 +298,15 @@ fn build_universe_filter(profile: TradableUniverseProfile) -> (&'static str, Str
            AND ms.exchange IN ('SSE', 'SZSE')
            AND ms.symbol NOT LIKE '300%SZ'
            AND ms.symbol NOT LIKE '301%SZ'
-           AND ms.symbol NOT LIKE '688%SH'{}",
+           AND ms.symbol NOT LIKE '688%SH'
+           AND ms.symbol NOT IN (
+               SELECT symbol FROM market_stock_suspension
+               WHERE trade_date = mfv.trade_date AND suspend_type = 'S'
+           )
+           AND ms.symbol NOT IN (
+               SELECT symbol FROM market_stock_limit
+               WHERE trade_date = mfv.trade_date
+           ){}",
                 pit_st_not_in
             ),
         ),

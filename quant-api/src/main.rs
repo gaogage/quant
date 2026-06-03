@@ -142,6 +142,10 @@ async fn main() {
             post(routes::sync::sync_namechange),
         )
         .route(
+            "/api/v1/quant/data/sync/suspension",
+            post(routes::sync::sync_suspension),
+        )
+        .route(
             "/api/v1/quant/data/sync/historical",
             post(routes::sync::sync_historical),
         )

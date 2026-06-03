@@ -1,10 +1,11 @@
-//! 内置调度器 — 交易日盘中实时数据同步 + 交易信号生成 + 收盘钉钉推送。
+//! 内置调度器 — v15 日频量化交易。
 //!
-//! 盘中 (9:30-15:00): 每 10 分钟同步实时数据 → 检查信号 → 模拟交易
-//! 收盘 (15:30):     推送钉钉持仓摘要 (每日一次)
-//! 历史批量同步:     API 手动触发 (quant-sync-daily)
+//! 14:45 (收盘前): 获取当日行情 → 回测 → MVO → 调仓 → 立即推送钉钉
+//! 16:00 (收盘后): 同步日终行情数据到历史表 → 清理过期回测数据
 //!
+//! 日频交易不需要盘中实时行情，每天只在收盘前交易一次。
 //! MVO 策略: Ledoit-Wolf + Grid Search 季度调仓 (自动发现权重)
+//! 杠杆: 波动率目标 (vol_target, 20%年化波动率目标)
 //! 启动时通过 tokio::spawn 在后台运行，每 60 秒检查一次。
 
 use chrono::{Datelike, Local, NaiveDate, Timelike};
@@ -21,9 +22,8 @@ fn short_id() -> String {
 
 struct DailyState {
     date: Option<NaiveDate>,
-    last_sync_minute: Option<u32>,
-    signals_generated: bool,
-    dingtalk_sent: bool,
+    traded_today: bool,    // 今日是否已完成调仓 (14:45)
+    eod_synced_today: bool, // 今日是否已完成日终数据同步 (16:00)
     cleanup_done: bool,
 }
 
@@ -38,14 +38,13 @@ pub fn start_scheduler(db: PgPool, port: u16) {
     tokio::spawn(async move {
         let state = Arc::new(Mutex::new(DailyState {
             date: None,
-            last_sync_minute: None,
-            signals_generated: false,
-            dingtalk_sent: false,
+            traded_today: false,
+            eod_synced_today: false,
             cleanup_done: false,
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] 已启动: LW-MVO自动发现+季度调仓, 盘中9:30-15:00实时同步+交易, 15:30钉钉推送");
+        info!("[scheduler] v15已启动: 14:45调仓+钉钉, 16:00日终数据同步");
 
         loop {
             interval.tick().await;
@@ -82,9 +81,8 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<M
         let mut st = state.lock().await;
         if st.date != Some(today) {
             st.date = Some(today);
-            st.last_sync_minute = None;
-            st.signals_generated = false;
-            st.dingtalk_sent = false;
+            st.traded_today = false;
+            st.eod_synced_today = false;
             st.cleanup_done = false;
         }
     }
@@ -94,75 +92,50 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<M
         return Ok(());
     }
 
-    // ── 盘中 (9:30 - 15:00): 实时数据同步 + 交易信号 ──
-    if hour >= 9 && (hour < 15 || (hour == 15 && minute == 0)) {
-        let current_minute_slot = minute / 10; // 10 分钟粒度
-
-        let should_sync = {
+    // ── 14:45 (收盘前): 用当日行情调仓 + 立即推送钉钉 (每日一次) ──
+    if hour == 14 && minute >= 40 && minute <= 50 {
+        let should_trade = {
             let st = state.lock().await;
-            // 9:30-9:40 首次同步 + 生成信号
-            if hour == 9 && minute >= 30 && st.last_sync_minute.is_none() {
-                true
-            } else {
-                st.last_sync_minute.map_or(true, |last| {
-                    // 距上次同步 >= 10 分钟
-                    let elapsed = if current_minute_slot >= last {
-                        current_minute_slot - last
-                    } else {
-                        // 跨小时
-                        (60 / 10) - last + current_minute_slot
-                    };
-                    elapsed >= 1
-                })
-            }
+            !st.traded_today
         };
 
-        if should_sync {
-            info!("[scheduler] 盘中数据同步 {}:{:02}", hour, minute);
-
-            // 数据同步
-            sync_intraday_data(port, today).await?;
-
-            // 更新同步时间
+        if should_trade {
             {
                 let mut st = state.lock().await;
-                st.last_sync_minute = Some(current_minute_slot);
+                st.traded_today = true;
             }
-
-            // 首次同步后生成交易信号
-            let should_generate = {
-                let st = state.lock().await;
-                !st.signals_generated
-            };
-
-            if should_generate {
-                info!("[scheduler] 生成交易信号 (LW-MVO)...");
-                match generate_paper_signals_for_all(db, mvo_cache, port, today).await {
-                    Ok(_) => {
-                        let mut st = state.lock().await;
-                        st.signals_generated = true;
+            info!("[scheduler] 14:45 日频调仓 (v15 LW-MVO)...");
+            // 先同步当日行情数据
+            sync_daily_data_for_today(port, today).await?;
+            // 生成信号 + 调仓
+            match generate_paper_signals_for_all(db, mvo_cache, port, today).await {
+                Ok(_) => {
+                    info!("[scheduler] 调仓完成, 推送钉钉...");
+                    match push_dingtalk_for_all_accounts(db, today).await {
+                        Ok(_) => info!("[scheduler] 钉钉推送完成"),
+                        Err(e) => warn!("[scheduler] 钉钉推送失败: {}", e),
                     }
-                    Err(e) => warn!("[scheduler] 信号生成失败: {}", e),
                 }
+                Err(e) => warn!("[scheduler] 调仓失败: {}", e),
             }
         }
     }
 
-    // ── 收盘后 (15:30): 钉钉推送持仓摘要 (每日一次) ──
-    if hour == 15 && minute >= 30 {
-        let should_push = {
+    // ── 16:00 (收盘后): 同步日终行情数据到历史表 ──
+    if hour >= 16 {
+        let should_sync = {
             let st = state.lock().await;
-            !st.dingtalk_sent
+            !st.eod_synced_today
         };
 
-        if should_push {
-            info!("[scheduler] 收盘钉钉推送...");
-            match push_dingtalk_for_all_accounts(db, today).await {
-                Ok(_) => {
-                    let mut st = state.lock().await;
-                    st.dingtalk_sent = true;
-                }
-                Err(e) => warn!("[scheduler] 钉钉推送失败: {}", e),
+        if should_sync {
+            {
+                let mut st = state.lock().await;
+                st.eod_synced_today = true;
+            }
+            info!("[scheduler] 16:00 日终数据同步...");
+            if let Err(e) = sync_eod_data(db, port, today).await {
+                warn!("[scheduler] 日终数据同步失败: {}", e);
             }
         }
     }
@@ -420,11 +393,25 @@ async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
     Ok(row.and_then(|(v,)| v).unwrap_or(false))
 }
 
-/// 盘中实时数据同步 (指数 + ETF)
-async fn sync_intraday_data(port: u16, date: NaiveDate) -> Result<(), String> {
+/// 14:45 调仓前获取当日行情 + 停牌/涨跌停数据
+async fn sync_daily_data_for_today(port: u16, date: NaiveDate) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
     let base = format!("http://localhost:{}", port);
     let client = reqwest::Client::new();
+
+    // 停牌数据
+    let _ = client
+        .post(format!("{}/api/v1/quant/data/sync/suspension", base))
+        .json(&serde_json::json!({"trade_date": date_str}))
+        .send().await;
+
+    // A股日线
+    let _ = client
+        .post(format!("{}/api/v1/quant/data/sync/daily", base))
+        .json(&serde_json::json!({
+            "symbols": [], "start_date": date_str, "end_date": date_str
+        }))
+        .send().await;
 
     // 指数日线
     let _ = client
@@ -439,12 +426,162 @@ async fn sync_intraday_data(port: u16, date: NaiveDate) -> Result<(), String> {
     let _ = client
         .post(format!("{}/api/v1/quant/data/sync/fund-daily", base))
         .json(&serde_json::json!({
-            "symbols": ["518880.SH","511010.SH","513100.SH","513500.SH"],
+            "symbols": ["518880.SH","511010.SH","513100.SH","513500.SH","513030.SH","159980.SZ","159985.SZ","511260.SH"],
             "start_date": date_str, "end_date": date_str
         }))
         .send().await;
 
+    info!("[scheduler] 当日行情+停牌同步完成 ({})", date_str);
     Ok(())
+}
+
+/// 16:00 日终数据同步 + 数据完整性检查 + 因子重算
+async fn sync_eod_data(db: &PgPool, port: u16, date: NaiveDate) -> Result<(), String> {
+    let date_str = date.format("%Y%m%d").to_string();
+    let base = format!("http://localhost:{}", port);
+    let client = reqwest::Client::new();
+
+    // A股日线 (最终收盘价覆盖14:45的盘中数据)
+    let _ = client
+        .post(format!("{}/api/v1/quant/data/sync/daily/background", base))
+        .json(&serde_json::json!({
+            "symbols": [], "start_date": date_str, "end_date": date_str
+        }))
+        .send().await;
+
+    // 日线基础指标
+    let _ = client
+        .post(format!("{}/api/v1/quant/data/sync-tasks", base))
+        .json(&serde_json::json!({
+            "dataset": "daily_basic", "symbols": [], "start_date": date_str, "end_date": date_str,
+            "task_id": format!("dv-basic-eod-{}", date_str)
+        }))
+        .send().await;
+
+    // 复权因子
+    let _ = client
+        .post(format!("{}/api/v1/quant/data/sync/adj-factor/background", base))
+        .json(&serde_json::json!({
+            "symbols": [], "start_date": date_str, "end_date": date_str
+        }))
+        .send().await;
+
+    info!("[scheduler] 日终数据同步已触发 ({})", date_str);
+
+    // 因子重算 (等数据同步完成后)
+    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    let _ = client
+        .post(format!("{}/api/v1/quant/factors/phase7-price-volume-backfill/background", base))
+        .json(&serde_json::json!({
+            "start_date": date_str, "end_date": date_str,
+            "combo_name": "phase7_price_volume_expanded_v1"
+        }))
+        .send().await;
+    let _ = client
+        .post(format!("{}/api/v1/quant/factors/phase7-financial-quality-backfill/background", base))
+        .json(&serde_json::json!({
+            "start_date": date_str, "end_date": date_str,
+            "combo_name": "phase7_financial_quality_v1"
+        }))
+        .send().await;
+    info!("[scheduler] 因子重算已触发");
+
+    // 数据完整性检查
+    run_data_quality_check(db).await;
+
+    Ok(())
+}
+
+/// 数据完整性检查: 从配置的起始日期到今天, 检查所有核心表是否有缺口
+async fn run_data_quality_check(db: &PgPool) {
+    let start_date = sqlx::query_as::<_, (String,)>(
+        "SELECT config_value FROM data_quality_config WHERE config_key = 'data_start_date'"
+    )
+    .fetch_optional(db).await
+    .ok().flatten()
+    .map(|(v,)| v)
+    .unwrap_or_else(|| "2006-01-01".to_string());
+
+    let today = chrono::Utc::now().date_naive();
+
+    // 检查各表最后数据日期 (A股日线排除停牌股, 避免误报)
+    let checks: Vec<(&str, &str, &str, Option<&str>)> = vec![
+        ("A股日线", "market_stock_daily_bar d", "d.trade_date",
+         Some("d.symbol NOT IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = d.trade_date AND suspend_type = 'S')")),
+        ("复权因子", "market_adjustment_factor", "trade_date", None),
+        ("日线基础", "market_stock_daily_basic", "trade_date", None),
+        ("因子(pv)", "multi_factor_value", "trade_date AND combo_name='phase7_price_volume_expanded_v1'", None),
+        ("CSI300指数", "market_index_daily_bar", "trade_date AND symbol='000300.SH'", None),
+    ];
+
+    let mut gaps: Vec<String> = Vec::new();
+    for (name, table, date_filter, exclude_filter) in &checks {
+        let where_clause = if let Some(excl) = exclude_filter {
+            format!("{} AND {}", date_filter, excl)
+        } else {
+            date_filter.to_string()
+        };
+        let sql = format!(
+            "SELECT MAX(trade_date)::text FROM {} WHERE {}", table, where_clause
+        );
+        let max_date: Option<(String,)> = sqlx::query_as(&sql).fetch_optional(db).await.ok().flatten();
+
+        if let Some((max_d,)) = max_date {
+            if let (Ok(max_dt), Ok(today_dt)) = (
+                NaiveDate::parse_from_str(&max_d, "%Y-%m-%d"),
+                NaiveDate::parse_from_str(&today.format("%Y-%m-%d").to_string(), "%Y-%m-%d")
+            ) {
+                let gap_days = (today_dt - max_dt).num_days();
+                if gap_days > 1 {
+                    gaps.push(format!("{}: 最新={}, 缺口={}天", name, max_d, gap_days));
+                }
+            }
+        } else {
+            gaps.push(format!("{}: 无数据", name));
+        }
+    }
+
+    if !gaps.is_empty() {
+        let msg = format!("[数据质量] 发现 {} 个缺口:\n{}", gaps.len(), gaps.join("\n"));
+        warn!("{}", msg);
+        // 钉钉报告
+        send_quality_alert(db, &gaps).await;
+    } else {
+        info!("[数据质量] 全部数据完整 ({} → {})", start_date, today);
+    }
+
+    // 更新最后检查时间
+    let _ = sqlx::query(
+        "INSERT INTO data_quality_config (config_key, config_value, description) VALUES ('last_quality_check', $1, '最后质量检查日期') ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = NOW()"
+    )
+    .bind(today.format("%Y-%m-%d").to_string())
+    .execute(db).await;
+}
+
+/// 发送数据质量告警到钉钉 (所有活跃账号)
+async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
+    let accounts = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT name, dingtalk_webhook_url FROM paper_account WHERE status='active' AND dingtalk_webhook_url IS NOT NULL"
+    )
+    .fetch_all(db).await.unwrap_or_default();
+
+    if accounts.is_empty() { return; }
+
+    let gap_text = gaps.join("\n- ");
+    let msg = format!("## ⚠️ 数据质量告警\n\n发现 {} 个数据缺口:\n- {}\n\n请检查数据同步状态。", gaps.len(), gap_text);
+
+    for (_name, webhook_url) in &accounts {
+        if let Some(url) = webhook_url {
+            let payload = serde_json::json!({
+                "msgtype": "markdown",
+                "markdown": {"title": "数据质量告警", "text": msg}
+            });
+            let _ = reqwest::Client::new()
+                .post(url)
+                .json(&payload)
+                .send().await;
+        }
+    }
 }
 
 /// 为所有活跃模拟账号生成交易信号（使用 LW-MVO 自动发现权重）。
