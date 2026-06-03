@@ -394,7 +394,7 @@ async fn compute_paper_nav_inner(
     // Load close prices for all position symbols
     let price_rows = sqlx::query_as::<_, (NaiveDate, String, Option<f64>)>(
         "SELECT trade_date, symbol, close::double precision
-         FROM market_stock_daily_bar
+         FROM market_stock_daily_bar_adj
          WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
            AND close IS NOT NULL
          ORDER BY symbol, trade_date",
@@ -657,7 +657,7 @@ async fn simulate_paper_nav_inner(
 
     // Get all trading days in range
     let all_days = sqlx::query_as::<_, (NaiveDate,)>(
-        "SELECT DISTINCT trade_date FROM market_stock_daily_bar
+        "SELECT DISTINCT trade_date FROM market_stock_daily_bar_adj
          WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY trade_date",
     )
     .bind(start - chrono::Duration::days(30)).bind(end + chrono::Duration::days(5))
@@ -667,7 +667,7 @@ async fn simulate_paper_nav_inner(
     // Load close prices for all symbols
     let symbols: Vec<String> = scores.iter().map(|(_, s, _)| s.clone()).collect::<Vec<_>>();
     let price_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
-        "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
+        "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar_adj
          WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3 AND close > 0",
     )
     .bind(&symbols).bind(start - chrono::Duration::days(30)).bind(end + chrono::Duration::days(5))
@@ -924,7 +924,7 @@ async fn simulate_multi_window_inner(
         let symbols: Vec<String> = scores.iter().map(|(_, s, _)| s.clone()).collect();
 
         let price_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
-            "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
+            "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar_adj
              WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3 AND close > 0",
         ).bind(&symbols).bind(w_start - chrono::Duration::days(10)).bind(w_end + chrono::Duration::days(5))
         .fetch_all(db).await.map_err(|e| format!("w{} prices: {}", wi, e))?;
@@ -932,7 +932,7 @@ async fn simulate_multi_window_inner(
         for (d, s, p) in &price_rows { price_map.insert((*d, s.clone()), *p); }
 
         let all_days = sqlx::query_as::<_, (NaiveDate,)>(
-            "SELECT DISTINCT trade_date FROM market_stock_daily_bar
+            "SELECT DISTINCT trade_date FROM market_stock_daily_bar_adj
              WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY trade_date",
         ).bind(w_start).bind(w_end + chrono::Duration::days(5))
         .fetch_all(db).await.map_err(|e| format!("w{} days: {}", wi, e))?;

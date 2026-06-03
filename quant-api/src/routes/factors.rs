@@ -3207,7 +3207,7 @@ pub async fn batch_sync_factors(
         for &sym in &syms {
             let rows = sqlx::query_as::<_, (String, NaiveDate, Decimal, Decimal, Decimal, Decimal, Option<Decimal>, Option<Decimal>, Decimal, Decimal)>(
                 "SELECT symbol, trade_date, open, high, low, close, pre_close, pct_change, volume, amount
-                 FROM market_stock_daily_bar
+                 FROM market_stock_daily_bar_adj
                  WHERE symbol = $1 AND trade_date >= $2::date AND trade_date <= $3::date
                  ORDER BY trade_date ASC"
             ).bind(sym).bind(start_d).bind(end_d).fetch_all(&state.db).await;
@@ -3352,7 +3352,7 @@ pub async fn batch_sync_factors_background(
                 // Batch-load all bars for this chunk in ONE query
                 let all_rows: Vec<(String, NaiveDate, Decimal, Decimal, Decimal, Decimal, Option<Decimal>, Option<Decimal>, Decimal, Decimal)> =
                     sqlx::query_as("SELECT symbol, trade_date, open, high, low, close, pre_close, pct_change, volume, amount
-                        FROM market_stock_daily_bar WHERE symbol = ANY($1) AND trade_date >= $2::date AND trade_date <= $3::date ORDER BY symbol, trade_date ASC")
+                        FROM market_stock_daily_bar_adj WHERE symbol = ANY($1) AND trade_date >= $2::date AND trade_date <= $3::date ORDER BY symbol, trade_date ASC")
                     .bind(&sym_refs).bind(start_d).bind(end_d)
                     .fetch_all(&state.db).await
                     .map_err(|e| format!("batch query failed ({} symbols, {} - {}): {}", sym_refs.len(), start_d, end_d, e))?;
@@ -6113,7 +6113,7 @@ fn phase7_reversal_backfill_sql(period: i32) -> String {
                 LAG(close::double precision, {period}) OVER (
                     PARTITION BY symbol ORDER BY trade_date
                 ) AS prev_close
-            FROM market_stock_daily_bar
+            FROM market_stock_daily_bar_adj
             WHERE close IS NOT NULL
               AND trade_date <= $4
         ),
@@ -6167,7 +6167,7 @@ fn phase7_downside_volatility_backfill_sql(period: i32) -> String {
                     LAG(close::double precision) OVER (
                         PARTITION BY symbol ORDER BY trade_date
                     ) AS prev_close
-                FROM market_stock_daily_bar
+                FROM market_stock_daily_bar_adj
                 WHERE close IS NOT NULL
                   AND trade_date <= $4
             ) bars
@@ -6233,7 +6233,7 @@ fn phase7_amihud_backfill_sql(period: i32) -> String {
                     LAG(close::double precision) OVER (
                         PARTITION BY symbol ORDER BY trade_date
                     ) AS prev_close
-                FROM market_stock_daily_bar
+                FROM market_stock_daily_bar_adj
                 WHERE close IS NOT NULL
                   AND amount IS NOT NULL
                   AND trade_date <= $4
@@ -6295,7 +6295,7 @@ fn phase7_amount_intensity_backfill_sql(period: i32) -> String {
                     PARTITION BY symbol ORDER BY trade_date
                     ROWS BETWEEN {period} PRECEDING AND 1 PRECEDING
                 ) AS obs_count
-            FROM market_stock_daily_bar
+            FROM market_stock_daily_bar_adj
             WHERE amount IS NOT NULL
               AND trade_date <= $4
         ),
@@ -6357,7 +6357,7 @@ fn phase7_relative_momentum_backfill_sql(period: i32, industry_relative: bool) -
                     LAG(close::double precision, {period}) OVER (
                         PARTITION BY symbol ORDER BY trade_date
                     ) AS prev_close
-                FROM market_stock_daily_bar
+                FROM market_stock_daily_bar_adj
                 WHERE close IS NOT NULL
                   AND trade_date <= $4
             ) bars
@@ -6705,7 +6705,7 @@ fn phase7_moneyflow_backfill_sql(
                 {amount_expression} AS flow_amount,
                 bar.amount::double precision AS traded_amount
             FROM market_stock_moneyflow mf
-            JOIN market_stock_daily_bar bar
+            JOIN market_stock_daily_bar_adj bar
               ON bar.symbol = mf.symbol
              AND bar.trade_date = mf.trade_date
             WHERE mf.trade_date <= $4
@@ -7140,7 +7140,7 @@ fn phase7_event_post_return_curve_backfill_sql(
               ON ms.symbol = events.symbol
             JOIN LATERAL (
                 SELECT close, trade_date
-                FROM market_stock_daily_bar anchor_bar
+                FROM market_stock_daily_bar_adj anchor_bar
                 WHERE anchor_bar.symbol = events.symbol
                   AND anchor_bar.trade_date <= events.available_at
                   AND anchor_bar.close IS NOT NULL
@@ -7148,7 +7148,7 @@ fn phase7_event_post_return_curve_backfill_sql(
                 ORDER BY anchor_bar.trade_date DESC
                 LIMIT 1
             ) anchor_bar ON true
-            JOIN market_stock_daily_bar current_bar
+            JOIN market_stock_daily_bar_adj current_bar
               ON current_bar.symbol = events.symbol
              AND current_bar.trade_date = td.trade_date
              AND current_bar.close IS NOT NULL
@@ -7439,7 +7439,7 @@ pub async fn evaluate_all_factors(
         let mut size_proxy: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
         if do_sz {
             let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
-                "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
+                "SELECT symbol, trade_date, amount FROM market_stock_daily_bar_adj
                  WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0
                  ORDER BY symbol, trade_date",
             )
@@ -7629,7 +7629,7 @@ pub async fn evaluate_all_factors_background(
                 let mut size_proxy: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
                 if ds {
                     let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
-                        "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
+                        "SELECT symbol, trade_date, amount FROM market_stock_daily_bar_adj
                          WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0 ORDER BY symbol, trade_date"
                     ).bind(start).bind(end).fetch_all(&state.db).await;
                     if let Ok(rows) = amt_rows {
@@ -7651,7 +7651,7 @@ pub async fn evaluate_all_factors_background(
             // Load forward returns ONCE for all factors — support multi-horizon
             // Load close prices grouped by symbol, compute N-day forward return
             let fwd_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
-                "SELECT symbol, trade_date, close FROM market_stock_daily_bar
+                "SELECT symbol, trade_date, close FROM market_stock_daily_bar_adj
                  WHERE trade_date >= $1::date AND trade_date <= $2::date
                    AND close > 0
                  ORDER BY symbol, trade_date"
@@ -7937,7 +7937,7 @@ async fn load_bars(
     for sym in symbols {
         let rows = sqlx::query_as::<_, (String, chrono::NaiveDate, rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, rust_decimal::Decimal, rust_decimal::Decimal)>(
             "SELECT symbol, trade_date, open, high, low, close, pre_close, pct_change, volume, amount
-             FROM market_stock_daily_bar
+             FROM market_stock_daily_bar_adj
              WHERE symbol = $1 AND trade_date >= $2::date AND trade_date <= $3::date
              ORDER BY trade_date ASC"
         )
@@ -8067,7 +8067,7 @@ pub async fn neutralize_factors(
 
     // 3. Load size proxy (log daily amount)
     let amt_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
-        "SELECT symbol, trade_date, amount FROM market_stock_daily_bar
+        "SELECT symbol, trade_date, amount FROM market_stock_daily_bar_adj
          WHERE trade_date >= $1::date AND trade_date <= $2::date AND amount > 0
          ORDER BY symbol, trade_date",
     )
@@ -9199,7 +9199,7 @@ mod tests {
         assert_eq!(job.total_steps(), specs.len() + 1);
         assert_eq!(job.plan.combo_method, "equal_weight");
         assert_eq!(job.specs[0].factor_code, "rev_5d_std");
-        assert!((job.factor_sql)(&job.specs[0]).contains("market_stock_daily_bar"));
+        assert!((job.factor_sql)(&job.specs[0]).contains("market_stock_daily_bar_adj"));
     }
 
     #[test]
@@ -9211,7 +9211,7 @@ mod tests {
             .expect("downvol spec");
         let sql = phase7_factor_backfill_sql(downvol);
 
-        assert!(sql.contains("market_stock_daily_bar"));
+        assert!(sql.contains("market_stock_daily_bar_adj"));
         assert!(sql.contains("percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value)"));
         assert!(sql.contains("ROWS BETWEEN 19 PRECEDING AND CURRENT ROW"));
         assert!(sql.contains("ON CONFLICT (factor_code, factor_version, symbol, trade_date)"));
@@ -9360,7 +9360,7 @@ mod tests {
         let pressure_sql = phase7_factor_backfill_sql(pressure);
 
         assert!(net_sql.contains("market_stock_moneyflow mf"));
-        assert!(net_sql.contains("JOIN market_stock_daily_bar bar"));
+        assert!(net_sql.contains("JOIN market_stock_daily_bar_adj bar"));
         assert!(net_sql.contains("mf.net_mf_amount::double precision"));
         assert!(net_sql.contains("SUM(flow_amount) OVER"));
         assert!(net_sql.contains("SUM(traded_amount) OVER"));

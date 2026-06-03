@@ -898,7 +898,7 @@ async fn sync_positions_from_backtest(
 
         // Get latest ETF price
         let price_row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
-            "SELECT close FROM market_stock_daily_bar WHERE symbol = $1 ORDER BY trade_date DESC LIMIT 1"
+            "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 ORDER BY trade_date DESC LIMIT 1"
         ).bind(etf_symbol).fetch_optional(db).await.map_err(|e| format!("etf price: {}", e))?;
 
         let price = price_row.and_then(|(p,)| p).unwrap_or(rust_decimal::Decimal::ONE);
@@ -1149,7 +1149,7 @@ async fn get_monthly_returns(
 
     // ETF：从 market_stock_daily_bar 获取
     let rows: Vec<(NaiveDate, rust_decimal::Decimal)> = sqlx::query_as(
-        "SELECT trade_date, close FROM market_stock_daily_bar
+        "SELECT trade_date, close FROM market_stock_daily_bar_adj
          WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3
          ORDER BY trade_date",
     )

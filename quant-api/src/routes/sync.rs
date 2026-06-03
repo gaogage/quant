@@ -1470,7 +1470,7 @@ pub async fn data_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let stock_count = quant_data::repository::count_stocks(&state.db)
         .await
         .unwrap_or(0);
-    let bar_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM market_stock_daily_bar")
+    let bar_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM market_stock_daily_bar_adj")
         .fetch_one(&state.db)
         .await
         .unwrap_or(0);
@@ -2744,7 +2744,7 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
     >(
         r#"
         SELECT 'market_stock_daily_bar'::text, COUNT(*)::bigint, MIN(trade_date), MAX(trade_date), COUNT(DISTINCT symbol)::bigint
-        FROM market_stock_daily_bar
+        FROM market_stock_daily_bar_adj
         UNION ALL
         SELECT 'market_stock_daily_basic'::text, COUNT(*)::bigint, MIN(trade_date), MAX(trade_date), COUNT(DISTINCT symbol)::bigint
         FROM market_stock_daily_basic

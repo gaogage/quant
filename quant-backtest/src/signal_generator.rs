@@ -8510,7 +8510,7 @@ async fn apply_prediction_liquidity_filter(
     let liquid_rows: Vec<(String,)> = sqlx::query_as(
         "SELECT symbol FROM (
             SELECT symbol, AVG(amount) as avg_amt
-            FROM market_stock_daily_bar
+            FROM market_stock_daily_bar_adj
             WHERE symbol = ANY($1)
               AND trade_date >= $2 AND trade_date <= $3
               AND amount > 0
@@ -9115,7 +9115,7 @@ async fn load_symbol_return_history(
     let query_start = return_history_query_start(start_date, lookback_days);
     let rows: Vec<(String, NaiveDate, Decimal, Option<Decimal>)> = sqlx::query_as(
         "SELECT symbol, trade_date, close, pre_close
-         FROM market_stock_daily_bar
+         FROM market_stock_daily_bar_adj
          WHERE symbol = ANY($1)
            AND trade_date >= $2 AND trade_date <= $3
            AND close IS NOT NULL AND close > 0
@@ -9650,7 +9650,7 @@ async fn load_average_amounts(
 
     let rows: Vec<(String, Option<Decimal>)> = sqlx::query_as(
         "SELECT symbol, AVG(amount) as avg_amount
-         FROM market_stock_daily_bar
+         FROM market_stock_daily_bar_adj
          WHERE symbol = ANY($1)
            AND trade_date >= $2 AND trade_date <= $3
            AND amount > 0
@@ -9707,7 +9707,7 @@ async fn load_average_amount_history(
     let query_start = average_amount_history_query_start(start_date, lookback_days);
     let rows: Vec<(String, NaiveDate, Option<Decimal>)> = sqlx::query_as(
         "SELECT symbol, trade_date, amount
-         FROM market_stock_daily_bar
+         FROM market_stock_daily_bar_adj
          WHERE symbol = ANY($1)
            AND trade_date >= $2 AND trade_date <= $3
            AND amount > 0

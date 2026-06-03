@@ -360,7 +360,7 @@ pub async fn mvo_backtest(
 
     let etf_sql = format!(
         "SELECT symbol, trade_date::text, close::double precision
-         FROM market_stock_daily_bar
+         FROM market_stock_daily_bar_adj
          WHERE symbol IN ({})
          ORDER BY symbol, trade_date",
         etf_list
@@ -1243,7 +1243,7 @@ async fn load_mvo_etf_prices(
             .collect();
         let sql = format!(
             "SELECT symbol, trade_date::text, close::double precision
-             FROM market_stock_daily_bar
+             FROM market_stock_daily_bar_adj
              WHERE symbol IN ({})
              ORDER BY symbol, trade_date",
             placeholders.join(",")
@@ -1547,7 +1547,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
     }).unwrap_or(NaiveDate::from_ymd_opt(2013, 3, 25).unwrap());
 
     let etf_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
-        "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar
+        "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar_adj
          WHERE symbol IN ($1, $2, $3, $4) AND trade_date >= $5 ORDER BY trade_date",
     )
     .bind(&etf_sym0)

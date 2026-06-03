@@ -3292,7 +3292,7 @@ async fn load_training_samples_from_feature_rows(
     let label_end_date = req.train_end_date + Duration::days(req.label_horizon_days + 7);
     let price_rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
         "SELECT symbol, trade_date, close::double precision
-         FROM market_stock_daily_bar
+         FROM market_stock_daily_bar_adj
          WHERE trade_date >= $1
            AND trade_date <= $2
            AND close IS NOT NULL

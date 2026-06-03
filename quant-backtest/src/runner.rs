@@ -898,7 +898,7 @@ impl BacktestRunner {
             Option<Decimal>,
         )> = sqlx::query_as(
             "SELECT trade_date, symbol, open, close, pre_close, amount
-             FROM market_stock_daily_bar
+             FROM market_stock_daily_bar_adj
              WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
              ORDER BY trade_date, symbol",
         )
@@ -944,7 +944,7 @@ impl BacktestRunner {
             Option<Decimal>,
         )> = sqlx::query_as(
             "SELECT trade_date, symbol, open, close, pre_close, amount
-             FROM market_stock_daily_bar
+             FROM market_stock_daily_bar_adj
              WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
              ORDER BY trade_date, symbol",
         )
