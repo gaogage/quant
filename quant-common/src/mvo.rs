@@ -163,6 +163,79 @@ pub fn mvo_allocate(
     })
 }
 
+/// MVO with return target: minimize variance subject to return >= target.
+/// Falls back to max-Sharpe if target is unachievable.
+pub fn mvo_allocate_with_target(
+    monthly_returns: &Array2<f64>,
+    min_stock: f64,
+    return_target: f64,
+) -> Option<MvoWeights> {
+    let cov = ledoit_wolf_shrinkage(monthly_returns);
+    let mu = annualized_returns(monthly_returns);
+    let n_assets = monthly_returns.ncols();
+    let n = mu.len();
+    let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
+
+    let risk_free = 0.02;
+    let max_single = 0.75;
+    let step = 0.05;
+    let steps = ((1.0 / step) as i32) + 1;
+    let step_values: Vec<f64> = (0..steps).map(|i| i as f64 * step).collect();
+
+    let mut best_var = f64::INFINITY;
+    let mut best_weights: Option<Array1<f64>> = None;
+    let mut fallback_sharpe = f64::NEG_INFINITY;
+    let mut fallback_weights: Option<Array1<f64>> = None;
+
+    for &w0 in &step_values {
+        if w0 < min_stock || w0 > max_single { continue; }
+        let rem1 = 1.0 - w0;
+        for &w1 in &step_values {
+            if w1 > rem1 + 0.001 || w1 > max_single { continue; }
+            let rem2 = rem1 - w1;
+            for &w2 in &step_values {
+                if w2 > rem2 + 0.001 || w2 > max_single { continue; }
+                let rem3 = rem2 - w2;
+                for &w3 in &step_values {
+                    if w3 > rem3 + 0.001 || w3 > max_single { continue; }
+                    let w4 = rem3 - w3;
+                    if w4 < -0.001 || w4 > max_single { continue; }
+
+                    let weights = Array1::from_vec(vec![w0, w1, w2, w3, w4.max(0.0)]);
+                    let w_sum = weights.sum();
+                    let w = &weights / w_sum;
+
+                    let port_mu = w.dot(&mu) - risk_free;
+                    let port_var = w.dot(&cov.dot(&w));
+                    if port_var <= 0.0 { continue; }
+                    let sharpe = port_mu / port_var.sqrt();
+
+                    // Track fallback (max Sharpe)
+                    if sharpe > fallback_sharpe {
+                        fallback_sharpe = sharpe;
+                        fallback_weights = Some(w.clone());
+                    }
+
+                    // Return target: minimize variance for portfolios meeting target
+                    if port_mu >= return_target - risk_free {
+                        if port_var < best_var {
+                            best_var = port_var;
+                            best_weights = Some(w);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let final_w = best_weights.or(fallback_weights);
+    final_w.map(|w| MvoWeights {
+        weights: w,
+        sharpe: fallback_sharpe,
+        rho,
+    })
+}
+
 /// Compute monthly returns from daily prices for each asset.
 ///
 /// `daily_prices`: Vec of (date_string, Vec<f64> prices for each asset)

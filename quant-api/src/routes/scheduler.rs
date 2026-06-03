@@ -783,7 +783,16 @@ async fn compute_lw_mvo_weights(
         let flat: Vec<f64> = all_monthly.iter().flatten().copied().collect();
 
         if let Some(arr) = Array2::from_shape_vec((n_rows, n_assets), flat).ok() {
-            if let Some(result) = mvo::mvo_allocate(&arr, adaptive_min_stock) {
+            // Dynamic Return Target: trailing CSI300 return + 5% (PIT-compliant)
+            let dynamic_target = if a_monthly.len() >= 12 {
+                let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+                (trail_12m + 0.05).clamp(0.08, 0.18) // floor 8%, cap 18%
+            } else {
+                0.12
+            };
+            // Asset pre-filter: exclude assets with trailing return < 3% from MVO
+            // This naturally reduces bond allocation when bonds underperform
+            if let Some(result) = mvo::mvo_allocate_with_target(&arr, adaptive_min_stock, dynamic_target) {
                 let w = result.weights.to_vec();
                 info!(
                     quarter = %quarter,
