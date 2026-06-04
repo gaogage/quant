@@ -3006,13 +3006,26 @@ pub async fn sync_daily_background(
     let dv_id = req
         .data_version_id
         .unwrap_or_else(generated_data_version_id);
-    info!(data_version_id = %dv_id, symbols = req.symbols.len(), "后台同步日线");
 
     let state = state.clone();
-    let symbols = req.symbols.clone();
+    let mut symbols = req.symbols.clone();
     let start = req.start_date.clone();
     let end = req.end_date.clone();
     let task_id = dv_id.clone();
+
+    // 修复: symbols为空时, 从数据库获取所有A股列表
+    if symbols.is_empty() {
+        symbols = sqlx::query_as::<_, (String,)>(
+            "SELECT symbol FROM market_stock WHERE list_status = 'L' AND exchange IN ('SSE', 'SZSE')"
+        )
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(s,)| s)
+        .collect();
+    }
+    info!(data_version_id = %dv_id, symbols = symbols.len(), "后台同步日线");
 
     tokio::spawn(async move {
         match quant_data::sync::sync_daily_bars(
