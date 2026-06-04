@@ -495,7 +495,7 @@ async fn sync_eod_data(db: &PgPool, port: u16, date: NaiveDate) -> Result<(), St
         warn!("[scheduler] ⚠ 涨跌停数据同步失败 (已重试), 将发送告警");
     }
 
-    // ── ML预测数据检查+补齐 ──
+    // ── ML预测数据检查+补齐 (60天间隔, 含依赖验证) ──
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     let pred_ok = ensure_prediction_coverage(db, &client, &base, &date_str, date).await;
     if !pred_ok {
@@ -520,20 +520,25 @@ async fn run_data_quality_check(db: &PgPool) {
 
     let today = chrono::Utc::now().date_naive();
 
-    // 检查各表最后数据日期 (A股日线排除停牌股, 避免误报)
-    let checks: Vec<(&str, &str, Option<&str>)> = vec![
+    // 检查各表最后数据日期
+    // 复权因子Tushare更新频率低(~月更), 使用30天阈值; 其他表使用2天阈值
+    let checks: Vec<(&str, &str, Option<&str>, i64)> = vec![
         ("A股日线", "market_stock_daily_bar d",
-         Some("d.symbol NOT IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = d.trade_date AND suspend_type = 'S')")),
-        ("复权因子", "market_adjustment_factor", None),
-        ("日线基础", "market_stock_daily_basic", None),
+         Some("d.symbol NOT IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = d.trade_date AND suspend_type = 'S')"), 2),
+        ("复权因子", "market_adjustment_factor", None, 30), // Tushare月更, 30天阈值
+        ("日线基础", "market_stock_daily_basic", None, 2),
         ("因子(pv)", "multi_factor_value",
-         Some("combo_name = 'phase7_price_volume_expanded_v1'")),
+         Some("combo_name = 'phase7_price_volume_expanded_v1'"), 2),
         ("CSI300指数", "market_index_daily_bar",
-         Some("symbol = '000300.SH'")),
+         Some("symbol = '000300.SH'"), 2),
+        ("ML预测", "model_prediction",
+         None, 5),  // 不限制特定prediction_set, 检查全表最新日期
+        // 涨跌停: Tushare免费版限流1次/分钟, 数据积累缓慢, 阈值设高避免频繁告警
+        ("涨跌停", "market_stock_limit", None, 90),
     ];
 
     let mut gaps: Vec<String> = Vec::new();
-    for (name, table, exclude_filter) in &checks {
+    for (name, table, exclude_filter, max_gap) in &checks {
         let where_sql = exclude_filter.unwrap_or("TRUE");
         let sql = format!(
             "SELECT MAX(trade_date)::text FROM {} WHERE {}", table, where_sql
@@ -546,12 +551,17 @@ async fn run_data_quality_check(db: &PgPool) {
                 NaiveDate::parse_from_str(&today.format("%Y-%m-%d").to_string(), "%Y-%m-%d")
             ) {
                 let gap_days = (today_dt - max_dt).num_days();
-                if gap_days > 1 {
-                    gaps.push(format!("{}: 最新={}, 缺口={}天", name, max_d, gap_days));
+                if gap_days > *max_gap {
+                    gaps.push(format!("{}: 最新={}, 缺口={}天 (阈值{}天)", name, max_d, gap_days, max_gap));
                 }
             }
         } else {
-            gaps.push(format!("{}: 无数据", name));
+            // 低优先级数据源(涨跌停等)无数据仅warn, 不触发告警
+            if *max_gap >= 30 {
+                warn!("[数据质量] {}: 无数据 (低优先级, 不告警)", name);
+            } else {
+                gaps.push(format!("{}: 无数据", name));
+            }
         }
     }
 
@@ -626,41 +636,70 @@ async fn sync_limit_with_retry(db: &PgPool, client: &reqwest::Client, base: &str
 
 /// 确保ML预测数据覆盖到当前日期
 /// 策略: gap≤1天→正常; gap>1天→触发后台训练生成; 无法生成→降级纯因子
+/// ML预测数据检查+补齐 (60天间隔, 含依赖验证)
+/// 流程: 检查间隔→验证依赖→缺则补齐→仍缺则告警→触发训练
 async fn ensure_prediction_coverage(db: &PgPool, client: &reqwest::Client, base: &str, _date_str: &str, date: chrono::NaiveDate) -> bool {
-    let pred_set = "pred-p7-wf-wide-qgvrel-h60-v1-201602-202605";
+    // ── 1. 检查最新模型的训练数据新鲜度 ──
+    let latest_training: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT MAX(training_end_date) FROM prediction_set WHERE status = 'ready' AND training_end_date IS NOT NULL"
+    ).fetch_optional(db).await.ok().flatten();
 
-    // 检查最新预测日期
-    let max_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
-        "SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1"
-    ).bind(pred_set).fetch_optional(db).await.ok().flatten();
-
-    let gap = match max_date {
-        Some((max_d,)) => (date - max_d).num_days(),
-        None => 999,
-    };
-
-    if gap <= 1 {
-        info!("[scheduler] ML预测数据正常 (最新={:?}, gap={}天)", max_date.map(|(d,)| d), gap);
-        return true;
+    if let Some((last_train,)) = latest_training {
+        let days_since = (date - last_train).num_days();
+        if days_since < 60 {
+            info!("[scheduler] ML训练跳过 (最新训练={}, 距今{}天 < 60天)", last_train, days_since);
+            return check_prediction_available(db, date).await;
+        }
+        info!("[scheduler] ML训练触发 (最新训练={}, 距今{}天 >= 60天)", last_train, days_since);
+    } else {
+        info!("[scheduler] 首次ML训练, 开始训练流程...");
     }
 
-    warn!("[scheduler] ⚠ ML预测数据过期: gap={}天, 触发后台训练补齐...", gap);
+    // ── 2. 验证训练依赖数据是否就绪 ──
+    let deps_ready = verify_training_dependencies(db, date).await;
+    if !deps_ready {
+        warn!("[scheduler] ⚠ ML训练依赖数据不全, 尝试补齐...");
+        // 触发缺失数据同步
+        let fixed = fix_training_dependencies(db, client, base, date).await;
+        if !fixed {
+            // 补齐失败 → 钉钉告警, 终止训练
+            let msg = format!("## ⚠️ ML训练中止\n\n训练依赖数据不全, 自动补齐失败.\n日期: {}\n请检查 Tushare API 限流状态.", date);
+            send_dingtalk_alert(db, &msg).await;
+            warn!("[scheduler] ⚠ ML训练依赖数据补齐失败, 已发钉钉告警, 终止训练");
+            return check_prediction_available(db, date).await;
+        }
+        info!("[scheduler] ML训练依赖数据已补齐");
+    }
 
-    // 触发NLQR walk-forward prediction set 创建 (后台异步, 可能需要数分钟到数小时)
-    // 日终触发, 次日14:45调仓时检查是否ready
+    // ── 3. 触发训练 ──
+    info!("[scheduler] 🚀 触发ML预测训练 (预测范围: {} ~ {})",
+        date.format("%Y%m%d"), (date + chrono::Duration::days(30)).format("%Y%m%d"));
+
     let triggered = client
         .post(format!("{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", base))
         .json(&serde_json::json!({
             "model_code": "nlqr_mr",
             "model_version": "1.0.0",
+            "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
             "data_version_id": "research-full-2016-2026-20260515",
-            "feature_set_version_id": "phase7-wf-wide-qgvrel-h60-v1",
+            "feature_set_version_id": "phase7-wide-qgvrel-v1",
             "training_dataset_id": "phase7-wf-wide-qgvrel-h60-v1",
-            "prediction_set_id": format!("pred-nlqr_mr_eod_{}", date.format("%Y%m%d").to_string()),
+            "prediction_set_id": format!("pred-nlqr_mr_eod_{}", date.format("%Y%m%d")),
             "prediction_start_date": date.format("%Y%m%d").to_string(),
             "prediction_end_date": (date + chrono::Duration::days(30)).format("%Y%m%d").to_string(),
+            "train_lookback_days": 756,
+            "prediction_step_days": 63,
+            "label_horizon_days": 20,
+            "min_training_samples": 200,
+            "max_windows": 20,
             "bucket_count": 10,
-            "min_samples_per_bucket": 100
+            "min_samples_per_bucket": 100,
+            "factors": [
+                {"factor_code": "rev_5d_std", "factor_version": "1.0.0"},
+                {"factor_code": "rev_20d_std", "factor_version": "1.0.0"},
+                {"factor_code": "downvol_20d_std", "factor_version": "1.0.0"},
+                {"factor_code": "amihud_20d_std", "factor_version": "1.0.0"}
+            ]
         }))
         .send().await;
 
@@ -668,16 +707,114 @@ async fn ensure_prediction_coverage(db: &PgPool, client: &reqwest::Client, base:
         Ok(r) => {
             let body: serde_json::Value = r.json().await.unwrap_or_default();
             if body.get("code").and_then(|c| c.as_i64()) == Some(0) {
-                info!("[scheduler] ML预测后台训练已触发, 预计次日就绪. 当前v16暂时降级纯因子");
+                let pid = body.get("data").and_then(|d| d.get("prediction_set_id"))
+                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                // 记录训练日期: 训练数据截止于今天(行情已同步)
+                if !pid.is_empty() {
+                    let train_start = date - chrono::Duration::days(756);
+                    let _ = sqlx::query(
+                        "UPDATE prediction_set SET training_start_date = $1, training_end_date = $2 WHERE prediction_set_id = $3"
+                    ).bind(train_start).bind(date).bind(&pid).execute(db).await;
+                    info!("[scheduler] ✅ ML训练已触发 (pid={}, train={}~{}, pred={}~{})",
+                        pid, train_start, date,
+                        date + chrono::Duration::days(1),
+                        date + chrono::Duration::days(63));
+                }
+                // 记录上次训练触发时间
+                let _ = sqlx::query(
+                    "INSERT INTO data_quality_config (config_key, config_value, description) VALUES ('last_ml_training', $1, '上次ML训练触发日期') ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = NOW()"
+                ).bind(date.format("%Y-%m-%d").to_string()).execute(db).await;
             } else {
-                warn!("[scheduler] ML预测训练触发失败: {:?}", body.get("message"));
+                warn!("[scheduler] ⚠ ML训练触发失败: {:?}", body.get("message"));
             }
         }
-        Err(e) => warn!("[scheduler] ML预测训练触发网络错误: {}", e),
+        Err(e) => warn!("[scheduler] ⚠ ML训练网络错误: {}", e),
     }
 
-    // 返回false: v16当前调仓降级为纯因子选股, 等预测数据ready后自动恢复
-    false
+    // 训练触发后, 当前数据可能还没ready, 返回现有覆盖状态
+    check_prediction_available(db, date).await
+}
+
+/// 检查prediction数据是否覆盖当前日期
+async fn check_prediction_available(db: &PgPool, date: chrono::NaiveDate) -> bool {
+    let count: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM model_prediction mp
+         JOIN prediction_set ps ON ps.prediction_set_id = mp.prediction_set_id AND ps.status = 'ready'
+         WHERE mp.trade_date = $1"
+    ).bind(date).fetch_optional(db).await.ok().flatten().map(|(c,)| c).unwrap_or(0);
+    count > 0
+}
+
+/// 验证ML训练依赖的所有数据是否就绪
+async fn verify_training_dependencies(db: &PgPool, date: chrono::NaiveDate) -> bool {
+    let today = date;
+    let threshold = today - chrono::Duration::days(2); // 2天内都算就绪
+
+    // A股日线
+    let daily_ok: bool = sqlx::query_as::<_, (chrono::NaiveDate,)>(
+        "SELECT MAX(trade_date) FROM market_stock_daily_bar WHERE trade_date >= $1"
+    ).bind(threshold).fetch_optional(db).await.ok().flatten().map(|(d,)| d >= threshold).unwrap_or(false);
+
+    // 复权因子 (30天阈值, 因为Tushare月更)
+    let adj_ok: bool = sqlx::query_as::<_, (chrono::NaiveDate,)>(
+        "SELECT MAX(trade_date) FROM market_adjustment_factor"
+    ).fetch_optional(db).await.ok().flatten().map(|(d,)| (today - d).num_days() < 60).unwrap_or(false);
+
+    // 因子值 (pv combo)
+    let factor_ok: bool = sqlx::query_as::<_, (chrono::NaiveDate,)>(
+        "SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name = 'phase7_price_volume_expanded_v1' AND trade_date >= $1"
+    ).bind(threshold).fetch_optional(db).await.ok().flatten().map(|(d,)| d >= threshold).unwrap_or(false);
+
+    let all_ok = daily_ok && adj_ok && factor_ok;
+    info!("[scheduler] ML训练依赖检查: daily={} adj={} factor={} → {}", daily_ok, adj_ok, factor_ok, if all_ok {"OK"} else {"MISSING"});
+    all_ok
+}
+
+/// 补齐ML训练缺失的数据 (触发同步+等待+重试验证)
+async fn fix_training_dependencies(db: &PgPool, client: &reqwest::Client, base: &str, date: chrono::NaiveDate) -> bool {
+    let date_str = date.format("%Y%m%d").to_string();
+    let start_str = (date - chrono::Duration::days(7)).format("%Y%m%d").to_string(); // 补最近7天
+
+    // 触发A股日线同步
+    let _ = client.post(format!("{}/api/v1/quant/data/sync/daily/background", base))
+        .json(&serde_json::json!({"symbols": [], "start_date": start_str, "end_date": date_str}))
+        .send().await;
+
+    // 触发复权因子同步
+    let _ = client.post(format!("{}/api/v1/quant/data/sync/adj-factor/background", base))
+        .json(&serde_json::json!({"symbols": [], "start_date": start_str, "end_date": date_str}))
+        .send().await;
+
+    // 等60秒让数据同步完成
+    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+    // 触发因子重算
+    let _ = client.post(format!("{}/api/v1/quant/factors/phase7-price-volume-backfill/background", base))
+        .json(&serde_json::json!({"start_date": start_str, "end_date": date_str, "combo_name": "phase7_price_volume_expanded_v1"}))
+        .send().await;
+
+    // 等30秒让因子计算完成
+    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+    // 再次验证
+    verify_training_dependencies(db, date).await
+}
+
+/// 发送钉钉告警 (独立于账号体系, 直接使用webhook)
+async fn send_dingtalk_alert(db: &PgPool, msg: &str) {
+    let accounts = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT name, dingtalk_webhook_url FROM paper_account WHERE status='active' AND dingtalk_webhook_url IS NOT NULL"
+    ).fetch_all(db).await.unwrap_or_default();
+
+    for (_name, webhook_url) in &accounts {
+        if let Some(url) = webhook_url {
+            let payload = serde_json::json!({
+                "msgtype": "markdown",
+                "markdown": {"title": "ML训练告警", "text": msg}
+            });
+            let _ = reqwest::Client::new().post(url).json(&payload).send().await;
+        }
+    }
 }
 async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
     let accounts = sqlx::query_as::<_, (String, Option<String>)>(
@@ -814,18 +951,28 @@ async fn generate_paper_signals_for_all(
         let is_prediction = signal_source == "prediction";
         let is_prediction_blend = signal_source == "prediction_blend";
 
-        // v16: 使用宽域 prediction set (2016-2026), 检查数据是否可用
+        // v16: 动态选择最新的 ready prediction set, 检查数据是否覆盖当前日期
         let prediction_set_id = if is_prediction || is_prediction_blend {
-            // 检查prediction数据是否覆盖当前日期
-            let pred_ok: bool = sqlx::query_as::<_, (i64,)>(
-                "SELECT COUNT(*) FROM model_prediction WHERE prediction_set_id = 'pred-p7-wf-wide-qgvrel-h60-v1-201602-202605' AND trade_date = $1"
-            ).bind(date).fetch_optional(db).await.ok().flatten().map(|(c,)| c > 0).unwrap_or(false);
+            // PIT合规: 训练数据结束日期 < 预测日期, 选训练数据最新的模型
+            let best: Option<(String,)> = sqlx::query_as(
+                "SELECT ps.prediction_set_id FROM prediction_set ps
+                 WHERE ps.status = 'ready'
+                   AND ps.training_end_date IS NOT NULL
+                   AND ps.training_end_date < $1           -- PIT: 训练数据必须在预测日期之前
+                   AND ps.start_date <= $1 AND ps.end_date >= $1  -- 预测覆盖日期
+                 ORDER BY ps.training_end_date DESC, ps.created_at DESC  -- 最近训练的优先
+                 LIMIT 1"
+            ).bind(date).fetch_optional(db).await.ok().flatten();
 
-            if pred_ok {
-                Some("pred-p7-wf-wide-qgvrel-h60-v1-201602-202605")
-            } else {
-                warn!("[paper] ⚠ prediction数据未覆盖{}, v16降级为纯因子选股", date);
-                None
+            match best {
+                Some((pid,)) => {
+                    info!("[paper] v16 prediction set: {} (覆盖{})", pid, date);
+                    Some(pid)
+                }
+                None => {
+                    warn!("[paper] ⚠ 无prediction set覆盖{}, v16降级为纯因子选股", date);
+                    None
+                }
             }
         } else {
             None
@@ -834,7 +981,7 @@ async fn generate_paper_signals_for_all(
         let resp = if is_prediction_blend {
             // v16: 因子+ML混合 — run-factor + prediction_blend
             let mut blend_body = body.clone();
-            if let Some(pid) = prediction_set_id {
+            if let Some(ref pid) = prediction_set_id {
                 blend_body["prediction_set_id"] = serde_json::json!(pid);
                 blend_body["prediction_blend_weight"] = serde_json::json!(0.5);
             }
@@ -853,7 +1000,7 @@ async fn generate_paper_signals_for_all(
             client
                 .post(format!("{}/api/v1/quant/backtests/run-prediction", base))
                 .json(&serde_json::json!({
-                    "prediction_set_id": prediction_set_id,
+                    "prediction_set_id": prediction_set_id.as_ref(),
                     "strategy_version_id": "phase7-professional-v1",
                     "data_version_id": "research-full-2016-2026-20260515",
                     "top_n": 15, "rebalance": "monthly", "max_position_pct": 0.10,
