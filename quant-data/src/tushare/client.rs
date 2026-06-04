@@ -885,15 +885,20 @@ impl TushareClient {
     }
 
     /// 涨跌停列表
-    /// Tushare limit_list_d endpoint — 返回当日涨跌停股票
+    /// Tushare limit_list_d endpoint — 返回涨跌停股票
+    /// 支持 trade_date(单日) 或 start_date+end_date(日期范围)
     pub async fn limit_list_d(
         &self,
         trade_date: Option<&str>,
         ts_code: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         let mut params: Vec<(&str, &str)> = Vec::new();
         if let Some(d) = trade_date { params.push(("trade_date", d)); }
         if let Some(c) = ts_code { params.push(("ts_code", c)); }
+        if let Some(s) = start_date { params.push(("start_date", s)); }
+        if let Some(e) = end_date { params.push(("end_date", e)); }
         self.call_api::<Vec<serde_json::Value>>("limit_list_d", params, &[]).await
     }
 }

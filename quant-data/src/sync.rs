@@ -2824,7 +2824,7 @@ pub async fn sync_limit_list(
     trade_date: &str,
 ) -> Result<usize, String> {
     let resp = client
-        .limit_list_d(Some(trade_date), None)
+        .limit_list_d(Some(trade_date), None, None, None)
         .await
         .map_err(|e| format!("limit_list_d API: {}", e))?;
 
@@ -2850,6 +2850,40 @@ pub async fn sync_limit_list(
     }
 
     info!(total, date = trade_date, "涨跌停数据同步完成");
+    Ok(total)
+}
+
+/// 同步涨跌停数据（日期范围，一次API调用）
+pub async fn sync_limit_list_range(
+    pool: &PgPool,
+    client: &TushareClient,
+    start_date: &str,
+    end_date: &str,
+) -> Result<usize, String> {
+    let resp = client
+        .limit_list_d(None, None, Some(start_date), Some(end_date))
+        .await
+        .map_err(|e| format!("limit_list_d range API: {}", e))?;
+
+    let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
+    let mut total = 0usize;
+
+    for item in &maps {
+        let ts_code = item["ts_code"].as_str().unwrap_or("");
+        let trade_date_str = item["trade_date"].as_str().unwrap_or("");
+        if ts_code.is_empty() || trade_date_str.is_empty() { continue; }
+
+        let d = NaiveDate::parse_from_str(trade_date_str, "%Y%m%d")
+            .map_err(|_| "日期解析".to_string())?;
+
+        sqlx::query(
+            "INSERT INTO market_stock_limit (symbol, trade_date) VALUES ($1, $2) ON CONFLICT (symbol, trade_date) DO NOTHING",
+        )
+        .bind(ts_code).bind(d).execute(pool).await.map_err(|e| format!("insert: {}", e))?;
+        total += 1;
+    }
+
+    info!(total, start = start_date, end = end_date, "涨跌停范围同步完成");
     Ok(total)
 }
 
