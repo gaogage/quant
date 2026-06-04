@@ -1101,6 +1101,45 @@ async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
     }
 }
 
+/// v17: CSI300体制检测，返回动态min_stock
+/// bull(MA60>MA250, trailing12m>10%): 35% | neutral: 25% | bear(trailing12m<-15%): 0%
+async fn get_regime_min_stock(db: &PgPool, date: NaiveDate) -> f64 {
+    // MA60
+    let ma60: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
+        "SELECT AVG(close::double precision) FROM (
+            SELECT close FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 60
+        ) sub"
+    ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
+
+    // MA250
+    let ma250: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
+        "SELECT AVG(close::double precision) FROM (
+            SELECT close FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 250
+        ) sub"
+    ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
+
+    // trailing 12m return
+    let trail_12m: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
+        "WITH dates AS (SELECT trade_date, close::double precision FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 252)
+         SELECT (MAX(close)/MIN(close) - 1) FROM dates"
+    ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
+
+    match (ma60, ma250, trail_12m) {
+        (Some(m60), Some(m250), Some(t12)) if t12 > 0.10 && m60 > m250 => {
+            info!("[Regime] BULL: min_stock=35% (t12m={:.1}%)", t12*100.0);
+            0.35
+        }
+        (_, _, Some(t12)) if t12 < -0.15 => {
+            info!("[Regime] BEAR: min_stock=0% (t12m={:.1}%)", t12*100.0);
+            0.00
+        }
+        _ => {
+            // neutral: 25% min stock (P2最优参数)
+            0.25
+        }
+    }
+}
+
 /// LW-MVO 自动发现权重：Ledoit-Wolf shrinkage + Grid Search 季度调仓。
 /// 返回 (a_share, gold, bond, sp500, nasdaq) 权重（和为 1.0）。
 /// ETF 从实际有数据的日期开始纳入 MVO 计算。
@@ -1110,6 +1149,9 @@ async fn compute_lw_mvo_weights(
     cache: &Mutex<Option<MvoWeightCache>>,
     min_stock: f64,
 ) -> Vec<f64> {
+    // v17: 动态min_stock based on CSI300 regime, with caller's default as floor
+    let regime_ms = get_regime_min_stock(db, date).await;
+    let min_stock = min_stock.max(regime_ms);
     let quarter = format!("{}-Q{}", date.year(), (date.month() - 1) / 3 + 1);
 
     // 检查缓存（同季度不重复计算）
