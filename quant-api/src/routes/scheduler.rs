@@ -11,6 +11,7 @@
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use ndarray::Array2;
 use quant_common::mvo;
+use quant_data::tushare::client::TushareClient;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -22,8 +23,9 @@ fn short_id() -> String {
 
 struct DailyState {
     date: Option<NaiveDate>,
-    traded_today: bool,    // 今日是否已完成调仓 (14:45)
-    eod_synced_today: bool, // 今日是否已完成日终数据同步 (16:00)
+    traded_today: bool,        // 今日是否已完成调仓 (14:40+)
+    eod_synced_today: bool,    // 今日是否已完成日终数据同步 (16:00)
+    yesterday_synced: bool,    // 昨日日线是否已完成 T+1 同步 (次日9:00)
     cleanup_done: bool,
 }
 
@@ -34,21 +36,23 @@ struct MvoWeightCache {
 }
 
 /// 启动后台调度器。
-pub fn start_scheduler(db: PgPool, port: u16) {
+pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
     tokio::spawn(async move {
+        let tushare = Arc::new(tushare);
         let state = Arc::new(Mutex::new(DailyState {
             date: None,
             traded_today: false,
             eod_synced_today: false,
+            yesterday_synced: false,
             cleanup_done: false,
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] v15已启动: 14:45调仓+钉钉, 16:00日终数据同步");
+        info!("[scheduler] v16 已启动: 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
 
         loop {
             interval.tick().await;
-            if let Err(e) = run_tick(&db, &state, &mvo_cache, port).await {
+            if let Err(e) = run_tick(&db, &tushare, &state, &mvo_cache, port).await {
                 error!("[scheduler] 任务失败: {}", e);
             }
         }
@@ -70,7 +74,7 @@ async fn get_current_wfa_params(db: &PgPool, date: NaiveDate) -> Result<serde_js
     Ok(row.map(|(p,)| p).unwrap_or_default())
 }
 
-async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16) -> Result<(), String> {
+async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16) -> Result<(), String> {
     let now = Local::now();
     let today = now.date_naive();
     let hour = now.time().hour();
@@ -83,6 +87,7 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<M
             st.date = Some(today);
             st.traded_today = false;
             st.eod_synced_today = false;
+            st.yesterday_synced = false;
             st.cleanup_done = false;
         }
     }
@@ -92,8 +97,8 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<M
         return Ok(());
     }
 
-    // ── 14:45 (收盘前): 用当日行情调仓 + 立即推送钉钉 (每日一次) ──
-    if hour == 14 && minute >= 40 && minute <= 50 {
+    // ── 14:40~15:00 (收盘前): 用当日行情调仓 + 立即推送钉钉 (每日一次) ──
+    if hour == 14 && minute >= 40 {
         let should_trade = {
             let st = state.lock().await;
             !st.traded_today
@@ -106,7 +111,7 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<M
             }
             info!("[scheduler] 14:45 日频调仓 (v16 LW-MVO 7-asset)...");
             // 先同步当日行情数据
-            sync_daily_data_for_today(port, today).await?;
+            sync_daily_data_for_today(db, tushare, today).await?;
             // 生成信号 + 调仓
             match generate_paper_signals_for_all(db, mvo_cache, port, today).await {
                 Ok(_) => {
@@ -137,6 +142,46 @@ async fn run_tick(db: &PgPool, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<M
             if let Err(e) = sync_eod_data(db, port, today).await {
                 warn!("[scheduler] 日终数据同步失败: {}", e);
             }
+        }
+    }
+
+    // ── 次日 9:00: 同步昨日日线 (Tushare T+1) + 因子重算 ──
+    if hour == 9 {
+        let should_sync_yesterday = {
+            let st = state.lock().await;
+            !st.yesterday_synced
+        };
+        if should_sync_yesterday {
+            {
+                let mut st = state.lock().await;
+                st.yesterday_synced = true;
+            }
+            let yesterday = today - chrono::Duration::days(1);
+            let yesterday_str = yesterday.format("%Y%m%d").to_string();
+            info!("[scheduler] 9:00 T+1 补同步昨日日线 {}  + 因子重算...", yesterday_str);
+            let base = format!("http://localhost:{}", port);
+            let client = reqwest::Client::new();
+
+            // 昨日日线 (T+1 数据应已就绪)
+            let _ = client
+                .post(format!("{}/api/v1/quant/data/sync/daily/background", base))
+                .json(&serde_json::json!({"symbols": [], "start_date": yesterday_str, "end_date": yesterday_str}))
+                .send().await;
+
+            // 等日线同步完成
+            tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+
+            // 因子重算
+            let _ = client
+                .post(format!("{}/api/v1/quant/factors/phase7-price-volume-backfill/background", base))
+                .json(&serde_json::json!({"start_date": yesterday_str, "end_date": yesterday_str, "combo_name": "phase7_price_volume_expanded_v1"}))
+                .send().await;
+            let _ = client
+                .post(format!("{}/api/v1/quant/factors/phase7-financial-quality-backfill/background", base))
+                .json(&serde_json::json!({"start_date": yesterday_str, "end_date": yesterday_str, "combo_name": "phase7_financial_quality_v1"}))
+                .send().await;
+
+            info!("[scheduler] T+1 补同步完成 ({})", yesterday_str);
         }
     }
 
@@ -394,42 +439,24 @@ async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
 }
 
 /// 14:45 调仓前获取当日行情 + 停牌/涨跌停数据
-async fn sync_daily_data_for_today(port: u16, date: NaiveDate) -> Result<(), String> {
+async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: NaiveDate) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
-    let base = format!("http://localhost:{}", port);
-    let client = reqwest::Client::new();
+    let empty: Vec<String> = vec![];
 
-    // 停牌数据
-    let _ = client
-        .post(format!("{}/api/v1/quant/data/sync/suspension", base))
-        .json(&serde_json::json!({"trade_date": date_str}))
-        .send().await;
+    // 停牌数据 (直接调用)
+    let _ = quant_data::sync::sync_suspension(db, tushare, &date_str).await;
 
-    // A股日线
-    let _ = client
-        .post(format!("{}/api/v1/quant/data/sync/daily", base))
-        .json(&serde_json::json!({
-            "symbols": [], "start_date": date_str, "end_date": date_str
-        }))
-        .send().await;
+    // A股日线 (直接调用, symbols空→函数内自动获取全量)
+    let dv_id = format!("dv-{}", date_str);
+    let _ = quant_data::sync::sync_daily_bars(db, tushare, &empty, &date_str, &date_str, &dv_id).await;
 
     // 指数日线
-    let _ = client
-        .post(format!("{}/api/v1/quant/data/sync/index-daily", base))
-        .json(&serde_json::json!({
-            "index_codes": ["000300.SH"],
-            "start_date": date_str, "end_date": date_str
-        }))
-        .send().await;
+    let index_codes = vec!["000300.SH".to_string()];
+    let _ = quant_data::sync::sync_index_daily(db, tushare, &index_codes, &date_str, &date_str, &format!("idx-{}", date_str)).await;
 
-    // ETF 日线 (v16: 精简7资产 — 黄金+国债+SP500+NASDAQ+有色+豆粕)
-    let _ = client
-        .post(format!("{}/api/v1/quant/data/sync/fund-daily", base))
-        .json(&serde_json::json!({
-            "symbols": ["518880.SH","511010.SH","513100.SH","513500.SH","159980.SZ","159985.SZ"],
-            "start_date": date_str, "end_date": date_str
-        }))
-        .send().await;
+    // ETF 日线 (v16: 7资产)
+    let etf_symbols = vec!["518880.SH".into(),"511010.SH".into(),"513100.SH".into(),"513500.SH".into(),"159980.SZ".into(),"159985.SZ".into()];
+    let _ = quant_data::sync::sync_fund_daily(db, tushare, &etf_symbols, &date_str, &date_str, &format!("etf-{}", date_str)).await;
 
     info!("[scheduler] 当日行情+停牌同步完成 ({})", date_str);
     Ok(())
@@ -441,15 +468,7 @@ async fn sync_eod_data(db: &PgPool, port: u16, date: NaiveDate) -> Result<(), St
     let base = format!("http://localhost:{}", port);
     let client = reqwest::Client::new();
 
-    // A股日线 (最终收盘价覆盖14:45的盘中数据)
-    let _ = client
-        .post(format!("{}/api/v1/quant/data/sync/daily/background", base))
-        .json(&serde_json::json!({
-            "symbols": [], "start_date": date_str, "end_date": date_str
-        }))
-        .send().await;
-
-    // 日线基础指标
+    // 日线基础指标 (Tushare T+1, 尝试同步, 可能暂无数据)
     let _ = client
         .post(format!("{}/api/v1/quant/data/sync-tasks", base))
         .json(&serde_json::json!({
@@ -466,29 +485,9 @@ async fn sync_eod_data(db: &PgPool, port: u16, date: NaiveDate) -> Result<(), St
         }))
         .send().await;
 
-    info!("[scheduler] 日终数据同步已触发 ({})", date_str);
+    info!("[scheduler] 16:00 EOD 同步已触发 (日线/因子由次日9:00 T+1补同步) ({})", date_str);
 
-    // 因子重算 (等数据同步完成后)
-    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-    // v16核心: 量价因子combo
-    let _ = client
-        .post(format!("{}/api/v1/quant/factors/phase7-price-volume-backfill/background", base))
-        .json(&serde_json::json!({
-            "start_date": date_str, "end_date": date_str,
-            "combo_name": "phase7_price_volume_expanded_v1"
-        }))
-        .send().await;
-    // v16核心: 财务质量因子combo
-    let _ = client
-        .post(format!("{}/api/v1/quant/factors/phase7-financial-quality-backfill/background", base))
-        .json(&serde_json::json!({
-            "start_date": date_str, "end_date": date_str,
-            "combo_name": "phase7_financial_quality_v1"
-        }))
-        .send().await;
-    info!("[scheduler] 因子重算已触发");
-
-    // ── 涨跌停数据同步 (先尝试, 失败重试, 再失败告警) ──
+    // ── 涨跌停数据同步 ──
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     let limit_ok = sync_limit_with_retry(db, &client, &base, &date_str).await;
     if !limit_ok {
@@ -524,7 +523,7 @@ async fn run_data_quality_check(db: &PgPool) {
     // 复权因子Tushare更新频率低(~月更), 使用30天阈值; 其他表使用2天阈值
     let checks: Vec<(&str, &str, Option<&str>, i64)> = vec![
         ("A股日线", "market_stock_daily_bar d",
-         Some("d.symbol NOT IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = d.trade_date AND suspend_type = 'S')"), 2),
+         Some("d.symbol NOT IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = d.trade_date AND suspend_type = 'S')"), 2), // Tushare T+1, 允许1天gap
         ("复权因子", "market_adjustment_factor", None, 30), // Tushare月更, 30天阈值
         ("日线基础", "market_stock_daily_basic", None, 2),
         ("因子(pv)", "multi_factor_value",

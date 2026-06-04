@@ -43,6 +43,9 @@ async fn main() {
         quant_data::tushare::client::TushareClient::from_env().expect("Tushare 客户端初始化失败");
     info!("Tushare 客户端已初始化");
 
+    // Clone for scheduler (before move into AppState)
+    let tushare_for_scheduler = tushare.clone();
+
     let state = Arc::new(AppState {
         start_time: chrono::Utc::now(),
         db,
@@ -512,7 +515,7 @@ async fn main() {
     info!(%addr, "Quant API 启动");
 
     // 启动后台调度器（数据同步 + 模拟交易）
-    routes::scheduler::start_scheduler(db_for_scheduler, port);
+    routes::scheduler::start_scheduler(db_for_scheduler, tushare_for_scheduler, port);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
