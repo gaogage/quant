@@ -1648,8 +1648,13 @@ pub async fn run_historical_replay(
     start_date: NaiveDate,
     end_date: NaiveDate,
     strategy: &str,
+    leverage_mode: &str,
+    leverage_multiplier: f64,
+    min_stock_override: Option<f64>,
 ) -> Result<ReplayResult, String> {
     let is_v17 = strategy == "v17";
+    let use_vol_target = leverage_mode == "vol_target";
+    let fixed_lev = if leverage_mode == "fixed" { leverage_multiplier.max(1.0) } else { 1.0 };
     let start_str = start_date.format("%Y-%m-%d").to_string();
     let end_str = end_date.format("%Y-%m-%d").to_string();
     info!("[replay] v17 历史回放: {} ~ {}", start_str, end_str);
@@ -1796,7 +1801,8 @@ pub async fn run_historical_replay(
                     let n_months = train.len();
                     let flat: Vec<f64> = train.iter().flatten().copied().collect();
                     if let Some(arr) = Array2::from_shape_vec((n_months, n_assets), flat).ok() {
-                        let regime_ms = if is_v17 { get_regime_min_stock(db, *d).await } else { 0.08 };
+                        let v16_min = min_stock_override.unwrap_or(0.08);
+                        let regime_ms = if is_v17 { get_regime_min_stock(db, *d).await } else { v16_min };
                         let regime_exposure = detect_regime_exposure(db, *d).await;
 
                         let mvo_result = if is_v17 {
@@ -1845,8 +1851,25 @@ pub async fn run_historical_replay(
 
     if mvo_daily_rets.len() < 60 { return Err("MVO收益序列不足".into()); }
 
-    // 8. 计算绩效指标
-    let mvo_rets = &mvo_daily_rets[mvo_start_idx..];
+    // 8. 应用杠杆 (vol_target or fixed)
+    let mut leveraged_rets: Vec<f64> = Vec::with_capacity(mvo_daily_rets.len());
+    let mut trail_60: Vec<f64> = Vec::new();
+    for &mvo_r in &mvo_daily_rets {
+        trail_60.push(mvo_r);
+        if trail_60.len() > 60 { trail_60.remove(0); }
+        let lev = if use_vol_target && trail_60.len() >= 20 {
+            let n = trail_60.len() as f64;
+            let m = trail_60.iter().sum::<f64>() / n;
+            let v = if n > 1.0 { trail_60.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (n - 1.0) } else { 0.0 };
+            let ann_vol = v.sqrt() * (252.0_f64).sqrt();
+            if ann_vol > 0.05 { (0.20 / ann_vol).clamp(0.5, 2.0) } else { 1.0 }
+        } else if fixed_lev > 1.0 { fixed_lev } else { 1.0 };
+        leveraged_rets.push(mvo_r * lev);
+    }
+
+    // 9. 计算绩效指标 (使用杠杆后收益)
+    let final_rets = if use_vol_target || fixed_lev > 1.0 { &leveraged_rets } else { &mvo_daily_rets };
+    let mvo_rets = &final_rets[mvo_start_idx..];
     let mvo_start_date = daily_returns[mvo_start_idx].0.format("%Y-%m-%d").to_string();
     let n = mvo_rets.len() as f64;
 

@@ -840,6 +840,12 @@ pub struct HistoricalReplayRequest {
     pub end_date: Option<String>,
     #[serde(default)]
     pub strategy: Option<String>, // "v16" | "v17" (default: "v17")
+    #[serde(default)]
+    pub leverage_mode: Option<String>, // "none" | "vol_target" | "fixed"
+    #[serde(default)]
+    pub leverage_multiplier: Option<f64>,
+    #[serde(default)]
+    pub min_stock: Option<f64>, // override min_stock (default: v16=0.08, v17=dynamic)
 }
 
 pub async fn historical_replay(
@@ -854,7 +860,10 @@ pub async fn historical_replay(
         .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2026, 5, 31).unwrap());
 
     let strategy = req.strategy.as_deref().unwrap_or("v17");
-    match crate::routes::scheduler::run_historical_replay(&state.db, start_date, end_date, strategy).await {
+    let leverage_mode = req.leverage_mode.as_deref().unwrap_or("none");
+    let leverage_multiplier = req.leverage_multiplier.unwrap_or(1.0);
+    let min_stock_override = req.min_stock;
+    match crate::routes::scheduler::run_historical_replay(&state.db, start_date, end_date, strategy, leverage_mode, leverage_multiplier, min_stock_override).await {
         Ok(result) => Json(json!({"code": 0, "data": result})),
         Err(e) => Json(json!({"code": 1, "message": e})),
     }
