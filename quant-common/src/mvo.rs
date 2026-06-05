@@ -45,6 +45,74 @@ pub fn ledoit_wolf_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
     shrunk
 }
 
+/// Compute EWMA (exponentially weighted) covariance matrix.
+/// Recent observations have higher weight: w_t = (1-λ) * λ^(T-1-t) / (1-λ^T)
+/// `lambda`: decay factor, typically 0.94 (RiskMetrics) or 0.97
+pub fn ewma_covariance(returns: &Array2<f64>, lambda: f64) -> Array2<f64> {
+    let n_assets = returns.ncols();
+    let n_periods = returns.nrows();
+    let mut cov = Array2::zeros((n_assets, n_assets));
+    if n_periods < 2 { return cov; }
+    let means = returns.mean_axis(Axis(0)).unwrap();
+    let centered = returns - &means;
+    // Compute weights: normalized exponential decay
+    let mut weights = Vec::with_capacity(n_periods);
+    let mut w_sum = 0.0;
+    for t in 0..n_periods {
+        let w = lambda.powi((n_periods - 1 - t) as i32);
+        weights.push(w);
+        w_sum += w;
+    }
+    for t in 0..n_periods {
+        let row = centered.row(t);
+        let w = weights[t] / w_sum;
+        for i in 0..n_assets {
+            for j in 0..n_assets {
+                cov[(i, j)] += w * row[i] * row[j];
+            }
+        }
+    }
+    // Bias correction
+    let scale = 1.0 / (1.0 - w_sum * w_sum / (w_sum * w_sum));
+    cov * scale
+}
+
+/// MVO with custom expected returns (momentum-adjusted mu) + LW covariance.
+pub fn mvo_allocate_with_custom_mu(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    return_target: f64,
+    grid_step: f64,
+) -> Option<MvoWeights> {
+    let cov = ledoit_wolf_shrinkage(monthly_returns);
+    let n_assets = monthly_returns.ncols();
+    let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
+    let result = grid_search_n_asset(custom_mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target }, grid_step);
+    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+}
+
+/// MVO with EWMA covariance + Ledoit-Wolf shrinkage, configurable grid step.
+/// Applies LW shrinkage on top of EWMA covariance for stability.
+pub fn mvo_allocate_ewma_n(
+    monthly_returns: &Array2<f64>,
+    min_stock: f64,
+    return_target: f64,
+    grid_step: f64,
+    lambda: f64,
+) -> Option<MvoWeights> {
+    // Apply LW shrinkage to EWMA covariance for stability
+    let raw_cov = ewma_covariance(monthly_returns, lambda);
+    let lw_cov = ledoit_wolf_shrinkage(monthly_returns);
+    // Blend: 70% EWMA + 30% LW shrinkage (keep responsiveness while maintaining stability)
+    let cov = 0.7 * &raw_cov + 0.3 * &lw_cov;
+    let mu = annualized_returns(monthly_returns);
+    let n_assets = monthly_returns.ncols();
+    let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
+    let result = grid_search_n_asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target }, grid_step);
+    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+}
+
 /// Compute downside semi-covariance matrix (only negative returns contribute).
 /// For Sortino-ratio optimization: only penalizes downside co-movement.
 /// Returns annualized semi-covariance (×12).

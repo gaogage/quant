@@ -972,7 +972,7 @@ async fn sync_positions_from_backtest(
     ).bind(account_id).fetch_one(db).await.map_err(|e| format!("cap: {}", e))?;
 
     // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
-    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.08).await;
+    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.0).await;
 
     // ── 体制检测 + 降仓 ──
     let regime_exposure = detect_regime_exposure(db, date).await;
@@ -1230,7 +1230,7 @@ async fn compute_lw_mvo_weights(
     cache: &Mutex<Option<MvoWeightCache>>,
     min_stock: f64,
 ) -> Vec<f64> {
-    // v16: fixed min_stock (8%), no regime-based dynamic adjustment
+    // v16: min_stock=0% (allow MVO to freely allocate away from A-shares)
     let quarter = format!("{}-Q{}", date.year(), (date.month() - 1) / 3 + 1);
 
     // 检查缓存（同季度不重复计算）
@@ -1651,8 +1651,14 @@ pub async fn run_historical_replay(
     leverage_mode: &str,
     leverage_multiplier: f64,
     min_stock_override: Option<f64>,
+    objective: &str,
+    rebalance: &str,
 ) -> Result<ReplayResult, String> {
     let is_v17 = strategy == "v17";
+    let use_max_sharpe = objective == "max_sharpe";
+    let use_ewma = objective == "ewma";
+    let use_momentum = objective == "momentum";
+    let is_monthly = rebalance == "monthly";
     let use_vol_target = leverage_mode == "vol_target";
     let fixed_lev = if leverage_mode == "fixed" { leverage_multiplier.max(1.0) } else { 1.0 };
     let start_str = start_date.format("%Y-%m-%d").to_string();
@@ -1788,9 +1794,14 @@ pub async fn run_historical_replay(
 
     for (di, (d, rets)) in daily_returns.iter().enumerate() {
         let q_key = format!("{}-Q{}", d.format("%Y"), (d.month()-1)/3 + 1);
-        let is_q_month = matches!(d.month(), 1 | 4 | 7 | 10);
+        let should_rebalance = if is_monthly {
+            q_key != last_q  // every month
+        } else {
+            let is_q_month = matches!(d.month(), 1 | 4 | 7 | 10);
+            is_q_month && q_key != last_q
+        };
 
-        if is_q_month && q_key != last_q {
+        if should_rebalance {
             let mk = format!("{}-{:02}", d.format("%Y"), d.month());
             if let Some(mi) = monthly_rets.iter().position(|(m, _, _)| m.as_str() >= mk.as_str()) {
                 if mi >= lookback {
@@ -1807,9 +1818,44 @@ pub async fn run_historical_replay(
 
                         let mvo_result = if is_v17 {
                             mvo::mvo_allocate_sortino_n(&arr, regime_ms, 0.06, 0.10)
+                        } else if use_max_sharpe {
+                            mvo::mvo_allocate(&arr, regime_ms)
+                        } else if use_momentum {
+                            // Exp D: momentum-adjusted expected returns
+                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
+                                .map(|(_, _, r)| r[0]).collect();
+                            let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+                            let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
+                            // Blend: 60% historical mean + 40% recent momentum (6m annualized)
+                            let hist_mu = ndarray::Array1::from_vec(
+                                (0..n_assets).map(|j| {
+                                    let col: Vec<f64> = train.iter().map(|r| r[j]).collect();
+                                    col.iter().sum::<f64>() / col.len() as f64 * 12.0
+                                }).collect()
+                            );
+                            let mom_mu = ndarray::Array1::from_vec(
+                                (0..n_assets).map(|j| {
+                                    let recent: Vec<f64> = train.iter().rev().take(6).map(|r| r[j]).collect();
+                                    let cum: f64 = recent.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+                                    cum.powf(2.0) - 1.0  // 6m → annualized
+                                }).collect()
+                            );
+                            let adj_mu = 0.6 * &hist_mu + 0.4 * &mom_mu;
+                            mvo::mvo_allocate_with_custom_mu(&arr, &adj_mu, regime_ms, dynamic_target, 0.10)
+                        } else if use_ewma {
+                            // Exp B: EWMA covariance (λ=0.94) with dynamic target
+                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
+                                .map(|(_, _, r)| r[0]).collect();
+                            let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+                            let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
+                            mvo::mvo_allocate_ewma_n(&arr, regime_ms, dynamic_target, 0.10, 0.94)
                         } else {
-                            // v16: Sharpe-max MVO (original)
-                            mvo::mvo_allocate_with_target_n(&arr, regime_ms, 0.12, 0.10)
+                            // v16 baseline: MinVariance with LW shrinkage + dynamic target
+                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
+                                .map(|(_, _, r)| r[0]).collect();
+                            let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+                            let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
+                            mvo::mvo_allocate_with_target_n(&arr, regime_ms, dynamic_target, 0.10)
                         };
 
                         if let Some(result) = mvo_result {

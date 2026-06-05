@@ -841,11 +841,17 @@ pub struct HistoricalReplayRequest {
     #[serde(default)]
     pub strategy: Option<String>, // "v16" | "v17" (default: "v17")
     #[serde(default)]
-    pub leverage_mode: Option<String>, // "none" | "vol_target" | "fixed"
+    pub paper_account_id: Option<String>, // 若提供，从账号读取杠杆设置
+    #[serde(default)]
+    pub leverage_mode: Option<String>, // 手动覆盖: "none" | "vol_target" | "fixed"
     #[serde(default)]
     pub leverage_multiplier: Option<f64>,
     #[serde(default)]
-    pub min_stock: Option<f64>, // override min_stock (default: v16=0.08, v17=dynamic)
+    pub min_stock: Option<f64>, // override min_stock
+    #[serde(default)]
+    pub objective: Option<String>, // MVO objective: "min_variance" (default) | "max_sharpe" | "ewma" | "monthly"
+    #[serde(default)]
+    pub rebalance: Option<String>, // "quarterly" (default) | "monthly"
 }
 
 pub async fn historical_replay(
@@ -860,10 +866,27 @@ pub async fn historical_replay(
         .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2026, 5, 31).unwrap());
 
     let strategy = req.strategy.as_deref().unwrap_or("v17");
-    let leverage_mode = req.leverage_mode.as_deref().unwrap_or("none");
-    let leverage_multiplier = req.leverage_multiplier.unwrap_or(1.0);
+    let objective = req.objective.as_deref().unwrap_or("min_variance");
     let min_stock_override = req.min_stock;
-    match crate::routes::scheduler::run_historical_replay(&state.db, start_date, end_date, strategy, leverage_mode, leverage_multiplier, min_stock_override).await {
+
+    // 杠杆: 优先从 paper_account 读取, 否则用手动参数
+    let (leverage_mode, leverage_multiplier) =
+        if let Some(ref acct_id) = req.paper_account_id {
+            let row_result = sqlx::query_as::<_, (bool, String, f64)>(
+                "SELECT COALESCE(leverage_enabled,false), COALESCE(leverage_mode,'fixed'), COALESCE(leverage_multiplier,1.0) FROM paper_account WHERE paper_account_id=$1"
+            ).bind(acct_id).fetch_optional(&state.db).await;
+            match row_result {
+                Ok(Some((true, mode, mult))) => (mode, mult.max(1.0)),
+                _ => ("none".to_string(), 1.0),
+            }
+        } else {
+            (req.leverage_mode.as_deref().unwrap_or("none").to_string(), req.leverage_multiplier.unwrap_or(1.0))
+        };
+
+    let rebalance = req.rebalance.as_deref().unwrap_or("quarterly");
+    match crate::routes::scheduler::run_historical_replay(
+        &state.db, start_date, end_date, strategy, &leverage_mode, leverage_multiplier, min_stock_override, objective, rebalance,
+    ).await {
         Ok(result) => Json(json!({"code": 0, "data": result})),
         Err(e) => Json(json!({"code": 1, "message": e})),
     }
