@@ -832,6 +832,34 @@ async fn simulate_paper_nav_inner(
     }))
 }
 
+// ── v17 Historical Replay ──
+
+#[derive(Debug, Deserialize)]
+pub struct HistoricalReplayRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>, // "v16" | "v17" (default: "v17")
+}
+
+pub async fn historical_replay(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<HistoricalReplayRequest>,
+) -> impl IntoResponse {
+    let start = req.start_date.as_deref().unwrap_or("2014-01-01");
+    let end = req.end_date.as_deref().unwrap_or("2026-05-31");
+    let start_date = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2014, 1, 1).unwrap());
+    let end_date = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2026, 5, 31).unwrap());
+
+    let strategy = req.strategy.as_deref().unwrap_or("v17");
+    match crate::routes::scheduler::run_historical_replay(&state.db, start_date, end_date, strategy).await {
+        Ok(result) => Json(json!({"code": 0, "data": result})),
+        Err(e) => Json(json!({"code": 1, "message": e})),
+    }
+}
+
 // ── Multi-Window Simulation ──
 
 #[derive(Debug, Deserialize)]

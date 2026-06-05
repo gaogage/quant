@@ -440,6 +440,10 @@ async fn main() {
             "/api/v1/quant/paper/nav/simulate-multi",
             post(routes::paper::simulate_multi_window),
         )
+        .route(
+            "/api/v1/quant/paper/historical-replay",
+            post(routes::paper::historical_replay),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",

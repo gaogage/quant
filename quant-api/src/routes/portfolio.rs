@@ -1529,35 +1529,67 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
         return Err("回测数据不足（需至少 1 年）".into());
     }
 
+    // v17: 加载 CSI300 用于体制检测
+    let csi_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
+        "SELECT trade_date, close::double precision FROM market_index_daily_bar
+         WHERE symbol = '000300.SH' ORDER BY trade_date",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("加载CSI300失败: {e}"))?;
+    let csi_closes: Vec<(NaiveDate, f64)> = csi_rows;
+
+    // v17: PIT体制检测 — 返回动态 min_stock
+    let get_regime_min = |d: NaiveDate| -> f64 {
+        let closes: Vec<f64> = csi_closes.iter()
+            .filter(|(td, _)| *td <= d)
+            .map(|(_, c)| *c)
+            .collect();
+        if closes.len() < 250 { return min_stock; }
+        let t12 = closes.last().unwrap() / closes[closes.len() - 250] - 1.0;
+        let ma60: f64 = closes.iter().rev().take(60).sum::<f64>() / 60.0;
+        let ma250: f64 = closes.iter().rev().take(250).sum::<f64>() / 250.0;
+        if t12 > 0.10 && ma60 > ma250 { 0.35 }
+        else if t12 < -0.15 { 0.00 }
+        else { min_stock.max(0.25) }  // neutral: 25% (P2最优) or request default
+    };
+
     let a_nav: Vec<(NaiveDate, f64)> = eq_rows
         .iter()
         .map(|(d, v)| (*d, v.to_string().parse::<f64>().unwrap_or(0.0)))
         .filter(|(_, v)| *v > 0.0)
         .collect();
 
-    // 2. 加载 ETF 日线价格（用固定 SQL 避免 IN 子句参数化问题）
-    let etf_sym0 = req.etf_symbols.first().cloned().unwrap_or_default();
-    let etf_sym1 = req.etf_symbols.get(1).cloned().unwrap_or_default();
-    let etf_sym2 = req.etf_symbols.get(2).cloned().unwrap_or_default();
-    let etf_sym3 = req.etf_symbols.get(3).cloned().unwrap_or_default();
+    // 2. 加载 ETF 日线价格 — v17: 7资产(6 ETFs + A股)
+    // 518880=黄金, 511010=国债, 513500=SP500, 513100=纳指, 159980=有色, 159985=豆粕
+    let default_etfs = vec![
+        "518880.SH".to_string(), "511010.SH".to_string(), "513500.SH".to_string(),
+        "513100.SH".to_string(), "159980.SZ".to_string(), "159985.SZ".to_string(),
+    ];
+    let etf_symbols = if req.etf_symbols.is_empty() { &default_etfs } else { &req.etf_symbols };
+    let etf_count = etf_symbols.len();
 
-    // ETF数据起始日期: 回测起始日 - MVO回看期 - 1年缓冲, 最早不早于2013-03-25(首只ETF上市)
+    // ETF数据起始日期: 回测起始日 - MVO回看期 - 1年缓冲
     let etf_start = a_nav.first().map(|(d, _)| {
         (*d - chrono::Duration::days(lookback as i64 * 31 + 365)).max(NaiveDate::from_ymd_opt(2013, 3, 25).unwrap())
     }).unwrap_or(NaiveDate::from_ymd_opt(2013, 3, 25).unwrap());
 
-    let etf_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
+    // 动态构建 SQL IN 子句
+    let placeholders: Vec<String> = (1..=etf_count).map(|i| format!("${}", i)).collect();
+    let in_clause = placeholders.join(", ");
+    let sql = format!(
         "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar_adj
-         WHERE symbol IN ($1, $2, $3, $4) AND trade_date >= $5 ORDER BY trade_date",
-    )
-    .bind(&etf_sym0)
-    .bind(&etf_sym1)
-    .bind(&etf_sym2)
-    .bind(&etf_sym3)
-    .bind(etf_start)
-    .fetch_all(db)
-    .await
-    .map_err(|e| format!("加载 ETF 数据失败: {e}"))?;
+         WHERE symbol IN ({}) AND trade_date >= ${} ORDER BY trade_date",
+        in_clause, etf_count + 1
+    );
+
+    let mut query = sqlx::query_as::<_, (NaiveDate, String, f64)>(&sql);
+    for sym in etf_symbols {
+        query = query.bind(sym);
+    }
+    query = query.bind(etf_start);
+
+    let etf_rows = query.fetch_all(db).await.map_err(|e| format!("加载 ETF 数据失败: {e}"))?;
 
     let mut etf_prices: HashMap<String, HashMap<NaiveDate, f64>> = HashMap::new();
     for (d, sym, price) in &etf_rows {
@@ -1575,7 +1607,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
 
         let mut row = vec![a_ret];
         let mut valid = true;
-        for sym in &req.etf_symbols {
+        for sym in etf_symbols {
             let prices = etf_prices.get(sym.as_str());
             let pp = prices.and_then(|p| p.get(&prev_d)).copied().unwrap_or(0.0);
             let pc = prices.and_then(|p| p.get(&d)).copied().unwrap_or(0.0);
@@ -1584,7 +1616,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
                 if r.abs() > 0.5 { valid = false; }
                 row.push(r);
             } else {
-                row.push(0.0); // ETF 数据缺失 → 0 收益（不参与 MVO 计算时权重为 0）
+                row.push(0.0);
             }
         }
         if valid { daily_returns.push((d, row)); }
@@ -1594,7 +1626,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
         return Err("无有效日收益率".into());
     }
 
-    let n_assets = 1 + req.etf_symbols.len();
+    let n_assets = 1 + etf_count;
 
     // 4. 月度聚合
     let mut monthly_rets: Vec<(String, Vec<f64>)> = Vec::new();
@@ -1678,8 +1710,40 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
                     if n_months >= 12 {
                         let flat: Vec<f64> = train.iter().flatten().copied().collect();
                         if let Some(arr) = Array2::from_shape_vec((n_months, n_assets), flat).ok() {
-                            if let Some(result) = mvo::mvo_allocate(&arr, min_stock) {
+                            // v17: Sortino-max MVO (target=6%) + dynamic regime min_stock
+                            let regime_ms = get_regime_min(*d);
+                            if let Some(result) = mvo::mvo_allocate_sortino_n(&arr, regime_ms, 0.06, 0.10) {
                                 weights = result.weights.to_vec();
+
+                                // v17: ETF MA200 趋势过滤
+                                for (ei, sym) in etf_symbols.iter().enumerate() {
+                                    let wi = ei + 1;
+                                    if wi >= weights.len() || weights[wi] <= 0.0 { continue; }
+                                    if let Some(prices) = etf_prices.get(sym.as_str()) {
+                                        let mut sorted_dates: Vec<NaiveDate> = prices.keys().copied().collect();
+                                        sorted_dates.sort();
+                                        if sorted_dates.len() >= 200 {
+                                            let recent: Vec<f64> = sorted_dates.iter()
+                                                .filter(|&&pd| pd <= *d)
+                                                .rev().take(200)
+                                                .map(|pd| prices.get(pd).copied().unwrap_or(0.0))
+                                                .collect();
+                                            if recent.len() >= 200 {
+                                                let ma200: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
+                                                let latest = recent[0];
+                                                if latest < ma200 && latest > 0.0 {
+                                                    weights[wi] = 0.0;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // 重新归一化
+                                let w_sum: f64 = weights.iter().sum();
+                                if w_sum > 0.0 {
+                                    for w in &mut weights { *w /= w_sum; }
+                                }
+
                                 weight_history.push(json!({
                                     "date": d.format("%Y-%m-%d").to_string(),
                                     "weights": weights.iter().map(|&w| (w * 1000.0).round() / 10.0).collect::<Vec<f64>>(),

@@ -1140,6 +1140,87 @@ async fn get_regime_min_stock(db: &PgPool, date: NaiveDate) -> f64 {
     }
 }
 
+/// v17: ETF MA200 趋势过滤。
+/// 对每个 ETF，若最新收盘价 < MA200，将其权重归零，剩余权重重新归一化。
+/// 仅当至少有一个 ETF 被过滤时才返回新权重，否则返回空 vec（调用方使用原权重）。
+async fn apply_etf_trend_filter(
+    db: &PgPool,
+    date: NaiveDate,
+    etf_symbols: &[&str],
+    original_weights: &[f64],
+) -> Vec<f64> {
+    let n = original_weights.len();
+    if n == 0 || etf_symbols.is_empty() {
+        return vec![];
+    }
+    let mut filtered = original_weights.to_vec();
+    let mut any_filtered = false;
+
+    for (ei, sym) in etf_symbols.iter().enumerate() {
+        // ETF 权重在索引 ei+1 (A股在索引0)
+        let wi = ei + 1;
+        if wi >= n || filtered[wi] <= 0.0 {
+            continue;
+        }
+        // 获取最近 200 个交易日的收盘价
+        let rows = sqlx::query_as::<_, (rust_decimal::Decimal,)>(
+            "SELECT close FROM market_stock_daily_bar_adj
+             WHERE symbol = $1 AND trade_date <= $2
+             ORDER BY trade_date DESC LIMIT 200",
+        )
+        .bind(*sym)
+        .bind(date)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+
+        if rows.len() >= 200 {
+            let sum: f64 = rows.iter().map(|(c,)| {
+                c.to_string().parse::<f64>().unwrap_or(0.0)
+            }).sum();
+            let ma200 = sum / rows.len() as f64;
+            let latest: f64 = rows[0].0.to_string().parse::<f64>().unwrap_or(0.0);
+
+            if latest < ma200 {
+                let etf_name = match *sym {
+                    "518880.SH" => "黄金",
+                    "511010.SH" => "国债",
+                    "513500.SH" => "SP500",
+                    "513100.SH" => "纳指",
+                    "159980.SZ" => "有色",
+                    "159985.SZ" => "豆粕",
+                    _ => *sym,
+                };
+                info!(
+                    "[ETF Trend] {} ({}) 跌破MA200 ({:.3} < {:.3}), 权重 {:.0}% → 0%",
+                    etf_name, sym, latest, ma200, filtered[wi] * 100.0
+                );
+                filtered[wi] = 0.0;
+                any_filtered = true;
+            }
+        }
+    }
+
+    if any_filtered {
+        let remaining_sum: f64 = filtered.iter().sum();
+        if remaining_sum > 0.0 {
+            for w in &mut filtered {
+                *w /= remaining_sum;
+            }
+        }
+        info!(
+            "[ETF Trend] 过滤后权重: A股={:.0}% 黄金={:.0}% 国债={:.0}% SP500={:.0}% 纳指={:.0}% 有色={:.0}% 豆粕={:.0}%",
+            filtered[0] * 100.0, filtered[1] * 100.0, filtered[2] * 100.0,
+            filtered[3] * 100.0, filtered[4] * 100.0,
+            filtered.get(5).copied().unwrap_or(0.0) * 100.0,
+            filtered.get(6).copied().unwrap_or(0.0) * 100.0,
+        );
+        filtered
+    } else {
+        vec![]
+    }
+}
+
 /// LW-MVO 自动发现权重：Ledoit-Wolf shrinkage + Grid Search 季度调仓。
 /// 返回 (a_share, gold, bond, sp500, nasdaq) 权重（和为 1.0）。
 /// ETF 从实际有数据的日期开始纳入 MVO 计算。
@@ -1149,9 +1230,7 @@ async fn compute_lw_mvo_weights(
     cache: &Mutex<Option<MvoWeightCache>>,
     min_stock: f64,
 ) -> Vec<f64> {
-    // v17: 动态min_stock based on CSI300 regime, with caller's default as floor
-    let regime_ms = get_regime_min_stock(db, date).await;
-    let min_stock = min_stock.max(regime_ms);
+    // v16: fixed min_stock (8%), no regime-based dynamic adjustment
     let quarter = format!("{}-Q{}", date.year(), (date.month() - 1) / 3 + 1);
 
     // 检查缓存（同季度不重复计算）
@@ -1258,13 +1337,13 @@ async fn compute_lw_mvo_weights(
         let flat: Vec<f64> = all_monthly.iter().flatten().copied().collect();
 
         if let Some(arr) = Array2::from_shape_vec((n_rows, n_total_assets), flat).ok() {
+            // v16: Sharpe-max MVO with dynamic return target
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
                 (trail_12m + 0.05).clamp(0.08, 0.18)
             } else {
                 0.12
             };
-            // v16: 8资产统一Grid Search (10%步长, O(11^7)≈19M组合)
             if let Some(result) = mvo::mvo_allocate_with_target_n(&arr, adaptive_min_stock, dynamic_target, 0.10) {
                 let w = result.weights.to_vec();
                 info!(
@@ -1515,4 +1594,384 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
         }
     }
     Ok(())
+}
+
+// ── v17 Historical Replay ──────────────────────────────────────────
+
+/// v17 完整策略历史回放结果
+#[derive(Debug, serde::Serialize)]
+pub struct ReplayResult {
+    pub start_date: String,
+    pub end_date: String,
+    pub trading_days: usize,
+    pub annual_return_pct: f64,
+    pub cumulative_return_pct: f64,
+    pub max_drawdown_pct: f64,
+    pub sharpe_ratio: f64,
+    pub sortino_ratio: f64,
+    pub volatility_pct: f64,
+    pub calmar_ratio: f64,
+    pub win_rate_pct: f64,
+    pub yearly_returns: Vec<YearlyReturn>,
+    pub benchmarks: Benchmarks,
+    pub mvo_start_date: String,
+    pub mvo_trading_days: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct YearlyReturn {
+    pub year: String,
+    pub return_pct: f64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Benchmarks {
+    pub csi300: BenchmarkMetrics,
+    pub sp500: BenchmarkMetrics,
+    pub gold: BenchmarkMetrics,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BenchmarkMetrics {
+    pub annual_return_pct: f64,
+    pub max_drawdown_pct: f64,
+    pub sharpe_ratio: f64,
+    pub sortino_ratio: f64,
+    pub yearly_returns: Vec<YearlyReturn>,
+}
+
+/// 运行 v17 完整策略历史回放（与生产 scheduler 相同的逻辑）。
+/// 逐日迭代所有交易日，在每个季度调仓日运行 compute_lw_mvo_weights，
+/// 计算逐日 NAV 和完整绩效指标。
+pub async fn run_historical_replay(
+    db: &PgPool,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    strategy: &str,
+) -> Result<ReplayResult, String> {
+    let is_v17 = strategy == "v17";
+    let start_str = start_date.format("%Y-%m-%d").to_string();
+    let end_str = end_date.format("%Y-%m-%d").to_string();
+    info!("[replay] v17 历史回放: {} ~ {}", start_str, end_str);
+
+    // 1. 加载交易日历
+    let tdates: Vec<NaiveDate> = sqlx::query_as::<_, (NaiveDate,)>(
+        "SELECT DISTINCT trade_date FROM market_trade_calendar WHERE trade_date >= $1 AND trade_date <= $2 AND is_open = true ORDER BY trade_date",
+    )
+    .bind(start_date).bind(end_date)
+    .fetch_all(db).await.map_err(|e| format!("交易日历: {e}"))?
+    .into_iter().map(|(d,)| d).collect();
+
+    if tdates.len() < 252 { return Err("交易日不足1年".into()); }
+
+    // 2. 加载 A 股权益曲线（从最长的全周期回测任务）
+    let eq_task_id = "bt-ee3f3b65-6cc4-4cc3-bf6f-a28acacff461";
+    let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
+        "SELECT trade_date, portfolio_value FROM backtest_equity_curve WHERE task_id = $1 ORDER BY trade_date",
+    ).bind(eq_task_id).fetch_all(db).await
+    .map_err(|e| format!("A股权益曲线: {e}"))?;
+
+    let a_nav: Vec<(NaiveDate, f64)> = eq_rows.iter()
+        .map(|(d, v)| (*d, v.to_string().parse::<f64>().unwrap_or(0.0)))
+        .filter(|(_, v)| *v > 0.0).collect();
+
+    // 3. 加载 ETF 价格
+    let etf_symbols = vec![
+        "518880.SH".to_string(), "511010.SH".to_string(), "513500.SH".to_string(),
+        "513100.SH".to_string(), "159980.SZ".to_string(), "159985.SZ".to_string(),
+    ];
+    let etf_count = etf_symbols.len();
+    let etf_start = start_date - chrono::Duration::days(3 * 365); // 3年缓冲用于MA200
+
+    let placeholders: Vec<String> = (1..=etf_count).map(|i| format!("${}", i)).collect();
+    let in_clause = placeholders.join(", ");
+    let sql = format!(
+        "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar_adj
+         WHERE symbol IN ({}) AND trade_date >= ${} ORDER BY trade_date",
+        in_clause, etf_count + 1
+    );
+    let mut query = sqlx::query_as::<_, (NaiveDate, String, f64)>(&sql);
+    for sym in &etf_symbols { query = query.bind(sym); }
+    query = query.bind(etf_start);
+    let etf_rows = query.fetch_all(db).await.map_err(|e| format!("ETF数据: {e}"))?;
+
+    use std::collections::HashMap;
+    let mut etf_prices: HashMap<String, HashMap<NaiveDate, f64>> = HashMap::new();
+    for (d, sym, price) in &etf_rows {
+        etf_prices.entry(sym.clone()).or_default().insert(*d, *price);
+    }
+
+    // 4. 加载基准数据
+    async fn load_benchmark(
+        db: &PgPool, sym: &str, table: &str,
+        start_date: NaiveDate, end_date: NaiveDate, tdates: &[NaiveDate],
+    ) -> Result<(Vec<f64>, Vec<NaiveDate>), String> {
+        let sql = format!(
+            "SELECT trade_date, close::double precision FROM {} WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date", table
+        );
+        let rows: Vec<(NaiveDate, f64)> = sqlx::query_as(&sql)
+            .bind(sym).bind(start_date).bind(end_date)
+            .fetch_all(db).await
+            .map_err(|e: sqlx::Error| format!("基准{}: {e}", sym))?;
+        let prices: HashMap<NaiveDate, f64> = rows.into_iter().collect();
+        let mut rets = Vec::new(); let mut ret_dates = Vec::new();
+        for di in 1..tdates.len() {
+            let d = tdates[di]; let pd = tdates[di-1];
+            if let (Some(&cp), Some(&pp)) = (prices.get(&d), prices.get(&pd)) {
+                if pp > 0.0 && cp > 0.0 { rets.push(cp/pp - 1.0); ret_dates.push(d); }
+            }
+        }
+        Ok((rets, ret_dates))
+    }
+
+    let (csi_rets, csi_dates) = load_benchmark(db, "000300.SH", "market_index_daily_bar", start_date, end_date, &tdates).await?;
+    let (sp500_rets, sp500_dates) = load_benchmark(db, "513500.SH", "market_stock_daily_bar_adj", start_date, end_date, &tdates).await?;
+    let (gold_rets, gold_dates) = load_benchmark(db, "518880.SH", "market_stock_daily_bar_adj", start_date, end_date, &tdates).await?;
+
+    // 5. 构建日收益率 (A股 + 6 ETFs)
+    let mut daily_returns: Vec<(NaiveDate, Vec<f64>)> = Vec::new();
+    for di in 1..tdates.len() {
+        let d = tdates[di]; let pd = tdates[di-1];
+        // Find A-share nav
+        let ap = a_nav.iter().find(|(td, _)| *td == pd).map(|(_, v)| *v);
+        let ac = a_nav.iter().find(|(td, _)| *td == d).map(|(_, v)| *v);
+        if let (Some(pp), Some(cp)) = (ap, ac) {
+            if pp <= 0.0 { continue; }
+            let ar = cp/pp - 1.0;
+            if ar.abs() > 0.5 { continue; }
+            let mut row = vec![ar];
+            let mut valid = true;
+            for sym in &etf_symbols {
+                let prices = etf_prices.get(sym.as_str());
+                let ep = prices.and_then(|p| p.get(&pd)).copied().unwrap_or(0.0);
+                let ec = prices.and_then(|p| p.get(&d)).copied().unwrap_or(0.0);
+                if ep > 0.0 && ec > 0.0 {
+                    let r = ec/ep - 1.0;
+                    if r.abs() > 0.5 { valid = false; }
+                    row.push(r);
+                } else { row.push(0.0); }
+            }
+            if valid { daily_returns.push((d, row)); }
+        }
+    }
+    let n_assets = 1 + etf_count;
+
+    // 6. 月度聚合
+    let mut monthly_rets: Vec<(String, NaiveDate, Vec<f64>)> = Vec::new();
+    let mut cm: Option<(String, NaiveDate, Vec<f64>)> = None;
+    for (d, rets) in &daily_returns {
+        let mk = format!("{}-{:02}", d.format("%Y"), d.month());
+        match &mut cm {
+            Some((m, _, cum)) if *m == mk => {
+                for j in 0..n_assets { cum[j] = (1.0+cum[j])*(1.0+rets[j])-1.0; }
+            }
+            _ => {
+                if let Some((m, ld, cum)) = cm.take() { monthly_rets.push((m, ld, cum)); }
+                cm = Some((mk, *d, rets.clone()));
+            }
+        }
+    }
+    if let Some((m, ld, cum)) = cm { monthly_rets.push((m, ld, cum)); }
+
+    // 7. 逐日回放: 季度调仓时直接调用 MVO 模块
+    let lookback = 36usize;
+    let mut weights: Vec<f64> = vec![0.10, 0.25, 0.35, 0.05, 0.15, 0.05, 0.05]; // A股,黄金,国债,SP500,纳指,有色,豆粕
+    let mut last_q = String::new();
+    let mut mvo_daily_rets: Vec<f64> = Vec::new();
+    let mut mvo_start_idx = 0usize;
+    let mut found_start = false;
+
+    for (di, (d, rets)) in daily_returns.iter().enumerate() {
+        let q_key = format!("{}-Q{}", d.format("%Y"), (d.month()-1)/3 + 1);
+        let is_q_month = matches!(d.month(), 1 | 4 | 7 | 10);
+
+        if is_q_month && q_key != last_q {
+            let mk = format!("{}-{:02}", d.format("%Y"), d.month());
+            if let Some(mi) = monthly_rets.iter().position(|(m, _, _)| m.as_str() >= mk.as_str()) {
+                if mi >= lookback {
+                    last_q = q_key.clone();
+                    // 直接用MVO模块计算权重
+                    let train: Vec<Vec<f64>> = monthly_rets[mi - lookback..mi]
+                        .iter().map(|(_, _, r)| r.clone()).collect();
+                    let n_months = train.len();
+                    let flat: Vec<f64> = train.iter().flatten().copied().collect();
+                    if let Some(arr) = Array2::from_shape_vec((n_months, n_assets), flat).ok() {
+                        let regime_ms = if is_v17 { get_regime_min_stock(db, *d).await } else { 0.08 };
+                        let regime_exposure = detect_regime_exposure(db, *d).await;
+
+                        let mvo_result = if is_v17 {
+                            mvo::mvo_allocate_sortino_n(&arr, regime_ms, 0.06, 0.10)
+                        } else {
+                            // v16: Sharpe-max MVO (original)
+                            mvo::mvo_allocate_with_target_n(&arr, regime_ms, 0.12, 0.10)
+                        };
+
+                        if let Some(result) = mvo_result {
+                            let mut w = result.weights.to_vec();
+                            // v17 only: ETF MA200 趋势过滤
+                            if is_v17 {
+                                for (ei, sym) in etf_symbols.iter().enumerate() {
+                                    let wi = ei + 1;
+                                    if wi >= w.len() || w[wi] <= 0.0 { continue; }
+                                    if let Some(prices) = etf_prices.get(sym.as_str()) {
+                                        let mut sorted_dates: Vec<NaiveDate> = prices.keys().copied().collect();
+                                        sorted_dates.sort();
+                                        let recent: Vec<f64> = sorted_dates.iter()
+                                            .filter(|&&pd| pd <= *d).rev().take(200)
+                                            .map(|pd| prices.get(pd).copied().unwrap_or(0.0)).collect();
+                                        if recent.len() >= 200 {
+                                            let ma200: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
+                                            if recent[0] < ma200 && recent[0] > 0.0 { w[wi] = 0.0; }
+                                        }
+                                    }
+                                }
+                            }
+                            let w_sum: f64 = w.iter().sum();
+                            if w_sum > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum; } }
+                            for w_i in w.iter_mut() { *w_i *= regime_exposure; }
+                            let w_sum2: f64 = w.iter().sum();
+                            if w_sum2 > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum2; } }
+                            weights = w;
+                            if !found_start { mvo_start_idx = di; found_start = true; }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mvo_ret: f64 = weights.iter().zip(rets.iter()).map(|(w, r)| w * r).sum();
+        mvo_daily_rets.push(mvo_ret);
+    }
+
+    if mvo_daily_rets.len() < 60 { return Err("MVO收益序列不足".into()); }
+
+    // 8. 计算绩效指标
+    let mvo_rets = &mvo_daily_rets[mvo_start_idx..];
+    let mvo_start_date = daily_returns[mvo_start_idx].0.format("%Y-%m-%d").to_string();
+    let n = mvo_rets.len() as f64;
+
+    let mean = mvo_rets.iter().sum::<f64>() / n;
+    let var = mvo_rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let daily_vol = var.sqrt();
+    let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
+    let ann_vol = daily_vol * (252.0_f64).sqrt();
+    let rf = 0.02;
+    let sharpe = if ann_vol > 0.0 { (ann_ret - rf) / ann_vol } else { 0.0 };
+
+    let mut nav = 1.0_f64; let mut peak = 1.0_f64; let mut max_dd = 0.0_f64;
+    for r in mvo_rets { nav *= 1.0 + r; peak = peak.max(nav); max_dd = max_dd.max((peak-nav)/peak); }
+    let cumulative = nav - 1.0;
+    let calmar = if max_dd > 0.0 { ann_ret / max_dd } else { 0.0 };
+
+    let down: Vec<f64> = mvo_rets.iter().filter(|&&r| r < 0.0).copied().collect();
+    let down_std = if down.len() > 1 {
+        let dm = down.iter().sum::<f64>() / down.len() as f64;
+        (down.iter().map(|r| (r-dm).powi(2)).sum::<f64>() / (down.len()-1) as f64).sqrt()
+    } else { 0.0 };
+    let ann_down = down_std * (252.0_f64).sqrt();
+    let sortino = if ann_down > 0.0 { (ann_ret - rf) / ann_down } else { 0.0 };
+    let wr = mvo_rets.iter().filter(|&&r| r > 0.0).count() as f64 / mvo_rets.len() as f64;
+
+    // 9. 逐年收益
+    let mut yearly: Vec<YearlyReturn> = Vec::new();
+    let mut yn: f64 = 1.0; let mut ys: f64 = 1.0; let mut py: Option<String> = None;
+    for (idx, &r) in mvo_rets.iter().enumerate() {
+        let di = mvo_start_idx + idx;
+        let yr = daily_returns[di].0.format("%Y").to_string();
+        if py.as_deref() != Some(&yr) {
+            if let Some(ref p) = py {
+                let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
+                yearly.push(YearlyReturn { year: p.clone(), return_pct: ret_pct });
+            }
+            ys = yn; py = Some(yr);
+        }
+        yn *= 1.0 + r;
+    }
+    if let Some(p) = py {
+        let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
+        yearly.push(YearlyReturn { year: p, return_pct: ret_pct });
+    }
+
+    // 10. 基准指标
+    fn bench_metrics_with_yearly(rets: &[f64], dates: &[NaiveDate]) -> BenchmarkMetrics {
+        let n = rets.len() as f64; let rf = 0.02;
+        if n < 60.0 { return BenchmarkMetrics { annual_return_pct:0.,max_drawdown_pct:0.,sharpe_ratio:0.,sortino_ratio:0.,yearly_returns:vec![] }; }
+        let mean = rets.iter().sum::<f64>()/n;
+        let ann_ret = (1.0+mean).powf(252.0)-1.0;
+        let var = rets.iter().map(|r|(r-mean).powi(2)).sum::<f64>()/(n-1.0);
+        let ann_vol = var.sqrt()*(252.0_f64).sqrt();
+        let sharpe = if ann_vol>0.0 {(ann_ret-rf)/ann_vol} else {0.0};
+        let mut nav: f64 = 1.0; let mut peak: f64 = 1.0; let mut mdd: f64 = 0.0;
+        for r in rets { nav *= 1.0 + r; peak = peak.max(nav); mdd = mdd.max((peak - nav) / peak); }
+        let down:Vec<f64> = rets.iter().filter(|&&r|r<0.0).copied().collect();
+        let ds = if down.len()>1 {
+            let dm=down.iter().sum::<f64>()/down.len() as f64;
+            (down.iter().map(|r|(r-dm).powi(2)).sum::<f64>()/(down.len()-1)as f64).sqrt()*(252.0_f64).sqrt()
+        } else {0.01};
+        let sortino = if ds>0.0 {(ann_ret-rf)/ds} else {0.0};
+        let mut yearly = Vec::new();
+        let mut yn: f64 = 1.0; let mut ys: f64 = 1.0; let mut py: Option<String> = None;
+        for (i, r) in rets.iter().enumerate() {
+            let yr = dates[i].format("%Y").to_string();
+            if py.as_deref() != Some(&yr) {
+                if let Some(ref p) = py {
+                    let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
+                    yearly.push(YearlyReturn { year: p.clone(), return_pct: ret_pct });
+                }
+                ys = yn; py = Some(yr);
+            }
+            yn *= 1.0 + r;
+        }
+        if let Some(p) = py {
+            let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
+            yearly.push(YearlyReturn { year: p, return_pct: ret_pct });
+        }
+        let ar_pct: f64 = (ann_ret * 1000.0).round() / 10.0;
+        let dd_pct: f64 = (mdd * 1000.0).round() / 10.0;
+        let sr_val: f64 = (sharpe * 100.0).round() / 100.0;
+        let so_val: f64 = (sortino * 100.0).round() / 100.0;
+        BenchmarkMetrics {
+            annual_return_pct: ar_pct,
+            max_drawdown_pct: dd_pct,
+            sharpe_ratio: sr_val,
+            sortino_ratio: so_val,
+            yearly_returns: yearly,
+        }
+    }
+
+    let benchmarks = Benchmarks {
+        csi300: bench_metrics_with_yearly(&csi_rets, &csi_dates),
+        sp500: bench_metrics_with_yearly(&sp500_rets, &sp500_dates),
+        gold: bench_metrics_with_yearly(&gold_rets, &gold_dates),
+    };
+
+    info!("[replay] v17 回放完成: AR={:.1}% DD={:.1}% SR={:.2} SO={:.2}",
+        ann_ret*100.0, max_dd*100.0, sharpe, sortino);
+
+    let ar_pct: f64 = (ann_ret * 1000.0).round() / 10.0;
+    let cum_pct: f64 = (cumulative * 1000.0).round() / 10.0;
+    let dd_pct: f64 = (max_dd * 1000.0).round() / 10.0;
+    let sr: f64 = (sharpe * 100.0).round() / 100.0;
+    let so: f64 = (sortino * 100.0).round() / 100.0;
+    let vol_pct: f64 = (ann_vol * 1000.0).round() / 10.0;
+    let cal: f64 = (calmar * 100.0).round() / 100.0;
+    let wr_pct: f64 = (wr * 1000.0).round() / 10.0;
+
+    Ok(ReplayResult {
+        start_date: tdates.first().map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+        end_date: tdates.last().map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+        trading_days: tdates.len(),
+        annual_return_pct: ar_pct,
+        cumulative_return_pct: cum_pct,
+        max_drawdown_pct: dd_pct,
+        sharpe_ratio: sr,
+        sortino_ratio: so,
+        volatility_pct: vol_pct,
+        calmar_ratio: cal,
+        win_rate_pct: wr_pct,
+        yearly_returns: yearly,
+        benchmarks,
+        mvo_start_date,
+        mvo_trading_days: mvo_rets.len(),
+    })
 }

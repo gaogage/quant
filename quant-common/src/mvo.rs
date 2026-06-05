@@ -45,6 +45,39 @@ pub fn ledoit_wolf_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
     shrunk
 }
 
+/// Compute downside semi-covariance matrix (only negative returns contribute).
+/// For Sortino-ratio optimization: only penalizes downside co-movement.
+/// Returns annualized semi-covariance (×12).
+pub fn downside_semi_covariance(returns: &Array2<f64>) -> Array2<f64> {
+    let n_assets = returns.ncols();
+    let n_periods = returns.nrows();
+    let mut semi_cov = Array2::zeros((n_assets, n_assets));
+    if n_periods < 2 {
+        return semi_cov;
+    }
+
+    // Center: use 0 as threshold (only negative deviations contribute)
+    let means = returns.mean_axis(Axis(0)).unwrap();
+    let centered = returns - &means;
+
+    for t in 0..n_periods {
+        let row = centered.row(t);
+        // Only include periods where the portfolio return would be negative
+        // Simplified: if ANY asset has negative centered return, contribute
+        for i in 0..n_assets {
+            for j in 0..n_assets {
+                let ri = row[i];
+                let rj = row[j];
+                // Include if both centered returns are negative (downside co-movement)
+                if ri < 0.0 && rj < 0.0 {
+                    semi_cov[(i, j)] += ri * rj;
+                }
+            }
+        }
+    }
+    semi_cov / (n_periods as f64 - 1.0) * 12.0
+}
+
 /// Compute annualized mean returns from a T×N monthly returns matrix.
 pub fn annualized_returns(monthly_returns: &Array2<f64>) -> Array1<f64> {
     monthly_returns.mean_axis(Axis(0)).unwrap() * 12.0
@@ -74,6 +107,7 @@ const MAX_SINGLE: f64 = 0.75;
 enum GridObjective {
     MaxSharpe,
     MinVariance { target: f64 },
+    MaxSortino { target: f64 },
 }
 
 struct GridSearchResult {
@@ -104,6 +138,19 @@ fn grid_search_n_asset(
     objective: GridObjective,
     grid_step: f64,
 ) -> GridSearchResult {
+    grid_search_n_asset_ext(mu_annual, cov, None, min_stock, max_single, objective, grid_step)
+}
+
+/// Extended grid search with optional downside semi-covariance for Sortino-max.
+fn grid_search_n_asset_ext(
+    mu_annual: &Array1<f64>,
+    cov: &Array2<f64>,
+    semi_cov: Option<&Array2<f64>>,
+    min_stock: f64,
+    max_single: f64,
+    objective: GridObjective,
+    grid_step: f64,
+) -> GridSearchResult {
     let n_assets = mu_annual.len();
     if n_assets < 2 {
         return GridSearchResult { weights: None, best_sharpe: f64::NEG_INFINITY };
@@ -113,12 +160,13 @@ fn grid_search_n_asset(
     let step_values: Vec<f64> = (0..steps).map(|i| i as f64 * grid_step).collect();
 
     let mut best_sharpe = f64::NEG_INFINITY;
+    let mut best_sortino = f64::NEG_INFINITY;
     let mut fallback_weights: Option<Array1<f64>> = None;
     let mut best_var = f64::INFINITY;
     let mut target_weights: Option<Array1<f64>> = None;
     let mut current = vec![0.0f64; n_assets];
 
-    // Recursive search: enumerate weights for assets 0..n_assets-1, last asset is remainder
+    // Recursive search
     fn search_level(
         level: usize,
         n_assets: usize,
@@ -129,14 +177,15 @@ fn grid_search_n_asset(
         current: &mut [f64],
         mu_annual: &Array1<f64>,
         cov: &Array2<f64>,
+        semi_cov: Option<&Array2<f64>>,
         best_sharpe: &mut f64,
+        best_sortino: &mut f64,
         fallback_weights: &mut Option<Array1<f64>>,
         best_var: &mut f64,
         target_weights: &mut Option<Array1<f64>>,
         objective: &GridObjective,
     ) {
         if level == n_assets - 1 {
-            // Last asset: remainder
             let w_last = remaining.max(0.0);
             if w_last > max_single + 0.001 { return; }
             current[level] = w_last;
@@ -166,11 +215,29 @@ fn grid_search_n_asset(
                         *target_weights = Some(w);
                     }
                 }
+                GridObjective::MaxSortino { target } => {
+                    if let Some(sc) = semi_cov {
+                        let port_down_var = w.dot(&sc.dot(&w));
+                        if port_down_var > 0.0 {
+                            let sortino = (port_mu + RISK_FREE - *target) / port_down_var.sqrt();
+                            if sortino > *best_sortino {
+                                *best_sortino = sortino;
+                                *target_weights = Some(w.clone());
+                            }
+                        } else if port_mu + RISK_FREE > *target {
+                            // No downside at all — this is excellent
+                            let sortino = (port_mu + RISK_FREE - *target) / port_var.sqrt();
+                            if sortino > *best_sortino {
+                                *best_sortino = sortino;
+                                *target_weights = Some(w.clone());
+                            }
+                        }
+                    }
+                }
             }
             return;
         }
 
-        // First asset (stock) must be >= min_stock
         let min_val = if level == 0 { min_stock.min(max_single) } else { 0.0 };
         let max_val = remaining.min(max_single);
 
@@ -180,8 +247,8 @@ fn grid_search_n_asset(
             search_level(
                 level + 1, n_assets, remaining - sv,
                 min_stock, max_single, step_values, current,
-                mu_annual, cov, best_sharpe, fallback_weights,
-                best_var, target_weights, objective,
+                mu_annual, cov, semi_cov, best_sharpe, best_sortino,
+                fallback_weights, best_var, target_weights, objective,
             );
         }
     }
@@ -189,8 +256,8 @@ fn grid_search_n_asset(
     search_level(
         0, n_assets, 1.0,
         min_stock, max_single, &step_values, &mut current,
-        mu_annual, cov, &mut best_sharpe, &mut fallback_weights,
-        &mut best_var, &mut target_weights, &objective,
+        mu_annual, cov, semi_cov, &mut best_sharpe, &mut best_sortino,
+        &mut fallback_weights, &mut best_var, &mut target_weights, &objective,
     );
 
     GridSearchResult {
@@ -254,6 +321,34 @@ pub fn mvo_allocate_with_target(
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
 
     let result = grid_search_5asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target });
+    result.weights.map(|w| MvoWeights {
+        weights: w,
+        sharpe: result.best_sharpe,
+        rho,
+    })
+}
+
+/// MVO with Sortino-max objective: maximize Sortino ratio with target return.
+/// Sortino = (expected_return - target_return) / downside_deviation.
+/// Uses downside semi-covariance matrix for penalty — only downside co-movement counts.
+pub fn mvo_allocate_sortino_n(
+    monthly_returns: &Array2<f64>,
+    min_stock: f64,
+    sortino_target: f64,
+    grid_step: f64,
+) -> Option<MvoWeights> {
+    let cov = ledoit_wolf_shrinkage(monthly_returns);
+    let semi_cov = downside_semi_covariance(monthly_returns);
+    let mu = annualized_returns(monthly_returns);
+    let n_assets = monthly_returns.ncols();
+    let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
+
+    let result = grid_search_n_asset_ext(
+        &mu, &cov, Some(&semi_cov),
+        min_stock, MAX_SINGLE,
+        GridObjective::MaxSortino { target: sortino_target },
+        grid_step,
+    );
     result.weights.map(|w| MvoWeights {
         weights: w,
         sharpe: result.best_sharpe,
