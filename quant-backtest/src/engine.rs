@@ -9,7 +9,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive, Zero};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::portfolio::{DailyPosition, FeeConfig, Portfolio, Trade};
 
@@ -404,7 +404,9 @@ pub struct BacktestEngine {
     execution_schedule_roll_forward_count: usize,
     max_execution_target_gap_pct: Decimal,
     latest_target_gross_exposure_pct: Decimal,
-    warm_prev_close: HashMap<String, Decimal>,
+    warm_prev_close: HashMap<String, (NaiveDate, Decimal)>,
+    symbol_suspended_until: HashMap<String, NaiveDate>,
+    adj_blacklisted: HashSet<String>,
 }
 
 impl BacktestEngine {
@@ -433,6 +435,8 @@ impl BacktestEngine {
             max_execution_target_gap_pct: Decimal::zero(),
             latest_target_gross_exposure_pct: Decimal::zero(),
             warm_prev_close: HashMap::new(),
+            symbol_suspended_until: HashMap::new(),
+            adj_blacklisted: HashSet::new(),
         }
     }
 
@@ -445,25 +449,41 @@ impl BacktestEngine {
             self.portfolio.holdings.len()
         );
 
-        // 数据完整性: 检测单日价格跳变 (>50% = adj_factor数据缺口)
-        // 使用上一日的close而非pre_close(后者在adj_factor变化日不可靠)
+        // 记录停牌状态
+        for sym in &market.suspended {
+            self.symbol_suspended_until.insert(sym.clone(), market.date);
+        }
+
+        // 数据完整性: 检测非停牌期的价格跳变 (>50% = adj_factor数据异常)
         for (sym, close) in &market.close {
-            if let Some(prev_close) = self.warm_prev_close.get(sym) {
+            if let Some((prev_date, prev_close)) = self.warm_prev_close.get(sym) {
                 if !prev_close.is_zero() {
-                    let ret = (*close - *prev_close) / *prev_close;
-                    if ret.abs() > Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ONE) {
-                        panic!(
-                            "数据异常: {} {} 复权后价格跳变 {:.1}% ({}→{}). adj_factor数据缺口, 请修复market_adjustment_factor表",
-                            sym, market.date, ret * Decimal::from(100u32), prev_close, close
-                        );
+                    let was_suspended = self.symbol_suspended_until.get(sym)
+                        .map(|until| *until >= *prev_date)
+                        .unwrap_or(false);
+                    if !was_suspended && !self.adj_blacklisted.contains(sym) {
+                        let ret = (*close - *prev_close) / *prev_close;
+                        if ret.abs() > Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ONE) {
+                            warn!(
+                                "adj_factor异常: {} {}→{} 复权价跳变{:.0}%({}→{}) 加入黑名单排除",
+                                sym, prev_date, market.date, ret * Decimal::from(100u32), prev_close, close
+                            );
+                            self.adj_blacklisted.insert(sym.clone());
+                        }
                     }
                 }
             }
-            self.warm_prev_close.insert(sym.clone(), *close);
+            self.warm_prev_close.insert(sym.clone(), (market.date, *close));
         }
 
+        // 过滤adj_factor黑名单股票(仅影响mark_to_market,持仓会在下个调仓日自然卖出)
+        let clean_close: HashMap<String, Decimal> = market.close.iter()
+            .filter(|(s, _)| !self.adj_blacklisted.contains(*s))
+            .map(|(s, v)| (s.clone(), *v))
+            .collect();
+
         let previous_value = self.equity_curve.last().map(|(_, value)| *value);
-        self.portfolio.mark_to_market(&market.close);
+        self.portfolio.mark_to_market(&clean_close);
         self.update_position_risk_state(market);
         self.execute_position_risk_controls(market);
 

@@ -1680,7 +1680,7 @@ pub async fn run_historical_replay(
     if tdates.len() < 252 { return Err("交易日不足1年".into()); }
 
     // 2. 加载 A 股权益曲线 — 因子选股回测(2009-2026全覆盖)
-    let eq_task_id = "fbt-dc4144c1-75b0-4856-b2b9-62592ad5f157";
+    let eq_task_id = "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e"; // 干净全量回测(2006-2026, adj_factor黑名单已排除)
     let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
         "SELECT trade_date, portfolio_value FROM backtest_equity_curve WHERE task_id = $1 ORDER BY trade_date",
     ).bind(eq_task_id).fetch_all(db).await
