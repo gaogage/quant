@@ -1658,6 +1658,14 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
         etf_count >= 2
     });
 
+    // ═══ 数据完整性检查 ═══
+    crate::routes::data_validation::validate_equity_curve(&a_nav, a_nav.first().map(|(d,_)| *d).unwrap_or(NaiveDate::from_ymd_opt(2014,1,1).unwrap()))?;
+    crate::routes::data_validation::validate_data_coverage(
+        &a_nav, &etf_prices, etf_symbols,
+        a_nav.first().map(|(d,_)| *d).unwrap_or(NaiveDate::from_ymd_opt(2014,1,1).unwrap()),
+        a_nav.last().map(|(d,_)| *d).unwrap_or(NaiveDate::from_ymd_opt(2026,1,1).unwrap()),
+    )?;
+
     // 5. MVO 季度调仓模拟
     let mut weights = vec![min_stock];
     let mut remaining = 1.0 - min_stock;

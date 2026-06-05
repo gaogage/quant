@@ -404,6 +404,7 @@ pub struct BacktestEngine {
     execution_schedule_roll_forward_count: usize,
     max_execution_target_gap_pct: Decimal,
     latest_target_gross_exposure_pct: Decimal,
+    warm_prev_close: HashMap<String, Decimal>,
 }
 
 impl BacktestEngine {
@@ -431,6 +432,7 @@ impl BacktestEngine {
             execution_schedule_roll_forward_count: 0,
             max_execution_target_gap_pct: Decimal::zero(),
             latest_target_gross_exposure_pct: Decimal::zero(),
+            warm_prev_close: HashMap::new(),
         }
     }
 
@@ -442,6 +444,23 @@ impl BacktestEngine {
             signal.is_some(),
             self.portfolio.holdings.len()
         );
+
+        // 数据完整性: 检测单日价格跳变 (>50% = adj_factor数据缺口)
+        // 使用上一日的close而非pre_close(后者在adj_factor变化日不可靠)
+        for (sym, close) in &market.close {
+            if let Some(prev_close) = self.warm_prev_close.get(sym) {
+                if !prev_close.is_zero() {
+                    let ret = (*close - *prev_close) / *prev_close;
+                    if ret.abs() > Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ONE) {
+                        panic!(
+                            "数据异常: {} {} 复权后价格跳变 {:.1}% ({}→{}). adj_factor数据缺口, 请修复market_adjustment_factor表",
+                            sym, market.date, ret * Decimal::from(100u32), prev_close, close
+                        );
+                    }
+                }
+            }
+            self.warm_prev_close.insert(sym.clone(), *close);
+        }
 
         let previous_value = self.equity_curve.last().map(|(_, value)| *value);
         self.portfolio.mark_to_market(&market.close);

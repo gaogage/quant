@@ -972,7 +972,7 @@ async fn sync_positions_from_backtest(
     ).bind(account_id).fetch_one(db).await.map_err(|e| format!("cap: {}", e))?;
 
     // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
-    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.0).await;
+    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.08).await;
 
     // ── 体制检测 + 降仓 ──
     let regime_exposure = detect_regime_exposure(db, date).await;
@@ -1230,7 +1230,7 @@ async fn compute_lw_mvo_weights(
     cache: &Mutex<Option<MvoWeightCache>>,
     min_stock: f64,
 ) -> Vec<f64> {
-    // v16: min_stock=0% (allow MVO to freely allocate away from A-shares)
+    // v16: fixed min_stock (8%), no regime-based dynamic adjustment
     let quarter = format!("{}-Q{}", date.year(), (date.month() - 1) / 3 + 1);
 
     // 检查缓存（同季度不重复计算）
@@ -1665,18 +1665,22 @@ pub async fn run_historical_replay(
     let end_str = end_date.format("%Y-%m-%d").to_string();
     info!("[replay] v17 历史回放: {} ~ {}", start_str, end_str);
 
-    // 1. 加载交易日历
-    let tdates: Vec<NaiveDate> = sqlx::query_as::<_, (NaiveDate,)>(
+    // 1. 加载交易日历（含36个月前置训练窗口）
+    let pre_start = start_date - chrono::Duration::days(36 * 31); // ~3 years before
+    let all_tdates: Vec<NaiveDate> = sqlx::query_as::<_, (NaiveDate,)>(
         "SELECT DISTINCT trade_date FROM market_trade_calendar WHERE trade_date >= $1 AND trade_date <= $2 AND is_open = true ORDER BY trade_date",
     )
-    .bind(start_date).bind(end_date)
+    .bind(pre_start).bind(end_date)
     .fetch_all(db).await.map_err(|e| format!("交易日历: {e}"))?
     .into_iter().map(|(d,)| d).collect();
 
+    let tdates: Vec<NaiveDate> = all_tdates.iter()
+        .filter(|d| **d >= start_date).copied().collect();
+
     if tdates.len() < 252 { return Err("交易日不足1年".into()); }
 
-    // 2. 加载 A 股权益曲线（从最长的全周期回测任务）
-    let eq_task_id = "bt-ee3f3b65-6cc4-4cc3-bf6f-a28acacff461";
+    // 2. 加载 A 股权益曲线 — 因子选股回测(2009-2026全覆盖)
+    let eq_task_id = "fbt-dc4144c1-75b0-4856-b2b9-62592ad5f157";
     let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
         "SELECT trade_date, portfolio_value FROM backtest_equity_curve WHERE task_id = $1 ORDER BY trade_date",
     ).bind(eq_task_id).fetch_all(db).await
@@ -1739,31 +1743,32 @@ pub async fn run_historical_replay(
     let (sp500_rets, sp500_dates) = load_benchmark(db, "513500.SH", "market_stock_daily_bar_adj", start_date, end_date, &tdates).await?;
     let (gold_rets, gold_dates) = load_benchmark(db, "518880.SH", "market_stock_daily_bar_adj", start_date, end_date, &tdates).await?;
 
-    // 5. 构建日收益率 (A股 + 6 ETFs)
+    // 5. 构建日收益率 (含前置训练窗口, A股 + 6 ETFs)
     let mut daily_returns: Vec<(NaiveDate, Vec<f64>)> = Vec::new();
-    for di in 1..tdates.len() {
-        let d = tdates[di]; let pd = tdates[di-1];
-        // Find A-share nav
+    for di in 1..all_tdates.len() {
+        let d = all_tdates[di]; let pd = all_tdates[di-1];
+        // A股收益: 使用因子选股回测权益曲线(fbt-dc4144c1, 覆盖2009-2026)
         let ap = a_nav.iter().find(|(td, _)| *td == pd).map(|(_, v)| *v);
         let ac = a_nav.iter().find(|(td, _)| *td == d).map(|(_, v)| *v);
-        if let (Some(pp), Some(cp)) = (ap, ac) {
-            if pp <= 0.0 { continue; }
-            let ar = cp/pp - 1.0;
-            if ar.abs() > 0.5 { continue; }
-            let mut row = vec![ar];
-            let mut valid = true;
-            for sym in &etf_symbols {
-                let prices = etf_prices.get(sym.as_str());
-                let ep = prices.and_then(|p| p.get(&pd)).copied().unwrap_or(0.0);
-                let ec = prices.and_then(|p| p.get(&d)).copied().unwrap_or(0.0);
-                if ep > 0.0 && ec > 0.0 {
-                    let r = ec/ep - 1.0;
-                    if r.abs() > 0.5 { valid = false; }
-                    row.push(r);
-                } else { row.push(0.0); }
-            }
-            if valid { daily_returns.push((d, row)); }
+        let (pp, cp) = match (ap, ac) {
+            (Some(p1), Some(p2)) if p1 > 0.0 => (p1, p2),
+            _ => continue,
+        };
+        let ar = cp/pp - 1.0;
+        if ar.abs() > 0.5 { continue; }
+        let mut row = vec![ar];
+        let mut valid = true;
+        for sym in &etf_symbols {
+            let prices = etf_prices.get(sym.as_str());
+            let ep = prices.and_then(|p| p.get(&pd)).copied().unwrap_or(0.0);
+            let ec = prices.and_then(|p| p.get(&d)).copied().unwrap_or(0.0);
+            if ep > 0.0 && ec > 0.0 {
+                let r = ec/ep - 1.0;
+                if r.abs() > 0.5 { valid = false; }
+                row.push(r);
+            } else { row.push(0.0); }
         }
+        if valid { daily_returns.push((d, row)); }
     }
     let n_assets = 1 + etf_count;
 
@@ -1784,8 +1789,14 @@ pub async fn run_historical_replay(
     }
     if let Some((m, ld, cum)) = cm { monthly_rets.push((m, ld, cum)); }
 
+    // ═══ 数据完整性检查 ═══
+    crate::routes::data_validation::validate_equity_curve(&a_nav, start_date)?;
+    crate::routes::data_validation::validate_data_coverage(
+        &a_nav, &etf_prices, &etf_symbols, start_date, end_date)?;
+    crate::routes::data_validation::validate_training_data(&monthly_rets, etf_count, 36)?;
+
     // 7. 逐日回放: 季度调仓时直接调用 MVO 模块
-    let lookback = 36usize;
+    let lookback: usize = 36;
     let mut weights: Vec<f64> = vec![0.10, 0.25, 0.35, 0.05, 0.15, 0.05, 0.05]; // A股,黄金,国债,SP500,纳指,有色,豆粕
     let mut last_q = String::new();
     let mut mvo_daily_rets: Vec<f64> = Vec::new();

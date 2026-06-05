@@ -1,5 +1,6 @@
 pub mod backtest;
 pub mod cleanup;
+pub mod data_validation;
 pub mod factors;
 pub mod ml;
 pub mod optimization;
