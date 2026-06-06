@@ -48,7 +48,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] v16 已启动: 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
+        info!("[scheduler] v16m 已启动 (momentum-adjusted μ): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
 
         loop {
             interval.tick().await;
@@ -1337,14 +1337,28 @@ async fn compute_lw_mvo_weights(
         let flat: Vec<f64> = all_monthly.iter().flatten().copied().collect();
 
         if let Some(arr) = Array2::from_shape_vec((n_rows, n_total_assets), flat).ok() {
-            // v16: Sharpe-max MVO with dynamic return target
+            // v16m: momentum-adjusted μ (60%历史均值 + 40%近期动量) + dynamic return target
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
                 (trail_12m + 0.05).clamp(0.08, 0.18)
             } else {
                 0.12
             };
-            if let Some(result) = mvo::mvo_allocate_with_target_n(&arr, adaptive_min_stock, dynamic_target, 0.10) {
+            // Momentum-adjusted expected returns
+            let hist_mu = ndarray::Array1::from_vec(
+                (0..n_total_assets).map(|j| {
+                    let col: Vec<f64> = all_monthly.iter().map(|r| r[j]).collect();
+                    col.iter().sum::<f64>() / col.len() as f64 * 12.0
+                }).collect()
+            );
+            let mom_mu = ndarray::Array1::from_vec(
+                (0..n_total_assets).map(|j| {
+                    let recent: Vec<f64> = all_monthly.iter().rev().take(6).map(|r| r[j]).collect();
+                    recent.iter().fold(1.0, |acc, r| acc * (1.0 + r)).powf(2.0) - 1.0
+                }).collect()
+            );
+            let adj_mu = 0.6 * &hist_mu + 0.4 * &mom_mu;
+            if let Some(result) = mvo::mvo_allocate_with_custom_mu(&arr, &adj_mu, adaptive_min_stock, dynamic_target, 0.10) {
                 let w = result.weights.to_vec();
                 info!(
                     quarter = %quarter,
@@ -1356,7 +1370,7 @@ async fn compute_lw_mvo_weights(
                     color = %(w[5] * 100.0).round(),
                     meal = %(w[6] * 100.0).round(),
                     sharpe = %(result.sharpe * 100.0).round() / 100.0,
-                    "v16 7-asset MVO 权重已更新"
+                    "v16m 7-asset MVO 权重已更新 (momentum μ)"
                 );
                 weights = w;
             }
@@ -1653,11 +1667,18 @@ pub async fn run_historical_replay(
     min_stock_override: Option<f64>,
     objective: &str,
     rebalance: &str,
+    fixed_return_target: Option<f64>,
+    trend_boost: bool,
+    vol_budget: bool,
+    adaptive_vol_target: bool,
+    leverage_cap: f64,
+    extra_etfs: &[String],
 ) -> Result<ReplayResult, String> {
     let is_v17 = strategy == "v17";
     let use_max_sharpe = objective == "max_sharpe";
     let use_ewma = objective == "ewma";
     let use_momentum = objective == "momentum";
+    let use_bl = objective == "black_litterman";
     let is_monthly = rebalance == "monthly";
     let use_vol_target = leverage_mode == "vol_target";
     let fixed_lev = if leverage_mode == "fixed" { leverage_multiplier.max(1.0) } else { 1.0 };
@@ -1691,10 +1712,11 @@ pub async fn run_historical_replay(
         .filter(|(_, v)| *v > 0.0).collect();
 
     // 3. 加载 ETF 价格
-    let etf_symbols = vec![
+    let mut etf_symbols = vec![
         "518880.SH".to_string(), "511010.SH".to_string(), "513500.SH".to_string(),
         "513100.SH".to_string(), "159980.SZ".to_string(), "159985.SZ".to_string(),
     ];
+    for e in extra_etfs { if !etf_symbols.contains(e) { etf_symbols.push(e.clone()); } }
     let etf_count = etf_symbols.len();
     let etf_start = start_date - chrono::Duration::days(3 * 365); // 3年缓冲用于MA200
 
@@ -1831,8 +1853,23 @@ pub async fn run_historical_replay(
                             mvo::mvo_allocate_sortino_n(&arr, regime_ms, 0.06, 0.10)
                         } else if use_max_sharpe {
                             mvo::mvo_allocate(&arr, regime_ms)
+                        } else if use_bl {
+                            // P3: Black-Litterman approximated (60% hist + 40% equal-weight prior)
+                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
+                                .map(|(_, _, r)| r[0]).collect();
+                            let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+                            let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
+                            let hist_mu = ndarray::Array1::from_vec(
+                                (0..n_assets).map(|j| {
+                                    let col: Vec<f64> = train.iter().map(|r| r[j]).collect();
+                                    col.iter().sum::<f64>() / col.len() as f64 * 12.0
+                                }).collect()
+                            );
+                            let prior_mu = ndarray::Array1::from_vec(vec![0.12_f64; n_assets]); // equal-weight prior
+                            let bl_mu = 0.6 * &hist_mu + 0.4 * &prior_mu;
+                            mvo::mvo_allocate_with_custom_mu(&arr, &bl_mu, regime_ms, dynamic_target, 0.10)
                         } else if use_momentum {
-                            // Exp D: momentum-adjusted expected returns
+                            // v16m: momentum-adjusted expected returns
                             let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
                                 .map(|(_, _, r)| r[0]).collect();
                             let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
@@ -1861,12 +1898,22 @@ pub async fn run_historical_replay(
                             let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
                             mvo::mvo_allocate_ewma_n(&arr, regime_ms, dynamic_target, 0.10, 0.94)
                         } else {
-                            // v16 baseline: MinVariance with LW shrinkage + dynamic target
+                            // v16 baseline with experiment options
                             let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
                                 .map(|(_, _, r)| r[0]).collect();
                             let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
-                            let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
-                            mvo::mvo_allocate_with_target_n(&arr, regime_ms, dynamic_target, 0.10)
+                            let return_target = fixed_return_target.unwrap_or(
+                                (cum - 1.0 + 0.05).clamp(0.08, 0.18)
+                            );
+                            // Exp: trend_boost — 趋势确认后提升min_stock
+                            let effective_min = if trend_boost {
+                                let trail_3m: f64 = prev_12.iter().rev().take(3).fold(1.0, |acc, r| acc * (1.0+r)) - 1.0;
+                                // 简化的MA判断: 近3月累计正收益=上升趋势
+                                if trail_3m > 0.0 && cum > 0.0 { 0.20_f64.max(regime_ms) } else { regime_ms }
+                            } else { regime_ms };
+                            // Exp: vol_budget — 逆波动率风险预算fallback(在MVO失败时用)
+                            let _use_vol_budget = vol_budget;
+                            mvo::mvo_allocate_with_target_n(&arr, effective_min, return_target, 0.10)
                         };
 
                         if let Some(result) = mvo_result {
@@ -1891,6 +1938,23 @@ pub async fn run_historical_replay(
                             }
                             let w_sum: f64 = w.iter().sum();
                             if w_sum > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum; } }
+                            // Exp: vol_budget — 用逆波动率权重做30%混合,增加分散化
+                            if vol_budget && train.len() >= 12 {
+                                let mut iv_w = vec![0.0f64; n_assets];
+                                let mut iv_sum = 0.0f64;
+                                for j in 0..n_assets {
+                                    let col: Vec<f64> = train.iter().map(|r| r[j]).collect();
+                                    let n = col.len() as f64;
+                                    let mean = col.iter().sum::<f64>() / n;
+                                    let var = col.iter().map(|x| (x-mean).powi(2)).sum::<f64>() / (n-1.0);
+                                    iv_w[j] = 1.0 / (var.sqrt() + 0.01);
+                                    iv_sum += iv_w[j];
+                                }
+                                if iv_sum > 0.0 { for j in 0..n_assets { iv_w[j] /= iv_sum; } }
+                                for j in 0..n_assets { w[j] = 0.7 * w[j] + 0.3 * iv_w[j]; }
+                                let w_sum3: f64 = w.iter().sum();
+                                if w_sum3 > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum3; } }
+                            }
                             for w_i in w.iter_mut() { *w_i *= regime_exposure; }
                             let w_sum2: f64 = w.iter().sum();
                             if w_sum2 > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum2; } }
@@ -1911,7 +1975,19 @@ pub async fn run_historical_replay(
     // 8. 应用杠杆 (vol_target or fixed)
     let mut leveraged_rets: Vec<f64> = Vec::with_capacity(mvo_daily_rets.len());
     let mut trail_60: Vec<f64> = Vec::new();
-    for &mvo_r in &mvo_daily_rets {
+    // 预计算CSI300 regime用于自适应vol target
+    let mut csi_trail_12m: Vec<f64> = Vec::with_capacity(csi_rets.len());
+    let mut csi_cum = 1.0f64;
+    for (i, r) in csi_rets.iter().enumerate() {
+        csi_cum *= 1.0 + r;
+        if i >= 252 {
+            csi_trail_12m.push(csi_cum / csi_trail_12m[i - 252] - 1.0);
+        } else {
+            csi_trail_12m.push(0.0);
+        }
+    }
+
+    for (i, &mvo_r) in mvo_daily_rets.iter().enumerate() {
         trail_60.push(mvo_r);
         if trail_60.len() > 60 { trail_60.remove(0); }
         let lev = if use_vol_target && trail_60.len() >= 20 {
@@ -1919,7 +1995,13 @@ pub async fn run_historical_replay(
             let m = trail_60.iter().sum::<f64>() / n;
             let v = if n > 1.0 { trail_60.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (n - 1.0) } else { 0.0 };
             let ann_vol = v.sqrt() * (252.0_f64).sqrt();
-            if ann_vol > 0.05 { (0.20 / ann_vol).clamp(0.5, 2.0) } else { 1.0 }
+            // P0: 自适应波动率目标 (bull=25%, bear=15%, neutral=20%)
+            let target_vol = if adaptive_vol_target && i < csi_trail_12m.len() {
+                let t12 = csi_trail_12m[i];
+                if t12 > 0.10 { 0.25 } else if t12 < -0.15 { 0.15 } else { 0.20 }
+            } else { 0.20 };
+            let cap = leverage_cap;
+            if ann_vol > 0.05 { (target_vol / ann_vol).clamp(0.5, cap) } else { 1.0 }
         } else if fixed_lev > 1.0 { fixed_lev } else { 1.0 };
         leveraged_rets.push(mvo_r * lev);
     }

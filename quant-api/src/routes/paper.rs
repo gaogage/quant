@@ -852,6 +852,19 @@ pub struct HistoricalReplayRequest {
     pub objective: Option<String>, // MVO objective: "min_variance" (default) | "max_sharpe" | "ewma" | "monthly"
     #[serde(default)]
     pub rebalance: Option<String>, // "quarterly" (default) | "monthly"
+    // ── 实验参数 ──
+    #[serde(default)]
+    pub fixed_return_target: Option<f64>, // 固定return_target (覆盖dynamic_target)
+    #[serde(default)]
+    pub trend_boost: Option<bool>, // 趋势确认后提升min_stock到20%
+    #[serde(default)]
+    pub vol_budget: Option<bool>, // 逆波动率风险预算fallback
+    #[serde(default)]
+    pub adaptive_vol_target: Option<bool>, // P0: 自适应波动率目标(bull=25%, bear=15%)
+    #[serde(default)]
+    pub leverage_cap: Option<f64>, // P2: 杠杆上限覆盖 (默认2.0)
+    #[serde(default)]
+    pub extra_etfs: Option<Vec<String>>, // P4: 额外ETF (如日经)
 }
 
 pub async fn historical_replay(
@@ -884,8 +897,15 @@ pub async fn historical_replay(
         };
 
     let rebalance = req.rebalance.as_deref().unwrap_or("quarterly");
+    let fixed_rt = req.fixed_return_target;
+    let trend_boost = req.trend_boost.unwrap_or(false);
+    let vol_budget = req.vol_budget.unwrap_or(false);
+    let adaptive_vol = req.adaptive_vol_target.unwrap_or(false);
+    let lev_cap = req.leverage_cap.unwrap_or(2.0);
+    let extra_etfs = req.extra_etfs.unwrap_or_default();
     match crate::routes::scheduler::run_historical_replay(
         &state.db, start_date, end_date, strategy, &leverage_mode, leverage_multiplier, min_stock_override, objective, rebalance,
+        fixed_rt, trend_boost, vol_budget, adaptive_vol, lev_cap, &extra_etfs,
     ).await {
         Ok(result) => Json(json!({"code": 0, "data": result})),
         Err(e) => Json(json!({"code": 1, "message": e})),

@@ -1273,28 +1273,38 @@ impl BacktestRunner {
             .await?;
         }
 
-        // Positions
-        for pos in &output.daily_positions {
-            sqlx::query(
-                r#"INSERT INTO backtest_position (task_id, symbol, position_date,
-                   quantity, available_quantity, avg_cost, close_price,
-                   market_value, weight, unrealized_pnl, target_weight)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                ON CONFLICT (task_id, symbol, position_date) DO NOTHING"#,
-            )
-            .bind(task_id)
-            .bind(&pos.symbol)
-            .bind(pos.date)
-            .bind(pos.quantity)
-            .bind(pos.available_quantity)
-            .bind(pos.avg_cost)
-            .bind(pos.close_price)
-            .bind(pos.market_value)
-            .bind(pos.weight)
-            .bind(pos.unrealized_pnl)
-            .bind(pos.target_weight)
-            .execute(&self.pool)
-            .await?;
+        // Positions — batch insert (1000 per batch)
+        for chunk in output.daily_positions.chunks(1000) {
+            let mut query_builder = String::from(
+                "INSERT INTO backtest_position (task_id, symbol, position_date,
+                 quantity, available_quantity, avg_cost, close_price,
+                 market_value, weight, unrealized_pnl, target_weight) VALUES "
+            );
+            let mut params: Vec<String> = Vec::new();
+            for (i, pos) in chunk.iter().enumerate() {
+                if i > 0 { query_builder.push_str(", "); }
+                let base = i * 11;
+                query_builder.push_str(&format!(
+                    "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                    base + 1, base + 2, base + 3, base + 4, base + 5, base + 6,
+                    base + 7, base + 8, base + 9, base + 10, base + 11
+                ));
+                params.push(task_id.to_string());
+                params.push(pos.symbol.clone());
+                params.push(pos.date.format("%Y-%m-%d").to_string());
+                params.push(pos.quantity.to_string());
+                params.push(pos.available_quantity.to_string());
+                params.push(pos.avg_cost.to_string());
+                params.push(pos.close_price.to_string());
+                params.push(pos.market_value.to_string());
+                params.push(pos.weight.to_string());
+                params.push(pos.unrealized_pnl.to_string());
+                params.push(pos.target_weight.map(|w| w.to_string()).unwrap_or_default());
+            }
+            query_builder.push_str(" ON CONFLICT (task_id, symbol, position_date) DO NOTHING");
+            let mut q = sqlx::query(&query_builder);
+            for p in &params { q = q.bind(p); }
+            q.execute(&self.pool).await?;
         }
 
         // Portfolio exposures
@@ -1361,7 +1371,7 @@ impl BacktestRunner {
     }
 
     fn should_persist_detail_tables(config: &BacktestConfig) -> bool {
-        matches!(config.persistence_mode, BacktestPersistenceMode::Full)
+        config.mode != BacktestMode::Fast && matches!(config.persistence_mode, BacktestPersistenceMode::Full)
     }
 
     async fn mark_task_completed(
