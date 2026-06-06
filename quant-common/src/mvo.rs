@@ -291,6 +291,334 @@ pub fn nonlinear_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
     cov_nl
 }
 
+// ── Genetic Algorithm Optimizer ──────────────────────────────────────
+//
+// Grid Search degenerates with >7 assets because the search space grows as
+// O(step_count^(N-1)). With 10% steps and 8 assets, that's 11^7 ≈ 19M
+// combinations — barely tractable; with 9 assets it's 11^8 ≈ 214M.
+//
+// Genetic Algorithm (GA) scales linearly with population size regardless of
+// asset count. It naturally handles simplex constraints (sum=1, wi≥0) and
+// can find near-optimal solutions with far fewer evaluations than Grid Search.
+//
+// The GA uses:
+//   - Tournament selection (size 3)
+//   - Simulated Binary Crossover (SBX) for real-coded weights
+//   - Gaussian mutation with adaptive re-normalization
+//   - Elitism (top 2 individuals survive)
+//   - Dirichlet initialization for uniform simplex coverage
+
+use rand::Rng;
+
+/// GA optimization parameters
+struct GaParams {
+    population_size: usize,
+    generations: usize,
+    crossover_prob: f64,
+    mutation_prob: f64,
+    mutation_scale: f64, // σ for Gaussian mutation
+    elite_count: usize,
+}
+
+impl Default for GaParams {
+    fn default() -> Self {
+        Self {
+            population_size: 500,
+            generations: 200,
+            crossover_prob: 0.8,
+            mutation_prob: 0.3,
+            mutation_scale: 0.05,
+            elite_count: 3,
+        }
+    }
+}
+
+/// Generate a random weight vector uniformly distributed on the simplex.
+fn random_simplex(n: usize, rng: &mut impl Rng) -> Vec<f64> {
+    // Generate n exponential(1) random variates = -ln(U(0,1))
+    let mut v: Vec<f64> = (0..n).map(|_| -rng.gen::<f64>().max(1e-12).ln()).collect();
+    let s: f64 = v.iter().sum();
+    v.iter_mut().for_each(|x| *x /= s);
+    v
+}
+
+/// Generate a random weight vector respecting min/max constraints.
+fn random_feasible_weights(n: usize, min_stock: f64, max_single: f64, rng: &mut impl Rng) -> Vec<f64> {
+    loop {
+        let mut w = random_simplex(n, rng);
+        // Enforce min_stock on first asset (A股)
+        w[0] = w[0].max(min_stock);
+        // Check max_single constraint
+        if w.iter().any(|&wi| wi > max_single + 1e-6) {
+            continue;
+        }
+        // Re-normalize
+        let s: f64 = w.iter().sum();
+        if s > 0.0 {
+            w.iter_mut().for_each(|x| *x /= s);
+        }
+        // Check max_single again after normalization
+        if w.iter().any(|&wi| wi > max_single + 1e-6) {
+            continue;
+        }
+        return w;
+    }
+}
+
+/// Tournament selection: pick k random individuals, return the best.
+fn tournament_select(
+    fitness: &[(Vec<f64>, f64)], // (weights, fitness), higher fitness = better
+    k: usize,
+    rng: &mut impl Rng,
+) -> usize {
+    let mut best_idx = 0usize;
+    let mut best_fit = f64::NEG_INFINITY;
+    for _ in 0..k {
+        let idx = rng.gen_range(0..fitness.len());
+        if fitness[idx].1 > best_fit {
+            best_fit = fitness[idx].1;
+            best_idx = idx;
+        }
+    }
+    best_idx
+}
+
+/// Simulated Binary Crossover (SBX) for real-coded GA.
+/// Produces two children from two parents with the given η (distribution index).
+fn sbx_crossover(
+    parent1: &[f64],
+    parent2: &[f64],
+    eta: f64,
+    rng: &mut impl Rng,
+) -> (Vec<f64>, Vec<f64>) {
+    let n = parent1.len();
+    let mut child1 = parent1.to_vec();
+    let mut child2 = parent2.to_vec();
+
+    for i in 0..n {
+        if rng.gen::<f64>() > 0.5 {
+            // 50% chance to crossover each gene
+            continue;
+        }
+        let y1 = parent1[i].min(parent2[i]);
+        let y2 = parent1[i].max(parent2[i]);
+        if y2 - y1 < 1e-10 {
+            continue;
+        }
+        let u = rng.gen::<f64>();
+        let beta = if u <= 0.5 {
+            (2.0 * u).powf(1.0 / (eta + 1.0))
+        } else {
+            (0.5 / (1.0 - u)).powf(1.0 / (eta + 1.0))
+        };
+        child1[i] = 0.5 * ((y1 + y2) - beta * (y2 - y1));
+        child2[i] = 0.5 * ((y1 + y2) + beta * (y2 - y1));
+    }
+    (child1, child2)
+}
+
+/// Gaussian mutation with simplex re-normalization.
+fn mutate(weights: &mut [f64], scale: f64, rng: &mut impl Rng) {
+    let n = weights.len();
+    for i in 0..n {
+        if rng.gen::<f64>() < 1.0 / n as f64 {
+            let delta = rng.sample::<f64, _>(rand_distr::StandardNormal) * scale;
+            let new_val = weights[i] + delta;
+            weights[i] = new_val.clamp(0.0, 0.75);
+        }
+    }
+    // Re-normalize to sum=1
+    let s: f64 = weights.iter().sum();
+    if s > 0.0 {
+        for w in weights.iter_mut() {
+            *w /= s;
+        }
+    }
+}
+
+/// Ensure weights satisfy constraints: sum=1, min_stock, max_single.
+fn enforce_constraints(weights: &mut [f64], min_stock: f64, max_single: f64) {
+    // Enforce min_stock on first asset
+    weights[0] = weights[0].max(min_stock);
+    // Clamp to max_single
+    for w in weights.iter_mut() {
+        *w = w.clamp(0.0, max_single);
+    }
+    // Re-normalize
+    let s: f64 = weights.iter().sum();
+    if s > 0.0 {
+        for w in weights.iter_mut() {
+            *w /= s;
+        }
+    }
+}
+
+/// Genetic Algorithm MVO optimization.
+///
+/// Supports two objective modes:
+/// - MaxSharpe: maximize Sharpe ratio (portfolio return / portfolio volatility)
+/// - MinVariance{target}: minimize portfolio variance subject to return ≥ target
+///
+/// Constraints:
+/// - sum(weights) = 1
+/// - weights[i] ≥ 0 (no shorting)
+/// - weights[0] ≥ min_stock (A股 minimum)
+/// - weights[i] ≤ max_single for all i
+///
+/// Returns the best weight vector found with its Sharpe ratio.
+pub fn ga_optimize(
+    mu_annual: &Array1<f64>,
+    cov: &Array2<f64>,
+    min_stock: f64,
+    max_single: f64,
+) -> Option<MvoWeights> {
+    ga_optimize_with_params(mu_annual, cov, min_stock, max_single, &GaParams::default(), None)
+}
+
+/// GA optimization with MinVariance objective (minimize variance subject to return ≥ target).
+/// This matches the Grid Search MinVariance behavior but uses GA instead of brute force.
+pub fn ga_optimize_min_variance(
+    mu_annual: &Array1<f64>,
+    cov: &Array2<f64>,
+    min_stock: f64,
+    max_single: f64,
+    return_target: f64,
+) -> Option<MvoWeights> {
+    ga_optimize_with_params(mu_annual, cov, min_stock, max_single, &GaParams::default(), Some(return_target))
+}
+
+fn ga_optimize_with_params(
+    mu_annual: &Array1<f64>,
+    cov: &Array2<f64>,
+    min_stock: f64,
+    max_single: f64,
+    params: &GaParams,
+    return_target: Option<f64>, // Some(target) = MinVariance mode, None = MaxSharpe mode
+) -> Option<MvoWeights> {
+    let n_assets = mu_annual.len();
+    if n_assets < 2 {
+        return None;
+    }
+
+    let mut rng = rand::thread_rng();
+
+    // Fitness function: MinVariance or MaxSharpe depending on target
+    let fitness = |w: &[f64]| -> f64 {
+        let port_mu: f64 = w.iter().zip(mu_annual.iter()).map(|(wi, mui)| wi * mui).sum();
+        let mut port_var = 0.0f64;
+        for i in 0..n_assets {
+            for j in 0..n_assets {
+                port_var += w[i] * cov[(i, j)] * w[j];
+            }
+        }
+        if port_var <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        if let Some(target) = return_target {
+            // MinVariance: two-stage ranking (matching Grid Search logic)
+            // Stage 1: Feasibility — portfolios meeting target always beat those that don't
+            // Stage 2: Among feasible, minimize variance; among infeasible, minimize shortfall
+            if port_mu >= target {
+                // Feasible: higher fitness = lower variance. Range: [0, -0.1] typically
+                -port_var
+            } else {
+                // Infeasible: ranked below ALL feasible, by shortfall magnitude
+                // Worst feasible fitness ≈ -0.1, so use -1.0 base to separate
+                -1.0 - (target - port_mu)
+            }
+        } else {
+            // MaxSharpe mode
+            (port_mu - RISK_FREE) / port_var.sqrt()
+        }
+    };
+
+    // Initialize population
+    let mut population: Vec<Vec<f64>> = (0..params.population_size)
+        .map(|_| random_feasible_weights(n_assets, min_stock, max_single, &mut rng))
+        .collect();
+
+    // Inject boundary portfolios to ensure exploration of extreme weights
+    // (random simplex init tends to produce balanced portfolios, missing corners)
+    population[0] = vec![1.0 / n_assets as f64; n_assets]; // equal weight
+    enforce_constraints(&mut population[0], min_stock, max_single);
+    // Max single-asset corner cases (each asset at max_single, rest evenly distributed)
+    for i in 0..n_assets.min(params.population_size - 1) {
+        let mut w = vec![(1.0 - max_single) / (n_assets - 1) as f64; n_assets];
+        w[i] = max_single;
+        enforce_constraints(&mut w, min_stock, max_single);
+        if i + 1 < population.len() {
+            population[i + 1] = w;
+        }
+    }
+
+    let mut best_weights: Option<Vec<f64>> = None;
+    let mut best_sharpe = f64::NEG_INFINITY;
+
+    for gen in 0..params.generations {
+        // Evaluate fitness
+        let mut fitness: Vec<(Vec<f64>, f64)> = population.iter()
+            .map(|w| (w.clone(), fitness(w)))
+            .collect();
+
+        // Sort by fitness descending
+        fitness.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Track best
+        if fitness[0].1 > best_sharpe {
+            best_sharpe = fitness[0].1;
+            best_weights = Some(fitness[0].0.clone());
+        }
+
+        // Check convergence: if top 10% have nearly identical fitness, stop early
+        let top_n = (params.population_size / 10).max(2);
+        let top_std = fitness[..top_n].iter()
+            .map(|(_, f)| (f - best_sharpe).powi(2))
+            .sum::<f64>() / top_n as f64;
+        if gen > 30 && top_std.sqrt() < 1e-6 {
+            break;
+        }
+
+        // Elitism: keep best individuals
+        let mut new_population: Vec<Vec<f64>> = fitness[..params.elite_count]
+            .iter().map(|(w, _)| w.clone()).collect();
+
+        // Fill rest with selection + crossover + mutation
+        while new_population.len() < params.population_size {
+            let p1_idx = tournament_select(&fitness, 3, &mut rng);
+            let p2_idx = tournament_select(&fitness, 3, &mut rng);
+
+            let (mut child1, mut child2) = if rng.gen::<f64>() < params.crossover_prob {
+                sbx_crossover(&fitness[p1_idx].0, &fitness[p2_idx].0, 2.0, &mut rng)
+            } else {
+                (fitness[p1_idx].0.clone(), fitness[p2_idx].0.clone())
+            };
+
+            if rng.gen::<f64>() < params.mutation_prob {
+                mutate(&mut child1, params.mutation_scale, &mut rng);
+            }
+            if rng.gen::<f64>() < params.mutation_prob {
+                mutate(&mut child2, params.mutation_scale, &mut rng);
+            }
+
+            enforce_constraints(&mut child1, min_stock, max_single);
+            enforce_constraints(&mut child2, min_stock, max_single);
+
+            new_population.push(child1);
+            if new_population.len() < params.population_size {
+                new_population.push(child2);
+            }
+        }
+
+        population = new_population;
+    }
+
+    best_weights.map(|w| MvoWeights {
+        weights: Array1::from_vec(w),
+        sharpe: best_sharpe,
+        rho: 0.0, // GA doesn't use shrinkage
+    })
+}
+
 /// RMT-based eigenvalue filtering covariance.
 ///
 /// Uses Random Matrix Theory: eigenvalues within the Marčenko-Pastur
@@ -452,6 +780,47 @@ pub fn mvo_allocate_with_custom_mu_rmt(
         grid_step,
     );
     result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+}
+
+/// MVO allocation using Genetic Algorithm + custom mu + LW covariance.
+/// Uses MinVariance objective with return target (matching Grid Search behavior)
+/// to avoid the over-aggressive portfolios of pure Sharpe maximization.
+/// GA scales O(population × generations) regardless of asset count,
+/// while Grid Search is O(grid_step^(N-1)).
+pub fn mvo_allocate_ga(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    return_target: f64,
+    _grid_step: f64,
+) -> Option<MvoWeights> {
+    mvo_allocate_ga_with_max_single(monthly_returns, custom_mu, min_stock, return_target, _grid_step, MAX_SINGLE)
+}
+
+/// GA MVO with configurable max_single constraint.
+/// Allows adaptive max_single: higher (e.g. 80%) in bull markets for more concentration.
+pub fn mvo_allocate_ga_with_max_single(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    return_target: f64,
+    _grid_step: f64,
+    max_single: f64,
+) -> Option<MvoWeights> {
+    let cov = ledoit_wolf_shrinkage(monthly_returns);
+    ga_optimize_min_variance(custom_mu, &cov, min_stock, max_single, return_target)
+}
+
+/// GA MVO with nonlinear shrinkage covariance.
+pub fn mvo_allocate_ga_nl(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    _return_target: f64,
+    _grid_step: f64,
+) -> Option<MvoWeights> {
+    let cov = nonlinear_shrinkage(monthly_returns);
+    ga_optimize(custom_mu, &cov, min_stock, MAX_SINGLE)
 }
 
 /// Covariance estimation method for MVO.

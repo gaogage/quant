@@ -401,6 +401,25 @@ fn months_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDat
     result
 }
 
+/// Split a date range into yearly chunks. Each chunk is at most one calendar year.
+/// This reduces Tushare API calls by ~12× compared to monthly chunks.
+fn years_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+    use chrono::Datelike;
+    let mut result = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        let year = cursor.year();
+        // End of this year or `end`, whichever is earlier
+        let year_end = NaiveDate::from_ymd_opt(year, 12, 31).unwrap_or(cursor);
+        let actual_end = year_end.min(end);
+        result.push((cursor, actual_end));
+        // Move to first day of next year
+        cursor = NaiveDate::from_ymd_opt(year + 1, 1, 1)
+            .unwrap_or(end + chrono::Duration::days(1));
+    }
+    result
+}
+
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -744,19 +763,31 @@ pub async fn sync_fund_daily(
     .await?;
 
     let mut total_rows = 0usize;
-    let months = months_in_range(s, e);
-    info!("Syncing {} fund symbols across {} months", symbols.len(), months.len());
+    // Use yearly chunks instead of monthly — reduces API calls ~12× (240→20 for 2006-2026)
+    let years = years_in_range(s, e);
+    info!("Syncing {} fund symbols across {} yearly chunks ({} to {})", symbols.len(), years.len(), start, end);
 
-    for (m_start, m_end) in &months {
-        let sd = m_start.format("%Y%m%d").to_string();
-        let ed = m_end.format("%Y%m%d").to_string();
+    // Rate-limit tracking: max 4000 calls/hr, target ~3000 calls/hr = 50 calls/min
+    let mut calls_this_minute = 0u32;
+    let max_calls_per_minute = 45u32; // conservative: 45 × 60 = 2700/hr, well under 4000 limit
+
+    for (y_start, y_end) in &years {
+        let sd = y_start.format("%Y%m%d").to_string();
+        let ed = y_end.format("%Y%m%d").to_string();
 
         for symbol in symbols {
+            // Rate-limit: pause 1.5s if we've made too many calls this minute
+            if calls_this_minute >= max_calls_per_minute {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                calls_this_minute = 0;
+            }
+
             match client
                 .fund_daily(Some(symbol), None, Some(&sd), Some(&ed))
                 .await
             {
                 Ok(resp) => {
+                    calls_this_minute += 1;
                     if let Some(data) = resp.data {
                         let maps = data.to_maps();
                         if maps.is_empty() {
@@ -795,7 +826,56 @@ pub async fn sync_fund_daily(
                     }
                 }
                 Err(e) => {
-                    warn!("fund_daily failed for {} in {}-{}: {}", symbol, sd, ed, e);
+                    let err_str = e.to_string();
+                    // Rate-limit hit: wait and retry once
+                    if err_str.contains("40203") || err_str.contains("4000") {
+                        warn!("fund_daily rate-limit, waiting 5s for {}: {}", symbol, err_str);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        calls_this_minute = 0;
+                        // Retry once
+                        match client
+                            .fund_daily(Some(symbol), None, Some(&sd), Some(&ed))
+                            .await
+                        {
+                            Ok(resp) => {
+                                calls_this_minute += 1;
+                                if let Some(data) = resp.data {
+                                    let maps = data.to_maps();
+                                    if maps.is_empty() { continue; }
+                                    let bars: Vec<MarketStockDailyBar> = maps
+                                        .iter()
+                                        .filter_map(|item| {
+                                            let ts_code = get_str(item, "ts_code");
+                                            Some(MarketStockDailyBar {
+                                                symbol: ts_code.to_string(),
+                                                trade_date: to_date(&get_str(item, "trade_date"))?,
+                                                open: to_decimal(get_f64(item, "open")),
+                                                high: to_decimal(get_f64(item, "high")),
+                                                low: to_decimal(get_f64(item, "low")),
+                                                close: to_decimal(get_f64(item, "close")),
+                                                pre_close: get_f64(item, "pre_close")
+                                                    .and_then(|v| Decimal::from_f64_retain(v)),
+                                                change_pct: get_f64(item, "pct_chg").and_then(
+                                                    |v| Decimal::from_f64_retain(v / 100.0),
+                                                ),
+                                                volume: to_decimal(get_f64(item, "vol")),
+                                                amount: to_decimal(get_f64(item, "amount")),
+                                            })
+                                        })
+                                        .collect();
+                                    if !bars.is_empty() {
+                                        total_rows += bars.len();
+                                        repository::upsert_daily_bars_batch(pool, &bars, dv_id, "tushare").await?;
+                                    }
+                                }
+                            }
+                            Err(e2) => {
+                                warn!("fund_daily retry also failed for {} in {}-{}: {}", symbol, sd, ed, e2);
+                            }
+                        }
+                    } else {
+                        warn!("fund_daily failed for {} in {}-{}: {}", symbol, sd, ed, e);
+                    }
                 }
             }
         }
@@ -806,7 +886,7 @@ pub async fn sync_fund_daily(
         total_rows as i32, total_rows as i32, 0,
     )
     .await?;
-    info!("fund_daily 同步完成: rows={}", total_rows);
+    info!("fund_daily 同步完成: {} symbols, {} rows, {} yearly chunks", symbols.len(), total_rows, years.len());
     Ok(total_rows)
 }
 

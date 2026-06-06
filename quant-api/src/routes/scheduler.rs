@@ -32,7 +32,7 @@ struct DailyState {
 /// MVO 权重缓存（季度更新）
 struct MvoWeightCache {
     quarter: String,              // e.g. "2026-Q2"
-    weights: Vec<f64>,            // [A股, 黄金, 国债, SP500, 纳指]
+    weights: Vec<f64>,            // [A股, 黄金, 国债, SP500, 纳指, 有色, 豆粕, 原油]
 }
 
 /// 启动后台调度器。
@@ -48,7 +48,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] v18 已启动 (momentum μ + ms=12%): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
+        info!("[scheduler] v19 已启动 (GA优化器 + 原油LOF + momentum μ 50/50): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
 
         loop {
             interval.tick().await;
@@ -445,7 +445,7 @@ async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: N
     let _ = quant_data::sync::sync_index_daily(db, tushare, &index_codes, &date_str, &date_str, &format!("idx-{}", date_str)).await;
 
     // ETF 日线 (v16: 7资产)
-    let etf_symbols = vec!["518880.SH".into(),"511010.SH".into(),"513100.SH".into(),"513500.SH".into(),"159980.SZ".into(),"159985.SZ".into()];
+    let etf_symbols = vec!["518880.SH".into(),"511010.SH".into(),"513100.SH".into(),"513500.SH".into(),"159980.SZ".into(),"159985.SZ".into(),"501018.SH".into()];
     let _ = quant_data::sync::sync_fund_daily(db, tushare, &etf_symbols, &date_str, &date_str, &format!("etf-{}", date_str)).await;
 
     info!("[scheduler] 当日行情+停牌同步完成 ({})", date_str);
@@ -983,6 +983,7 @@ async fn sync_positions_from_backtest(
     let mvo_nq_pct = mvo_weights[4] * regime_exposure;
     let mvo_color_pct = mvo_weights.get(5).copied().unwrap_or(0.03) * regime_exposure;
     let mvo_meal_pct = mvo_weights.get(6).copied().unwrap_or(0.03) * regime_exposure;
+    let mvo_oil_pct = mvo_weights.get(7).copied().unwrap_or(0.02) * regime_exposure;
     let cash_pct = 1.0 - regime_exposure; // 现金/货币基金
 
     if regime_exposure < 0.99 {
@@ -1044,6 +1045,7 @@ async fn sync_positions_from_backtest(
         ("513100.SH", "纳指ETF", mvo_nq_pct),
         ("159980.SZ", "有色ETF", mvo_color_pct),
         ("159985.SZ", "豆粕ETF", mvo_meal_pct),
+        ("501018.SH", "原油LOF", mvo_oil_pct),
     ];
     // 体制降仓时加入货币基金
     if cash_pct > 0.01 {
@@ -1189,6 +1191,7 @@ async fn apply_etf_trend_filter(
                     "513100.SH" => "纳指",
                     "159980.SZ" => "有色",
                     "159985.SZ" => "豆粕",
+                    "501018.SH" => "原油",
                     _ => *sym,
                 };
                 info!(
@@ -1209,11 +1212,12 @@ async fn apply_etf_trend_filter(
             }
         }
         info!(
-            "[ETF Trend] 过滤后权重: A股={:.0}% 黄金={:.0}% 国债={:.0}% SP500={:.0}% 纳指={:.0}% 有色={:.0}% 豆粕={:.0}%",
+            "[ETF Trend] 过滤后权重: A股={:.0}% 黄金={:.0}% 国债={:.0}% SP500={:.0}% 纳指={:.0}% 有色={:.0}% 豆粕={:.0}% 原油={:.0}%",
             filtered[0] * 100.0, filtered[1] * 100.0, filtered[2] * 100.0,
             filtered[3] * 100.0, filtered[4] * 100.0,
             filtered.get(5).copied().unwrap_or(0.0) * 100.0,
             filtered.get(6).copied().unwrap_or(0.0) * 100.0,
+            filtered.get(7).copied().unwrap_or(0.0) * 100.0,
         );
         filtered
     } else {
@@ -1243,12 +1247,12 @@ async fn compute_lw_mvo_weights(
         }
     }
 
-    // v16: 7资产MVO — 精简后相关性独立的资产池
+    // v19: 8资产MVO — +原油LOF分散化 + GA优化器替代Grid Search
     // 国债ETF+十年国债(corr=0.865)合并保留国债ETF
     // 德国ETF移除(冗余), 银华日利仅在体制降仓时加入
-    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "159980.SZ", "159985.SZ"];
-    // 对应: 黄金, 国债, SP500, NASDAQ, 有色, 豆粕
-    let n_total_assets = 1 + etf_symbols.len(); // A股 + 6 ETFs = 7
+    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "159980.SZ", "159985.SZ", "501018.SH"];
+    // 对应: 黄金, 国债, SP500, NASDAQ, 有色, 豆粕, 原油
+    let n_total_assets = 1 + etf_symbols.len(); // A股 + 7 ETFs = 8
 
     // 获取过去 36 个月的月度收益数据
     let lookback_start = date - chrono::Duration::days(36 * 31); // ~3 years
@@ -1295,8 +1299,8 @@ async fn compute_lw_mvo_weights(
     };
     let adaptive_min_stock = (adaptive_min_stock * kelly_scale).min(0.75);
 
-    // 7资产默认权重 (数据不足时的fallback): A股,黄金,国债,SP500,NASDAQ,有色,豆粕
-    let default_weights = vec![adaptive_min_stock, 0.25, 0.35, 0.05, 0.15, 0.03, 0.03, 0.14 - adaptive_min_stock];
+    // 8资产默认权重 (数据不足时的fallback): A股,黄金,国债,SP500,NASDAQ,有色,豆粕,原油
+    let default_weights = vec![adaptive_min_stock, 0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03];
 
     let mut weights = default_weights.clone();
 
@@ -1337,14 +1341,14 @@ async fn compute_lw_mvo_weights(
         let flat: Vec<f64> = all_monthly.iter().flatten().copied().collect();
 
         if let Some(arr) = Array2::from_shape_vec((n_rows, n_total_assets), flat).ok() {
-            // v16m: momentum-adjusted μ (60%历史均值 + 40%近期动量) + dynamic return target
+            // v19: momentum-adjusted μ (50/50) + GA MinVariance + adaptive max_single
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
                 (trail_12m + 0.05).clamp(0.08, 0.18)
             } else {
                 0.12
             };
-            // Momentum-adjusted expected returns
+            // Momentum-adjusted expected returns (50/50 blend)
             let hist_mu = ndarray::Array1::from_vec(
                 (0..n_total_assets).map(|j| {
                     let col: Vec<f64> = all_monthly.iter().map(|r| r[j]).collect();
@@ -1357,8 +1361,16 @@ async fn compute_lw_mvo_weights(
                     recent.iter().fold(1.0, |acc, r| acc * (1.0 + r)).powf(2.0) - 1.0
                 }).collect()
             );
-            let adj_mu = 0.6 * &hist_mu + 0.4 * &mom_mu;
-            if let Some(result) = mvo::mvo_allocate_with_custom_mu(&arr, &adj_mu, adaptive_min_stock, dynamic_target, 0.10) {
+            let adj_mu = 0.5 * &hist_mu + 0.5 * &mom_mu; // 50/50 (v19)
+            // 自适应max_single: 牛市80% vs 默认75%
+            let trail_12m_a = a_monthly[..a_monthly.len().min(12)].iter()
+                .fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+            let adaptive_max = if trail_12m_a > 0.10 { 0.80 } else { 0.75 };
+            // 牛市放宽min_stock
+            let adaptive_ms = if trail_12m_a > 0.10 {
+                (adaptive_min_stock * 0.7).max(0.08)
+            } else { adaptive_min_stock };
+            if let Some(result) = mvo::mvo_allocate_ga_with_max_single(&arr, &adj_mu, adaptive_ms, dynamic_target, 0.10, adaptive_max) {
                 let w = result.weights.to_vec();
                 info!(
                     quarter = %quarter,
@@ -1369,6 +1381,7 @@ async fn compute_lw_mvo_weights(
                     nq = %(w[4] * 100.0).round(),
                     color = %(w[5] * 100.0).round(),
                     meal = %(w[6] * 100.0).round(),
+                    oil = %(w.get(7).copied().unwrap_or(0.0) * 100.0).round(),
                     sharpe = %(result.sharpe * 100.0).round() / 100.0,
                     "v18 7-asset MVO 权重已更新 (momentum μ + ms=12%)"
                 );
@@ -1677,10 +1690,12 @@ pub async fn run_historical_replay(
     cov_method: &str,
 ) -> Result<ReplayResult, String> {
     let is_v17 = strategy == "v17";
+    let is_v19 = strategy == "v19";
     let use_max_sharpe = objective == "max_sharpe";
     let use_ewma = objective == "ewma";
-    let use_momentum = objective == "momentum";
+    let use_momentum = objective == "momentum" || is_v19; // v19 always uses momentum μ
     let use_bl = objective == "black_litterman";
+    let use_ga = objective == "ga" || is_v19; // v19 always uses GA optimizer
     let is_monthly = rebalance == "monthly";
     let use_vol_target = leverage_mode == "vol_target";
     let fixed_lev = if leverage_mode == "fixed" { leverage_multiplier.max(1.0) } else { 1.0 };
@@ -1718,6 +1733,10 @@ pub async fn run_historical_replay(
         "518880.SH".to_string(), "511010.SH".to_string(), "513500.SH".to_string(),
         "513100.SH".to_string(), "159980.SZ".to_string(), "159985.SZ".to_string(),
     ];
+    // v19: 8资产 = 7基础 + 原油LOF, 使用GA优化器
+    if is_v19 && !etf_symbols.contains(&"501018.SH".to_string()) {
+        etf_symbols.push("501018.SH".to_string());
+    }
     for e in extra_etfs { if !etf_symbols.contains(e) { etf_symbols.push(e.clone()); } }
     let etf_count = etf_symbols.len();
     let etf_start = start_date - chrono::Duration::days(3 * 365); // 3年缓冲用于MA200
@@ -1739,6 +1758,9 @@ pub async fn run_historical_replay(
     for (d, sym, price) in &etf_rows {
         etf_prices.entry(sym.clone()).or_default().insert(*d, *price);
     }
+
+    // 不在全期层面过滤ETF（会导致过早剔除后期才有数据的资产）。
+    // 幽灵资产问题在MVO层解决：每个调仓日只使用训练窗口内有数据的ETF。
 
     // 4. 加载基准数据
     async fn load_benchmark(
@@ -1845,8 +1867,24 @@ pub async fn run_historical_replay(
                     let train: Vec<Vec<f64>> = monthly_rets[mi - lookback..mi]
                         .iter().map(|(_, _, r)| r.clone()).collect();
                     let n_months = train.len();
-                    let flat: Vec<f64> = train.iter().flatten().copied().collect();
-                    if let Some(arr) = Array2::from_shape_vec((n_months, n_assets), flat).ok() {
+                    // 幽灵列过滤：排除训练窗口内方差≈0的ETF列
+                    // (ETF尚未上市时月度收益恒为0.0，零方差列会污染协方差估计)
+                    let eps = 1e-10;
+                    let col_is_ghost: Vec<bool> = (0..n_assets).map(|j| {
+                        if j == 0 { return false; } // A股始终保留
+                        let mean = train.iter().map(|r| r[j]).sum::<f64>() / n_months as f64;
+                        let var = train.iter().map(|r| (r[j] - mean).powi(2)).sum::<f64>() / (n_months - 1) as f64;
+                        var < eps // 零方差 = 幽灵列
+                    }).collect();
+                    let active_cols: Vec<usize> = col_is_ghost.iter()
+                        .enumerate().filter(|(_, &ghost)| !ghost).map(|(i, _)| i).collect();
+                    let n_active = active_cols.len();
+                    if n_active < 2 { continue; } // 至少需要A股+1个ETF
+                    // 构建无NaN训练矩阵
+                    let clean_flat: Vec<f64> = train.iter().flat_map(|r| {
+                        active_cols.iter().map(|&j| r[j]).collect::<Vec<_>>()
+                    }).collect();
+                    if let Some(arr) = Array2::from_shape_vec((n_months, n_active), clean_flat).ok() {
                         let v16_min = min_stock_override.unwrap_or(0.12); // v18 default
                         let regime_ms = if is_v17 { get_regime_min_stock(db, *d).await } else { v16_min };
                         let regime_exposure = detect_regime_exposure(db, *d).await;
@@ -1862,12 +1900,12 @@ pub async fn run_historical_replay(
                             let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
                             let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
                             let hist_mu = ndarray::Array1::from_vec(
-                                (0..n_assets).map(|j| {
-                                    let col: Vec<f64> = train.iter().map(|r| r[j]).collect();
+                                (0..n_active).map(|j| {
+                                    let col: Vec<f64> = train.iter().map(|r| r[active_cols[j]]).collect();
                                     col.iter().sum::<f64>() / col.len() as f64 * 12.0
                                 }).collect()
                             );
-                            let prior_mu = ndarray::Array1::from_vec(vec![0.12_f64; n_assets]); // equal-weight prior
+                            let prior_mu = ndarray::Array1::from_vec(vec![0.12_f64; n_active]);
                             let bl_mu = 0.6 * &hist_mu + 0.4 * &prior_mu;
                             mvo::mvo_allocate_with_custom_mu(&arr, &bl_mu, regime_ms, dynamic_target, 0.10)
                         } else if use_momentum {
@@ -1878,22 +1916,35 @@ pub async fn run_historical_replay(
                             let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
                             // Blend: 60% historical mean + 40% recent momentum (6m annualized)
                             let hist_mu = ndarray::Array1::from_vec(
-                                (0..n_assets).map(|j| {
-                                    let col: Vec<f64> = train.iter().map(|r| r[j]).collect();
+                                (0..n_active).map(|j| {
+                                    let col: Vec<f64> = train.iter().map(|r| r[active_cols[j]]).collect();
                                     col.iter().sum::<f64>() / col.len() as f64 * 12.0
                                 }).collect()
                             );
                             let mom_mu = ndarray::Array1::from_vec(
-                                (0..n_assets).map(|j| {
-                                    let recent: Vec<f64> = train.iter().rev().take(6).map(|r| r[j]).collect();
+                                (0..n_active).map(|j| {
+                                    let recent: Vec<f64> = train.iter().rev().take(6).map(|r| r[active_cols[j]]).collect();
                                     let cum: f64 = recent.iter().fold(1.0, |acc, r| acc * (1.0 + r));
                                     cum.powf(2.0) - 1.0  // 6m → annualized
                                 }).collect()
                             );
-                            let bw = momentum_blend_ratio;
+                            // v19: 50/50 momentum blend (更快响应牛市趋势)
+                            let bw = if is_v19 { 0.5 } else { momentum_blend_ratio };
                             let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
                             let cm: mvo::CovMethod = cov_method.parse().unwrap_or(mvo::CovMethod::LinearLW);
-                            mvo::mvo_allocate_with_cov_method(&arr, &adj_mu, regime_ms, dynamic_target, 0.10, cm)
+                            if use_ga {
+                                // 自适应max_single: 牛市80% vs 默认75%
+                                // 判断: A股12月趋势>10% = 牛市, 允许更集中配置
+                                let trail_12m_a: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0+r)) - 1.0;
+                                let adaptive_max = if trail_12m_a > 0.10 { 0.80 } else { 0.75 };
+                                // 牛市同时放宽min_stock（允许更高弹性）
+                                let adaptive_ms = if trail_12m_a > 0.10 {
+                                    (regime_ms * 0.7).max(0.08)
+                                } else { regime_ms };
+                                mvo::mvo_allocate_ga_with_max_single(&arr, &adj_mu, adaptive_ms, dynamic_target, 0.10, adaptive_max)
+                            } else {
+                                mvo::mvo_allocate_with_cov_method(&arr, &adj_mu, regime_ms, dynamic_target, 0.10, cm)
+                            }
                         } else if use_ewma {
                             // Exp B: EWMA covariance (λ=0.94) with dynamic target
                             let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
@@ -1921,7 +1972,15 @@ pub async fn run_historical_replay(
                         };
 
                         if let Some(result) = mvo_result {
-                            let mut w = result.weights.to_vec();
+                            let active_w = result.weights.to_vec();
+                            // 权重映射：MVO只返回活跃列 → 扩展回完整n_assets向量（NaN列填0）
+                            let mut w = vec![0.0f64; n_assets];
+                            for (j, &orig_idx) in active_cols.iter().enumerate() {
+                                if j < active_w.len() { w[orig_idx] = active_w[j]; }
+                            }
+                            // 归一化（过滤NaN列后权重和可能<1）
+                            let w_sum: f64 = w.iter().sum();
+                            if w_sum > 0.0 { for wi in w.iter_mut() { *wi /= w_sum; } }
                             // v17 only: ETF MA200 趋势过滤
                             if is_v17 {
                                 for (ei, sym) in etf_symbols.iter().enumerate() {
