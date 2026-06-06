@@ -865,6 +865,8 @@ pub struct HistoricalReplayRequest {
     pub leverage_cap: Option<f64>, // P2: 杠杆上限覆盖 (默认2.0)
     #[serde(default)]
     pub extra_etfs: Option<Vec<String>>, // P4: 额外ETF (如日经)
+    #[serde(default)]
+    pub momentum_blend: Option<f64>, // P7: momentum blend ratio (hist weight, default 0.6)
 }
 
 pub async fn historical_replay(
@@ -903,9 +905,10 @@ pub async fn historical_replay(
     let adaptive_vol = req.adaptive_vol_target.unwrap_or(false);
     let lev_cap = req.leverage_cap.unwrap_or(2.0);
     let extra_etfs = req.extra_etfs.unwrap_or_default();
+    let mom_blend = req.momentum_blend.unwrap_or(0.6);
     match crate::routes::scheduler::run_historical_replay(
         &state.db, start_date, end_date, strategy, &leverage_mode, leverage_multiplier, min_stock_override, objective, rebalance,
-        fixed_rt, trend_boost, vol_budget, adaptive_vol, lev_cap, &extra_etfs,
+        fixed_rt, trend_boost, vol_budget, adaptive_vol, lev_cap, &extra_etfs, mom_blend,
     ).await {
         Ok(result) => Json(json!({"code": 0, "data": result})),
         Err(e) => Json(json!({"code": 1, "message": e})),

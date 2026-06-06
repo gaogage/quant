@@ -48,7 +48,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] v16m 已启动 (momentum-adjusted μ): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
+        info!("[scheduler] v18 已启动 (momentum μ + ms=12%): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
 
         loop {
             interval.tick().await;
@@ -972,7 +972,7 @@ async fn sync_positions_from_backtest(
     ).bind(account_id).fetch_one(db).await.map_err(|e| format!("cap: {}", e))?;
 
     // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
-    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.08).await;
+    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.12).await;
 
     // ── 体制检测 + 降仓 ──
     let regime_exposure = detect_regime_exposure(db, date).await;
@@ -1230,7 +1230,7 @@ async fn compute_lw_mvo_weights(
     cache: &Mutex<Option<MvoWeightCache>>,
     min_stock: f64,
 ) -> Vec<f64> {
-    // v16: fixed min_stock (8%), no regime-based dynamic adjustment
+    // v18: min_stock=12% (P7超参数优化最优值)
     let quarter = format!("{}-Q{}", date.year(), (date.month() - 1) / 3 + 1);
 
     // 检查缓存（同季度不重复计算）
@@ -1370,7 +1370,7 @@ async fn compute_lw_mvo_weights(
                     color = %(w[5] * 100.0).round(),
                     meal = %(w[6] * 100.0).round(),
                     sharpe = %(result.sharpe * 100.0).round() / 100.0,
-                    "v16m 7-asset MVO 权重已更新 (momentum μ)"
+                    "v18 7-asset MVO 权重已更新 (momentum μ + ms=12%)"
                 );
                 weights = w;
             }
@@ -1673,6 +1673,7 @@ pub async fn run_historical_replay(
     adaptive_vol_target: bool,
     leverage_cap: f64,
     extra_etfs: &[String],
+    momentum_blend_ratio: f64,
 ) -> Result<ReplayResult, String> {
     let is_v17 = strategy == "v17";
     let use_max_sharpe = objective == "max_sharpe";
@@ -1845,7 +1846,7 @@ pub async fn run_historical_replay(
                     let n_months = train.len();
                     let flat: Vec<f64> = train.iter().flatten().copied().collect();
                     if let Some(arr) = Array2::from_shape_vec((n_months, n_assets), flat).ok() {
-                        let v16_min = min_stock_override.unwrap_or(0.08);
+                        let v16_min = min_stock_override.unwrap_or(0.12); // v18 default
                         let regime_ms = if is_v17 { get_regime_min_stock(db, *d).await } else { v16_min };
                         let regime_exposure = detect_regime_exposure(db, *d).await;
 
@@ -1888,7 +1889,8 @@ pub async fn run_historical_replay(
                                     cum.powf(2.0) - 1.0  // 6m → annualized
                                 }).collect()
                             );
-                            let adj_mu = 0.6 * &hist_mu + 0.4 * &mom_mu;
+                            let bw = momentum_blend_ratio;
+                            let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
                             mvo::mvo_allocate_with_custom_mu(&arr, &adj_mu, regime_ms, dynamic_target, 0.10)
                         } else if use_ewma {
                             // Exp B: EWMA covariance (λ=0.94) with dynamic target
