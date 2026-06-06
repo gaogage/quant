@@ -35,6 +35,103 @@ struct MvoWeightCache {
     weights: Vec<f64>,            // [A股, 黄金, 国债, SP500, 纳指, 有色, 豆粕, 原油]
 }
 
+/// 从数据库加载的策略配置（运行时缓存，启动时加载）
+#[derive(Debug, Clone, serde::Deserialize)]
+struct StrategyConfig {
+    strategy_id: String,
+    name: String,
+    etf_symbols: Vec<String>,
+    equity_curve_task_id: String,
+    min_stock: f64,
+    max_single: f64,
+    max_single_bull: f64,
+    momentum_blend_ratio: f64,
+    ga_population: usize,
+    ga_generations: usize,
+    vol_target: f64,
+    leverage_cap: f64,
+    default_weights: Vec<f64>,
+}
+
+impl Default for StrategyConfig {
+    fn default() -> Self {
+        Self {
+            strategy_id: "v19".into(),
+            name: "v19 (hardcoded fallback)".into(),
+            etf_symbols: vec!["518880.SH".into(),"511010.SH".into(),"513500.SH".into(),"513100.SH".into(),"159980.SZ".into(),"159985.SZ".into(),"501018.SH".into()],
+            equity_curve_task_id: "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".into(),
+            min_stock: 0.12, max_single: 0.75, max_single_bull: 0.80,
+            momentum_blend_ratio: 0.5, ga_population: 500, ga_generations: 200,
+            vol_target: 0.20, leverage_cap: 2.0,
+            default_weights: vec![0.12, 0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
+        }
+    }
+}
+
+/// 从数据库加载活跃策略配置，失败时回退到硬编码默认值
+async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig {
+    match sqlx::query_as::<_, (serde_json::Value,)>(
+        "SELECT jsonb_build_object(
+            'strategy_id', strategy_id,
+            'name', name,
+            'etf_symbols', etf_symbols,
+            'equity_curve_task_id', equity_curve_task_id,
+            'min_stock', min_stock,
+            'max_single', max_single,
+            'max_single_bull', max_single_bull,
+            'momentum_blend_ratio', momentum_blend_ratio,
+            'ga_population', ga_population,
+            'ga_generations', ga_generations,
+            'vol_target', vol_target,
+            'leverage_cap', leverage_cap,
+            'default_weights', default_weights
+        ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'"
+    ).bind(strategy_id).fetch_optional(db).await
+    {
+        Ok(Some((row,))) => {
+            let cfg: StrategyConfig = serde_json::from_value(row).unwrap_or_default();
+            info!("[scheduler] 策略配置加载: {} (DB)", cfg.strategy_id);
+            cfg
+        }
+        _ => {
+            let cfg = StrategyConfig::default();
+            warn!("[scheduler] 策略配置加载失败, 使用硬编码fallback: {}", cfg.name);
+            cfg
+        }
+    }
+}
+
+async fn run_scheduled_tasks(db: &PgPool) {
+    let now = chrono::Utc::now();
+    let tasks: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT task_name, task_type, params FROM scheduled_task_config
+         WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= $1)
+         ORDER BY next_run_at NULLS FIRST"
+    ).bind(now).fetch_all(db).await.unwrap_or_default();
+
+    for (name, task_type, params) in &tasks {
+        info!("[scheduler] 定时任务触发: {} ({})", name, task_type);
+        match task_type.as_str() {
+            "data_quality_check" => {
+                run_data_quality_check(db).await;
+            }
+            "equity_curve_update" => {
+                let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or("phase7_price_volume_expanded_v1");
+                info!("[scheduler] 月度权益曲线更新任务: combo={}", combo);
+                // TODO: 调用 run_factor_backtest 生成新权益曲线并更新 strategy_config
+            }
+            "factor_backfill" => {
+                // 因子回填已在 T+1 补同步中处理
+            }
+            _ => {}
+        }
+        // 更新下次运行时间
+        let _ = sqlx::query(
+            "UPDATE scheduled_task_config SET last_run_at = NOW(), run_count = run_count + 1, last_status = 'success', next_run_at = NOW() + INTERVAL '1 day' WHERE task_name = $1"
+        ).bind(name).execute(db).await;
+    }
+}
+
 /// 启动后台调度器。
 pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
     tokio::spawn(async move {
@@ -47,13 +144,26 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
             cleanup_done: false,
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
+
+        // 从数据库加载策略配置
+        let strategy_config = Arc::new(load_strategy_config(&db, "v19").await);
+
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] v19 已启动 (GA优化器 + 原油LOF + momentum μ 50/50): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步");
+        info!("[scheduler] {} 已启动 ({}): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步",
+              strategy_config.strategy_id, strategy_config.name);
+
+        // 首次运行时检查定时任务
+        run_scheduled_tasks(&db).await;
 
         loop {
             interval.tick().await;
-            if let Err(e) = run_tick(&db, &tushare, &state, &mvo_cache, port).await {
+            if let Err(e) = run_tick(&db, &tushare, &state, &mvo_cache, port, &strategy_config).await {
                 error!("[scheduler] 任务失败: {}", e);
+            }
+            // 每小时检查一次定时任务
+            let now = chrono::Local::now();
+            if now.minute() == 0 {
+                run_scheduled_tasks(&db).await;
             }
         }
     });
@@ -74,7 +184,7 @@ async fn get_current_wfa_params(db: &PgPool, date: NaiveDate) -> Result<serde_js
     Ok(row.map(|(p,)| p).unwrap_or_default())
 }
 
-async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16) -> Result<(), String> {
+async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, sc: &StrategyConfig) -> Result<(), String> {
     let now = Local::now();
     let today = now.date_naive();
     let hour = now.time().hour();
@@ -111,9 +221,9 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
             }
             info!("[scheduler] 14:45 日频调仓 (v16 LW-MVO 7-asset)...");
             // 先同步当日行情数据
-            sync_daily_data_for_today(db, tushare, today).await?;
+            sync_daily_data_for_today(db, tushare, today, sc).await?;
             // 生成信号 + 调仓
-            match generate_paper_signals_for_all(db, mvo_cache, port, today).await {
+            match generate_paper_signals_for_all(db, mvo_cache, port, today, sc).await {
                 Ok(_) => {
                     info!("[scheduler] 调仓完成, 推送钉钉...");
                     match push_dingtalk_for_all_accounts(db, today).await {
@@ -429,7 +539,7 @@ async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
 }
 
 /// 14:45 调仓前获取当日行情 + 停牌/涨跌停数据
-async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: NaiveDate) -> Result<(), String> {
+async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: NaiveDate, sc: &StrategyConfig) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
     let empty: Vec<String> = vec![];
 
@@ -444,9 +554,8 @@ async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: N
     let index_codes = vec!["000300.SH".to_string()];
     let _ = quant_data::sync::sync_index_daily(db, tushare, &index_codes, &date_str, &date_str, &format!("idx-{}", date_str)).await;
 
-    // ETF 日线 (v16: 7资产)
-    let etf_symbols = vec!["518880.SH".into(),"511010.SH".into(),"513100.SH".into(),"513500.SH".into(),"159980.SZ".into(),"159985.SZ".into(),"501018.SH".into()];
-    let _ = quant_data::sync::sync_fund_daily(db, tushare, &etf_symbols, &date_str, &date_str, &format!("etf-{}", date_str)).await;
+    // ETF 日线 (从策略配置读取)
+    let _ = quant_data::sync::sync_fund_daily(db, tushare, &sc.etf_symbols, &date_str, &date_str, &format!("etf-{}", date_str)).await;
 
     info!("[scheduler] 当日行情+停牌同步完成 ({})", date_str);
     Ok(())
@@ -512,6 +621,8 @@ async fn run_data_quality_check(db: &PgPool) {
          None, 5),  // 不限制特定prediction_set, 检查全表最新日期
         // 涨跌停: Tushare免费版限流1次/分钟, 数据积累缓慢, 阈值设高避免频繁告警
         ("涨跌停", "market_stock_limit", None, 90),
+        ("权益曲线", "backtest_equity_curve",
+         Some("task_id = 'fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e'"), 60), // 全量回测生成的静态数据, 60天阈值
     ];
 
     let mut gaps: Vec<String> = Vec::new();
@@ -712,7 +823,7 @@ async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
 
 /// 为所有活跃模拟账号生成交易信号（使用 LW-MVO 自动发现权重）。
 async fn generate_paper_signals_for_all(
-    db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate,
+    db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate, sc: &StrategyConfig,
 ) -> Result<(), String> {
     let accounts = sqlx::query_as::<_, (String, String, bool, String, f64, String)>(
         "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(signal_source, 'factor'), COALESCE(leverage_multiplier, 1.0), COALESCE(leverage_mode, 'fixed') FROM paper_account
@@ -893,7 +1004,7 @@ async fn generate_paper_signals_for_all(
         };
         let Some(task_id) = task_id else { continue };
 
-        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, leverage_enabled, leverage_multiplier, leverage_mode).await {
+        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, sc, leverage_enabled, leverage_multiplier, leverage_mode).await {
             Ok(n) => info!("[paper] {} 同步 {} 个持仓", name, n),
             Err(e) => error!("[paper] {} 持仓同步失败: {}", name, e),
         }
@@ -953,7 +1064,7 @@ async fn compute_vol_target_leverage(db: &PgPool, account_id: &str) -> f64 {
 async fn sync_positions_from_backtest(
     db: &PgPool, account_id: &str, task_id: &str,
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
-    date: NaiveDate,
+    date: NaiveDate, sc: &StrategyConfig,
     leverage_enabled: bool,
     leverage_multiplier: f64,
     leverage_mode: &str,
@@ -972,7 +1083,7 @@ async fn sync_positions_from_backtest(
     ).bind(account_id).fetch_one(db).await.map_err(|e| format!("cap: {}", e))?;
 
     // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
-    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, 0.12).await;
+    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, sc).await;
 
     // ── 体制检测 + 降仓 ──
     let regime_exposure = detect_regime_exposure(db, date).await;
@@ -1232,9 +1343,8 @@ async fn compute_lw_mvo_weights(
     db: &PgPool,
     date: NaiveDate,
     cache: &Mutex<Option<MvoWeightCache>>,
-    min_stock: f64,
+    sc: &StrategyConfig,
 ) -> Vec<f64> {
-    // v18: min_stock=12% (P7超参数优化最优值)
     let quarter = format!("{}-Q{}", date.year(), (date.month() - 1) / 3 + 1);
 
     // 检查缓存（同季度不重复计算）
@@ -1247,18 +1357,15 @@ async fn compute_lw_mvo_weights(
         }
     }
 
-    // v19: 8资产MVO — +原油LOF分散化 + GA优化器替代Grid Search
-    // 国债ETF+十年国债(corr=0.865)合并保留国债ETF
-    // 德国ETF移除(冗余), 银华日利仅在体制降仓时加入
-    let etf_symbols = ["518880.SH", "511010.SH", "513500.SH", "513100.SH", "159980.SZ", "159985.SZ", "501018.SH"];
-    // 对应: 黄金, 国债, SP500, NASDAQ, 有色, 豆粕, 原油
-    let n_total_assets = 1 + etf_symbols.len(); // A股 + 7 ETFs = 8
+    let etf_symbols: Vec<&str> = sc.etf_symbols.iter().map(|s| s.as_str()).collect();
+    let n_total_assets = 1 + etf_symbols.len();
+    let min_stock = sc.min_stock;
 
     // 获取过去 36 个月的月度收益数据
-    let lookback_start = date - chrono::Duration::days(36 * 31); // ~3 years
+    let lookback_start = date - chrono::Duration::days(36 * 31);
 
-    // A 股月度收益（从 backtest_equity_curve 获取）
-    let a_monthly = get_monthly_returns(db, lookback_start, date, "A_SHARE").await;
+    // A 股月度收益（从策略配置的权益曲线获取）
+    let a_monthly = get_monthly_returns(db, lookback_start, date, "A_SHARE", sc).await;
 
     // Adaptive MVO: 根据近期 A 股表现动态调整 min_stock
     let adaptive_min_stock = if a_monthly.len() >= 3 {
@@ -1297,10 +1404,14 @@ async fn compute_lw_mvo_weights(
     } else {
         1.0
     };
-    let adaptive_min_stock = (adaptive_min_stock * kelly_scale).min(0.75);
+    let adaptive_min_stock = (adaptive_min_stock * kelly_scale).min(sc.max_single);
 
-    // 8资产默认权重 (数据不足时的fallback): A股,黄金,国债,SP500,NASDAQ,有色,豆粕,原油
-    let default_weights = vec![adaptive_min_stock, 0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03];
+    // 默认权重从策略配置读取 (数据不足时的fallback)
+    let default_weights: Vec<f64> = {
+        let mut w = sc.default_weights.clone();
+        w.insert(0, adaptive_min_stock); // A股权重在第一位
+        w
+    };
 
     let mut weights = default_weights.clone();
 
@@ -1314,7 +1425,7 @@ async fn compute_lw_mvo_weights(
     let mut etf_monthly_data: Vec<Vec<f64>> = Vec::new();
     let mut valid_etf_count = 0;
     for sym in &etf_symbols {
-        let mrets = get_monthly_returns(db, lookback_start, date, sym).await;
+        let mrets = get_monthly_returns(db, lookback_start, date, sym, sc).await;
         if !mrets.is_empty() { valid_etf_count += 1; }
         etf_monthly_data.push(mrets);
     }
@@ -1361,11 +1472,12 @@ async fn compute_lw_mvo_weights(
                     recent.iter().fold(1.0, |acc, r| acc * (1.0 + r)).powf(2.0) - 1.0
                 }).collect()
             );
-            let adj_mu = 0.5 * &hist_mu + 0.5 * &mom_mu; // 50/50 (v19)
-            // 自适应max_single: 牛市80% vs 默认75%
+            let bw = sc.momentum_blend_ratio;
+            let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
+            // 自适应max_single: 牛市用max_single_bull, 否则用max_single
             let trail_12m_a = a_monthly[..a_monthly.len().min(12)].iter()
                 .fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
-            let adaptive_max = if trail_12m_a > 0.10 { 0.80 } else { 0.75 };
+            let adaptive_max = if trail_12m_a > 0.10 { sc.max_single_bull } else { sc.max_single };
             // 牛市放宽min_stock
             let adaptive_ms = if trail_12m_a > 0.10 {
                 (adaptive_min_stock * 0.7).max(0.08)
@@ -1439,18 +1551,36 @@ async fn get_monthly_returns(
     start: NaiveDate,
     end: NaiveDate,
     symbol: &str,
+    sc: &StrategyConfig,
 ) -> Vec<f64> {
     if symbol == "A_SHARE" {
-        // A 股月度收益：从 multi_factor_value 混合 price_volume + financial_quality
-        // 直接使用因子得分计算月收益（避免依赖特定回测task_id）
-        let pv_monthly = get_factor_monthly_returns(db, start, end, "phase7_price_volume_expanded_v1").await;
-        let fq_monthly = get_factor_monthly_returns(db, start, end, "phase7_financial_quality_v1").await;
+        // A股月度收益：从策略配置的权益曲线获取
+        let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
+            "SELECT trade_date, portfolio_value FROM backtest_equity_curve
+             WHERE task_id = $1
+             AND trade_date >= $2 AND trade_date <= $3
+             ORDER BY trade_date",
+        )
+        .bind(&sc.equity_curve_task_id)
+        .bind(start)
+        .bind(end)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
 
-        if !pv_monthly.is_empty() && !fq_monthly.is_empty() {
-            let n = pv_monthly.len().min(fq_monthly.len());
-            return (0..n).map(|i| pv_monthly[i] * 0.5 + fq_monthly[i] * 0.5).collect();
+        // 权益曲线新鲜度检查
+        if let Some(last) = eq_rows.last() {
+            let gap = (end - last.0).num_days();
+            if gap > 60 {
+                warn!("[MVO] ⚠ A股权益曲线数据滞后{}天 (最新: {}), MVO训练窗口可能缺失近期数据。建议重新运行全量回测更新fbt-36e18e12",
+                      gap, last.0.format("%Y-%m-%d"));
+            } else if gap > 30 {
+                info!("[MVO] A股权益曲线滞后{}天 (最新: {}), 36月训练窗口内影响可忽略",
+                      gap, last.0.format("%Y-%m-%d"));
+            }
         }
-        return pv_monthly;
+
+        return daily_to_monthly_returns(&eq_rows);
     }
 
     // ETF：从 market_stock_daily_bar 获取
