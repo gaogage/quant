@@ -2,6 +2,7 @@
 //!
 //! PIT-compliant: all computations use only past data (expanding window).
 //! Uses Ledoit-Wolf shrinkage for stable covariance estimates.
+//! Also supports analytical nonlinear shrinkage (Ledoit-Wolf 2017).
 //! Grid-search optimization with constraints (min stock weight, no shorting).
 
 use ndarray::{Array1, Array2, Axis};
@@ -21,6 +22,327 @@ pub fn sample_covariance(returns: &Array2<f64>) -> Array2<f64> {
     // (X'X) / (T-1)
     let cov = centered.t().dot(&centered) / (n_periods as f64 - 1.0);
     cov
+}
+
+// ── Eigenvalue Decomposition (Jacobi method for symmetric matrices) ──────
+
+/// Result of symmetric eigenvalue decomposition.
+/// eigenvalues are sorted descending, eigenvectors are columns of `vectors`.
+#[derive(Debug, Clone)]
+struct EigenDecomp {
+    eigenvalues: Vec<f64>,
+    eigenvectors: Array2<f64>,
+}
+
+/// Jacobi eigenvalue decomposition for symmetric N×N matrix.
+/// Efficient for N ≤ 10 (our MVO use case).
+fn sym_eigen_decomp(matrix: &Array2<f64>) -> EigenDecomp {
+    let n = matrix.ncols();
+    assert_eq!(matrix.nrows(), n, "matrix must be square");
+
+    // Initialize eigenvectors to identity
+    let mut eigvecs = Array2::eye(n);
+    let mut eigvals = matrix.clone();
+
+    let max_iter = 100;
+    let tol = 1e-12;
+
+    for _iter in 0..max_iter {
+        // Find max off-diagonal element
+        let mut max_off = 0.0f64;
+        let mut p = 0usize;
+        let mut q = 1usize;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let abs_val = eigvals[(i, j)].abs();
+                if abs_val > max_off {
+                    max_off = abs_val;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+
+        if max_off < tol {
+            break;
+        }
+
+        // Compute Jacobi rotation
+        let theta = if (eigvals[(p, p)] - eigvals[(q, q)]).abs() < 1e-15 {
+            std::f64::consts::FRAC_PI_4
+        } else {
+            0.5 * (2.0 * eigvals[(p, q)] / (eigvals[(p, p)] - eigvals[(q, q)])).atan()
+        };
+
+        let c = theta.cos();
+        let s = theta.sin();
+
+        // Apply rotation: A' = J^T * A * J
+        let mut new_vals = eigvals.clone();
+
+        // Update rows/columns p and q
+        for i in 0..n {
+            if i != p && i != q {
+                let a_ip = eigvals[(i, p)];
+                let a_iq = eigvals[(i, q)];
+                new_vals[(i, p)] = c * a_ip - s * a_iq;
+                new_vals[(p, i)] = new_vals[(i, p)];
+                new_vals[(i, q)] = s * a_ip + c * a_iq;
+                new_vals[(q, i)] = new_vals[(i, q)];
+            }
+        }
+        new_vals[(p, p)] = c * c * eigvals[(p, p)] + s * s * eigvals[(q, q)]
+            - 2.0 * s * c * eigvals[(p, q)];
+        new_vals[(q, q)] = s * s * eigvals[(p, p)] + c * c * eigvals[(q, q)]
+            + 2.0 * s * c * eigvals[(p, q)];
+        new_vals[(p, q)] = (c * c - s * s) * eigvals[(p, q)]
+            + s * c * (eigvals[(p, p)] - eigvals[(q, q)]);
+        new_vals[(q, p)] = new_vals[(p, q)];
+
+        eigvals = new_vals;
+
+        // Update eigenvectors: V' = V * J
+        let mut new_vecs = Array2::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                if j == p {
+                    new_vecs[(i, j)] = c * eigvecs[(i, p)] + s * eigvecs[(i, q)];
+                } else if j == q {
+                    new_vecs[(i, j)] = -s * eigvecs[(i, p)] + c * eigvecs[(i, q)];
+                } else {
+                    new_vecs[(i, j)] = eigvecs[(i, j)];
+                }
+            }
+        }
+        eigvecs = new_vecs;
+    }
+
+    // Extract eigenvalues from diagonal, sort descending
+    let mut ev_pairs: Vec<(f64, Vec<f64>)> = (0..n)
+        .map(|i| (eigvals[(i, i)], eigvecs.column(i).to_vec()))
+        .collect();
+    ev_pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let eigenvalues: Vec<f64> = ev_pairs.iter().map(|(v, _)| *v).collect();
+    let mut eigenvectors = Array2::zeros((n, n));
+    for (j, (_, vec)) in ev_pairs.iter().enumerate() {
+        for i in 0..n {
+            eigenvectors[(i, j)] = vec[i];
+        }
+    }
+
+    EigenDecomp {
+        eigenvalues,
+        eigenvectors,
+    }
+}
+
+// ── Nonlinear Shrinkage (Ledoit-Wolf 2017) ──────────────────────────────
+
+/// Kernel density estimator using Epanechnikov kernel.
+fn epanechnikov_kernel(x: f64) -> f64 {
+    if x.abs() <= 1.0 {
+        0.75 * (1.0 - x * x)
+    } else {
+        0.0
+    }
+}
+
+/// Silverman's rule-of-thumb bandwidth for kernel density estimation.
+fn silverman_bandwidth(values: &[f64]) -> f64 {
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let std_dev = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+
+    // Silverman: h = 0.9 * min(σ, IQR/1.34) * n^(-1/5)
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let q1 = sorted[(n * 0.25) as usize];
+    let q3 = sorted[(n * 0.75) as usize];
+    let iqr = q3 - q1;
+
+    let sigma = std_dev.min(iqr / 1.34).max(1e-10);
+    0.9 * sigma * n.powf(-0.2)
+}
+
+/// Analytical Nonlinear Shrinkage (Ledoit & Wolf 2017, JFE).
+///
+/// Unlike linear LW shrinkage (same shrinkage intensity for all eigenvalues),
+/// nonlinear shrinkage individually shrinks each eigenvalue:
+/// - Large eigenvalues (signal/diversification) → less shrinkage
+/// - Small eigenvalues (noise) → more shrinkage
+///
+/// Formula: d_i* = λ_i / ((1-c-cλ_i·Ĥ(λ_i))² + (π·c·λ_i·f̂(λ_i))²)
+/// where c = N/T, f̂ = kernel density, Ĥ = kernel-smoothed Hilbert transform.
+///
+/// `returns`: T×N matrix (rows = time, cols = assets)
+/// Returns the nonlinearly-shrunk covariance matrix.
+pub fn nonlinear_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
+    let sample_cov = sample_covariance(returns);
+    let n_assets = sample_cov.ncols();
+    let n_periods = returns.nrows();
+
+    if n_assets < 2 || n_periods < n_assets + 2 {
+        // Fall back to linear LW for degenerate cases
+        return ledoit_wolf_shrinkage(returns);
+    }
+
+    // 1. Convert to correlation matrix for standardized shrinkage
+    let mut volatilities = Vec::with_capacity(n_assets);
+    let mut corr = Array2::zeros((n_assets, n_assets));
+    for i in 0..n_assets {
+        let vol = sample_cov[(i, i)].sqrt();
+        volatilities.push(vol);
+    }
+    for i in 0..n_assets {
+        for j in 0..n_assets {
+            if volatilities[i] > 0.0 && volatilities[j] > 0.0 {
+                corr[(i, j)] = sample_cov[(i, j)] / (volatilities[i] * volatilities[j]);
+            }
+        }
+    }
+
+    // 2. Eigendecompose correlation matrix
+    let decomp = sym_eigen_decomp(&corr);
+    let lambda = &decomp.eigenvalues;
+    let n = n_assets as f64;
+    let t = n_periods as f64;
+    let c = n / t;
+
+    // 3. Kernel bandwidth
+    let h = silverman_bandwidth(lambda);
+
+    // 4. Shrink each eigenvalue individually
+    let mut shrunk_lambda = vec![0.0f64; n_assets];
+    for k in 0..n_assets {
+        let lk = lambda[k];
+
+        // Kernel density estimate at λ_k
+        let mut f_hat = 0.0;
+        for j in 0..n_assets {
+            let x = (lambda[j] - lk) / h;
+            f_hat += epanechnikov_kernel(x);
+        }
+        f_hat /= n * h;
+
+        // Kernel-smoothed Hilbert transform: Ĥ(λ) = (1/N) Σ K_h(λ_j - λ) * (λ - λ_j)
+        // Using the relationship: Hilbert transform = convolution with 1/x
+        // Kernel-smoothed version: Ĥ(λ_k) ≈ (1/N) Σ_{j≠k} (λ_k - λ_j)/((λ_k - λ_j)² + ε²)
+        let eps = h * 0.01; // regularization to avoid singularity
+        let mut h_hat = 0.0;
+        for j in 0..n_assets {
+            if j != k {
+                let diff = lk - lambda[j];
+                h_hat += diff / (diff * diff + eps * eps);
+            }
+        }
+        h_hat /= n;
+
+        // 5. Analytical nonlinear shrinkage formula
+        let denom = (1.0 - c - c * lk * h_hat).powi(2)
+            + (std::f64::consts::PI * c * lk * f_hat).powi(2);
+
+        if denom > 1e-15 {
+            shrunk_lambda[k] = lk / denom;
+        } else {
+            shrunk_lambda[k] = lk; // fallback: no shrinkage
+        }
+
+        // Clamp to prevent negative or extreme eigenvalues
+        shrunk_lambda[k] = shrunk_lambda[k].clamp(1e-6, 10.0);
+    }
+
+    // 6. Ensure eigenvalues sum = N (preserve trace of correlation matrix)
+    let sum_orig: f64 = lambda.iter().sum();
+    let sum_shrunk: f64 = shrunk_lambda.iter().sum();
+    if sum_shrunk > 0.0 {
+        let scale = sum_orig / sum_shrunk;
+        for v in shrunk_lambda.iter_mut() {
+            *v *= scale;
+        }
+    }
+
+    // 7. Reconstruct shrunk correlation matrix: R_nl = U * diag(λ*) * U^T
+    let u = &decomp.eigenvectors;
+    let mut r_nl = Array2::zeros((n_assets, n_assets));
+    for i in 0..n_assets {
+        for j in 0..n_assets {
+            let mut sum = 0.0;
+            for k in 0..n_assets {
+                sum += u[(i, k)] * shrunk_lambda[k] * u[(j, k)];
+            }
+            r_nl[(i, j)] = sum;
+        }
+    }
+
+    // 8. Ensure proper correlation matrix: clamp diagonal to ~1
+    for i in 0..n_assets {
+        r_nl[(i, i)] = r_nl[(i, i)].clamp(0.9, 1.1);
+    }
+
+    // 9. Convert back to covariance: S_nl[i][j] = R_nl[i][j] * σ_i * σ_j
+    let mut cov_nl = Array2::zeros((n_assets, n_assets));
+    for i in 0..n_assets {
+        for j in 0..n_assets {
+            cov_nl[(i, j)] = r_nl[(i, j)] * volatilities[i] * volatilities[j];
+        }
+    }
+
+    cov_nl
+}
+
+/// RMT-based eigenvalue filtering covariance.
+///
+/// Uses Random Matrix Theory: eigenvalues within the Marčenko-Pastur
+/// bounds are considered "noise" and replaced by their average.
+/// Only eigenvalues above the upper MP bound are kept as "signal."
+///
+/// This is a simpler alternative to full nonlinear shrinkage,
+/// well-suited for portfolios where most eigenvalues represent noise.
+pub fn rmt_filtered_covariance(returns: &Array2<f64>) -> Array2<f64> {
+    let sample_cov = sample_covariance(returns);
+    let n_assets = sample_cov.ncols();
+    let n_periods = returns.nrows();
+
+    if n_assets < 2 || n_periods < n_assets + 2 {
+        return ledoit_wolf_shrinkage(returns);
+    }
+
+    let decomp = sym_eigen_decomp(&sample_cov);
+    let lambda = &decomp.eigenvalues;
+    let n = n_assets as f64;
+    let t = n_periods as f64;
+    let c = n / t;
+
+    // Marčenko-Pastur upper bound: λ_+ = σ²(1 + √c)²
+    // σ² ≈ mean of eigenvalues (trace/N)
+    let sigma_sq = lambda.iter().sum::<f64>() / n;
+    let mp_upper = sigma_sq * (1.0 + c.sqrt()).powi(2);
+
+    // Separate signal (λ > MP upper) and noise (λ ≤ MP upper)
+    let noise_avg: f64 = lambda.iter()
+        .filter(|&&lv| lv <= mp_upper)
+        .sum::<f64>()
+        / lambda.iter().filter(|&&lv| lv <= mp_upper).count().max(1) as f64;
+
+    // Replace noise eigenvalues with their average, keep signal
+    let shrunk_lambda: Vec<f64> = lambda.iter()
+        .map(|&lv| if lv > mp_upper { lv } else { noise_avg })
+        .collect();
+
+    let u = &decomp.eigenvectors;
+    let mut cov_rmt = Array2::zeros((n_assets, n_assets));
+    for i in 0..n_assets {
+        for j in 0..n_assets {
+            let mut sum = 0.0;
+            for k in 0..n_assets {
+                sum += u[(i, k)] * shrunk_lambda[k] * u[(j, k)];
+            }
+            cov_rmt[(i, j)] = sum;
+        }
+    }
+
+    cov_rmt
 }
 
 /// Ledoit-Wolf shrinkage estimator for covariance matrix.
@@ -90,6 +412,86 @@ pub fn mvo_allocate_with_custom_mu(
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
     let result = grid_search_n_asset(custom_mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target }, grid_step);
     result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+}
+
+/// MVO with custom mu + NONLINEAR shrinkage covariance (Ledoit-Wolf 2017).
+/// Otherwise identical to mvo_allocate_with_custom_mu.
+pub fn mvo_allocate_with_custom_mu_nl(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    return_target: f64,
+    grid_step: f64,
+) -> Option<MvoWeights> {
+    let cov = nonlinear_shrinkage(monthly_returns);
+    let n_assets = monthly_returns.ncols();
+    let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
+    let result = grid_search_n_asset(
+        custom_mu, &cov, min_stock, MAX_SINGLE,
+        GridObjective::MinVariance { target: return_target },
+        grid_step,
+    );
+    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+}
+
+/// MVO with custom mu + RMT eigenvalue filtering covariance.
+/// Uses Random Matrix Theory to filter noise eigenvalues.
+pub fn mvo_allocate_with_custom_mu_rmt(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    return_target: f64,
+    grid_step: f64,
+) -> Option<MvoWeights> {
+    let cov = rmt_filtered_covariance(monthly_returns);
+    let n_assets = monthly_returns.ncols();
+    let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
+    let result = grid_search_n_asset(
+        custom_mu, &cov, min_stock, MAX_SINGLE,
+        GridObjective::MinVariance { target: return_target },
+        grid_step,
+    );
+    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+}
+
+/// Covariance estimation method for MVO.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CovMethod {
+    /// Ledoit-Wolf linear shrinkage (default)
+    LinearLW,
+    /// Analytical nonlinear shrinkage (Ledoit-Wolf 2017)
+    Nonlinear,
+    /// RMT eigenvalue filtering (Marčenko-Pastur)
+    RMT,
+}
+
+impl std::str::FromStr for CovMethod {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "linear" | "lw" | "ledoit_wolf" => Ok(CovMethod::LinearLW),
+            "nonlinear" | "nl" | "nl_shrink" => Ok(CovMethod::Nonlinear),
+            "rmt" | "rmt_filter" => Ok(CovMethod::RMT),
+            _ => Err(format!("Unknown cov method: {} (use linear/nonlinear/rmt)", s)),
+        }
+    }
+}
+
+/// MVO with custom mu and configurable covariance method.
+/// Routes to the appropriate shrinkage implementation.
+pub fn mvo_allocate_with_cov_method(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    return_target: f64,
+    grid_step: f64,
+    cov_method: CovMethod,
+) -> Option<MvoWeights> {
+    match cov_method {
+        CovMethod::LinearLW => mvo_allocate_with_custom_mu(monthly_returns, custom_mu, min_stock, return_target, grid_step),
+        CovMethod::Nonlinear => mvo_allocate_with_custom_mu_nl(monthly_returns, custom_mu, min_stock, return_target, grid_step),
+        CovMethod::RMT => mvo_allocate_with_custom_mu_rmt(monthly_returns, custom_mu, min_stock, return_target, grid_step),
+    }
 }
 
 /// MVO with EWMA covariance + Ledoit-Wolf shrinkage, configurable grid step.

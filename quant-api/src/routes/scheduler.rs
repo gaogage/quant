@@ -1674,6 +1674,7 @@ pub async fn run_historical_replay(
     leverage_cap: f64,
     extra_etfs: &[String],
     momentum_blend_ratio: f64,
+    cov_method: &str,
 ) -> Result<ReplayResult, String> {
     let is_v17 = strategy == "v17";
     let use_max_sharpe = objective == "max_sharpe";
@@ -1891,7 +1892,8 @@ pub async fn run_historical_replay(
                             );
                             let bw = momentum_blend_ratio;
                             let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
-                            mvo::mvo_allocate_with_custom_mu(&arr, &adj_mu, regime_ms, dynamic_target, 0.10)
+                            let cm: mvo::CovMethod = cov_method.parse().unwrap_or(mvo::CovMethod::LinearLW);
+                            mvo::mvo_allocate_with_cov_method(&arr, &adj_mu, regime_ms, dynamic_target, 0.10, cm)
                         } else if use_ewma {
                             // Exp B: EWMA covariance (λ=0.94) with dynamic target
                             let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
