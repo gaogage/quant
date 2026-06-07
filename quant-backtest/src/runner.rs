@@ -1285,7 +1285,7 @@ impl BacktestRunner {
                 if i > 0 { query_builder.push_str(", "); }
                 let base = i * 11;
                 query_builder.push_str(&format!(
-                    "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                    "(${}, ${}, ${}::date, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric)",
                     base + 1, base + 2, base + 3, base + 4, base + 5, base + 6,
                     base + 7, base + 8, base + 9, base + 10, base + 11
                 ));
@@ -1299,7 +1299,7 @@ impl BacktestRunner {
                 params.push(pos.market_value.to_string());
                 params.push(pos.weight.to_string());
                 params.push(pos.unrealized_pnl.to_string());
-                params.push(pos.target_weight.map(|w| w.to_string()).unwrap_or_default());
+                params.push(pos.target_weight.map(|w| w.to_string()).unwrap_or_else(|| "0".to_string()));
             }
             query_builder.push_str(" ON CONFLICT (task_id, symbol, position_date) DO NOTHING");
             let mut q = sqlx::query(&query_builder);

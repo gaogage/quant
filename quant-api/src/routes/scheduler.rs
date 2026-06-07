@@ -117,8 +117,27 @@ async fn run_scheduled_tasks(db: &PgPool) {
             }
             "equity_curve_update" => {
                 let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or("phase7_price_volume_expanded_v1");
-                info!("[scheduler] 月度权益曲线更新任务: combo={}", combo);
-                // TODO: 调用 run_factor_backtest 生成新权益曲线并更新 strategy_config
+                let top_n = params.get("top_n").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
+                info!("[scheduler] 月度权益曲线更新: combo={} top_n={}", combo, top_n);
+                let client = reqwest::Client::new();
+                let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
+                let payload = serde_json::json!({
+                    "combo_name": combo, "strategy_version_id": "factor-combo-v1",
+                    "data_version_id": "dv-20260606-053217534", "top_n": top_n,
+                    "rebalance": "10", "start_date": "20060101", "end_date": end_date,
+                });
+                match client.post("http://localhost:8080/api/v1/quant/backtests/run-factor")
+                    .json(&payload).timeout(std::time::Duration::from_secs(600)).send().await
+                {
+                    Ok(resp) => {
+                        if let Ok(result) = resp.json::<serde_json::Value>().await {
+                            if let Some(tid) = result["data"]["task_id"].as_str() {
+                                info!("[scheduler] 新权益曲线已生成: task_id={} (需人工验证后手动更新strategy_config)", tid);
+                            }
+                        }
+                    }
+                    Err(e) => warn!("[scheduler] 权益曲线更新失败: {}", e),
+                }
             }
             "factor_backfill" => {
                 // 因子回填已在 T+1 补同步中处理
@@ -271,15 +290,45 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
             info!("[scheduler] 9:00 T+1 补同步昨日日线 {} + 因子重算...", yesterday_str);
             let empty: Vec<String> = vec![];
 
-            // 昨日日线 (T+1 数据应已就绪) — 直接调用
-            let _ = quant_data::sync::sync_daily_bars(db, tushare, &empty, &yesterday_str, &yesterday_str, &format!("dv-t1-{}", yesterday_str)).await;
+            // Step 1: 同步昨日日线 + ETF日线 (T+1数据)
+            let bar_dv = format!("dv-t1-{}", yesterday_str);
+            match quant_data::sync::sync_daily_bars(db, tushare, &empty, &yesterday_str, &yesterday_str, &bar_dv).await {
+                Ok(n) => info!("[scheduler] T+1 A股日线同步: {} 条", n),
+                Err(e) => warn!("[scheduler] T+1 A股日线同步失败: {}", e),
+            }
+            let etf_symbols = &sc.etf_symbols;
+            let _ = quant_data::sync::sync_fund_daily(db, tushare, etf_symbols, &yesterday_str, &yesterday_str, &format!("etf-t1-{}", yesterday_str)).await;
 
-            // 等日线同步完成
-            tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+            // Step 2: 验证日线数据已就绪 (实际查询DB确认, 非盲等)
+            let mut retries = 0;
+            let max_retries = 30; // 最多等5分钟 (30×10s)
+            loop {
+                let count: (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM market_stock_daily_bar_adj WHERE trade_date = $1"
+                ).bind(yesterday).fetch_one(db).await.unwrap_or((0,));
+                if count.0 > 100 {
+                    info!("[scheduler] T+1 日线数据已就绪: {} 条 (等待{}s)", count.0, retries * 10);
+                    break;
+                }
+                retries += 1;
+                if retries >= max_retries {
+                    warn!("[scheduler] T+1 日线数据等待超时({}s), 仅{}条, 因子回填可能不完整", retries*10, count.0);
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            }
 
-            // 因子回填仍在后台运行(spawn), 此处通过现有的 factor backfill API 保持异步
-            // 由于因子回填依赖 State, 需要一个简单的触发机制
-            // 使用 tokio::spawn 异步触发, 不阻塞
+            // Step 3: 日线就绪后才触发因子回填
+            if retries < max_retries {
+                info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
+                let client = reqwest::Client::new();
+                let backfill_start = (yesterday - chrono::Duration::days(7)).format("%Y%m%d").to_string();
+                let _ = client
+                    .post("http://localhost:8080/api/v1/quant/factors/phase7-price-volume-backfill/background")
+                    .json(&serde_json::json!({"start_date": backfill_start, "end_date": yesterday_str}))
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send().await;
+            }
 
             info!("[scheduler] T+1 补同步完成 ({})", yesterday_str);
         }
@@ -1835,11 +1884,12 @@ pub async fn run_historical_replay(
 ) -> Result<ReplayResult, String> {
     let is_v17 = strategy == "v17";
     let is_v19 = strategy == "v19";
+    let is_v20 = strategy == "v20";
     let use_max_sharpe = objective == "max_sharpe";
     let use_ewma = objective == "ewma";
-    let use_momentum = objective == "momentum" || is_v19; // v19 always uses momentum μ
+    let use_momentum = objective == "momentum" || is_v19 || is_v20;
     let use_bl = objective == "black_litterman";
-    let use_ga = objective == "ga" || is_v19; // v19 always uses GA optimizer
+    let use_ga = objective == "ga" || is_v19 || is_v20;
     let is_monthly = rebalance == "monthly";
     let use_vol_target = leverage_mode == "vol_target";
     let fixed_lev = if leverage_mode == "fixed" { leverage_multiplier.max(1.0) } else { 1.0 };
@@ -1861,11 +1911,21 @@ pub async fn run_historical_replay(
 
     if tdates.len() < 252 { return Err("交易日不足1年".into()); }
 
-    // 2. 加载 A 股权益曲线 — 因子选股回测(2009-2026全覆盖)
-    let eq_task_id = "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e"; // 干净全量回测(2006-2026, adj_factor黑名单已排除)
+    // 2. 加载 A 股权益曲线 — 因子选股回测
+    // v20: 从strategy_config读regime-stitched权益曲线; v19/v18: 默认fbt-36e18e12
+    let eq_task_id = if is_v20 {
+        sqlx::query_as::<_, (String,)>(
+            "SELECT equity_curve_task_id FROM strategy_config WHERE strategy_id = 'v20' AND status = 'active'"
+        ).fetch_optional(db).await.ok().flatten()
+            .map(|(tid,)| tid)
+            .unwrap_or_else(|| "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".to_string())
+    } else {
+        "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".to_string()
+    };
+    info!("[replay] 权益曲线: {} (strategy={})", eq_task_id, strategy);
     let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
         "SELECT trade_date, portfolio_value FROM backtest_equity_curve WHERE task_id = $1 ORDER BY trade_date",
-    ).bind(eq_task_id).fetch_all(db).await
+    ).bind(&eq_task_id).fetch_all(db).await
     .map_err(|e| format!("A股权益曲线: {e}"))?;
 
     let a_nav: Vec<(NaiveDate, f64)> = eq_rows.iter()
@@ -1878,7 +1938,7 @@ pub async fn run_historical_replay(
         "513100.SH".to_string(), "159980.SZ".to_string(), "159985.SZ".to_string(),
     ];
     // v19: 8资产 = 7基础 + 原油LOF, 使用GA优化器
-    if is_v19 && !etf_symbols.contains(&"501018.SH".to_string()) {
+    if (is_v19 || is_v20) && !etf_symbols.contains(&"501018.SH".to_string()) {
         etf_symbols.push("501018.SH".to_string());
     }
     for e in extra_etfs { if !etf_symbols.contains(e) { etf_symbols.push(e.clone()); } }
