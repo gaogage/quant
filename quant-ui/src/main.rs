@@ -35,16 +35,24 @@ fn AccountsPage() -> Element {
 }
 
 #[component]
-fn AdminPage() -> Element {
-    let nav = use_navigator();
-    if !auth::AuthState::is_admin() {
-        nav.replace(Route::LoginPage {});
-        return rsx! { div {} };
-    }
-    pages::admin::AdminContent()
+fn DataPage() -> Element {
+    if !auth::AuthState::is_admin() { let nav = use_navigator(); nav.replace(Route::LoginPage {}); return rsx! { div {} }; }
+    pages::admin::data::DataSyncPage()
 }
 
-// 登录页面 — 委托到 pages::login 的完整实现
+#[component]
+fn TasksPage() -> Element {
+    if !auth::AuthState::is_admin() { let nav = use_navigator(); nav.replace(Route::LoginPage {}); return rsx! { div {} }; }
+    pages::admin::tasks::TasksPage()
+}
+
+#[component]
+fn UsersPage() -> Element {
+    if !auth::AuthState::is_admin() { let nav = use_navigator(); nav.replace(Route::LoginPage {}); return rsx! { div {} }; }
+    pages::admin::users::UsersPage()
+}
+
+// 登录页面
 #[component]
 fn LoginPage() -> Element {
     pages::login::LoginPage()
@@ -62,8 +70,12 @@ enum Route {
         StrategiesPage {},
         #[route("/accounts")]
         AccountsPage {},
-        #[route("/admin")]
-        AdminPage {},
+        #[route("/data")]
+        DataPage {},
+        #[route("/tasks")]
+        TasksPage {},
+        #[route("/users")]
+        UsersPage {},
     #[end_layout]
     #[route("/login")]
     LoginPage {},
