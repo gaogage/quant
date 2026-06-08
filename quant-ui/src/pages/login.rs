@@ -50,17 +50,17 @@ pub fn LoginPage() -> Element {
     };
 
     rsx! {
-        div { class: "min-h-screen flex items-center justify-center bg-gray-950",
-            div { class: "w-full max-w-md p-8 bg-gray-900 rounded-xl border border-gray-800 shadow-2xl",
+        div { class: "min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950",
+            div { class: "w-full max-w-md p-8 bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 shadow-2xl",
                 // 标题
                 div { class: "text-center mb-8",
-                    h1 { class: "text-3xl font-bold text-blue-400 mb-2", "Quant Platform" }
-                    p { class: "text-gray-500 text-sm", "量化交易管理平台" }
+                    h1 { class: "text-3xl font-bold text-blue-600 dark:text-blue-400 mb-2", "Quant Platform" }
+                    p { class: "text-gray-500 dark:text-gray-400 text-sm", "量化交易管理平台" }
                 }
 
                 // 错误提示
                 if !error.read().is_empty() {
-                    div { class: "mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-sm",
+                    div { class: "mb-4 p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm",
                         "{error}"
                     }
                 }
@@ -69,10 +69,10 @@ pub fn LoginPage() -> Element {
                 div { class: "space-y-4",
                     // 用户名
                     div {
-                        label { class: "block text-sm font-medium text-gray-300 mb-1", "用户名" }
+                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1", "用户名" }
                         input {
-                            class: "w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg
-                                    text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500
+                            class: "w-full px-4 py-2.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg
+                                    text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500
                                     focus:ring-1 focus:ring-blue-500 transition",
                             r#type: "text",
                             placeholder: "请输入用户名",
@@ -83,10 +83,10 @@ pub fn LoginPage() -> Element {
                     }
                     // 密码
                     div {
-                        label { class: "block text-sm font-medium text-gray-300 mb-1", "密码" }
+                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1", "密码" }
                         input {
-                            class: "w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg
-                                    text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500
+                            class: "w-full px-4 py-2.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg
+                                    text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500
                                     focus:ring-1 focus:ring-blue-500 transition",
                             r#type: "password",
                             placeholder: "请输入密码",
@@ -97,7 +97,7 @@ pub fn LoginPage() -> Element {
                     }
                     // 提交按钮
                     button {
-                        class: "w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700
+                        class: "w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 dark:disabled:bg-gray-700
                                 disabled:text-gray-500 text-white font-medium rounded-lg transition
                                 focus:outline-none focus:ring-2 focus:ring-blue-500",
                         disabled: *loading.read(),
@@ -145,7 +145,7 @@ pub fn LoginPage() -> Element {
                 }
 
                 // 底部信息
-                p { class: "mt-6 text-center text-xs text-gray-600",
+                p { class: "mt-6 text-center text-xs text-gray-400 dark:text-gray-600",
                     "Quant Platform v0.1 · SCP Quantitative Trading"
                 }
             }

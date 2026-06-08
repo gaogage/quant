@@ -37,11 +37,11 @@ pub fn StrategiesContent() -> Element {
     rsx! {
         div { class: "p-6 max-w-6xl mx-auto",
             div { class: "flex items-center justify-between mb-6",
-                h1 { class: "text-2xl font-bold text-white", "策略管理" }
+                h1 { class: "text-2xl font-bold text-gray-900 dark:text-white", "策略管理" }
             }
 
             if !error.read().is_empty() {
-                div { class: "mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-sm",
+                div { class: "mb-4 p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm",
                     "{error}"
                 }
             }
@@ -127,44 +127,44 @@ fn StrategyCard(
 
     rsx! {
         div {
-            class: "bg-gray-900 rounded-xl border border-gray-800 p-5 cursor-pointer hover:border-blue-500 transition",
+            class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 cursor-pointer hover:border-blue-500 transition",
             onclick: move |_| on_select(()),
             div { class: "flex items-center justify-between mb-2",
                 div { class: "flex items-center gap-3",
-                    h3 { class: "font-semibold text-white", "{name}" }
-                    span { class: "text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300",
+                    h3 { class: "font-semibold text-gray-900 dark:text-white", "{name}" }
+                    span { class: "text-xs px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300",
                         if is_system { "系统" } else if is_mine { "我的" } else { "共享" }
                     }
                 }
-                span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-400",
+                span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400",
                     "{status}"
                 }
             }
             if !desc.is_empty() {
-                p { class: "text-sm text-gray-500 mb-2", "{desc}" }
+                p { class: "text-sm text-gray-500 dark:text-gray-400 mb-2", "{desc}" }
             }
-            div { class: "text-xs text-gray-600 font-mono truncate",
+            div { class: "text-xs text-gray-400 dark:text-gray-600 font-mono truncate",
                 "{params.to_string()}"
             }
         }
 
         // 展开详情
         if is_selected {
-            div { class: "bg-gray-800 rounded-xl border border-gray-700 p-5 mb-3",
-                h4 { class: "text-sm font-semibold text-gray-300 mb-3", "策略参数" }
-                pre { class: "text-xs text-gray-400 bg-gray-900 p-3 rounded-lg overflow-x-auto max-h-64",
+            div { class: "bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-5 mb-3",
+                h4 { class: "text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3", "策略参数" }
+                pre { class: "text-xs text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-950 p-3 rounded-lg overflow-x-auto max-h-64",
                     "{serde_json::to_string_pretty(&params).unwrap_or_default()}"
                 }
                 if is_system {
                     button {
-                        class: "mt-3 text-sm px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg transition",
+                        class: "mt-3 text-sm px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-white transition",
                         onclick: move |_| on_derive(()),
                         "派生此策略"
                     }
                 }
                 if is_mine {
                     button {
-                        class: "mt-3 ml-2 text-sm px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg transition",
+                        class: "mt-3 ml-2 text-sm px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-white transition",
                         onclick: move |_| on_delete(()),
                         "删除"
                     }

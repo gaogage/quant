@@ -9,6 +9,7 @@ mod api;
 mod auth;
 mod components;
 mod pages;
+mod theme;
 
 use components::layout::AppLayout;
 

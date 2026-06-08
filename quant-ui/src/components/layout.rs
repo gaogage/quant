@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use dioxus_router::prelude::*;
 
 use crate::auth::AuthState;
+use crate::theme::ThemeToggle;
 use crate::Route;
 
 #[component]
@@ -15,10 +16,10 @@ pub fn AppLayout() -> Element {
     let username = AuthState::user().map(|u| u.username).unwrap_or_default();
 
     fn link_css(is_active: bool, is_admin: bool) -> &'static str {
-        if is_active && is_admin { "text-sm text-yellow-400 font-medium transition" }
-        else if is_active { "text-sm text-blue-400 font-medium transition" }
-        else if is_admin { "text-sm text-yellow-300 hover:text-yellow-200 transition" }
-        else { "text-sm text-gray-300 hover:text-white transition" }
+        if is_active && is_admin { "text-sm text-yellow-500 dark:text-yellow-400 font-bold transition" }
+        else if is_active { "text-sm text-blue-600 dark:text-blue-400 font-bold transition" }
+        else if is_admin { "text-sm text-yellow-600 dark:text-yellow-300 hover:text-yellow-500 dark:hover:text-yellow-200 transition" }
+        else { "text-sm text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition" }
     }
 
     let dashboard_cls = link_css(route == Route::DashboardPage {}, false);
@@ -30,7 +31,7 @@ pub fn AppLayout() -> Element {
 
     rsx! {
         div { class: "min-h-screen flex flex-col",
-            nav { class: "bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between",
+            nav { class: "bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 px-6 py-3 flex items-center justify-between transition-colors",
                 div { class: "flex items-center gap-4",
                     Link {
                         to: Route::DashboardPage {},
@@ -50,7 +51,8 @@ pub fn AppLayout() -> Element {
                 }
                 div { class: "flex items-center gap-4",
                     if logged_in {
-                        span { class: "text-sm text-gray-400", "{username}" }
+                        ThemeToggle {}
+                        span { class: "text-sm text-gray-500 dark:text-gray-400", "{username}" }
                         button {
                             class: "text-sm text-red-400 hover:text-red-300 transition",
                             onclick: {

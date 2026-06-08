@@ -14,5 +14,6 @@ gloo-storage = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-web-sys = { version = "0.3", features = ["Window", "Location"] }
+web-sys = { version = "0.3", features = ["Window", "Location", "Document", "HtmlElement", "MediaQueryList", "MediaQueryListEvent", "Element"] }
+wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

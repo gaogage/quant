@@ -97,35 +97,35 @@ pub fn UsersPage() -> Element {
         let eu = editing.read().clone().unwrap();
         let eun = eu.get("username").and_then(|v| v.as_str()).unwrap_or("-");
         return rsx! {
-            div { class: "p-6 max-w-6xl mx-auto", h1 { class: "text-2xl font-bold text-white mb-6", "用户管理" } }
+            div { class: "p-6 max-w-6xl mx-auto", h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6", "用户管理" } }
             div { class: "fixed inset-0 bg-black/60 z-50 flex items-center justify-center", onclick: move |_| editing.set(None),
-                div { class: "bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl",
+                div { class: "bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl",
                     onclick: move |e| e.stop_propagation(),
-                    h2 { class: "text-lg font-bold text-white mb-1", "编辑用户" }
-                    p { class: "text-sm text-gray-500 mb-5", "{eun}" }
+                    h2 { class: "text-lg font-bold text-gray-900 dark:text-white mb-1", "编辑用户" }
+                    p { class: "text-sm text-gray-500 dark:text-gray-400 mb-5", "{eun}" }
                     div { class: "space-y-4",
-                        div { label { class: "block text-sm text-gray-300 mb-1.5", "角色" }
-                            select { class: "w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm",
+                        div { label { class: "block text-sm text-gray-700 dark:text-gray-300 mb-1.5", "角色" }
+                            select { class: "w-full px-3 py-2.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
                                 value: "{e_role}", onchange: move |e| e_role.set(e.value()),
                                 option { value: "user", "user" } option { value: "admin", "admin" }
                             }
                         }
-                        div { label { class: "block text-sm text-gray-300 mb-1.5", "状态" }
-                            select { class: "w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm",
+                        div { label { class: "block text-sm text-gray-700 dark:text-gray-300 mb-1.5", "状态" }
+                            select { class: "w-full px-3 py-2.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
                                 value: "{e_st}", onchange: move |e| e_st.set(e.value()),
                                 option { value: "active", "active — 正常" } option { value: "locked", "locked — 锁定" } option { value: "disabled", "disabled — 禁用" }
                             }
                         }
-                        div { label { class: "block text-sm text-gray-300 mb-1.5", "新密码(留空不修改)" }
-                            input { class: "w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm",
+                        div { label { class: "block text-sm text-gray-700 dark:text-gray-300 mb-1.5", "新密码(留空不修改)" }
+                            input { class: "w-full px-3 py-2.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
                                 r#type: "password", value: "{e_pw}", oninput: move |e| e_pw.set(e.value()), placeholder: "至少4位"
                             }
                         }
                     }
-                    if !err.read().is_empty() { div { class: "mt-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-sm", "{err}" } }
+                    if !err.read().is_empty() { div { class: "mt-4 p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm", "{err}" } }
                     div { class: "flex gap-3 mt-6",
-                        button { class: "flex-1 py-2.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300 transition", onclick: move |_| editing.set(None), "取消" }
-                        button { class: "flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 rounded-lg text-sm text-white transition",
+                        button { class: "flex-1 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-lg text-sm text-gray-700 dark:text-gray-300 transition", onclick: move |_| editing.set(None), "取消" }
+                        button { class: "flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 dark:disabled:bg-gray-600 rounded-lg text-sm text-white transition",
                             disabled: *e_save.read(), onclick: save_edit,
                             if *e_save.read() { "保存中..." } else { "保存修改" }
                         }
@@ -137,25 +137,25 @@ pub fn UsersPage() -> Element {
 
     rsx! {
         div { class: "p-6 max-w-6xl mx-auto",
-            h1 { class: "text-2xl font-bold text-white mb-6", "用户管理" }
-            if !msg.read().is_empty() { div { class: "mb-4 p-3 bg-green-900/50 border border-green-700 rounded-lg text-green-300 text-sm flex justify-between", span { "{msg}" } button { class: "text-green-400", onclick: move |_| msg.set(String::new()), "✕" } } }
-            if !err.read().is_empty() { div { class: "mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-sm flex justify-between", span { "{err}" } button { class: "text-red-400", onclick: move |_| err.set(String::new()), "✕" } } }
+            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6", "用户管理" }
+            if !msg.read().is_empty() { div { class: "mb-4 p-3 bg-green-50 dark:bg-green-900/50 border border-green-300 dark:border-green-700 rounded-lg text-green-700 dark:text-green-300 text-sm flex justify-between", span { "{msg}" } button { class: "text-green-600 dark:text-green-400", onclick: move |_| msg.set(String::new()), "✕" } } }
+            if !err.read().is_empty() { div { class: "mb-4 p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm flex justify-between", span { "{err}" } button { class: "text-red-600 dark:text-red-400", onclick: move |_| err.set(String::new()), "✕" } } }
             // 创建表单
-            div { class: "mb-6 bg-gray-900 rounded-xl border border-gray-800 p-5",
-                h3 { class: "text-sm font-semibold text-white mb-3", "创建新用户" }
+            div { class: "mb-6 bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5",
+                h3 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-3", "创建新用户" }
                 div { class: "flex gap-3 items-end flex-wrap",
-                    div { label { class: "block text-xs text-gray-500 mb-1", "用户名" } input { class: "px-3 py-2 bg-gray-800 rounded-lg border border-gray-700 text-white text-sm w-36", value: "{n_name}", oninput: move |e| n_name.set(e.value()), placeholder: "用户名" } }
-                    div { label { class: "block text-xs text-gray-500 mb-1", "密码" } input { class: "px-3 py-2 bg-gray-800 rounded-lg border border-gray-700 text-white text-sm w-36", r#type: "password", value: "{n_pass}", oninput: move |e| n_pass.set(e.value()), placeholder: "至少4位" } }
-                    div { label { class: "block text-xs text-gray-500 mb-1", "角色" } select { class: "px-3 py-2 bg-gray-800 rounded-lg border border-gray-700 text-white text-sm", onchange: move |e| n_role.set(e.value()), option { value: "user", selected: true, "user" } option { value: "admin", "admin" } } }
-                    button { class: "px-5 py-2 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 rounded-lg text-sm transition", disabled: *n_save.read(), onclick: do_create, if *n_save.read() { "创建中..." } else { "创建用户" } }
+                    div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "用户名" } input { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm w-36", value: "{n_name}", oninput: move |e| n_name.set(e.value()), placeholder: "用户名" } }
+                    div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "密码" } input { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm w-36", r#type: "password", value: "{n_pass}", oninput: move |e| n_pass.set(e.value()), placeholder: "至少4位" } }
+                    div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "角色" } select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm", onchange: move |e| n_role.set(e.value()), option { value: "user", selected: true, "user" } option { value: "admin", "admin" } } }
+                    button { class: "px-5 py-2 bg-green-600 hover:bg-green-500 disabled:bg-gray-300 dark:disabled:bg-gray-600 disabled:text-gray-500 rounded-lg text-sm text-white transition", disabled: *n_save.read(), onclick: do_create, if *n_save.read() { "创建中..." } else { "创建用户" } }
                 }
             }
             // 用户表格
-            div { class: "bg-gray-900 rounded-xl border border-gray-800 overflow-hidden",
+            div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden",
                 if users.read().is_empty() {
-                    div { class: "p-8 text-center text-gray-500", "暂无用户" }
+                    div { class: "p-8 text-center text-gray-400 dark:text-gray-500", "暂无用户" }
                 } else {
-                    div { class: "grid grid-cols-5 gap-4 px-5 py-3 bg-gray-800/50 text-xs font-medium text-gray-400 uppercase",
+                    div { class: "grid grid-cols-5 gap-4 px-5 py-3 bg-gray-50 dark:bg-gray-800/50 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase",
                         div { "用户名" } div { "角色" } div { "状态" } div { "邮箱/最后登录" } div { class: "text-right", "操作" }
                     }
                     for u in users.read().iter() {
@@ -170,17 +170,17 @@ pub fn UsersPage() -> Element {
                             let is_admin = un == "admin";
                             let uc = u.clone();
                             rsx! {
-                                div { class: "grid grid-cols-5 gap-4 px-5 py-3 border-t border-gray-800 items-center hover:bg-gray-800/30 transition",
-                                    div { div { class: "text-white text-sm font-medium", "{un}" } if !dn.is_empty() { div { class: "text-xs text-gray-500", "{dn}" } } }
-                                    div { if role == "admin" { span { class: "text-xs px-2 py-0.5 rounded-full bg-yellow-900/50 text-yellow-300", "管理员" } } else { span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-400", "用户" } } }
+                                div { class: "grid grid-cols-5 gap-4 px-5 py-3 border-t border-gray-100 dark:border-gray-800 items-center hover:bg-gray-50 dark:hover:bg-gray-800/30 transition",
+                                    div { div { class: "text-gray-900 dark:text-white text-sm font-medium", "{un}" } if !dn.is_empty() { div { class: "text-xs text-gray-500 dark:text-gray-400", "{dn}" } } }
+                                    div { if role == "admin" { span { class: "text-xs px-2 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900/50 text-yellow-700 dark:text-yellow-300", "管理员" } } else { span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400", "用户" } } }
                                     div {
-                                        if sv == "active" { span { class: "text-xs px-2 py-0.5 rounded-full bg-green-900/50 text-green-400", "正常" } }
-                                        else if sv == "locked" { span { class: "text-xs px-2 py-0.5 rounded-full bg-red-900/50 text-red-400", "已锁定" } }
-                                        else { span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-400", "{sv}" } }
+                                        if sv == "active" { span { class: "text-xs px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-400", "正常" } }
+                                        else if sv == "locked" { span { class: "text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-400", "已锁定" } }
+                                        else { span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400", "{sv}" } }
                                     }
-                                    div { class: "text-xs text-gray-500", if !email.is_empty() { div { "{email}" } } if !ll.is_empty() { div { class: "text-gray-600", "登录:{ll}" } } }
+                                    div { class: "text-xs text-gray-500 dark:text-gray-400", if !email.is_empty() { div { "{email}" } } if !ll.is_empty() { div { class: "text-gray-400 dark:text-gray-500", "登录:{ll}" } } }
                                     div { class: "flex items-center justify-end gap-2",
-                                        button { class: "text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-gray-300 transition",
+                                        button { class: "text-xs px-3 py-1.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-lg text-gray-700 dark:text-gray-300 transition",
                                             onclick: {
                                                 let v = uc.clone();
                                                 move |_| {
@@ -192,7 +192,7 @@ pub fn UsersPage() -> Element {
                                             },
                                             "编辑"
                                         }
-                                        if !is_admin { button { class: "text-xs px-3 py-1.5 bg-red-900/50 hover:bg-red-800 rounded-lg text-red-400 transition",
+                                        if !is_admin { button { class: "text-xs px-3 py-1.5 bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800 rounded-lg text-red-600 dark:text-red-400 transition",
                                             onclick: move |_| {
                                                 let uid2 = uid.clone();
                                                 let un2 = un.clone();

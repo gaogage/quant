@@ -43,19 +43,42 @@ pub async fn list_strategies(
     user: UserContext,
 ) -> impl IntoResponse {
     // 系统策略
-    let sys_rows: Vec<(String, String, Option<String>, serde_json::Value, String)> = sqlx::query_as(
-        "SELECT strategy_id, strategy_name, description, params, status FROM strategy_config ORDER BY strategy_id"
+    let sys_rows = sqlx::query(
+        "SELECT strategy_id, name, description, status,
+                etf_symbols, default_weights, vol_target, leverage_cap, leverage_floor,
+                min_stock, max_single, max_single_bull, momentum_blend_ratio,
+                rebalance_freq, ga_population, ga_generations, risk_free_rate
+         FROM strategy_config ORDER BY strategy_id"
     )
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
+    use sqlx::Row;
     let mut list: Vec<serde_json::Value> = sys_rows
-        .into_iter()
-        .map(|(id, name, desc, params, status)| {
+        .iter()
+        .map(|r| {
             serde_json::json!({
-                "strategy_id": id, "name": name, "description": desc,
-                "params": params, "status": status, "owner": "system",
+                "strategy_id": r.try_get::<String, _>("strategy_id").unwrap_or_default(),
+                "name": r.try_get::<String, _>("name").unwrap_or_default(),
+                "description": r.try_get::<Option<String>, _>("description").unwrap_or(None),
+                "status": r.try_get::<String, _>("status").unwrap_or_default(),
+                "params": serde_json::json!({
+                    "etf_symbols": r.try_get::<serde_json::Value, _>("etf_symbols").unwrap_or(serde_json::Value::Null),
+                    "default_weights": r.try_get::<serde_json::Value, _>("default_weights").unwrap_or(serde_json::Value::Null),
+                    "vol_target": r.try_get::<Option<f64>, _>("vol_target").unwrap_or(None),
+                    "leverage_cap": r.try_get::<Option<f64>, _>("leverage_cap").unwrap_or(None),
+                    "leverage_floor": r.try_get::<Option<f64>, _>("leverage_floor").unwrap_or(None),
+                    "min_stock": r.try_get::<Option<f64>, _>("min_stock").unwrap_or(None),
+                    "max_single": r.try_get::<Option<f64>, _>("max_single").unwrap_or(None),
+                    "max_single_bull": r.try_get::<Option<f64>, _>("max_single_bull").unwrap_or(None),
+                    "momentum_blend_ratio": r.try_get::<Option<f64>, _>("momentum_blend_ratio").unwrap_or(None),
+                    "rebalance_freq": r.try_get::<String, _>("rebalance_freq").unwrap_or_default(),
+                    "ga_population": r.try_get::<Option<i32>, _>("ga_population").unwrap_or(None),
+                    "ga_generations": r.try_get::<Option<i32>, _>("ga_generations").unwrap_or(None),
+                    "risk_free_rate": r.try_get::<Option<f64>, _>("risk_free_rate").unwrap_or(None),
+                }),
+                "owner": "system",
             })
         })
         .collect();
