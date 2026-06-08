@@ -9,6 +9,19 @@ use crate::auth::AuthState;
 
 const BASE_URL: &str = "http://localhost:8080";
 
+/// 健康检查 — 轻量级，不含认证
+pub async fn health_check() -> Result<(), String> {
+    let resp = http::Request::get(&format!("{}/health", BASE_URL))
+        .send()
+        .await
+        .map_err(|e| format!("连接失败: {}", e))?;
+    if resp.status() == 200 {
+        Ok(())
+    } else {
+        Err(format!("服务异常: {}", resp.status()))
+    }
+}
+
 fn auth_header() -> Option<String> {
     let token = AuthState::access_token();
     if token.is_empty() {
