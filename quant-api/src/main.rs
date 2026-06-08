@@ -8,11 +8,13 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, info_span, Span};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod auth;
 mod routes;
 
 pub struct AppState {
@@ -444,6 +446,10 @@ async fn main() {
             "/api/v1/quant/paper/historical-replay",
             post(routes::paper::historical_replay),
         )
+        .route(
+            "/api/v1/quant/paper/notify",
+            post(routes::paper::send_dingtalk_notification),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",
@@ -505,6 +511,35 @@ async fn main() {
             "/api/v1/quant/optimizations/{optimization_task_id}/trials/{trial_id}/robustness-gates",
             post(routes::optimization::evaluate_optimization_trial_robustness),
         )
+        // ── 认证 ──
+        .route("/api/v1/auth/login", post(routes::users::login))
+        .route("/api/v1/auth/refresh", post(routes::users::refresh))
+        .route("/api/v1/auth/logout", post(routes::users::logout))
+        .route("/api/v1/users/me", get(routes::users::get_me))
+        .route("/api/v1/users/me/password", axum::routing::put(routes::users::change_password))
+        // ── 管理 ──
+        .route("/api/v1/admin/users", get(routes::admin::list_users))
+        .route("/api/v1/admin/users", post(routes::admin::create_user))
+        .route("/api/v1/admin/users/{id}", axum::routing::put(routes::admin::update_user))
+        .route("/api/v1/admin/users/{id}", axum::routing::delete(routes::admin::delete_user))
+        .route("/api/v1/admin/users/{id}/password", axum::routing::put(routes::admin::reset_user_password))
+        .route("/api/v1/admin/tasks", get(routes::admin::list_tasks))
+        .route("/api/v1/admin/tasks/{name}", axum::routing::put(routes::admin::update_task))
+        .route("/api/v1/admin/tasks/{name}/run", post(routes::admin::run_task))
+        .route("/api/v1/admin/sync/status", get(routes::admin::sync_status))
+        // ── 策略 ──
+        .route("/api/v1/strategies", get(routes::strategies::list_strategies))
+        .route("/api/v1/strategies", post(routes::strategies::create_strategy))
+        .route("/api/v1/strategies/{id}", get(routes::strategies::get_strategy))
+        .route("/api/v1/strategies/{id}", axum::routing::put(routes::strategies::update_strategy))
+        .route("/api/v1/strategies/{id}", axum::routing::delete(routes::strategies::delete_strategy))
+        // ── 账号 ──
+        .route("/api/v1/accounts", get(routes::accounts::list_accounts))
+        .route("/api/v1/accounts", post(routes::accounts::create_account))
+        .route("/api/v1/accounts/{id}", get(routes::accounts::account_detail))
+        .route("/api/v1/accounts/{id}", axum::routing::put(routes::accounts::update_account))
+        .route("/api/v1/accounts/{id}", axum::routing::delete(routes::accounts::delete_account))
+        .layer(CorsLayer::permissive())
         .layer(trace_layer);
 
     // 提取 db 用于后台调度器 (必须在 with_state 之前, 因为 state 会被 move)

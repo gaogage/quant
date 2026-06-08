@@ -1707,6 +1707,20 @@ async fn push_position_to_dingtalk(
     }))
 }
 
+// ── 钉钉推送 ──────────────────────────────────────────────
+
+/// POST /api/v1/quant/paper/notify
+/// 手动触发钉钉推送持仓摘要（当天日期）。
+pub async fn send_dingtalk_notification(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let today = chrono::Local::now().date_naive();
+    match crate::routes::scheduler::push_dingtalk_for_all_accounts_public(&state.db, today).await {
+        Ok(_) => Json(json!({"code": 0, "message": "钉钉推送成功"})),
+        Err(e) => Json(json!({"code": 1, "message": format!("推送失败: {}", e)})),
+    }
+}
+
 // ─── helpers ───
 
 fn normalize_order_request(req: SubmitPaperOrderRequest) -> Result<NormalizedOrderRequest, String> {

@@ -221,13 +221,10 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
         }
     }
 
-    // 非交易日跳过
-    if !is_trading_day(db, today).await? {
-        return Ok(());
-    }
+    let is_trade = is_trading_day(db, today).await?;
 
-    // ── 14:40~15:00 (收盘前): 用当日行情调仓 + 立即推送钉钉 (每日一次) ──
-    if hour == 14 && minute >= 40 {
+    // ── 14:40~15:00 (收盘前): 交易日才调仓 ──
+    if is_trade && hour == 14 && minute >= 40 {
         let should_trade = {
             let st = state.lock().await;
             !st.traded_today
@@ -239,8 +236,23 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
                 st.traded_today = true;
             }
             info!("[scheduler] 14:45 日频调仓 (v16 LW-MVO 7-asset)...");
-            // 先同步当日行情数据
-            sync_daily_data_for_today(db, tushare, today, sc).await?;
+
+            // ── 前置数据校验+自动修复 ──
+            let data_errors = validate_pre_trade_data(db, tushare, today, sc).await;
+            if !data_errors.is_empty() {
+                let alert_msg = format!(
+                    "⛔ [调仓拒绝] {} 数据异常，已尝试自动修复失败:\n{}",
+                    today.format("%Y-%m-%d"),
+                    data_errors.join("\n")
+                );
+                error!("{}", alert_msg);
+                send_dingtalk_alert(db, &alert_msg).await;
+                // 将 traded_today 重置，下次 tick 可以重试
+                let mut st = state.lock().await;
+                st.traded_today = false;
+                return Ok(());
+            }
+
             // 生成信号 + 调仓
             match generate_paper_signals_for_all(db, mvo_cache, port, today, sc).await {
                 Ok(_) => {
@@ -255,7 +267,7 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
         }
     }
 
-    // ── 16:00 (收盘后): 同步日终行情数据到历史表 ──
+    // ── 16:00 (收盘后): 交易日EOD + 非交易日也执行数据同步 ──
     if hour >= 16 {
         let should_sync = {
             let st = state.lock().await;
@@ -274,7 +286,8 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
         }
     }
 
-    // ── 次日 9:00: 同步昨日日线 (Tushare T+1) + 因子重算 ──
+    // ── 每日 9:00: 同步上一个交易日日线 (Tushare T+1) + 因子重算 ──
+    // 非交易日同样执行，周末/假日后自动回补缺失数据
     if hour == 9 && minute < 5 {
         let should_sync_yesterday = {
             let st = state.lock().await;
@@ -285,19 +298,26 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
                 let mut st = state.lock().await;
                 st.yesterday_synced = true;
             }
-            let yesterday = today - chrono::Duration::days(1);
-            let yesterday_str = yesterday.format("%Y%m%d").to_string();
-            info!("[scheduler] 9:00 T+1 补同步昨日日线 {} + 因子重算...", yesterday_str);
+            // 查询最近一个交易日（处理假期/周末间隔）
+            let last_trade_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+                "SELECT trade_date FROM market_trade_calendar WHERE is_open = true AND trade_date < $1 ORDER BY trade_date DESC LIMIT 1"
+            ).bind(today).fetch_optional(db).await.ok().flatten();
+            let sync_date = match last_trade_date {
+                Some((d,)) => d,
+                None => today - chrono::Duration::days(1),
+            };
+            let sync_date_str = sync_date.format("%Y%m%d").to_string();
+            info!("[scheduler] 9:00 T+1 补同步最近交易日 {} 日线 + 因子重算...", sync_date_str);
             let empty: Vec<String> = vec![];
 
-            // Step 1: 同步昨日日线 + ETF日线 (T+1数据)
-            let bar_dv = format!("dv-t1-{}", yesterday_str);
-            match quant_data::sync::sync_daily_bars(db, tushare, &empty, &yesterday_str, &yesterday_str, &bar_dv).await {
+            // Step 1: 同步最近交易日日线 + ETF日线 (T+1数据已就绪)
+            let bar_dv = format!("dv-t1-{}", sync_date_str);
+            match quant_data::sync::sync_daily_bars(db, tushare, &empty, &sync_date_str, &sync_date_str, &bar_dv).await {
                 Ok(n) => info!("[scheduler] T+1 A股日线同步: {} 条", n),
                 Err(e) => warn!("[scheduler] T+1 A股日线同步失败: {}", e),
             }
             let etf_symbols = &sc.etf_symbols;
-            let _ = quant_data::sync::sync_fund_daily(db, tushare, etf_symbols, &yesterday_str, &yesterday_str, &format!("etf-t1-{}", yesterday_str)).await;
+            let _ = quant_data::sync::sync_fund_daily(db, tushare, etf_symbols, &sync_date_str, &sync_date_str, &format!("etf-t1-{}", sync_date_str)).await;
 
             // Step 2: 验证日线数据已就绪 (实际查询DB确认, 非盲等)
             let mut retries = 0;
@@ -305,7 +325,7 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
             loop {
                 let count: (i64,) = sqlx::query_as(
                     "SELECT COUNT(*) FROM market_stock_daily_bar_adj WHERE trade_date = $1"
-                ).bind(yesterday).fetch_one(db).await.unwrap_or((0,));
+                ).bind(sync_date).fetch_one(db).await.unwrap_or((0,));
                 if count.0 > 100 {
                     info!("[scheduler] T+1 日线数据已就绪: {} 条 (等待{}s)", count.0, retries * 10);
                     break;
@@ -322,15 +342,15 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
             if retries < max_retries {
                 info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
                 let client = reqwest::Client::new();
-                let backfill_start = (yesterday - chrono::Duration::days(7)).format("%Y%m%d").to_string();
+                let backfill_start = (sync_date - chrono::Duration::days(7)).format("%Y%m%d").to_string();
                 let _ = client
                     .post("http://localhost:8080/api/v1/quant/factors/phase7-price-volume-backfill/background")
-                    .json(&serde_json::json!({"start_date": backfill_start, "end_date": yesterday_str}))
+                    .json(&serde_json::json!({"start_date": backfill_start, "end_date": sync_date_str}))
                     .timeout(std::time::Duration::from_secs(10))
                     .send().await;
             }
 
-            info!("[scheduler] T+1 补同步完成 ({})", yesterday_str);
+            info!("[scheduler] T+1 补同步完成 ({})", sync_date_str);
         }
     }
 
@@ -576,6 +596,117 @@ async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
     Ok(())
 }
 
+/// 调仓前数据校验+自动修复。返回非空列表 = 校验/修复失败，拒绝调仓。
+async fn validate_pre_trade_data(
+    db: &PgPool, tushare: &TushareClient, today: NaiveDate, sc: &StrategyConfig,
+) -> Vec<String> {
+    let mut errors: Vec<String> = Vec::new();
+    let today_str = today.format("%Y%m%d").to_string();
+    let empty: Vec<String> = vec![];
+
+    // 1. ETF 日线 — 每个标的必须覆盖到最近一个交易日
+    for symbol in &sc.etf_symbols {
+        let stale = check_data_freshness(db, symbol, today, 1).await;
+        if let Some(gap_td) = stale {
+            info!("[pre-trade] {} 数据落后{}交易日, 尝试自动同步...", symbol, gap_td);
+            let dv_id = format!("pre-trade-etf-{}-{}", symbol, today_str);
+            let n = quant_data::sync::sync_fund_daily(db, tushare, &[symbol.clone()], &today_str, &today_str, &dv_id).await.unwrap_or(0);
+            if n > 0 {
+                info!("[pre-trade] {} 同步: {} 条", symbol, n);
+            } else {
+                let week_ago = (today - chrono::Duration::days(7)).format("%Y%m%d").to_string();
+                let dv2 = format!("pre-trade-etf-wk-{}-{}", symbol, today_str);
+                let n2 = quant_data::sync::sync_fund_daily(db, tushare, &[symbol.clone()], &week_ago, &today_str, &dv2).await.unwrap_or(0);
+                if n2 > 0 {
+                    info!("[pre-trade] {} 周回补: {} 条", symbol, n2);
+                } else {
+                    errors.push(format!("ETF {}: 数据落后{}交易日, 自动同步失败", symbol, gap_td));
+                }
+            }
+        }
+    }
+
+    // 2. A股日线 — 抽查沪深主板
+    for probe in &["000001.SZ", "600000.SH"] {
+        let stale = check_data_freshness(db, probe, today, 1).await;
+        if let Some(gap_td) = stale {
+            info!("[pre-trade] A股({})落后{}交易日, 自动同步...", probe, gap_td);
+            let dv_id = format!("pre-trade-stock-{}", today_str);
+            match quant_data::sync::sync_daily_bars(db, tushare, &empty, &today_str, &today_str, &dv_id).await {
+                Ok(n) if n > 0 => {
+                    info!("[pre-trade] A股日线同步: {} 条", n);
+                    break; // 成功一个就够
+                }
+                _ => errors.push(format!("A股日线({}): 数据落后, 自动同步失败", probe)),
+            }
+        }
+    }
+
+    // 3. 因子数据 — 缺了自动触发回填计算
+    let factor_combo = "phase7_price_volume_expanded_v1";
+    if let Some(gap_td) = check_factor_freshness(db, factor_combo, today, 2).await {
+        info!("[pre-trade] 因子({})落后{}交易日, 自动触发回填...", factor_combo, gap_td);
+        let client = reqwest::Client::new();
+        let backfill_start = (today - chrono::Duration::days(30)).format("%Y%m%d").to_string();
+        let today_str_clone = today_str.clone();
+        let trigger_ok = client
+            .post("http://localhost:8080/api/v1/quant/factors/phase7-price-volume-backfill/background")
+            .json(&serde_json::json!({"start_date": backfill_start, "end_date": today_str_clone}))
+            .timeout(std::time::Duration::from_secs(10))
+            .send().await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if trigger_ok {
+            // 轮询等待因子计算完成
+            for retry in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if check_factor_freshness(db, factor_combo, today, 2).await.is_none() {
+                    info!("[pre-trade] 因子回填完成 (等待{}s)", (retry+1)*3);
+                    break;
+                }
+            }
+            // 再次检查
+            if let Some(g) = check_factor_freshness(db, factor_combo, today, 2).await {
+                errors.push(format!("因子({}): 自动回填后仍落后{}交易日, 请检查底层数据", factor_combo, g));
+            }
+        } else {
+            errors.push(format!("因子({}): 自动回填触发失败", factor_combo));
+        }
+    }
+
+    errors
+}
+
+/// 检查单个 symbol 的数据新鲜度。返回 Some(落后交易日数) 表示需要同步。
+async fn check_data_freshness(db: &PgPool, symbol: &str, today: NaiveDate, max_gap: i64) -> Option<i64> {
+    let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = $1"
+    ).bind(symbol).fetch_optional(db).await.ok().flatten();
+    if let Some((max_dt,)) = max_row {
+        let gap: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+        ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((999,));
+        if gap.0 > max_gap { Some(gap.0) } else { None }
+    } else {
+        Some(999) // 完全无数据
+    }
+}
+
+/// 检查因子数据新鲜度
+async fn check_factor_freshness(db: &PgPool, combo: &str, today: NaiveDate, max_gap: i64) -> Option<i64> {
+    let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name = $1"
+    ).bind(combo).fetch_optional(db).await.ok().flatten();
+    if let Some((max_dt,)) = max_row {
+        let gap: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+        ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((999,));
+        if gap.0 > max_gap { Some(gap.0) } else { None }
+    } else {
+        None // 因子表为空不阻止调仓（可能是首次运行）
+    }
+}
+
 async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
     let row = sqlx::query_as::<_, (Option<bool>,)>(
         "SELECT is_open FROM market_trade_calendar WHERE trade_date = $1 LIMIT 1",
@@ -615,13 +746,18 @@ async fn sync_eod_data(db: &PgPool, tushare: &TushareClient, date: NaiveDate) ->
     let date_str = date.format("%Y%m%d").to_string();
     let empty: Vec<String> = vec![];
 
-    // 日线基础指标 (Tushare T+1, 尝试同步)
+    // ── 当日日线 + ETF日线（收盘后通常已可获取）──
+    let sc = load_strategy_config(db, "v19").await;
+    let _ = quant_data::sync::sync_daily_bars(db, tushare, &empty, &date_str, &date_str, &format!("dv-eod-{}", date_str)).await;
+    let _ = quant_data::sync::sync_fund_daily(db, tushare, &sc.etf_symbols, &date_str, &date_str, &format!("etf-eod-{}", date_str)).await;
+
+    // 日线基础指标
     let _ = quant_data::sync::sync_daily_basic(db, tushare, &empty, &date_str, &date_str, &format!("dv-basic-eod-{}", date_str)).await;
 
-    // 复权因子 (直接调用)
+    // 复权因子
     let _ = quant_data::sync::sync_adj_factor(db, tushare, &empty, &date_str, &date_str, &format!("dv-adj-eod-{}", date_str)).await;
 
-    info!("[scheduler] 16:00 EOD 同步 (日线/因子由次日9:00 T+1补同步) ({})", date_str);
+    info!("[scheduler] 16:00 EOD 同步 (当日日线+ETF+基础指标+复权) ({})", date_str);
 
     // ── 涨跌停数据同步 ──
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -645,59 +781,65 @@ async fn sync_eod_data(db: &PgPool, tushare: &TushareClient, date: NaiveDate) ->
 
 /// 数据完整性检查: 从配置的起始日期到今天, 检查所有核心表是否有缺口
 async fn run_data_quality_check(db: &PgPool) {
-    let start_date = sqlx::query_as::<_, (String,)>(
-        "SELECT config_value FROM data_quality_config WHERE config_key = 'data_start_date'"
-    )
-    .fetch_optional(db).await
-    .ok().flatten()
-    .map(|(v,)| v)
-    .unwrap_or_else(|| "2006-01-01".to_string());
-
     let today = chrono::Utc::now().date_naive();
 
-    // 检查各表最后数据日期
-    // 复权因子Tushare更新频率低(~月更), 使用30天阈值; 其他表使用2天阈值
-    let checks: Vec<(&str, &str, Option<&str>, i64)> = vec![
-        ("A股日线", "market_stock_daily_bar d",
-         Some("d.symbol NOT IN (SELECT symbol FROM market_stock_suspension WHERE trade_date = d.trade_date AND suspend_type = 'S')"), 2), // Tushare T+1, 允许1天gap
-        ("复权因子", "market_adjustment_factor", None, 30), // Tushare月更, 30天阈值
-        ("日线基础", "market_stock_daily_basic", None, 2),
-        ("因子(pv)", "multi_factor_value",
-         Some("combo_name = 'phase7_price_volume_expanded_v1'"), 2),
-        ("CSI300指数", "market_index_daily_bar",
-         Some("symbol = '000300.SH'"), 2),
-        ("ML预测", "model_prediction",
-         None, 5),  // 不限制特定prediction_set, 检查全表最新日期
-        // 涨跌停: Tushare免费版限流1次/分钟, 数据积累缓慢, 阈值设高避免频繁告警
-        ("涨跌停", "market_stock_limit", None, 90),
-        ("权益曲线", "backtest_equity_curve",
-         Some("task_id = 'fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e'"), 60), // 全量回测生成的静态数据, 60天阈值
-    ];
-
+    // 计算 A 股日线的交易日 gap
     let mut gaps: Vec<String> = Vec::new();
-    for (name, table, exclude_filter, max_gap) in &checks {
-        let where_sql = exclude_filter.unwrap_or("TRUE");
-        let sql = format!(
-            "SELECT MAX(trade_date)::text FROM {} WHERE {}", table, where_sql
-        );
-        let max_date: Option<(String,)> = sqlx::query_as(&sql).fetch_optional(db).await.ok().flatten();
+    let stock_max: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol LIKE '6%'"
+    ).fetch_optional(db).await.ok().flatten();
+    if let Some((max_dt,)) = stock_max {
+        let trading_days_behind: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+        ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
+        if trading_days_behind.0 > 1 {
+            gaps.push(format!("A股日线: 最新={}, 落后{}个交易日", max_dt, trading_days_behind.0));
+        }
+    }
 
-        if let Some((max_d,)) = max_date {
+    // 检查 ETF 日线（按策略配置的 ETF 列表逐个查）
+    let etf_symbols: Vec<String> = sqlx::query_as::<_, (serde_json::Value,)>(
+        "SELECT etf_symbols FROM strategy_config WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1"
+    ).fetch_optional(db).await.ok().flatten()
+        .and_then(|(v,)| serde_json::from_value::<Vec<String>>(v).ok())
+        .unwrap_or_default();
+
+    if !etf_symbols.is_empty() {
+        for symbol in &etf_symbols {
+            let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+                "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = $1"
+            ).bind(symbol).fetch_optional(db).await.ok().flatten();
+            if let Some((max_dt,)) = max_row {
+                let trading_gap: (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+                ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
+                if trading_gap.0 > 1 { // ETF T+1，允许落后1个交易日
+                    gaps.push(format!("ETF {}: 最新={}, 落后{}个交易日", symbol, max_dt, trading_gap.0));
+                }
+            } else {
+                gaps.push(format!("ETF {}: 无数据", symbol));
+            }
+        }
+    }
+
+    // 其他检查项
+    let other_checks: Vec<(&str, &str, i64)> = vec![
+        ("复权因子", "market_adjustment_factor", 30),
+        ("ML预测", "model_prediction", 5),
+    ];
+    for (name, table, max_calendar_gap) in &other_checks {
+        let max_row: Option<(String,)> = sqlx::query_as(
+            &format!("SELECT MAX(trade_date)::text FROM {}", table)
+        ).fetch_optional(db).await.ok().flatten();
+        if let Some((max_d,)) = max_row {
             if let (Ok(max_dt), Ok(today_dt)) = (
                 NaiveDate::parse_from_str(&max_d, "%Y-%m-%d"),
                 NaiveDate::parse_from_str(&today.format("%Y-%m-%d").to_string(), "%Y-%m-%d")
             ) {
-                let gap_days = (today_dt - max_dt).num_days();
-                if gap_days > *max_gap {
-                    gaps.push(format!("{}: 最新={}, 缺口={}天 (阈值{}天)", name, max_d, gap_days, max_gap));
+                let gap = (today_dt - max_dt).num_days();
+                if gap > *max_calendar_gap {
+                    gaps.push(format!("{}: 最新={}, 缺口={}天", name, max_d, gap));
                 }
-            }
-        } else {
-            // 低优先级数据源(涨跌停等)无数据仅warn, 不触发告警
-            if *max_gap >= 30 {
-                warn!("[数据质量] {}: 无数据 (低优先级, 不告警)", name);
-            } else {
-                gaps.push(format!("{}: 无数据", name));
             }
         }
     }
@@ -705,18 +847,14 @@ async fn run_data_quality_check(db: &PgPool) {
     if !gaps.is_empty() {
         let msg = format!("[数据质量] 发现 {} 个缺口:\n{}", gaps.len(), gaps.join("\n"));
         warn!("{}", msg);
-        // 钉钉报告
         send_quality_alert(db, &gaps).await;
     } else {
-        info!("[数据质量] 全部数据完整 ({} → {})", start_date, today);
+        info!("[数据质量] 全部数据完整, 检查日期={}", today);
     }
 
-    // 更新最后检查时间
     let _ = sqlx::query(
         "INSERT INTO data_quality_config (config_key, config_value, description) VALUES ('last_quality_check', $1, '最后质量检查日期') ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = NOW()"
-    )
-    .bind(today.format("%Y-%m-%d").to_string())
-    .execute(db).await;
+    ).bind(today.format("%Y-%m-%d").to_string()).execute(db).await;
 }
 
 /// 涨跌停数据同步 (直接调用, 带重试)
@@ -1124,12 +1262,16 @@ async fn sync_positions_from_backtest(
          ORDER BY market_value DESC",
     ).bind(task_id).fetch_all(db).await.map_err(|e| format!("pos: {}", e))?;
 
-    if positions.is_empty() { return Ok(0); }
-
-    // Get initial capital
-    let (initial_cap,): (rust_decimal::Decimal,) = sqlx::query_as(
-        "SELECT initial_capital FROM paper_account WHERE paper_account_id = $1"
+    // Get initial capital (use cash as base if NAV not computed yet)
+    let (initial_cap, cash_on_hand): (rust_decimal::Decimal, rust_decimal::Decimal) = sqlx::query_as(
+        "SELECT initial_capital, cash FROM paper_account WHERE paper_account_id = $1"
     ).bind(account_id).fetch_one(db).await.map_err(|e| format!("cap: {}", e))?;
+
+    let capital = if cash_on_hand > rust_decimal::Decimal::ZERO { cash_on_hand } else { initial_cap };
+
+    if positions.is_empty() {
+        info!("[paper] A股选股结果为空，仍执行 ETF 仓位分配 cap={}", capital);
+    }
 
     // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
     let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, sc).await;
@@ -1150,7 +1292,7 @@ async fn sync_positions_from_backtest(
         info!("[Regime] 降仓至 {:.0}%, 现金 {:.0}%", regime_exposure * 100.0, cash_pct * 100.0);
     }
 
-    let a_share_capital = initial_cap * rust_decimal::Decimal::from_f64_retain(mvo_a_pct).unwrap_or(rust_decimal::Decimal::from_f64_retain(0.25).unwrap());
+    let a_share_capital = capital * rust_decimal::Decimal::from_f64_retain(mvo_a_pct).unwrap_or(rust_decimal::Decimal::from_f64_retain(0.25).unwrap());
     let total_stock_mv: rust_decimal::Decimal = positions.iter()
         .filter_map(|(_, _, mv)| *mv)
         .sum();
@@ -1180,8 +1322,9 @@ async fn sync_positions_from_backtest(
     for (symbol, qty, mkt_val) in &positions {
         let q = qty.unwrap_or(rust_decimal::Decimal::ZERO);
         let m = mkt_val.unwrap_or(rust_decimal::Decimal::ZERO);
-        if q <= rust_decimal::Decimal::ZERO { continue; }
+        if q <= rust_decimal::Decimal::ZERO || m <= rust_decimal::Decimal::ZERO { continue; }
         let price = if q > rust_decimal::Decimal::ZERO { m / q } else { rust_decimal::Decimal::ZERO };
+        if price <= rust_decimal::Decimal::ZERO { continue; }
         let scaled_q = q * scale;
         let scaled_m = m * scale;
 
@@ -1214,7 +1357,7 @@ async fn sync_positions_from_backtest(
 
     for (etf_symbol, _etf_name, alloc_pct) in &etf_allocations {
         if *alloc_pct <= 0.0 { continue; }
-        let alloc_amount = initial_cap * rust_decimal::Decimal::from_f64_retain(*alloc_pct).unwrap_or(rust_decimal::Decimal::ZERO);
+        let alloc_amount = capital * rust_decimal::Decimal::from_f64_retain(*alloc_pct).unwrap_or(rust_decimal::Decimal::ZERO);
         if alloc_amount <= rust_decimal::Decimal::ZERO { continue; }
 
         // Get latest ETF price
@@ -1693,6 +1836,11 @@ fn daily_to_monthly_returns(rows: &[(NaiveDate, rust_decimal::Decimal)]) -> Vec<
     monthly
 }
 
+/// Public wrapper，供 API 端点调用。
+pub async fn push_dingtalk_for_all_accounts_public(db: &PgPool, date: NaiveDate) -> Result<(), String> {
+    push_dingtalk_for_all_accounts(db, date).await
+}
+
 /// 收盘后推送钉钉持仓摘要（所有活跃模拟账号）。
 async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<(), String> {
     use super::dingtalk;
@@ -1738,48 +1886,39 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
             }))}
         }).collect();
 
-        // MVO 资产大类分布：ETF 单独列出，A 股汇总
+        // 资产大类分布：ETF 按品种单独列出，A 股汇总
         let class_rows = sqlx::query_as::<_, (String, Option<f64>)>(
             "SELECT CASE
                       WHEN pp.symbol = '518880.SH' THEN '黄金ETF'
                       WHEN pp.symbol = '511010.SH' THEN '国债ETF'
                       WHEN pp.symbol = '513500.SH' THEN '美股标普ETF'
                       WHEN pp.symbol = '513100.SH' THEN '美股纳指ETF'
-                      ELSE 'A股' END,
-                    SUM(pp.quantity * COALESCE(pp.market_price, pp.avg_cost))::double precision
+                      WHEN pp.symbol = '159980.SZ' THEN '有色ETF'
+                      WHEN pp.symbol = '159985.SZ' THEN '豆粕ETF'
+                      WHEN pp.symbol = '501018.SH' THEN '原油LOF'
+                      WHEN pp.symbol = '511880.SH' THEN '货币基金'
+                      ELSE 'A股' END AS asset_class,
+                    SUM(pp.quantity * COALESCE(pp.market_price, pp.avg_cost))::double precision AS mv
              FROM paper_position pp
              WHERE pp.paper_account_id=$1 AND pp.quantity>0
              GROUP BY 1
              ORDER BY SUM(2) DESC",
         ).bind(id).fetch_all(db).await.unwrap_or_default();
 
-        // A股内部板块细分
-        let a_sub_rows = sqlx::query_as::<_, (String, Option<f64>)>(
-            "SELECT CONCAT('  A股-', COALESCE(NULLIF(ms.market,''), NULLIF(ms.exchange,''), '其他')),
-                    SUM(pp.quantity * COALESCE(pp.market_price, pp.avg_cost))::double precision
-             FROM paper_position pp
-             LEFT JOIN market_stock ms ON ms.symbol = pp.symbol
-             WHERE pp.paper_account_id=$1 AND pp.quantity>0
-               AND pp.symbol NOT IN ('518880.SH','511010.SH','513500.SH','513100.SH')
-             GROUP BY 1 ORDER BY SUM(2) DESC",
-        ).bind(id).fetch_all(db).await.unwrap_or_default();
-
-        let total_mv: f64 = class_rows.iter().filter_map(|(_, v)| *v).sum();
-        let mut class_breakdown: Vec<Value> = class_rows.iter().map(|(cls, v)| {
-            let val = v.unwrap_or(0.0);
-            let pct = if total_mv > 0.0 { val / total_mv * 100.0 } else { 0.0 };
-            json!({"class": cls, "market_value": val, "weight_pct": (pct*100.0).round()/100.0})
-        }).collect();
-        // Append A-share sub-breakdown
-        for (cls, v) in &a_sub_rows {
-            let val = v.unwrap_or(0.0);
-            let pct = if total_mv > 0.0 { val / total_mv * 100.0 } else { 0.0 };
-            class_breakdown.push(json!({"class": cls, "market_value": val, "weight_pct": (pct*100.0).round()/100.0}));
-        }
-
         let total_nav = nav.unwrap_or(0.0);
         let mv: f64 = positions.iter().filter_map(|p| p.get("market_value").and_then(|v| v.as_f64())).sum();
         let cash = total_nav - mv;
+
+        let mut class_breakdown: Vec<Value> = class_rows.iter().map(|(cls, v)| {
+            let val = v.unwrap_or(0.0);
+            let pct = if total_nav > 0.0 { val / total_nav * 100.0 } else { 0.0 };
+            json!({"class": cls, "market_value": val, "weight_pct": (pct*100.0).round()/100.0})
+        }).collect();
+        // 现金单独列出
+        if cash > 1.0 {
+            let cash_pct = if total_nav > 0.0 { cash / total_nav * 100.0 } else { 0.0 };
+            class_breakdown.push(json!({"class": "现金", "market_value": cash, "weight_pct": (cash_pct*100.0).round()/100.0}));
+        }
         let init_row = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
             "SELECT initial_capital::double precision, max_drawdown_pct::double precision FROM paper_account WHERE paper_account_id=$1"
         ).bind(id).fetch_optional(db).await.map_err(|e| format!("init: {}", e))?.unwrap_or((Some(total_nav), Some(0.0)));

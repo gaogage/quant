@@ -20,6 +20,7 @@ use sqlx::Row;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::auth::middleware::UserContext;
 use crate::AppState;
 
 // ── 请求体 ──────────────────────────────────────────────
@@ -82,7 +83,7 @@ struct TableSize {
 // ── 数据统计 ────────────────────────────────────────────
 
 /// GET /api/v1/quant/data/cleanup/stats
-pub async fn cleanup_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn cleanup_stats(State(state): State<Arc<AppState>>, _user: UserContext) -> impl IntoResponse {
     match get_cleanup_stats(&state.db).await {
         Ok(stats) => Json(json!({"code": 0, "data": stats})),
         Err(e) => Json(json!({"code": 1, "message": e})),
@@ -232,6 +233,7 @@ pub fn format_bytes(bytes: i64) -> String {
 /// POST /api/v1/quant/data/cleanup/preview
 pub async fn cleanup_preview(
     State(state): State<Arc<AppState>>,
+    _user: UserContext,
     Json(req): Json<CleanupRequest>,
 ) -> impl IntoResponse {
     match preview_cleanup(&state.db, &req).await {
@@ -354,6 +356,7 @@ async fn preview_cleanup(db: &sqlx::PgPool, req: &CleanupRequest) -> Result<Valu
 /// POST /api/v1/quant/data/cleanup
 pub async fn execute_cleanup(
     State(state): State<Arc<AppState>>,
+    _user: UserContext,
     Json(req): Json<CleanupRequest>,
 ) -> impl IntoResponse {
     match run_cleanup(&state.db, &req).await {
@@ -847,6 +850,7 @@ pub async fn clean_expired_backtests(db: &sqlx::PgPool) -> Result<(i64, i64), St
 /// POST /api/v1/quant/data/cleanup/backtest-tasks/{task_id}/keep
 pub async fn mark_backtest_kept(
     State(state): State<Arc<AppState>>,
+    _user: UserContext,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(req): Json<MarkKeepRequest>,
 ) -> impl IntoResponse {
@@ -875,7 +879,7 @@ pub async fn mark_backtest_kept(
 
 /// GET /api/v1/quant/data/cleanup/expired-stats
 /// 查看有多少过期回测任务可被清理
-pub async fn expired_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn expired_stats(State(state): State<Arc<AppState>>, _user: UserContext) -> impl IntoResponse {
     match get_expired_stats(&state.db).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(e) => Json(json!({"code": 1, "message": e})),

@@ -1,0 +1,18 @@
+[package]
+name = "quant-ui"
+version = "0.1.0"
+edition = "2021"
+
+# 独立 package，不属于父级 workspace（避免 WASM 与 native 依赖冲突）
+[workspace]
+
+[dependencies]
+dioxus = { version = "0.6", features = ["web", "router"] }
+dioxus-router = "0.6"
+gloo-net = "0.6"
+gloo-storage = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+wasm-bindgen-futures = "0.4"
