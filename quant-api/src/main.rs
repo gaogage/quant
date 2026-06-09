@@ -527,6 +527,7 @@ async fn main() {
         .route("/api/v1/admin/tasks/{name}", axum::routing::put(routes::admin::update_task))
         .route("/api/v1/admin/tasks/{name}/run", post(routes::admin::run_task))
         .route("/api/v1/admin/sync/status", get(routes::admin::sync_status))
+        .route("/api/v1/admin/sync/repair", post(routes::admin::repair_sync))
         // ── 策略 ──
         .route("/api/v1/strategies", get(routes::strategies::list_strategies))
         .route("/api/v1/strategies", post(routes::strategies::create_strategy))

@@ -276,6 +276,11 @@ pub async fn admin_sync_status() -> Result<Value, String> {
     get("/api/v1/admin/sync/status").await
 }
 
+/// 根据数据源名称触发对应的修复同步（调用后端统一修复端点）
+pub async fn admin_repair_data(name: &str) -> Result<Value, String> {
+    post("/api/v1/admin/sync/repair", &serde_json::json!({"name": name})).await
+}
+
 pub async fn trigger_dingtalk_notify() -> Result<Value, String> {
     post("/api/v1/quant/paper/notify", &serde_json::json!({})).await
 }

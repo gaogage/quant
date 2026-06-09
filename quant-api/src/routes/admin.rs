@@ -279,3 +279,115 @@ pub async fn sync_status(
 
     Json(serde_json::json!({"code": 0, "data": results})).into_response()
 }
+
+// ── Data Repair ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RepairRequest {
+    pub name: String,
+}
+
+/// POST /api/v1/admin/sync/repair — repair a specific data source
+pub async fn repair_sync(
+    State(state): State<Arc<AppState>>,
+    admin: UserContext,
+    Json(req): Json<RepairRequest>,
+) -> axum::response::Response {
+    if let Err(e) = require_admin(&admin) { return e; }
+
+    let dv_id = uuid::Uuid::new_v4().simple().to_string();
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    let recent_start = (chrono::Utc::now() - chrono::Duration::days(30)).format("%Y%m%d").to_string();
+
+    let result: Json<serde_json::Value> = match req.name.as_str() {
+        "A股日线" => {
+            let symbols: Vec<String> = sqlx::query_scalar(
+                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
+            ).fetch_all(&state.db).await.unwrap_or_default();
+            match quant_data::sync::sync_daily_bars(&state.db, &state.tushare, &symbols, &recent_start, &today, &dv_id).await {
+                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
+            }
+        }
+        "ETF日线(原油)" => {
+            let symbols = vec!["501018.SH".to_string()];
+            match quant_data::sync::sync_fund_daily(&state.db, &state.tushare, &symbols, &recent_start, &today, &dv_id).await {
+                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
+            }
+        }
+        "停牌" => {
+            match quant_data::sync::sync_suspension(&state.db, &state.tushare, &today).await {
+                Ok(count) => Json(serde_json::json!({"code": 0, "message": format!("同步 {} 条", count)})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": e})),
+            }
+        }
+        "复权因子" => {
+            let symbols: Vec<String> = sqlx::query_scalar(
+                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
+            ).fetch_all(&state.db).await.unwrap_or_default();
+            match quant_data::sync::sync_adj_factor(&state.db, &state.tushare, &symbols, &recent_start, &today, &dv_id).await {
+                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
+            }
+        }
+        "涨跌停" => {
+            match quant_data::sync::sync_limit_list(&state.db, &state.tushare, &today).await {
+                Ok(count) => Json(serde_json::json!({"code": 0, "message": format!("同步 {} 条", count)})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": e})),
+            }
+        }
+        "CSI300" => {
+            let codes = vec!["000300.SH".to_string()];
+            match quant_data::sync::sync_index_daily(&state.db, &state.tushare, &codes, &recent_start, &today, &dv_id).await {
+                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
+            }
+        }
+        "因子(pv)" => {
+            // 直接调用因子回填端点（与 scheduler T+1 同步一致）
+            let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+            let url = format!("http://localhost:{}/api/v1/quant/factors/phase7-price-volume-backfill/background", port);
+            let backfill_start = (chrono::Utc::now() - chrono::Duration::days(7)).format("%Y%m%d").to_string();
+            let payload = serde_json::json!({"start_date": backfill_start, "end_date": today});
+            match reqwest::Client::new().post(&url).json(&payload).send().await {
+                Ok(_) => Json(serde_json::json!({"code": 0, "message": "因子回填任务已触发，请等待1-2分钟后刷新状态"})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)})),
+            }
+        }
+        "ML预测" => {
+            let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+            let url = format!("http://localhost:{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", port);
+            let pred_date = chrono::Utc::now().date_naive();
+            let payload = serde_json::json!({
+                "model_code": "nlqr_mr", "model_version": "1.0.0",
+                "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
+                "data_version_id": "research-full-2016-2026-20260515",
+                "feature_set_version_id": "phase7-wide-qgvrel-v1",
+                "training_dataset_id": "phase7-wf-wide-qgvrel-h60-v1",
+                "prediction_start_date": pred_date.format("%Y%m%d").to_string(),
+                "prediction_end_date": (pred_date + chrono::Duration::days(63)).format("%Y%m%d").to_string(),
+                "train_lookback_days": 756, "prediction_step_days": 63,
+                "label_horizon_days": 20, "min_training_samples": 200,
+                "max_windows": 20, "bucket_count": 10, "min_samples_per_bucket": 100,
+                "factors": [
+                    {"factor_code": "rev_5d_std", "factor_version": "1.0.0"},
+                    {"factor_code": "rev_20d_std", "factor_version": "1.0.0"},
+                    {"factor_code": "downvol_20d_std", "factor_version": "1.0.0"},
+                    {"factor_code": "amihud_20d_std", "factor_version": "1.0.0"}
+                ]
+            });
+            match reqwest::Client::new().post(&url).json(&payload).send().await {
+                Ok(_) => Json(serde_json::json!({"code": 0, "message": "ML预测训练已触发，请等待3-5分钟后刷新状态"})),
+                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)})),
+            }
+        }
+        "权益曲线" => {
+            Json(serde_json::json!({"code": 1, "message": "权益曲线由回测计算产生，无法直接修复"}))
+        }
+        _ => {
+            Json(serde_json::json!({"code": 1, "message": format!("未知数据项: {}", req.name)}))
+        }
+    };
+    result.into_response()
+}
