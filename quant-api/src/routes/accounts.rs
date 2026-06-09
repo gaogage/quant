@@ -208,6 +208,34 @@ pub async fn account_detail(
     let cum_ret = if cap > 0.0 { (nav - cap) / cap * 100.0 } else { 0.0 };
     let calmar = if let Some(m) = mdd { if m > 0.01 { annual_return / m } else { 0.0 } } else { 0.0 };
 
+    // 如果快照无有效收益数据（回放产生的是聚合指标），从 paper_replay 读取
+    let mut yearly_returns_json: Option<serde_json::Value> = None;
+    let mut benchmarks_json: Option<serde_json::Value> = None;
+    let (annual_return, sharpe, sortino, cum_ret, calmar, mdd, replay_days) =
+        if annual_return == 0.0 && n > 1.0 {
+            // 检查是否有回放记录
+            let replay: Option<(
+                Option<f64>, Option<f64>, Option<f64>, Option<f64>,
+                Option<f64>, Option<f64>, Option<f64>, Option<i32>,
+                Option<serde_json::Value>, Option<serde_json::Value>,
+            )> = sqlx::query_as(
+                "SELECT annual_return_pct, cumulative_return_pct, sharpe_ratio, sortino_ratio,
+                 calmar_ratio, max_drawdown_pct, volatility_pct, trading_days,
+                 yearly_returns, benchmarks
+                 FROM paper_replay WHERE paper_account_id = $1 LIMIT 1"
+            ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+            if let Some((ar, cr, sh, so, ca, md, _vol, td, yr, bm)) = replay {
+                yearly_returns_json = yr;
+                benchmarks_json = bm;
+                (ar.unwrap_or(0.0), sh.unwrap_or(0.0), so.unwrap_or(0.0),
+                 cr.unwrap_or(0.0), ca.unwrap_or(0.0), md, td.unwrap_or(0) as i64)
+            } else {
+                (annual_return, sharpe, sortino, cum_ret, calmar, mdd, n as i64)
+            }
+        } else {
+            (annual_return, sharpe, sortino, cum_ret, calmar, mdd, n as i64)
+        };
+
     // 当前持仓
     let positions: Vec<serde_json::Value> = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
         "SELECT symbol, quantity, avg_cost, market_price, market_value FROM paper_position
@@ -255,8 +283,11 @@ pub async fn account_detail(
                 "sortino_ratio": (sortino * 100.0).round() / 100.0,
                 "max_drawdown_pct": mdd.unwrap_or(0.0),
                 "calmar_ratio": (calmar * 100.0).round() / 100.0,
-                "nav_history_days": n as i64,
+                "nav_history_days": replay_days,
             },
+            "yearly_returns": yearly_returns_json,
+            "benchmarks": benchmarks_json,
+            "asset_allocation": asset_allocation(&positions),
             "positions": positions,
             "trades": trades,
         }
@@ -361,4 +392,42 @@ pub async fn delete_account(
         .execute(&state.db).await;
 
     Json(serde_json::json!({"code": 0, "message": "已停用"}))
+}
+
+
+/// 根据持仓列表计算资产大类占比
+fn asset_allocation(positions: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use std::collections::HashMap;
+    let mut categories: HashMap<String, f64> = HashMap::new();
+    for p in positions {
+        let sym = p.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+        let mv_str = p.get("market_value").and_then(|v| v.as_str()).unwrap_or("0");
+        let mv: f64 = mv_str.parse().unwrap_or(0.0);
+        let cat = classify_asset(sym);
+        *categories.entry(cat).or_default() += mv;
+    }
+    let total: f64 = categories.values().sum();
+    let mut result: Vec<serde_json::Value> = categories.into_iter()
+        .filter(|(_, v)| *v > 0.0)
+        .map(|(name, value)| serde_json::json!({
+            "name": name, "market_value": (value * 100.0).round() / 100.0,
+            "pct": if total > 0.0 { (value / total * 10000.0).round() / 100.0 } else { 0.0 }
+        }))
+        .collect();
+    result.sort_by(|a, b| b["pct"].as_f64().unwrap_or(0.0).partial_cmp(&a["pct"].as_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
+    result
+}
+
+fn classify_asset(symbol: &str) -> String {
+    match symbol {
+        "511010.SH" | "511260.SH" => "国债ETF".into(),
+        "518880.SH" => "黄金ETF".into(),
+        "513100.SH" => "纳指ETF".into(),
+        "513500.SH" => "标普ETF".into(),
+        "501018.SH" => "原油LOF".into(),
+        "159980.SZ" => "商品ETF".into(),
+        "159985.SZ" => "商品ETF".into(),
+        s if s.ends_with(".SH") || s.ends_with(".SZ") => "A股".into(),
+        _ => "其他".into(),
+    }
 }

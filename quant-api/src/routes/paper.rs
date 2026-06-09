@@ -909,13 +909,101 @@ pub async fn historical_replay(
     let extra_etfs = req.extra_etfs.unwrap_or_default();
     let mom_blend = req.momentum_blend.unwrap_or(0.6);
     let cov_method = req.cov_method.as_deref().unwrap_or("linear");
-    match crate::routes::scheduler::run_historical_replay(
+    let account_id = req.paper_account_id.clone().unwrap_or_default();
+
+    // ── 回放前清空旧数据 + 重置账号 ──
+    if !account_id.is_empty() {
+        // 清空该账号旧回放记录
+        let _ = sqlx::query("DELETE FROM paper_replay WHERE paper_account_id = $1")
+            .bind(&account_id).execute(&state.db).await;
+
+        // 重置账号到初始状态
+        let _ = sqlx::query(
+            "UPDATE paper_account SET current_nav = initial_capital, peak_nav = initial_capital,
+             max_drawdown_pct = 0, updated_at = NOW() WHERE paper_account_id = $1"
+        ).bind(&account_id).execute(&state.db).await;
+
+        // 生成初始快照（run_historical_replay MVO 回放需要已存在的快照来 UPDATE）
+        let init_cap: Option<(f64,)> = sqlx::query_as(
+            "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1"
+        ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+        let cap_f64 = init_cap.map(|(c,)| c).unwrap_or(1000000.0);
+        let mut current = start_date;
+        while current <= end_date {
+            let is_trade_day: Option<(bool,)> = sqlx::query_as(
+                "SELECT EXISTS(SELECT 1 FROM market_trade_calendar WHERE trade_date = $1 AND is_open = true)"
+            ).bind(current).fetch_optional(&state.db).await.ok().flatten();
+            if is_trade_day.map(|(b,)| b).unwrap_or(false) {
+                let snap_id = uuid::Uuid::new_v4().simple().to_string();
+                let _ = sqlx::query(
+                    "INSERT INTO paper_nav_snapshot (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value, position_count, created_at)
+                     VALUES ($1, $2, $3, $4, 0, 0, 0, NOW())
+                     ON CONFLICT (paper_account_id, snapshot_date) DO NOTHING"
+                ).bind(&snap_id).bind(&account_id).bind(current).bind(cap_f64).execute(&state.db).await;
+            }
+            current += chrono::Duration::days(1);
+        }
+    }
+
+    let result = match crate::routes::scheduler::run_historical_replay(
         &state.db, start_date, end_date, strategy, &leverage_mode, leverage_multiplier, min_stock_override, objective, rebalance,
         fixed_rt, trend_boost, vol_budget, adaptive_vol, lev_cap, &extra_etfs, mom_blend, cov_method,
     ).await {
-        Ok(result) => Json(json!({"code": 0, "data": result})),
+        Ok(result) => {
+            // 回写 paper_account 的净值/回撤/启动时间
+            if !account_id.is_empty() {
+                let ic: Option<(f64,)> = sqlx::query_as(
+                    "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1"
+                ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+                let ic_val = ic.map(|(c,)| c).unwrap_or(1000000.0);
+                let final_nav = ic_val * (1.0 + result.cumulative_return_pct / 100.0);
+                let _ = sqlx::query(
+                    "UPDATE paper_account SET current_nav = $1, peak_nav = $2,
+                     max_drawdown_pct = $3, created_at = $4, updated_at = NOW()
+                     WHERE paper_account_id = $5"
+                ).bind(final_nav).bind(final_nav.max(ic_val)).bind(result.max_drawdown_pct)
+                 .bind(start_date).bind(&account_id)
+                .execute(&state.db).await;
+            }
+
+            // 保存回放记录
+            if !account_id.is_empty() {
+                let replay_id = uuid::Uuid::new_v4().simple().to_string();
+                let yt = serde_json::to_value(&result.yearly_returns).unwrap_or_default();
+                let bm = serde_json::to_value(&result.benchmarks).unwrap_or_default();
+                let _ = sqlx::query(
+                    "INSERT INTO paper_replay (replay_id, paper_account_id, start_date, end_date,
+                     annual_return_pct, cumulative_return_pct, sharpe_ratio, sortino_ratio,
+                     calmar_ratio, max_drawdown_pct, volatility_pct, win_rate_pct, trading_days,
+                     yearly_returns, benchmarks)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)"
+                ).bind(&replay_id).bind(&account_id)
+                 .bind(start_date).bind(end_date)
+                 .bind(result.annual_return_pct).bind(result.cumulative_return_pct)
+                 .bind(result.sharpe_ratio).bind(result.sortino_ratio)
+                 .bind(result.calmar_ratio).bind(result.max_drawdown_pct)
+                 .bind(result.volatility_pct).bind(result.win_rate_pct)
+                 .bind(result.trading_days as i32)
+                 .bind(&yt).bind(&bm)
+                .execute(&state.db).await;
+
+                // inactive 账号：设置结束时间为回放结束时间
+                let status: Option<(String,)> = sqlx::query_as(
+                    "SELECT status FROM paper_account WHERE paper_account_id = $1"
+                ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+                if let Some((s,)) = status {
+                    if s == "inactive" {
+                        let _ = sqlx::query(
+                            "UPDATE paper_account SET end_date = $1, updated_at = NOW() WHERE paper_account_id = $2"
+                        ).bind(end_date).bind(&account_id).execute(&state.db).await;
+                    }
+                }
+            }
+            Json(json!({"code": 0, "data": result}))
+        }
         Err(e) => Json(json!({"code": 1, "message": e})),
-    }
+    };
+    result
 }
 
 // ── Multi-Window Simulation ──

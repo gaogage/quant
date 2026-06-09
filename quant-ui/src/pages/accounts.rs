@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use crate::api;
+use crate::components::charts::CumulativeLineChart;
 
 #[component]
 pub fn AccountsContent() -> Element {
@@ -20,6 +21,13 @@ pub fn AccountsContent() -> Element {
     let mut expanded = use_signal(|| String::new());
     let mut detail = use_signal(|| Option::<Value>::None);
     let mut detail_loading = use_signal(|| false);
+
+    // ── 回放弹窗状态 ──────────────────────────────────
+    let mut replay_modal = use_signal(|| Option::<Value>::None); // Some(account_data) = 打开
+    let mut replay_start = use_signal(|| String::new());
+    let mut replay_end = use_signal(|| String::new());
+    let mut replay_loading = use_signal(|| false);
+    let mut replay_result = use_signal(|| Option::<Value>::None);
 
     let mut load = move || {
         loading.set(true);
@@ -40,6 +48,133 @@ pub fn AccountsContent() -> Element {
     };
 
     use_effect(move || { load(); });
+
+    // ── 回放弹窗（提前返回，避免在 rsx! 中使用 if let）───
+    let show_replay = replay_modal.read().is_some();
+    if show_replay {
+        let replay_acc = replay_modal.read().clone().unwrap();
+        let acc_name = replay_acc.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
+        let acc_id = replay_acc.get("paper_account_id").or(replay_acc.get("account_id"))
+            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let start_val = replay_start.read().clone();
+        let end_val = replay_end.read().clone();
+        let is_loading = *replay_loading.read();
+        let result = replay_result.read().clone();
+        let cap = replay_acc.get("initial_capital").and_then(|v| v.as_f64()).unwrap_or(1000000.0) as i64;
+
+        return rsx! {
+            div { class: "fixed inset-0 bg-black/60 z-50 flex items-center justify-center",
+                onclick: move |_| { replay_modal.set(None); },
+                div { class: "bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto shadow-2xl",
+                    onclick: move |e| e.stop_propagation(),
+                    h2 { class: "text-lg font-bold text-gray-900 dark:text-white mb-1", "模拟回放" }
+                    p { class: "text-sm text-gray-500 dark:text-gray-400 mb-5", "{acc_name}" }
+                    div { class: "grid grid-cols-2 gap-4 mb-5",
+                        div {
+                            label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "启动时间" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                r#type: "date", value: "{start_val}",
+                                oninput: move |e| replay_start.set(e.value()),
+                            }
+                        }
+                        div {
+                            label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "回放截止时间" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                r#type: "date", value: "{end_val}",
+                                oninput: move |e| replay_end.set(e.value()),
+                            }
+                        }
+                        div {
+                            label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "初始资金" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm font-mono",
+                                value: "{cap}", disabled: true,
+                            }
+                            div { class: "text-xs text-gray-400 mt-0.5", "（使用账号配置的初始资金）" }
+                        }
+                    }
+                    div { class: "flex gap-3 mb-5",
+                        button { class: "flex-1 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-lg text-sm text-gray-700 dark:text-gray-300 transition",
+                            onclick: move |_| replay_modal.set(None), "取消"
+                        }
+                        button { class: "flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 dark:disabled:bg-gray-600 disabled:text-gray-500 rounded-lg text-sm text-white transition",
+                            disabled: is_loading,
+                            onclick: {
+                                let aid = acc_id.clone();
+                                let s = start_val.clone();
+                                let e = end_val.clone();
+                                move |_| {
+                                    replay_loading.set(true);
+                                    replay_result.set(None);
+                                    let a = aid.clone(); let s2 = s.clone(); let e2 = e.clone();
+                                    spawn(async move {
+                                        match api::run_historical_replay(&a, &s2, &e2).await {
+                                            Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => {
+                                                replay_result.set(Some(v.clone()));
+                                            }
+                                            Ok(v) => {
+                                                error.set(v["message"].as_str().unwrap_or("失败").to_string());
+                                                replay_result.set(Some(v));
+                                            }
+                                            Err(e) => { error.set(e); }
+                                        }
+                                        replay_loading.set(false);
+                                    });
+                                }
+                            },
+                            if is_loading { span { class: "inline-flex items-center gap-2",
+                                span { class: "animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full" }
+                                "回放中…"
+                            } } else { "开始回放" }
+                        }
+                    }
+                    if is_loading {
+                        div { class: "flex justify-center py-8",
+                            div { class: "animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" }
+                        }
+                    }
+                    if let Some(ref res) = result {
+                        if let Some(data) = res.get("data") {
+                            {
+                                let ar = data["annual_return_pct"].as_f64().unwrap_or(0.0);
+                                let cr = data["cumulative_return_pct"].as_f64().unwrap_or(0.0);
+                                let sh = data["sharpe_ratio"].as_f64().unwrap_or(0.0);
+                                let so = data["sortino_ratio"].as_f64().unwrap_or(0.0);
+                                let mdd = data["max_drawdown_pct"].as_f64().unwrap_or(0.0);
+                                let ca = data["calmar_ratio"].as_f64().unwrap_or(0.0);
+                                let vol = data["volatility_pct"].as_f64().unwrap_or(0.0);
+                                let wr = data["win_rate_pct"].as_f64().unwrap_or(0.0);
+                                let td = data["trading_days"].as_i64().unwrap_or(0);
+                                let sd = data["start_date"].as_str().unwrap_or("-");
+                                let ed = data["end_date"].as_str().unwrap_or("-");
+                                let ar_cls = if ar >= 0.0 { "text-green-600 dark:text-green-400" } else { "text-red-600 dark:text-red-400" };
+                                let cr_cls = if cr >= 0.0 { "text-green-600 dark:text-green-400" } else { "text-red-600 dark:text-red-400" };
+                                rsx! {
+                                    div { class: "border-t border-gray-200 dark:border-gray-700 pt-4",
+                                        h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-3", "回放结果" }
+                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mb-3", "{sd} → {ed} · {td} 个交易日" }
+                                        div { class: "grid grid-cols-3 gap-3",
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "年化收益" } div { class: "font-mono font-semibold {ar_cls}", "{ar:.1}%" } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "累计收益" } div { class: "font-mono font-semibold {cr_cls}", "{cr:.1}%" } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "最大回撤" } div { class: "font-mono font-semibold text-red-600 dark:text-red-400", "{mdd:.1}%" } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Sharpe" } div { class: "font-mono font-semibold text-blue-600 dark:text-blue-400", "{sh:.2}" } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Sortino" } div { class: "font-mono font-semibold text-blue-600 dark:text-blue-400", "{so:.2}" } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Calmar" } div { class: "font-mono font-semibold text-yellow-600 dark:text-yellow-400", "{ca:.2}" } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "波动率" } div { class: "font-mono font-semibold text-gray-700 dark:text-gray-300", "{vol:.1}%" } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "胜率" } div { class: "font-mono font-semibold text-green-600 dark:text-green-400", "{wr:.1}%" } }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let Some(msg) = res.get("message").and_then(|v| v.as_str()) {
+                            div { class: "border-t border-gray-200 dark:border-gray-700 pt-4",
+                                div { class: "p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm", "{msg}" }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    }
 
     if *loading.read() {
         return rsx! { div { class: "p-6", div { class: "animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" } } };
@@ -112,6 +247,22 @@ pub fn AccountsContent() -> Element {
                                             }
                                             div { class: "flex items-center gap-2",
                                                 span { class: "text-xs text-gray-400 dark:text-gray-600", if is_open { "收起 ▲" } else { "展开 ▼" } }
+                                                {
+                                                    let a_clone = acc.clone();
+                                                    rsx! {
+                                                        button { class: "text-xs px-3 py-1.5 bg-blue-100 dark:bg-blue-900/50 hover:bg-blue-200 dark:hover:bg-blue-800 rounded-lg text-blue-600 dark:text-blue-400 transition",
+                                                            onclick: move |evt| {
+                                                                evt.stop_propagation();
+                                                                let created = a_clone.get("created_at").and_then(|v| v.as_str()).unwrap_or("2024-01-01").to_string().split('T').next().unwrap_or("2024-01-01").to_string();
+                                                                replay_start.set(created);
+                                                                replay_end.set("2026-06-09".to_string());
+                                                                replay_result.set(None);
+                                                                replay_modal.set(Some(a_clone.clone()));
+                                                            },
+                                                            "回放"
+                                                        }
+                                                    }
+                                                }
                                                 button { class: "text-xs px-3 py-1.5 bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800 rounded-lg text-red-600 dark:text-red-400 transition",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
@@ -165,6 +316,179 @@ pub fn AccountsContent() -> Element {
                                                                     div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Calmar" } div { class: "font-mono font-semibold text-yellow-600 dark:text-yellow-400", "{ca:.2}" } }
                                                                 }
                                                                 div { class: "text-xs text-gray-400 dark:text-gray-600 mt-2", "启动: {created} · 样本: {days}天" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // ── 年度收益柱状图 + 累计收益率曲线 ──
+                                                div { class: "mb-4",
+                                                    // 柱状图：年度收益对比
+                                                    if let (Some(yearly), Some(benchmarks)) = (d["yearly_returns"].as_array(), d["benchmarks"].as_object()) {
+                                                        {
+                                                            let max_abs = yearly.iter()
+                                                                .chain(benchmarks.get("csi300").and_then(|b| b["yearly_returns"].as_array()).into_iter().flatten())
+                                                                .chain(benchmarks.get("gold").and_then(|b| b["yearly_returns"].as_array()).into_iter().flatten())
+                                                                .chain(benchmarks.get("sp500").and_then(|b| b["yearly_returns"].as_array()).into_iter().flatten())
+                                                                .filter_map(|y| y["return_pct"].as_f64())
+                                                                .fold(0.0_f64, |a, b| a.max(b.abs())).max(5.0);
+                                                            let bar_h: f64 = 120.0;
+                                                            let yr_list: Vec<&serde_json::Value> = yearly.iter().collect();
+                                                            let years: Vec<String> = yr_list.iter().map(|y| y["year"].as_str().unwrap_or("-").to_string()).collect();
+                                                            let acct_rets: Vec<f64> = yr_list.iter().map(|y| y["return_pct"].as_f64().unwrap_or(0.0)).collect();
+                                                            let csi_rets: Vec<f64> = years.iter().map(|y| benchmarks.get("csi300").and_then(|b| b["yearly_returns"].as_array()).and_then(|a| a.iter().find(|x| x["year"].as_str()==Some(y))).and_then(|x| x["return_pct"].as_f64()).unwrap_or(0.0)).collect();
+                                                            let gold_rets: Vec<f64> = years.iter().map(|y| benchmarks.get("gold").and_then(|b| b["yearly_returns"].as_array()).and_then(|a| a.iter().find(|x| x["year"].as_str()==Some(y))).and_then(|x| x["return_pct"].as_f64()).unwrap_or(0.0)).collect();
+                                                            let sp_rets: Vec<f64> = years.iter().map(|y| benchmarks.get("sp500").and_then(|b| b["yearly_returns"].as_array()).and_then(|a| a.iter().find(|x| x["year"].as_str()==Some(y))).and_then(|x| x["return_pct"].as_f64()).unwrap_or(0.0)).collect();
+                                                            // 累计收益
+                                                            let cum_acct: Vec<f64> = acct_rets.iter().scan(1.0, |cum, &r| { *cum *= 1.0+r/100.0; Some((*cum-1.0)*100.0) }).collect();
+                                                            let cum_csi: Vec<f64> = csi_rets.iter().scan(1.0, |cum, &r| { *cum *= 1.0+r/100.0; Some((*cum-1.0)*100.0) }).collect();
+                                                            let cum_gold: Vec<f64> = gold_rets.iter().scan(1.0, |cum, &r| { *cum *= 1.0+r/100.0; Some((*cum-1.0)*100.0) }).collect();
+                                                            let cum_sp: Vec<f64> = sp_rets.iter().scan(1.0, |cum, &r| { *cum *= 1.0+r/100.0; Some((*cum-1.0)*100.0) }).collect();
+                                                            let max_cum = cum_acct.iter().chain(cum_csi.iter()).chain(cum_gold.iter()).chain(cum_sp.iter()).fold(0.0_f64, |a: f64, &v| a.max(v.abs())).max(1.0_f64);
+                                                            rsx! {
+                                                                h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-2", "年度收益对比（柱状图）" }
+                                                                div { class: "flex items-center gap-3 text-xs mb-2",
+                                                                    span { class: "inline-block w-3 h-3 rounded-sm bg-blue-500" } span { class: "text-gray-500 dark:text-gray-400", "账号" }
+                                                                    span { class: "inline-block w-3 h-3 rounded-sm bg-gray-400 ml-1" } span { class: "text-gray-500 dark:text-gray-400", "CSI300" }
+                                                                    span { class: "inline-block w-3 h-3 rounded-sm bg-yellow-500 ml-1" } span { class: "text-gray-500 dark:text-gray-400", "黄金" }
+                                                                    span { class: "inline-block w-3 h-3 rounded-sm bg-green-500 ml-1" } span { class: "text-gray-500 dark:text-gray-400", "SP500" }
+                                                                }
+                                                                div { class: "relative mb-6", style: "height:{bar_h}px",
+                                                                    // 零线
+                                                                    div { class: "absolute left-0 right-0 border-t border-gray-300 dark:border-gray-500", style: "top:{bar_h/2.0}px" }
+                                                                    div { class: "flex items-end justify-around h-full",
+                                                                        for (i, y) in years.iter().enumerate() {
+                                                                            {
+                                                                                let bh_acct = (acct_rets[i].abs() / max_abs * bar_h / 2.0).max(1.0);
+                                                                                let bh_csi = (csi_rets[i].abs() / max_abs * bar_h / 2.0).max(1.0);
+                                                                                let bh_gold = (gold_rets[i].abs() / max_abs * bar_h / 2.0).max(1.0);
+                                                                                let bh_sp = (sp_rets[i].abs() / max_abs * bar_h / 2.0).max(1.0);
+                                                                                let half = bar_h / 2.0;
+                                                                                let mb_acct = if acct_rets[i] >= 0.0 { half } else { half - bh_acct };
+                                                                                let mb_csi = if csi_rets[i] >= 0.0 { half } else { half - bh_csi };
+                                                                                let mb_gold = if gold_rets[i] >= 0.0 { half } else { half - bh_gold };
+                                                                                let mb_sp = if sp_rets[i] >= 0.0 { half } else { half - bh_sp };
+                                                                                rsx! {
+                                                                                    div { class: "flex flex-col items-center gap-0.5",
+                                                                                        div { class: "flex items-end gap-0.5",
+                                                                                            div { class: "w-3 bg-blue-500 rounded-t", style: "height:{bh_acct}px; margin-bottom:{mb_acct}px" }
+                                                                                            div { class: "w-3 bg-gray-400 rounded-t", style: "height:{bh_csi}px; margin-bottom:{mb_csi}px" }
+                                                                                            div { class: "w-3 bg-yellow-500 rounded-t", style: "height:{bh_gold}px; margin-bottom:{mb_gold}px" }
+                                                                                            div { class: "w-3 bg-green-500 rounded-t", style: "height:{bh_sp}px; margin-bottom:{mb_sp}px" }
+                                                                                        }
+                                                                                        span { class: "text-xs text-gray-500", "{y}" }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                // 累计收益率曲线（Canvas 二维折线图）
+                                                                {
+                                                                    let chart_id = format!("cumchart-{}", aid_detail.clone());
+                                                                    rsx! {
+                                                                        h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-2 mt-4", "累计收益率曲线" }
+                                                                        div { class: "flex items-center gap-3 text-xs mb-2",
+                                                                            span { class: "inline-block w-3 h-0.5 bg-blue-500 rounded" } span { class: "text-gray-500 dark:text-gray-400", "账号" }
+                                                                            span { class: "inline-block w-3 h-0.5 bg-gray-400 rounded", style: "border-top:1.5px dashed #9ca3af" } span { class: "text-gray-500 dark:text-gray-400", "CSI300" }
+                                                                            span { class: "inline-block w-3 h-0.5 bg-yellow-500 rounded", style: "border-top:1.5px dashed #eab308" } span { class: "text-gray-500 dark:text-gray-400", "黄金" }
+                                                                            span { class: "inline-block w-3 h-0.5 bg-green-500 rounded", style: "border-top:1.5px dashed #22c55e" } span { class: "text-gray-500 dark:text-gray-400", "SP500" }
+                                                                        }
+                                                                        CumulativeLineChart {
+                                                                            years: years.clone(),
+                                                                            acct: cum_acct.clone(),
+                                                                            csi300: cum_csi.clone(),
+                                                                            gold: cum_gold.clone(),
+                                                                            sp500: cum_sp.clone(),
+                                                                            canvas_id: chart_id,
+                                                                        }
+                                                                    }
+                                                                }
+                                                                // 数值表格
+                                                                div { class: "mt-2 text-xs overflow-x-auto",
+                                                                    table { class: "w-full",
+                                                                        thead { tr { class: "text-gray-500",
+                                                                            th { class: "text-left py-1", "年度" }
+                                                                            th { class: "text-right py-1 px-1", "账号" }
+                                                                            th { class: "text-right py-1 px-1", "CSI300" }
+                                                                            th { class: "text-right py-1 px-1", "黄金" }
+                                                                            th { class: "text-right py-1 px-1", "SP500" }
+                                                                            th { class: "text-right py-1 px-1", "累计" }
+                                                                        }}
+                                                                        tbody {
+                                                                            for (i, y) in years.iter().enumerate() {
+                                                                                {
+                                                                                    let ret = acct_rets[i];
+                                                                                    let cr = csi_rets[i];
+                                                                                    let gr = gold_rets[i];
+                                                                                    let sr = sp_rets[i];
+                                                                                    let cum = cum_acct[i];
+                                                                                    let rc = if ret>=0.0{"text-green-600"}else{"text-red-600"};
+                                                                                    let cc = if cr>=0.0{"text-gray-600"}else{"text-red-500"};
+                                                                                    let gc = if gr>=0.0{"text-yellow-600"}else{"text-red-500"};
+                                                                                    let sc = if sr>=0.0{"text-green-600"}else{"text-red-500"};
+                                                                                    let cuc = if cum>=0.0{"text-green-600 dark:text-green-400"}else{"text-red-600 dark:text-red-400"};
+                                                                                    rsx! {
+                                                                                        tr { class: "border-t border-gray-100 dark:border-gray-800",
+                                                                                            td { class: "py-1 text-gray-500", "{y}" }
+                                                                                            td { class: "py-1 text-right px-1 font-mono {rc}", "{ret:.1}%" }
+                                                                                            td { class: "py-1 text-right px-1 font-mono {cc}", "{cr:.1}%" }
+                                                                                            td { class: "py-1 text-right px-1 font-mono {gc}", "{gr:.1}%" }
+                                                                                            td { class: "py-1 text-right px-1 font-mono {sc}", "{sr:.1}%" }
+                                                                                            td { class: "py-1 text-right px-1 font-mono font-semibold {cuc}", "{cum:.1}%" }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        div { class: "text-xs text-gray-400 py-4 text-center", "回放后显示收益图表" }
+                                                    }
+                                                }
+                                                // ── 资产大类占比 ──
+                                                div { class: "mb-4 grid grid-cols-1 md:grid-cols-2 gap-4",
+                                                    div {
+                                                        h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-2", "资产大类占比" }
+                                                        if let Some(alloc) = d["asset_allocation"].as_array() {
+                                                            if alloc.is_empty() {
+                                                                div { class: "text-xs text-gray-400 py-4 text-center", "暂无持仓" }
+                                                            } else {
+                                                                {
+                                                                    rsx! {
+                                                                        div { class: "space-y-2",
+                                                                            for item in alloc.iter() {
+                                                                                {
+                                                                                    let name = item["name"].as_str().unwrap_or("-");
+                                                                                    let pct = item["pct"].as_f64().unwrap_or(0.0);
+                                                                                    let mv = item["market_value"].as_f64().unwrap_or(0.0);
+                                                                                    let color = match name {
+                                                                                        "A股" => "bg-gray-500",
+                                                                                        "黄金ETF" => "bg-yellow-500",
+                                                                                        "国债ETF" => "bg-blue-400",
+                                                                                        "纳指ETF" | "标普ETF" => "bg-green-500",
+                                                                                        "原油LOF" => "bg-orange-500",
+                                                                                        "商品ETF" => "bg-purple-500",
+                                                                                        _ => "bg-gray-400",
+                                                                                    };
+                                                                                    rsx! {
+                                                                                        div {
+                                                                                            div { class: "flex justify-between text-xs mb-0.5",
+                                                                                                span { class: "text-gray-700 dark:text-gray-300", "{name}" }
+                                                                                                span { class: "text-gray-500 dark:text-gray-400", "{pct:.1}% · ¥{mv as i64}" }
+                                                                                            }
+                                                                                            div { class: "w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2",
+                                                                                                div { class: "{color} h-2 rounded-full transition-all", style: "width:{pct}%" }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -252,6 +576,7 @@ pub fn AccountsContent() -> Element {
                     }
                 }
             }
+
         }
     }
 }

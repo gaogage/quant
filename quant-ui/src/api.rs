@@ -284,3 +284,16 @@ pub async fn admin_repair_data(name: &str) -> Result<Value, String> {
 pub async fn trigger_dingtalk_notify() -> Result<Value, String> {
     post("/api/v1/quant/paper/notify", &serde_json::json!({})).await
 }
+
+/// 历史模拟回放 — 清空旧数据后重新回放，一个账号仅保留最新结果
+pub async fn run_historical_replay(
+    paper_account_id: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Value, String> {
+    post("/api/v1/quant/paper/historical-replay", &serde_json::json!({
+        "paper_account_id": paper_account_id,
+        "start_date": start_date,
+        "end_date": end_date,
+    })).await
+}
