@@ -29,6 +29,15 @@ fn FilterBar(on_search: Callback<String>) -> Element {
         p.join("&")
     };
     let do_search = move || on_search(build_filter());
+    let mut do_reset = move || {
+        f_name.set(String::new());
+        f_leverage.set("all".to_string());
+        f_signal.set("all".to_string());
+        f_lev_min.set(String::new());
+        f_lev_max.set(String::new());
+        f_status.set("all".to_string());
+        on_search(String::new());
+    };
 
     rsx! {
         div { class: "mb-4 p-3 bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800",
@@ -66,6 +75,10 @@ fn FilterBar(on_search: Callback<String>) -> Element {
                         value: "{f_status}", onchange: move |e| f_status.set(e.value()),
                         option { value: "all", "全部" } option { value: "active", "活跃" } option { value: "inactive", "已停用" }
                     }
+                }
+                button { class: "px-3 py-2 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-lg text-sm text-gray-600 dark:text-gray-300 transition self-end",
+                    onclick: move |_| do_reset(),
+                    "重置"
                 }
                 button { class: "px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm text-white transition self-end",
                     onclick: move |_| do_search(),
