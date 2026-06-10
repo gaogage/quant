@@ -602,7 +602,6 @@ async fn validate_pre_trade_data(
 ) -> Vec<String> {
     let mut errors: Vec<String> = Vec::new();
     let today_str = today.format("%Y%m%d").to_string();
-    let empty: Vec<String> = vec![];
 
     // 1. ETF 日线 — 每个标的必须覆盖到最近一个交易日
     for symbol in &sc.etf_symbols {
@@ -632,7 +631,8 @@ async fn validate_pre_trade_data(
         if let Some(gap_td) = stale {
             info!("[pre-trade] A股({})落后{}交易日, 自动同步...", probe, gap_td);
             let dv_id = format!("pre-trade-stock-{}", today_str);
-            match quant_data::sync::sync_daily_bars(db, tushare, &empty, &today_str, &today_str, &dv_id).await {
+            let recent_start = (today - chrono::Duration::days(7)).format("%Y%m%d").to_string();
+            match quant_data::sync::sync_daily_bars(db, tushare, &[probe.to_string()], &recent_start, &today_str, &dv_id).await {
                 Ok(n) if n > 0 => {
                     info!("[pre-trade] A股日线同步: {} 条", n);
                     break; // 成功一个就够
