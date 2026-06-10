@@ -116,6 +116,7 @@ pub fn AccountsContent() -> Element {
     let mut edit_dingtalk = use_signal(String::new);
     let mut edit_margin = use_signal(String::new);
     let mut edit_cash = use_signal(String::new);
+    let mut edit_reserve = use_signal(String::new);
     let mut edit_saving = use_signal(|| false);
     let mut edit_result = use_signal(String::new);
 
@@ -155,6 +156,7 @@ pub fn AccountsContent() -> Element {
         let dingtalk_val = edit_dingtalk.read().clone();
         let margin_val = edit_margin.read().clone();
         let cash_val = edit_cash.read().clone();
+        let reserve_val = edit_reserve.read().clone();
         let saving = *edit_saving.read();
         let result_msg = edit_result.read().clone();
 
@@ -218,6 +220,12 @@ pub fn AccountsContent() -> Element {
                                 value: "{cash_val}", oninput: move |e| edit_cash.set(e.value()),
                             }
                         }
+                        // 预留现金
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "预留现金（超出自归还融资）" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                value: "{reserve_val}", oninput: move |e| edit_reserve.set(e.value()),
+                            }
+                        }
                         // 融资金额
                         div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "融资金额（无杠杆则为0）" }
                             input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
@@ -247,10 +255,12 @@ pub fn AccountsContent() -> Element {
                                     let dt = edit_dingtalk.read().clone();
                                     let mg = edit_margin.read().clone();
                                     let ca = edit_cash.read().clone();
+                                    let ra = edit_reserve.read().clone();
                                     spawn(async move {
                                         let lev_mult: Option<f64> = lmult.parse().ok();
                                         let margin: Option<f64> = mg.parse().ok();
                                         let cash: Option<f64> = ca.parse().ok();
+                                        let reserve: Option<f64> = ra.parse().ok();
                                         let payload = serde_json::json!({
                                             "name": name,
                                             "signal_source": sig,
@@ -260,6 +270,7 @@ pub fn AccountsContent() -> Element {
                                             "dingtalk_webhook_url": if dt.is_empty() { None::<String> } else { Some(dt) },
                                             "margin_amount": margin,
                                             "cash": cash,
+                                            "reserve_amount": reserve,
                                         });
                                         match api::update_account(&id, &payload).await {
                                             Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => {
@@ -494,6 +505,7 @@ pub fn AccountsContent() -> Element {
                                                                 edit_dingtalk.set(a_clone.get("dingtalk_webhook_url").and_then(|v| v.as_str()).unwrap_or("").to_string());
                                                                 edit_margin.set(a_clone.get("margin_amount").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_default());
                                                                 edit_cash.set(a_clone.get("cash").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_default());
+                                                                edit_reserve.set(a_clone.get("reserve_amount").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_default());
                                                                 edit_result.set(String::new());
                                                                 edit_modal.set(Some(a_clone.clone()));
                                                             },

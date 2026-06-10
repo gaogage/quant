@@ -16,6 +16,7 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use super::trading;
 use tracing::{error, info, warn};
 
 fn short_id() -> String {
@@ -1459,7 +1460,7 @@ async fn sync_positions_from_backtest(
         sqlx::query("INSERT INTO paper_order (order_id,paper_account_id,symbol,side,order_type,quantity,limit_price,status,strategy_version_id) VALUES ($1,$2,$3,'buy','market',$4,$5,'pending','phase7-professional-v1')")
             .bind(&oid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).execute(db).await.map_err(|e|format!("order:{}",e))?;
         let fid = format!("pf-{}", short_id());
-        sqlx::query("INSERT INTO paper_fill (fill_id,order_id,paper_account_id,symbol,fill_time,side,quantity,price,amount) VALUES ($1,$2,$3,$4,now(),'buy',$5,$6,$7)")
+        sqlx::query("INSERT INTO paper_fill (fill_id,order_id,paper_account_id,symbol,fill_time,side,quantity,price,amount,planned_order_id) VALUES ($1,$2,$3,$4,now(),'buy',$5,$6,$7,$2)")
             .bind(&fid).bind(&oid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).execute(db).await.map_err(|e|format!("fill:{}",e))?;
         sqlx::query("UPDATE paper_order SET status='filled' WHERE order_id=$1").bind(&oid).execute(db).await.map_err(|e|format!("upd:{}",e))?;
         let pid = format!("pp-{}", short_id());
@@ -1499,7 +1500,7 @@ async fn sync_positions_from_backtest(
         sqlx::query("INSERT INTO paper_order (order_id,paper_account_id,symbol,side,order_type,quantity,limit_price,status,strategy_version_id) VALUES ($1,$2,$3,'buy','market',$4,$5,'pending','phase7-professional-v1')")
             .bind(&oid).bind(account_id).bind(etf_symbol).bind(qty).bind(price).execute(db).await.map_err(|e|format!("etf order:{}",e))?;
         let fid = format!("pf-{}", short_id());
-        sqlx::query("INSERT INTO paper_fill (fill_id,order_id,paper_account_id,symbol,fill_time,side,quantity,price,amount) VALUES ($1,$2,$3,$4,now(),'buy',$5,$6,$7)")
+        sqlx::query("INSERT INTO paper_fill (fill_id,order_id,paper_account_id,symbol,fill_time,side,quantity,price,amount,planned_order_id) VALUES ($1,$2,$3,$4,now(),'buy',$5,$6,$7,$2)")
             .bind(&fid).bind(&oid).bind(account_id).bind(etf_symbol).bind(qty).bind(price).bind(alloc_amount).execute(db).await.map_err(|e|format!("etf fill:{}",e))?;
         sqlx::query("UPDATE paper_order SET status='filled' WHERE order_id=$1").bind(&oid).execute(db).await.map_err(|e|format!("upd:{}",e))?;
         let pid = format!("pp-{}", short_id());
@@ -1509,6 +1510,14 @@ async fn sync_positions_from_backtest(
 
     sqlx::query("UPDATE paper_account SET cash=initial_capital-(SELECT COALESCE(SUM(quantity*avg_cost),0) FROM paper_position WHERE paper_account_id=$1), current_nav=initial_capital-(SELECT COALESCE(SUM(quantity*avg_cost),0) FROM paper_position WHERE paper_account_id=$1)+(SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1), total_trades=(SELECT COUNT(*) FROM paper_order WHERE paper_account_id=$1) WHERE paper_account_id=$1")
         .bind(account_id).execute(db).await.map_err(|e|format!("acct:{}",e))?;
+
+    // 更新净资产并尝试自动归还融资
+    if let Err(e) = trading::update_current_nav(db, account_id).await {
+        warn!("[paper] {} 更新净资产失败: {}", account_id, e);
+    }
+    if let Err(e) = trading::try_auto_repay(db, account_id).await {
+        warn!("[paper] {} 自动归还融资失败: {}", account_id, e);
+    }
 
     Ok(positions.len() + etf_allocations.iter().filter(|(_,_,p)| *p > 0.0).count())
 }

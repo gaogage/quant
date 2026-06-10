@@ -1439,8 +1439,8 @@ async fn fill_paper_order_inner(
     sqlx::query(
         "INSERT INTO paper_fill
            (fill_id, order_id, paper_account_id, symbol, fill_time, side,
-            quantity, price, amount, commission, tax, slippage)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            quantity, price, amount, commission, tax, slippage, planned_order_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $2)",
     )
     .bind(&fill_id)
     .bind(order_id)

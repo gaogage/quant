@@ -43,6 +43,7 @@ pub struct UpdateAccountRequest {
     pub dingtalk_webhook_url: Option<String>,
     pub margin_amount: Option<f64>,
     pub cash: Option<f64>,
+    pub reserve_amount: Option<f64>,
 }
 
 // ── 列表 ────────────────────────────────────────────────
@@ -119,7 +120,8 @@ pub async fn list_accounts(
         "SELECT paper_account_id, account_type, name, initial_capital::double precision,
                 leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status,
                 user_id, current_nav::double precision, COALESCE(cash, initial_capital)::double precision,
-                max_drawdown_pct::double precision
+                max_drawdown_pct::double precision, COALESCE(margin_amount,0)::double precision,
+                COALESCE(reserve_amount,0)::double precision
          FROM paper_account
          WHERE {}
          ORDER BY status ASC, created_at DESC",
@@ -128,12 +130,12 @@ pub async fn list_accounts(
 
     let rows: Vec<(
         String, String, String, f64, bool, String, f64, String, String, Option<String>,
-        Option<f64>, f64, Option<f64>,
+        Option<f64>, f64, Option<f64>, f64, f64,
     )> = sqlx::query_as(&sql).fetch_all(&state.db).await.unwrap_or_default();
 
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(aid, at, name, cap, le, lm, lmp, ss, st, uid, nav, cash, mdd)| {
+        .map(|(aid, at, name, cap, le, lm, lmp, ss, st, uid, nav, cash, mdd, margin, reserve)| {
             serde_json::json!({
                 "account_id": aid, "account_type": at,
                 "name": name, "initial_capital": cap,
@@ -141,6 +143,7 @@ pub async fn list_accounts(
                 "leverage_multiplier": lmp, "signal_source": ss, "status": st,
                 "owner": uid.unwrap_or_default(),
                 "current_nav": nav, "cash": cash, "max_drawdown": mdd,
+                "margin_amount": margin, "reserve_amount": reserve,
             })
         })
         .collect();
@@ -257,20 +260,31 @@ pub async fn account_detail(
         })
     }).collect();
 
-    // 最近交易记录
-    let trades: Vec<serde_json::Value> = sqlx::query_as::<_, (String, String, String, String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT o.order_id, o.symbol, o.side, o.status, o.quantity, o.limit_price, f.price, f.fill_time
-         FROM paper_order o LEFT JOIN paper_fill f ON o.order_id = f.order_id
+    // 最近交易记录（实际交易 + 计划交易）
+    let trades: Vec<serde_json::Value> = sqlx::query_as::<_, (String, String, String, String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<chrono::DateTime<chrono::Utc>>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
+        "SELECT o.order_id, o.symbol, o.side, o.status, o.quantity, o.limit_price,
+                f.price as fill_price, f.fill_time,
+                o.target_price, o.price_upper_limit, o.price_lower_limit,
+                o.slippage_pct, f.quantity as fill_quantity, f.amount as fill_amount
+         FROM paper_order o LEFT JOIN paper_fill f ON o.order_id = f.planned_order_id
          WHERE o.paper_account_id = $1
-         ORDER BY o.created_at DESC LIMIT 50"
+         ORDER BY COALESCE(f.fill_time, o.created_at) DESC LIMIT 50"
     ).bind(&account_id).fetch_all(&state.db).await.unwrap_or_default()
-    .into_iter().map(|(oid, sym, side, sts, qty, lim, fill_price, fill_time)| {
+    .into_iter().map(|(oid, sym, side, sts, qty, lim, fill_price, fill_time, target_price, upper, lower, slip, fill_qty, fill_amt)| {
         serde_json::json!({
             "order_id": oid, "symbol": sym, "side": side, "status": sts,
             "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
             "limit_price": lim.map(|v| v.to_string()).unwrap_or_default(),
             "fill_price": fill_price.map(|v| v.to_string()).unwrap_or_default(),
             "fill_time": fill_time.map(|t| t.to_string()).unwrap_or_default(),
+            "planned": {
+                "target_price": target_price.map(|v| v.to_string()),
+                "price_upper": upper.map(|v| v.to_string()),
+                "price_lower": lower.map(|v| v.to_string()),
+                "slippage_pct": slip.map(|v| v.to_string()),
+            },
+            "fill_quantity": fill_qty.map(|v| v.to_string()),
+            "fill_amount": fill_amt.map(|v| v.to_string()),
         })
     }).collect();
 
@@ -364,14 +378,15 @@ pub async fn update_account(
          dingtalk_webhook_url = COALESCE($7, dingtalk_webhook_url),
          margin_amount = COALESCE($8, margin_amount),
          cash = COALESCE($9, cash),
+         reserve_amount = COALESCE($10, reserve_amount),
          updated_at = NOW()
-         WHERE paper_account_id = $10"
+         WHERE paper_account_id = $11"
     )
     .bind(&req.name).bind(req.leverage_enabled)
     .bind(&req.leverage_mode).bind(req.leverage_multiplier)
     .bind(&req.signal_source).bind(&req.status)
     .bind(&req.dingtalk_webhook_url).bind(req.margin_amount)
-    .bind(req.cash)
+    .bind(req.cash).bind(req.reserve_amount)
     .bind(&account_id)
     .execute(&state.db).await;
 
