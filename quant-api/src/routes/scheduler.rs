@@ -19,6 +19,99 @@ use tokio::sync::Mutex;
 use super::trading;
 use tracing::{error, info, warn};
 
+/// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
+async fn get_latest_data_version(db: &PgPool) -> String {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT data_version_id FROM data_version
+         WHERE data_version_id LIKE 'dv-eod-%'
+         ORDER BY end_date DESC LIMIT 1"
+    ).fetch_optional(db).await.ok().flatten();
+    row.map(|(d,)| d).unwrap_or_else(|| "research-full-2016-2026-20260515".to_string())
+}
+
+
+/// 盘中调仓时获取 ETF 当日实时价格（通过 Tushare fund_daily API）
+/// 若 Tushare 尚未有当日数据（T+1限制），回退到昨日收盘价。
+async fn fetch_intraday_etf_prices(
+    tushare: &TushareClient,
+    etf_symbols: &[String],
+    today: chrono::NaiveDate,
+    db: &PgPool,
+) -> std::collections::HashMap<String, f64> {
+    use std::collections::HashMap;
+    let mut prices = HashMap::new();
+
+    // 1. 先尝试从 DB 获取当日数据（可能已被其他同步流程更新）
+    for sym in etf_symbols {
+        let row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
+            "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 AND trade_date = $2"
+        ).bind(sym).bind(today).fetch_optional(db).await.ok().flatten();
+        if let Some((Some(p),)) = row {
+            prices.insert(sym.clone(), p.to_string().parse::<f64>().unwrap_or(0.0));
+        }
+    }
+
+    // 2. 对于 DB 中没有当日数据的 ETF，通过 Tushare realtime_quote 获取盘中实时价格
+    let missing: Vec<&String> = etf_symbols.iter().filter(|s| !prices.contains_key(*s)).collect();
+    if !missing.is_empty() {
+        for sym in missing {
+            // 盘中实时行情（PRO 用户可用）
+            match tushare.realtime_quote(Some(sym)).await {
+                Ok(resp) => {
+                    if let Some(data) = resp.data {
+                        let maps = data.to_maps();
+                        if let Some(row) = maps.first() {
+                            if let Some(price) = row.get("price").and_then(|v| v.as_f64()) {
+                                if price > 0.0 {
+                                    prices.insert(sym.clone(), price);
+                                    info!("[intraday] {} Tushare实时价 {:.4}", sym, price);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(ref e) => warn!("[intraday] {} realtime_quote失败: {}", sym, e),
+            }
+            // realtime_quote 失败时，尝试 fund_daily (T+1 数据)
+            let today_str = today.format("%Y%m%d").to_string();
+            match tushare.fund_daily(Some(sym), None, Some(&today_str), Some(&today_str)).await {
+                Ok(resp) => {
+                    if let Some(data) = resp.data {
+                        let maps = data.to_maps();
+                        if let Some(row) = maps.first() {
+                            if let Some(close) = row.get("close").and_then(|v| v.as_f64()) {
+                                if close > 0.0 {
+                                    prices.insert(sym.clone(), close);
+                                    info!("[intraday] {} fund_daily价 {:.4}", sym, close);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(ref e) => warn!("[intraday] {} fund_daily失败: {}", sym, e),
+            }
+        }
+    }
+
+    // 3. 仍未获取到的，回退到昨日收盘价
+    for sym in etf_symbols {
+        if !prices.contains_key(sym) {
+            let row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
+                "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 ORDER BY trade_date DESC LIMIT 1"
+            ).bind(sym).fetch_optional(db).await.ok().flatten();
+            if let Some((Some(p),)) = row {
+                let price = p.to_string().parse::<f64>().unwrap_or(0.0);
+                prices.insert(sym.clone(), price);
+                info!("[intraday] {} 无当日数据，回退昨日收盘价 {:.4}", sym, price);
+            }
+        }
+    }
+
+    prices
+}
+
+
 fn short_id() -> String {
     uuid::Uuid::new_v4().to_string().chars().take(12).collect()
 }
@@ -275,7 +368,7 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
             }
 
             // 生成信号 + 调仓
-            match generate_paper_signals_for_all(db, mvo_cache, port, today, sc).await {
+            match generate_paper_signals_for_all(db, mvo_cache, port, today, sc, tushare).await {
                 Ok(_) => {
                     info!("[scheduler] 调仓完成, 推送钉钉...");
                     match push_dingtalk_for_all_accounts(db, today).await {
@@ -497,7 +590,7 @@ async fn check_and_trigger_wfa(
     let resp = client
         .post(format!("{}/api/v1/quant/optimizations/phase7-oos-walk-forward-discovery", base))
         .json(&serde_json::json!({
-            "data_version_id": "research-full-2016-2026-20260515",
+            "data_version_id": &get_latest_data_version(db).await,
             "strategy_version_id": "phase7-professional-v1",
             "search_profile": "professional_simple_heuristic_discovery_default",
             "start_date": "20160201",
@@ -1139,6 +1232,7 @@ async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
 /// 为所有活跃模拟账号生成交易信号（使用 LW-MVO 自动发现权重）。
 async fn generate_paper_signals_for_all(
     db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate, sc: &StrategyConfig,
+    tushare: &TushareClient,
 ) -> Result<(), String> {
     let accounts = sqlx::query_as::<_, (String, String, bool, String, f64, String)>(
         "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(signal_source, 'factor'), COALESCE(leverage_multiplier, 1.0), COALESCE(leverage_mode, 'fixed') FROM paper_account
@@ -1221,7 +1315,7 @@ async fn generate_paper_signals_for_all(
         let mut body = serde_json::json!({
             "combo_name": combo_name, "version": "1.0.0",
             "strategy_version_id": "phase7-professional-v1",
-            "data_version_id": "research-full-2016-2026-20260515",
+            "data_version_id": &get_latest_data_version(db).await,
             "top_n": top_n, "rebalance": rebalance_freq, "max_position_pct": max_pos,
             "max_gross_exposure": max_exposure, "score_direction": score_direction,
             "portfolio_method": portfolio_method, "benchmark": "000300.SH",
@@ -1297,7 +1391,7 @@ async fn generate_paper_signals_for_all(
                 .json(&serde_json::json!({
                     "prediction_set_id": prediction_set_id.as_ref(),
                     "strategy_version_id": "phase7-professional-v1",
-                    "data_version_id": "research-full-2016-2026-20260515",
+                    "data_version_id": &get_latest_data_version(db).await,
                     "top_n": 15, "rebalance": "monthly", "max_position_pct": 0.10,
                     "max_gross_exposure": 0.95, "score_direction": "descending",
                     "portfolio_method": "heuristic", "benchmark": "000300.SH",
@@ -1319,7 +1413,7 @@ async fn generate_paper_signals_for_all(
         };
         let Some(task_id) = task_id else { continue };
 
-        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, sc, leverage_enabled, leverage_multiplier, leverage_mode).await {
+        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, sc, tushare, leverage_enabled, leverage_multiplier, leverage_mode).await {
             Ok(n) => info!("[paper] {} 同步 {} 个持仓", name, n),
             Err(e) => error!("[paper] {} 持仓同步失败: {}", name, e),
         }
@@ -1380,6 +1474,7 @@ async fn sync_positions_from_backtest(
     db: &PgPool, account_id: &str, task_id: &str,
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
     date: NaiveDate, sc: &StrategyConfig,
+    tushare: &TushareClient,
     leverage_enabled: bool,
     leverage_multiplier: f64,
     leverage_mode: &str,
@@ -1483,17 +1578,21 @@ async fn sync_positions_from_backtest(
         etf_allocations.push(("511880.SH", "银华日利(现金)", cash_pct));
     }
 
+    // ETF 实时价格（盘中通过 Tushare fund_daily 获取当日数据，回退昨日收盘价）
+    let etf_syms: Vec<String> = etf_allocations.iter()
+        .filter(|(_, _, p)| *p > 0.0)
+        .map(|(s, _, _)| s.to_string())
+        .collect();
+    let etf_prices = fetch_intraday_etf_prices(tushare, &etf_syms, date, db).await;
+
     for (etf_symbol, _etf_name, alloc_pct) in &etf_allocations {
         if *alloc_pct <= 0.0 { continue; }
         let alloc_amount = capital * rust_decimal::Decimal::from_f64_retain(*alloc_pct).unwrap_or(rust_decimal::Decimal::ZERO);
         if alloc_amount <= rust_decimal::Decimal::ZERO { continue; }
 
-        // Get latest ETF price
-        let price_row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
-            "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 ORDER BY trade_date DESC LIMIT 1"
-        ).bind(etf_symbol).fetch_optional(db).await.map_err(|e| format!("etf price: {}", e))?;
-
-        let price = price_row.and_then(|(p,)| p).unwrap_or(rust_decimal::Decimal::ONE);
+        // 使用盘中实时价格（从 HashMap 获取，fallback 到 1.0）
+        let price_val = etf_prices.get(*etf_symbol).copied().unwrap_or(1.0);
+        let price = rust_decimal::Decimal::from_f64_retain(price_val).unwrap_or(rust_decimal::Decimal::ONE);
         let qty = if price > rust_decimal::Decimal::ZERO { alloc_amount / price } else { rust_decimal::Decimal::ZERO };
 
         let oid = format!("po-{}", short_id());
@@ -1982,12 +2081,13 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
     use super::dingtalk;
     use serde_json::{json, Value};
 
-    let accounts = sqlx::query_as::<_, (String, String, String, Option<String>, Option<f64>)>(
-        "SELECT paper_account_id, name, account_type, dingtalk_webhook_url, current_nav::double precision
-         FROM paper_account WHERE status='active' AND account_type='simulated'",
+    let accounts = sqlx::query_as::<_, (String, String, String, Option<String>, Option<f64>, Option<f64>, Option<f64>)>(
+        "SELECT paper_account_id, name, account_type, dingtalk_webhook_url, current_nav::double precision,
+                COALESCE(cash, initial_capital)::double precision, COALESCE(margin_amount,0)::double precision
+         FROM paper_account WHERE status='active' AND account_type='simulated' AND user_id IS NOT NULL",
     ).fetch_all(db).await.map_err(|e| format!("acct: {}", e))?;
 
-    for (id, name, acct_type, webhook, nav) in &accounts {
+    for (id, name, acct_type, webhook, nav, cash, margin) in &accounts {
         let webhook_url = match webhook {
             Some(u) if !u.is_empty() => u.clone(),
             _ => match dingtalk::build_dingtalk_webhook_url() {
@@ -2042,8 +2142,10 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
         ).bind(id).fetch_all(db).await.unwrap_or_default();
 
         let total_nav = nav.unwrap_or(0.0);
+        let cash_val = cash.unwrap_or(total_nav);
+        let margin_val = margin.unwrap_or(0.0);
         let mv: f64 = positions.iter().filter_map(|p| p.get("market_value").and_then(|v| v.as_f64())).sum();
-        let cash = total_nav - mv;
+        let net_worth = mv + cash_val - margin_val; // 净资产 = 持仓市值 + 现金 - 融资金额
 
         let mut class_breakdown: Vec<Value> = class_rows.iter().map(|(cls, v)| {
             let val = v.unwrap_or(0.0);
@@ -2051,9 +2153,9 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
             json!({"class": cls, "market_value": val, "weight_pct": (pct*100.0).round()/100.0})
         }).collect();
         // 现金单独列出
-        if cash > 1.0 {
-            let cash_pct = if total_nav > 0.0 { cash / total_nav * 100.0 } else { 0.0 };
-            class_breakdown.push(json!({"class": "现金", "market_value": cash, "weight_pct": (cash_pct*100.0).round()/100.0}));
+        if cash_val > 1.0 {
+            let cash_pct = if net_worth > 0.0 { cash_val / net_worth * 100.0 } else { 0.0 };
+            class_breakdown.push(json!({"class": "现金", "market_value": cash_val, "weight_pct": (cash_pct*100.0).round()/100.0}));
         }
         let init_row = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
             "SELECT initial_capital::double precision, max_drawdown_pct::double precision FROM paper_account WHERE paper_account_id=$1"
@@ -2065,7 +2167,7 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
 
         let text = dingtalk::build_position_summary_notification(
             name, acct_type, &date.format("%Y-%m-%d").to_string(),
-            total_nav, cash, &positions, cum_ret, mdd, &class_breakdown,
+            total_nav, cash_val, margin_val, mv, net_worth, &positions, cum_ret, mdd, &class_breakdown,
         );
 
         if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "持仓摘要", &text).await {

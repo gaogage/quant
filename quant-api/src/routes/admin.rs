@@ -241,8 +241,8 @@ pub async fn sync_status(
     if let Err(e) = require_admin(&admin) { return e; }
 
     // T+1 数据在次日 9:00 自动同步（含周末），正常 gap ≤1 天。
-    // 设 2 天留 buffer（允许同步任务偶然延迟）。
     // 复权因子仅公司事件时更新；因子依赖日线；ML 训练间隔 60 天；权益曲线按月计算。
+    // ML预测 统一检查：选取调度器实际使用的预测集，验证日期覆盖+个股数量
     let checks = vec![
         ("A股日线", "market_stock_daily_bar_adj", 2i64),
         ("ETF日线(原油)", "market_stock_daily_bar_adj", 2i64),
@@ -251,16 +251,27 @@ pub async fn sync_status(
         ("因子(pv)", "multi_factor_value", 2i64),
         ("CSI300", "market_index_daily_bar", 2i64),
         ("涨跌停", "market_stock_limit", 2i64),
-        ("ML预测", "model_prediction", 7i64),
         ("权益曲线", "backtest_equity_curve", 10i64),
     ];
 
-    // 权益曲线的 task_id 从 strategy_config 读取（回测完成后自动更新）
+    // 权益曲线的 task_id 从 strategy_config 读取
     let eq_tid: String = sqlx::query_as::<_, (String,)>(
         "SELECT equity_curve_task_id FROM strategy_config WHERE strategy_id = 'v19' AND status = 'active'"
     ).fetch_optional(&state.db).await.ok().flatten()
         .map(|(t,)| t)
         .unwrap_or_else(|| "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".to_string());
+
+    let today = chrono::Utc::now().date_naive();
+
+    // PIT 查询：调度器实际会选中的预测集
+    let active_pred_set = sqlx::query_as::<_, (String,)>(
+        "SELECT ps.prediction_set_id FROM prediction_set ps
+         WHERE ps.status = 'ready'
+           AND ps.training_end_date IS NOT NULL
+           AND ps.training_end_date < $1
+           AND ps.start_date <= $1 AND ps.end_date >= $1
+         ORDER BY ps.training_end_date DESC, ps.created_at DESC LIMIT 1"
+    ).bind(today).fetch_optional(&state.db).await.ok().flatten().map(|(p,)| p);
 
     let mut results = Vec::new();
     for (name, table, max_gap) in &checks {
@@ -278,12 +289,49 @@ pub async fn sync_status(
         let max_date: Option<(String,)> = sqlx::query_as(&sql_str).fetch_optional(&state.db).await.ok().flatten();
         let gap = max_date.and_then(|(d,)| {
             chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok()
-                .map(|dt| (chrono::Utc::now().date_naive() - dt).num_days())
+                .map(|dt| (today - dt).num_days())
         }).unwrap_or(999);
 
         results.push(serde_json::json!({
             "name": name, "max_gap_days": max_gap,
             "current_gap_days": gap, "healthy": gap <= *max_gap
+        }));
+    }
+
+    // ── ML预测（统一检查：日期覆盖 + ETF 预测 + A股个股预测）──
+    {
+        let (ml_gap, ml_healthy, ml_extra) = if let Some(ref pid) = active_pred_set {
+            let latest: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+                "SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1"
+            ).bind(pid).fetch_optional(&state.db).await.ok().flatten();
+
+            let gap = latest
+                .map(|(d,)| (today - d).num_days())
+                .unwrap_or(999);
+
+            let total_symbols: (i64,) = sqlx::query_as(
+                "SELECT COUNT(DISTINCT symbol) FROM model_prediction
+                 WHERE prediction_set_id = $1 AND trade_date = (SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1)"
+            ).bind(pid).fetch_optional(&state.db).await.ok().flatten().unwrap_or((0,));
+
+            // A股个股（非 ETF 的 .SH/.SZ 标的，排除 5xxxxx, 1xxxxx ETF）
+            let a_stock_count: (i64,) = sqlx::query_as(
+                "SELECT COUNT(DISTINCT symbol) FROM model_prediction
+                 WHERE prediction_set_id = $1 AND trade_date = (SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1)
+                 AND symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'"
+            ).bind(pid).fetch_optional(&state.db).await.ok().flatten().unwrap_or((0,));
+
+            let healthy = gap <= 7 && total_symbols.0 >= 20 && a_stock_count.0 >= 20;
+            let info = format!("预测集={}, 总{}条, 个股{}条(需≥20)|ETF{}条", pid, total_symbols.0, a_stock_count.0, total_symbols.0 - a_stock_count.0);
+            (gap, healthy, info)
+        } else {
+            (999i64, false, "无可用预测集(未覆盖今天或training_end_date缺失)".to_string())
+        };
+
+        results.push(serde_json::json!({
+            "name": "ML预测", "max_gap_days": 7i64,
+            "current_gap_days": ml_gap, "healthy": ml_healthy,
+            "extra": ml_extra,
         }));
     }
 
@@ -375,14 +423,19 @@ pub async fn repair_sync(
                 Err(e) => Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)})),
             }
         }
-        "ML预测" => {
+        "ML预测" | "ML预测(活跃策略)" => {
             let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
             let url = format!("http://localhost:{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", port);
             let pred_date = chrono::Utc::now().date_naive();
+            // 使用最新的 EOD 数据版本而非硬编码旧版本
+            let dv_id: String = sqlx::query_scalar(
+                "SELECT data_version_id FROM data_version WHERE data_version_id LIKE 'dv-eod-%' ORDER BY end_date DESC LIMIT 1"
+            ).fetch_optional(&state.db).await.ok().flatten()
+                .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string());
             let payload = serde_json::json!({
                 "model_code": "nlqr_mr", "model_version": "1.0.0",
                 "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
-                "data_version_id": "research-full-2016-2026-20260515",
+                "data_version_id": dv_id,
                 "feature_set_version_id": "phase7-wide-qgvrel-v1",
                 "training_dataset_id": "phase7-wf-wide-qgvrel-h60-v1",
                 "prediction_start_date": pred_date.format("%Y%m%d").to_string(),

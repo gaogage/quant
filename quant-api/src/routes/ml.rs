@@ -847,11 +847,13 @@ async fn create_walk_forward_linear_prediction_set_inner(
     .await
     .map_err(|error| format!("Failed to upsert walk-forward model_registry: {}", error))?;
 
+    let training_end = req.prediction_start_date - chrono::Duration::days(1);
     sqlx::query(
         "INSERT INTO prediction_set
            (prediction_set_id, model_version_id, feature_set_version_id, data_version_id,
-            start_date, end_date, prediction_hash, status, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8)
+            start_date, end_date, prediction_hash, status, metadata,
+            training_end_date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9)
          ON CONFLICT (prediction_set_id) DO UPDATE SET
             model_version_id = EXCLUDED.model_version_id,
             feature_set_version_id = EXCLUDED.feature_set_version_id,
@@ -860,7 +862,8 @@ async fn create_walk_forward_linear_prediction_set_inner(
             end_date = EXCLUDED.end_date,
             prediction_hash = EXCLUDED.prediction_hash,
             status = EXCLUDED.status,
-            metadata = EXCLUDED.metadata",
+            metadata = EXCLUDED.metadata,
+            training_end_date = COALESCE(prediction_set.training_end_date, EXCLUDED.training_end_date)",
     )
     .bind(&req.prediction_set_id)
     .bind(&req.model_version_id)
@@ -870,6 +873,7 @@ async fn create_walk_forward_linear_prediction_set_inner(
     .bind(req.prediction_end_date)
     .bind(&prediction_hash)
     .bind(&metadata)
+    .bind(training_end)
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert walk-forward prediction_set: {}", error))?;
@@ -1563,11 +1567,13 @@ async fn train_linear_model_inner(
     .await
     .map_err(|error| format!("Failed to upsert model_registry: {}", error))?;
 
+    let training_end = req.prediction_start_date - chrono::Duration::days(1);
     sqlx::query(
         "INSERT INTO prediction_set
            (prediction_set_id, model_version_id, feature_set_version_id, data_version_id,
-            start_date, end_date, prediction_hash, status, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8)
+            start_date, end_date, prediction_hash, status, metadata,
+            training_end_date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9)
          ON CONFLICT (prediction_set_id) DO UPDATE SET
             model_version_id = EXCLUDED.model_version_id,
             feature_set_version_id = EXCLUDED.feature_set_version_id,
@@ -1576,7 +1582,8 @@ async fn train_linear_model_inner(
             end_date = EXCLUDED.end_date,
             prediction_hash = EXCLUDED.prediction_hash,
             status = EXCLUDED.status,
-            metadata = EXCLUDED.metadata",
+            metadata = EXCLUDED.metadata,
+            training_end_date = COALESCE(prediction_set.training_end_date, EXCLUDED.training_end_date)",
     )
     .bind(&req.prediction_set_id)
     .bind(&req.model_version_id)
@@ -1586,6 +1593,7 @@ async fn train_linear_model_inner(
     .bind(req.prediction_end_date)
     .bind(&prediction_hash)
     .bind(&metadata)
+    .bind(training_end)
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert prediction_set: {}", error))?;
@@ -2006,11 +2014,13 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
     .await
     .map_err(|error| format!("Failed to upsert nonlinear model_registry: {}", error))?;
 
+    let training_end = req.prediction_start_date - chrono::Duration::days(1);
     sqlx::query(
         "INSERT INTO prediction_set
            (prediction_set_id, model_version_id, feature_set_version_id, data_version_id,
-            start_date, end_date, prediction_hash, status, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8)
+            start_date, end_date, prediction_hash, status, metadata,
+            training_end_date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9)
          ON CONFLICT (prediction_set_id) DO UPDATE SET
             model_version_id = EXCLUDED.model_version_id,
             feature_set_version_id = EXCLUDED.feature_set_version_id,
@@ -2019,7 +2029,8 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
             end_date = EXCLUDED.end_date,
             prediction_hash = EXCLUDED.prediction_hash,
             status = EXCLUDED.status,
-            metadata = EXCLUDED.metadata",
+            metadata = EXCLUDED.metadata,
+            training_end_date = COALESCE(prediction_set.training_end_date, EXCLUDED.training_end_date)",
     )
     .bind(&req.prediction_set_id)
     .bind(&req.model_version_id)
@@ -2029,6 +2040,7 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
     .bind(req.prediction_end_date)
     .bind(&prediction_hash)
     .bind(&metadata)
+    .bind(training_end)
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert nonlinear prediction_set: {}", error))?;

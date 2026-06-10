@@ -217,27 +217,33 @@ pub fn build_position_summary_notification(
     trade_date: &str,
     total_nav: f64,
     cash: f64,
+    margin_amount: f64,
+    market_value: f64,
+    net_worth: f64,
     positions: &[Value],
     cumulative_return: f64,
     max_drawdown: f64,
     class_breakdown: &[Value],
 ) -> String {
     let type_label = if account_type == "real" { "🔴 实盘" } else { "🟡 模拟" };
-    let market_value = total_nav - cash;
-    let position_pct = if total_nav > 0.0 { market_value / total_nav * 100.0 } else { 0.0 };
+    let position_pct = if net_worth > 0.0 { market_value / net_worth * 100.0 } else { 0.0 };
+    let cash_pct = if net_worth > 0.0 { cash / net_worth * 100.0 } else { 0.0 };
+    let margin_pct = if net_worth > 0.0 { margin_amount / net_worth * 100.0 } else { 0.0 };
 
     let mut text = format!(
         "## {} 持仓摘要 — {}  \n\n\
          **账号**: {} | **日期**: {}  \n\n\
-         **总资产**: ¥{:.2} | **现金**: ¥{:.2} ({:.1}%) | **持仓市值**: ¥{:.2} ({:.1}%)  \n\
+         **净资产**: ¥{:.2}  \n\
+         **总资产**: ¥{:.2} | **持仓市值**: ¥{:.2} ({:.1}%)  \n\
+         **现金**: ¥{:.2} ({:.1}%) | **融资金额**: ¥{:.2} ({:.1}%)  \n\
          **累计收益**: {:.2}% | **最大回撤**: {:.2}%  \n\n\
          | 标的 | 名称 | 持仓量 | 现价 | 市值 | 占比 |  \n\
          |:-----|:-----|:------:|:----:|:----:|:----:|  \n",
         type_label, account_name,
         account_name, trade_date,
-        total_nav, cash,
-        if total_nav > 0.0 { cash / total_nav * 100.0 } else { 0.0 },
-        market_value, position_pct,
+        net_worth,
+        total_nav, market_value, position_pct,
+        cash, cash_pct, margin_amount, margin_pct,
         cumulative_return * 100.0, max_drawdown * 100.0,
     );
 
@@ -251,7 +257,7 @@ pub fn build_position_summary_notification(
         let qty = pos.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let price = pos.get("current_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let mval = pos.get("market_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let w = if total_nav > 0.0 { mval / total_nav * 100.0 } else { 0.0 };
+        let w = if net_worth > 0.0 { mval / net_worth * 100.0 } else { 0.0 };
         text.push_str(&format!("| {} | {} | {:.0} | {:.2} | ¥{:.0} | {:.1}% |  \n",
             symbol, short, qty, price, mval, w));
     }
@@ -308,7 +314,8 @@ mod tests {
 
         let text = build_position_summary_notification(
             "TestAccount", "simulated", "2026-06-02",
-            1_000_000.0, 567_500.0, &positions, 0.125, -0.08, &vec![],
+            1_000_000.0, 567_500.0, 0.0, 432_500.0, 1_000_000.0,
+            &positions, 0.125, -0.08, &vec![],
         );
 
         assert!(text.contains("🟡 模拟"));

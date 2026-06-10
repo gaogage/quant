@@ -491,7 +491,7 @@ pub async fn push_account_dingtalk(
          FROM paper_account WHERE paper_account_id = $1"
     ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
 
-    let (name, acc_type, webhook_url, nav, cash, _margin) = match acc {
+    let (name, acc_type, webhook_url, nav, cash, margin) = match acc {
         Some(a) => a,
         None => return Json(serde_json::json!({"code": 404, "message": "账号不存在"})).into_response(),
     };
@@ -553,9 +553,14 @@ pub async fn push_account_dingtalk(
     // 资产大类分布
     let class_breakdown = asset_allocation(&positions);
 
+    let mv: f64 = positions.iter()
+        .filter_map(|p| p.get("market_value").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
+        .sum();
+    let net_worth = mv + cash - margin;
+
     let text = dingtalk::build_position_summary_notification(
         &name, &acc_type, &trade_date,
-        nav, cash, &positions, cum_ret, mdd, &class_breakdown,
+        nav, cash, margin, mv, net_worth, &positions, cum_ret, mdd, &class_breakdown,
     );
 
     match dingtalk::send_dingtalk_markdown(&webhook, "持仓摘要", &text).await {

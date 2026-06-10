@@ -223,6 +223,19 @@ impl TushareClient {
         self.call_api::<Vec<serde_json::Value>>("fund_daily", params, &[]).await
     }
 
+    /// Tushare realtime_quote — 盘中实时行情（需 PRO 积分>=2000）
+    /// 返回字段: ts_code, name, price, open, pre_close, high, low, volume, amount, bid, ask
+    pub async fn realtime_quote(
+        &self,
+        ts_code: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        self.call_api::<Vec<serde_json::Value>>("realtime_quote", params, &[]).await
+    }
+
     /// 获取每日基础/估值数据，支持按交易日或按单只股票区间分页拉取。
     pub async fn daily_basic(
         &self,
