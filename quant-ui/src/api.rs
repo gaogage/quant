@@ -272,6 +272,17 @@ pub async fn admin_list_tasks() -> Result<Value, String> {
     get("/api/v1/admin/tasks").await
 }
 
+pub async fn admin_update_task(name: &str, enabled: Option<bool>, cron: Option<&str>) -> Result<Value, String> {
+    let mut payload = serde_json::json!({});
+    if let Some(en) = enabled { payload["enabled"] = serde_json::json!(en); }
+    if let Some(cr) = cron { payload["schedule_cron"] = serde_json::json!(cr); }
+    put(&format!("/api/v1/admin/tasks/{}", name), &payload).await
+}
+
+pub async fn admin_check_task_deps() -> Result<Value, String> {
+    get("/api/v1/admin/tasks/check-deps").await
+}
+
 pub async fn admin_sync_status() -> Result<Value, String> {
     get("/api/v1/admin/sync/status").await
 }

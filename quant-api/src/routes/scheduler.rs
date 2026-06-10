@@ -13,6 +13,7 @@ use ndarray::Array2;
 use quant_common::mvo;
 use quant_data::tushare::client::TushareClient;
 use sqlx::PgPool;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -102,15 +103,15 @@ async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig 
 }
 
 async fn run_scheduled_tasks(db: &PgPool) {
-    let now = chrono::Utc::now();
-    let tasks: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT task_name, task_type, params FROM scheduled_task_config
+    let now = chrono::Local::now();
+    let tasks: Vec<(String, String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT task_name, task_type, schedule_cron, params FROM scheduled_task_config
          WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= $1)
          ORDER BY next_run_at NULLS FIRST"
     ).bind(now).fetch_all(db).await.unwrap_or_default();
 
-    for (name, task_type, params) in &tasks {
-        info!("[scheduler] 定时任务触发: {} ({})", name, task_type);
+    for (name, task_type, cron_expr, params) in &tasks {
+        info!("[scheduler] 定时任务触发: {} ({}) cron={}", name, task_type, cron_expr);
         match task_type.as_str() {
             "data_quality_check" => {
                 run_data_quality_check(db).await;
@@ -118,7 +119,7 @@ async fn run_scheduled_tasks(db: &PgPool) {
             "equity_curve_update" => {
                 let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or("phase7_price_volume_expanded_v1");
                 let top_n = params.get("top_n").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
-                info!("[scheduler] 月度权益曲线更新: combo={} top_n={}", combo, top_n);
+                info!("[scheduler] 权益曲线更新: combo={} top_n={}", combo, top_n);
                 let client = reqwest::Client::new();
                 let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
                 let payload = serde_json::json!({
@@ -132,7 +133,14 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     Ok(resp) => {
                         if let Ok(result) = resp.json::<serde_json::Value>().await {
                             if let Some(tid) = result["data"]["task_id"].as_str() {
-                                info!("[scheduler] 新权益曲线已生成: task_id={} (需人工验证后手动更新strategy_config)", tid);
+                                info!("[scheduler] 新权益曲线已生成: task_id={}, 自动更新strategy_config", tid);
+                                let _ = sqlx::query(
+                                    "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() WHERE strategy_id = 'v19' AND status = 'active'"
+                                ).bind(tid).execute(db).await;
+                                // 同时保持 v20 同步（如果存在）
+                                let _ = sqlx::query(
+                                    "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() WHERE strategy_id = 'v20' AND status = 'active'"
+                                ).bind(tid).execute(db).await;
                             }
                         }
                     }
@@ -144,10 +152,22 @@ async fn run_scheduled_tasks(db: &PgPool) {
             }
             _ => {}
         }
-        // 更新下次运行时间
+
+        // 根据 CRON 表达式计算下次运行时间
+        let next = match cron::Schedule::from_str(cron_expr) {
+            Ok(schedule) => {
+                schedule.upcoming(chrono::Local).next()
+            }
+            Err(e) => {
+                warn!("[scheduler] 任务 {} 的 CRON 表达式 '{}' 无效: {}，默认 1 天后", name, cron_expr, e);
+                None
+            }
+        };
+        let next_at = next.unwrap_or_else(|| now + chrono::Duration::days(1));
         let _ = sqlx::query(
-            "UPDATE scheduled_task_config SET last_run_at = NOW(), run_count = run_count + 1, last_status = 'success', next_run_at = NOW() + INTERVAL '1 day' WHERE task_name = $1"
-        ).bind(name).execute(db).await;
+            "UPDATE scheduled_task_config SET last_run_at = NOW(), run_count = run_count + 1,
+             last_status = 'success', next_run_at = $1 WHERE task_name = $2"
+        ).bind(next_at).bind(name).execute(db).await;
     }
 }
 
@@ -308,11 +328,13 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
             };
             let sync_date_str = sync_date.format("%Y%m%d").to_string();
             info!("[scheduler] 9:00 T+1 补同步最近交易日 {} 日线 + 因子重算...", sync_date_str);
-            let empty: Vec<String> = vec![];
 
             // Step 1: 同步最近交易日日线 + ETF日线 (T+1数据已就绪)
             let bar_dv = format!("dv-t1-{}", sync_date_str);
-            match quant_data::sync::sync_daily_bars(db, tushare, &empty, &sync_date_str, &sync_date_str, &bar_dv).await {
+            let all_stocks: Vec<String> = sqlx::query_scalar(
+                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
+            ).fetch_all(db).await.unwrap_or_default();
+            match quant_data::sync::sync_daily_bars(db, tushare, &all_stocks, &sync_date_str, &sync_date_str, &bar_dv).await {
                 Ok(n) => info!("[scheduler] T+1 A股日线同步: {} 条", n),
                 Err(e) => warn!("[scheduler] T+1 A股日线同步失败: {}", e),
             }
@@ -744,18 +766,20 @@ async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: N
 /// 16:00 日终数据同步 (直接调用内部函数)
 async fn sync_eod_data(db: &PgPool, tushare: &TushareClient, date: NaiveDate) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
-    let empty: Vec<String> = vec![];
+    let sc = load_strategy_config(db, "v19").await;
+    let all_stocks: Vec<String> = sqlx::query_scalar(
+        "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
+    ).fetch_all(db).await.unwrap_or_default();
 
     // ── 当日日线 + ETF日线（收盘后通常已可获取）──
-    let sc = load_strategy_config(db, "v19").await;
-    let _ = quant_data::sync::sync_daily_bars(db, tushare, &empty, &date_str, &date_str, &format!("dv-eod-{}", date_str)).await;
+    let _ = quant_data::sync::sync_daily_bars(db, tushare, &all_stocks, &date_str, &date_str, &format!("dv-eod-{}", date_str)).await;
     let _ = quant_data::sync::sync_fund_daily(db, tushare, &sc.etf_symbols, &date_str, &date_str, &format!("etf-eod-{}", date_str)).await;
 
     // 日线基础指标
-    let _ = quant_data::sync::sync_daily_basic(db, tushare, &empty, &date_str, &date_str, &format!("dv-basic-eod-{}", date_str)).await;
+    let _ = quant_data::sync::sync_daily_basic(db, tushare, &all_stocks, &date_str, &date_str, &format!("dv-basic-eod-{}", date_str)).await;
 
     // 复权因子
-    let _ = quant_data::sync::sync_adj_factor(db, tushare, &empty, &date_str, &date_str, &format!("dv-adj-eod-{}", date_str)).await;
+    let _ = quant_data::sync::sync_adj_factor(db, tushare, &all_stocks, &date_str, &date_str, &format!("dv-adj-eod-{}", date_str)).await;
 
     info!("[scheduler] 16:00 EOD 同步 (当日日线+ETF+基础指标+复权) ({})", date_str);
 
@@ -844,6 +868,40 @@ async fn run_data_quality_check(db: &PgPool) {
         }
     }
 
+    // ── 策略依赖覆盖检查：验证所有活跃策略所需数据都有自动同步 ──
+    {
+        let signal_sources: Vec<(String, String)> = sqlx::query_as(
+            "SELECT DISTINCT signal_source, paper_account_id FROM paper_account WHERE status = 'active'"
+        ).fetch_all(db).await.unwrap_or_default();
+        for (signal_source, _account_id) in &signal_sources {
+            let required: Vec<&str> = match signal_source.as_str() {
+                "factor" => vec!["A股日线", "ETF日线", "因子(pv)", "CSI300"],
+                "prediction" | "prediction_blend" => vec!["A股日线", "ETF日线", "因子(pv)", "CSI300", "ML预测"],
+                _ => vec!["A股日线", "ETF日线", "因子(pv)", "CSI300"],
+            };
+            for item in &required {
+                let covered = match *item {
+                    "A股日线" | "ETF日线" | "CSI300" | "停牌" | "涨跌停" | "复权因子" => true, // scheduler 9:00/16:00 内置
+                    "因子(pv)" => true,  // factor_backfill_daily 任务 + T+1
+                    "ML预测" => true,   // scheduler 16:00 EOD (60天检查)
+                    "权益曲线" => true, // equity_curve_monthly 任务
+                    _ => false,
+                };
+                if !covered {
+                    gaps.push(format!("策略依赖缺失: signal={} 需要 {} 但无自动同步任务", signal_source, item));
+                }
+            }
+        }
+    }
+
+    // ── 定时任务依赖顺序检查 ──
+    {
+        let deps = check_task_dependency_order(db).await;
+        for d in &deps {
+            gaps.push(format!("任务依赖顺序异常: {}", d));
+        }
+    }
+
     if !gaps.is_empty() {
         let msg = format!("[数据质量] 发现 {} 个缺口:\n{}", gaps.len(), gaps.join("\n"));
         warn!("{}", msg);
@@ -855,6 +913,75 @@ async fn run_data_quality_check(db: &PgPool) {
     let _ = sqlx::query(
         "INSERT INTO data_quality_config (config_key, config_value, description) VALUES ('last_quality_check', $1, '最后质量检查日期') ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = NOW()"
     ).bind(today.format("%Y-%m-%d").to_string()).execute(db).await;
+}
+
+/// 检查定时任务 CRON 配置的依赖顺序。
+///
+/// 规则：
+/// - factor_backfill_daily 需要等日线同步完成后运行（9:00 T+1 或 16:00 EOD 之后）
+/// - equity_curve_monthly 需要因子数据就绪后运行（factor_backfill 之后）
+///
+/// 内置 scheduler 同步时刻（北京时间）:
+///   T+1 补同步: 9:00  |  EOD 同步: 16:00
+pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    // 读取所有启用任务的 CRON（格式: "分 时 日 月 周"）
+    let tasks: Vec<(String, String)> = sqlx::query_as(
+        "SELECT task_name, schedule_cron FROM scheduled_task_config WHERE enabled = true"
+    ).fetch_all(db).await.unwrap_or_default();
+
+    // 简单解析 CRON 的时和分字段
+    let mut task_times: Vec<(String, u32, u32)> = Vec::new(); // (name, hour, minute)
+    for (name, cron_str) in &tasks {
+        let parts: Vec<&str> = cron_str.split_whitespace().collect();
+        if parts.len() >= 2 {
+            if let (Ok(min), Ok(hour)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                task_times.push((name.clone(), hour, min));
+            } else {
+                issues.push(format!("{}: CRON 表达式 '{}' 无法解析", name, cron_str));
+            }
+        } else {
+            issues.push(format!("{}: CRON 表达式 '{}' 格式错误", name, cron_str));
+        }
+    }
+
+    // 内置 scheduler 同步完成时间（北京时间）
+    // T+1 补同步: 9:00-9:10  |  EOD 同步: 16:00-16:10
+    let t1_complete = (9, 10);  // 9:10 BJT
+    let eod_complete = (16, 10); // 16:10 BJT
+
+    // 检查 factor_backfill_daily 的 CRON 时间
+    for (name, hour, min) in &task_times {
+        let time_minutes = hour * 60 + min;
+
+        if name == "factor_backfill_daily" {
+            let eod_min = eod_complete.0 * 60 + eod_complete.1;
+            if time_minutes < eod_min && time_minutes < t1_complete.0 * 60 {
+                issues.push(format!(
+                    "factor_backfill_daily: CRON {}:{:02} (BJ) 早于日线同步完成 (16:10),
+                     因子计算可能缺少当日日线数据", hour, min
+                ));
+            }
+        }
+
+        if name == "equity_curve_monthly" {
+            // 权益曲线依赖因子数据，应在 factor_backfill_daily 之后
+            let factor_min = task_times.iter()
+                .find(|(n, _, _)| n == "factor_backfill_daily")
+                .map(|(_, h, m)| h * 60 + m);
+            if let Some(fm) = factor_min {
+                if time_minutes < fm {
+                    issues.push(format!(
+                        "equity_curve_monthly: CRON {}:{:02} (BJ) 早于 factor_backfill_daily ({}:{:02}),
+                         权益曲线可能缺少因子数据", hour, min, fm / 60, fm % 60
+                    ));
+                }
+            }
+        }
+    }
+
+    issues
 }
 
 /// 涨跌停数据同步 (直接调用, 带重试)

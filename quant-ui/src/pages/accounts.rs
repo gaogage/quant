@@ -5,41 +5,101 @@ use serde_json::Value;
 
 use crate::api;
 use crate::components::charts::CumulativeLineChart;
+use dioxus::events::{Key, KeyboardEvent};
+
+// ── 过滤器子组件：使用 Dioxus 信号管理状态，通过 use_callback 稳定回调避免重渲染 ──
+
+#[component]
+fn FilterBar(on_search: Callback<String>) -> Element {
+    let mut f_name = use_signal(String::new);
+    let mut f_leverage = use_signal(|| "all".to_string());
+    let mut f_signal = use_signal(|| "all".to_string());
+    let mut f_lev_min = use_signal(String::new);
+    let mut f_lev_max = use_signal(String::new);
+    let mut f_status = use_signal(|| "all".to_string());
+
+    let build_filter = move || {
+        let mut p = Vec::new();
+        let n = f_name.read(); if !n.is_empty() { p.push(format!("name={}", &*n)); }
+        let l = f_leverage.read(); if *l != "all" { p.push(format!("leverage={}", &*l)); }
+        let s = f_signal.read(); if *s != "all" { p.push(format!("signal_source={}", &*s)); }
+        let lmin = f_lev_min.read(); if !lmin.is_empty() { p.push(format!("lev_mult_min={}", &*lmin)); }
+        let lmax = f_lev_max.read(); if !lmax.is_empty() { p.push(format!("lev_mult_max={}", &*lmax)); }
+        let st = f_status.read(); if *st != "all" { p.push(format!("status={}", &*st)); }
+        p.join("&")
+    };
+    let do_search = move || on_search(build_filter());
+
+    rsx! {
+        div { class: "mb-4 p-3 bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800",
+            div { class: "flex gap-3 items-end flex-wrap",
+                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "名称" }
+                    input { class: "w-32 px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm",
+                        value: "{f_name}", oninput: move |e| f_name.set(e.value()),
+                        onkeydown: move |e: KeyboardEvent| if e.key() == Key::Enter { do_search(); },
+                    }
+                }
+                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆" }
+                    select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm",
+                        value: "{f_leverage}", onchange: move |e| f_leverage.set(e.value()),
+                        option { value: "all", "全部" } option { value: "enabled", "已启用" } option { value: "disabled", "未启用" }
+                    }
+                }
+                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "信号源" }
+                    select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm",
+                        value: "{f_signal}", onchange: move |e| f_signal.set(e.value()),
+                        option { value: "all", "全部" } option { value: "factor", "因子" } option { value: "prediction", "ML预测" } option { value: "prediction_blend", "ML混合" }
+                    }
+                }
+                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "倍率从" }
+                    input { class: "w-16 px-2 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm text-center",
+                        value: "{f_lev_min}", oninput: move |e| f_lev_min.set(e.value()),
+                    }
+                }
+                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "到" }
+                    input { class: "w-16 px-2 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm text-center",
+                        value: "{f_lev_max}", oninput: move |e| f_lev_max.set(e.value()),
+                    }
+                }
+                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "状态" }
+                    select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm",
+                        value: "{f_status}", onchange: move |e| f_status.set(e.value()),
+                        option { value: "all", "全部" } option { value: "active", "活跃" } option { value: "inactive", "已停用" }
+                    }
+                }
+                button { class: "px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm text-white transition self-end",
+                    onclick: move |_| do_search(),
+                    "查询"
+                }
+            }
+        }
+    }
+}
 
 #[component]
 pub fn AccountsContent() -> Element {
-    let mut accounts = use_signal(|| Vec::<Value>::new());
+    let mut accounts = use_signal(Vec::<Value>::new);
     let mut loading = use_signal(|| true);
-    let mut error = use_signal(|| String::new());
-    let mut message = use_signal(|| String::new());
-    let mut f_name = use_signal(|| String::new());
-    let mut f_leverage = use_signal(|| String::from("all"));
-    let mut f_signal = use_signal(|| String::from("all"));
-    let mut f_lev_min = use_signal(|| String::new());
-    let mut f_lev_max = use_signal(|| String::new());
-    let mut f_status = use_signal(|| String::from("all"));
-    let mut expanded = use_signal(|| String::new());
+    let mut error = use_signal(String::new);
+    let mut message = use_signal(String::new);
+    let mut expanded = use_signal(String::new);
     let mut detail = use_signal(|| Option::<Value>::None);
     let mut detail_loading = use_signal(|| false);
 
     // ── 回放弹窗状态 ──────────────────────────────────
-    let mut replay_modal = use_signal(|| Option::<Value>::None); // Some(account_data) = 打开
-    let mut replay_start = use_signal(|| String::new());
-    let mut replay_end = use_signal(|| String::new());
+    let mut replay_modal = use_signal(|| Option::<Value>::None);
+    let mut replay_start = use_signal(String::new);
+    let mut replay_end = use_signal(String::new);
     let mut replay_loading = use_signal(|| false);
     let mut replay_result = use_signal(|| Option::<Value>::None);
 
-    let mut load = move || {
+    let mut inited = use_signal(|| false);
+
+    // 加载账号列表（接收过滤参数），保持 FilterBar 始终挂载
+    let mut load = move |filter: String| {
         loading.set(true);
-        let mut params: Vec<String> = Vec::new();
-        let n: String = f_name.read().clone(); if !n.is_empty() { params.push(format!("name={}", n)); }
-        let l: String = f_leverage.read().clone(); if l != "all" { params.push(format!("leverage={}", l)); }
-        let s: String = f_signal.read().clone(); if s != "all" { params.push(format!("signal_source={}", s)); }
-        let lmin: String = f_lev_min.read().clone(); if !lmin.is_empty() { params.push(format!("lev_mult_min={}", lmin)); }
-        let lmax: String = f_lev_max.read().clone(); if !lmax.is_empty() { params.push(format!("lev_mult_max={}", lmax)); }
-        let st: String = f_status.read().clone(); if st != "all" { params.push(format!("status={}", st)); }
         spawn(async move {
-            match api::list_accounts(&params.join("&")).await {
+            match api::list_accounts(&filter).await {
                 Ok(v) => { if let Some(arr) = v["data"].as_array() { accounts.set(arr.clone()); } }
                 Err(e) => error.set(e),
             }
@@ -47,7 +107,12 @@ pub fn AccountsContent() -> Element {
         });
     };
 
-    use_effect(move || { load(); });
+    use_effect(move || {
+        if !*inited.read() { inited.set(true); load(String::new()); }
+    });
+
+    // 用 use_memo 创建稳定回调引用，避免 FilterBar 因父组件重渲染而丢失输入值
+    let on_filter_search = use_memo(move || Callback::new(move |f: String| load(f)));
 
     // ── 回放弹窗（提前返回，避免在 rsx! 中使用 if let）───
     let show_replay = replay_modal.read().is_some();
@@ -176,28 +241,22 @@ pub fn AccountsContent() -> Element {
         };
     }
 
-    if *loading.read() {
-        return rsx! { div { class: "p-6", div { class: "animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" } } };
-    }
-
+    // 注意：不在此处提前返回 loading spinner！否则 FilterBar 会被卸载，信号重置，查询条件丢失。
     rsx! {
         div { class: "p-6 max-w-6xl mx-auto",
             div { class: "flex items-center justify-between mb-4",
                 h1 { class: "text-2xl font-bold text-gray-900 dark:text-white", "投资账号" }
-                button { class: "px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm text-white transition", onclick: move |_| load(), "查询" }
             }
             if !message.read().is_empty() { div { class: "mb-4 p-3 bg-green-50 dark:bg-green-900/50 border border-green-300 dark:border-green-700 rounded-lg text-green-700 dark:text-green-300 text-sm flex justify-between", span { "{message}" } button { class: "text-green-600 dark:text-green-400", onclick: move |_| message.set(String::new()), "✕" } } }
             if !error.read().is_empty() { div { class: "mb-4 p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm flex justify-between", span { "{error}" } button { class: "text-red-600 dark:text-red-400", onclick: move |_| error.set(String::new()), "✕" } } }
-            // 过滤器
-            div { class: "mb-4 flex gap-3 flex-wrap items-end",
-                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "名称" } input { class: "w-36 px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm", value: "{f_name}", oninput: move |e| f_name.set(e.value()) } }
-                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆" } select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm", value: "{f_leverage}", onchange: move |e| f_leverage.set(e.value()), option { value: "all", "全部" } option { value: "enabled", "已启用" } option { value: "disabled", "未启用" } } }
-                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "信号源" } select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm", value: "{f_signal}", onchange: move |e| f_signal.set(e.value()), option { value: "all", "全部" } option { value: "factor", "因子" } option { value: "prediction", "ML预测" } option { value: "prediction_blend", "ML混合" } } }
-                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "倍率从" } input { class: "w-16 px-2 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm text-center", value: "{f_lev_min}", oninput: move |e| f_lev_min.set(e.value()) } }
-                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "到" } input { class: "w-16 px-2 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm text-center", value: "{f_lev_max}", oninput: move |e| f_lev_max.set(e.value()) } }
-                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "状态" } select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm", value: "{f_status}", onchange: move |e| f_status.set(e.value()), option { value: "all", "全部" } option { value: "active", "活跃" } option { value: "inactive", "已停用" } } }
+            FilterBar {
+                on_search: on_filter_search.cloned(),
             }
-            if accounts.read().is_empty() {
+            if *loading.read() {
+                div { class: "flex justify-center py-12",
+                    div { class: "animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" }
+                }
+            } else if accounts.read().is_empty() {
                 div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-8 text-center text-gray-400 dark:text-gray-500", "无匹配账号" }
             } else {
                 div { class: "space-y-4",
@@ -214,7 +273,7 @@ pub fn AccountsContent() -> Element {
                             let lev_mode = acc["leverage_mode"].as_str().unwrap_or("fixed");
                             let lev_mult = acc["leverage_multiplier"].as_f64().unwrap_or(1.0);
                             let signal = acc["signal_source"].as_str().unwrap_or("factor");
-                            let owner = acc["owner"].as_str().unwrap_or("");
+                            let _owner = acc["owner"].as_str().unwrap_or("");
                             let type_label = if acc_type == "real" { "🔴 实盘" } else { "🟡 模拟" };
                             let is_open = *expanded.read() == aid;
                             let aid_toggle = aid.clone();
@@ -270,7 +329,7 @@ pub fn AccountsContent() -> Element {
                                                         spawn(async move {
                                                             if !web_sys::window().and_then(|w| w.confirm_with_message(&format!("确认停用 {}？", n)).ok()).unwrap_or(false) { return; }
                                                             match api::delete_account(&a).await {
-                                                                Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => { message.set(format!("已停用 {}", n)); load(); }
+                                                                Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => { message.set(format!("已停用 {}", n)); load(String::new()); }
                                                                 Ok(v) => error.set(v["message"].as_str().unwrap_or("失败").to_string()),
                                                                 Err(e) => error.set(e),
                                                             }
@@ -343,7 +402,7 @@ pub fn AccountsContent() -> Element {
                                                             let cum_csi: Vec<f64> = csi_rets.iter().scan(1.0, |cum, &r| { *cum *= 1.0+r/100.0; Some((*cum-1.0)*100.0) }).collect();
                                                             let cum_gold: Vec<f64> = gold_rets.iter().scan(1.0, |cum, &r| { *cum *= 1.0+r/100.0; Some((*cum-1.0)*100.0) }).collect();
                                                             let cum_sp: Vec<f64> = sp_rets.iter().scan(1.0, |cum, &r| { *cum *= 1.0+r/100.0; Some((*cum-1.0)*100.0) }).collect();
-                                                            let max_cum = cum_acct.iter().chain(cum_csi.iter()).chain(cum_gold.iter()).chain(cum_sp.iter()).fold(0.0_f64, |a: f64, &v| a.max(v.abs())).max(1.0_f64);
+                                                            let _max_cum = cum_acct.iter().chain(cum_csi.iter()).chain(cum_gold.iter()).chain(cum_sp.iter()).fold(0.0_f64, |a: f64, &v| a.max(v.abs())).max(1.0_f64);
                                                             rsx! {
                                                                 h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-2", "年度收益对比（柱状图）" }
                                                                 div { class: "flex items-center gap-3 text-xs mb-2",

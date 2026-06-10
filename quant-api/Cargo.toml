@@ -28,3 +28,4 @@ rust_decimal.workspace = true
 bcrypt = "0.15"
 jsonwebtoken = "9"
 rand = "0.8"
+cron = "0.16"

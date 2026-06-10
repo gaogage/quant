@@ -4,7 +4,6 @@
 
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
-use serde::{Deserialize, Serialize};
 
 use crate::api::UserInfo;
 

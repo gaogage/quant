@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use serde_json::Value;
 
 use crate::api;

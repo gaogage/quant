@@ -240,6 +240,9 @@ pub async fn sync_status(
 ) -> axum::response::Response {
     if let Err(e) = require_admin(&admin) { return e; }
 
+    // T+1 数据在次日 9:00 自动同步（含周末），正常 gap ≤1 天。
+    // 设 2 天留 buffer（允许同步任务偶然延迟）。
+    // 复权因子仅公司事件时更新；因子依赖日线；ML 训练间隔 60 天；权益曲线按月计算。
     let checks = vec![
         ("A股日线", "market_stock_daily_bar_adj", 2i64),
         ("ETF日线(原油)", "market_stock_daily_bar_adj", 2i64),
@@ -247,22 +250,29 @@ pub async fn sync_status(
         ("复权因子", "market_adjustment_factor", 30i64),
         ("因子(pv)", "multi_factor_value", 2i64),
         ("CSI300", "market_index_daily_bar", 2i64),
-        ("涨跌停", "market_stock_limit", 90i64),
-        ("ML预测", "model_prediction", 5i64),
-        ("权益曲线", "backtest_equity_curve", 60i64),
+        ("涨跌停", "market_stock_limit", 2i64),
+        ("ML预测", "model_prediction", 7i64),
+        ("权益曲线", "backtest_equity_curve", 10i64),
     ];
+
+    // 权益曲线的 task_id 从 strategy_config 读取（回测完成后自动更新）
+    let eq_tid: String = sqlx::query_as::<_, (String,)>(
+        "SELECT equity_curve_task_id FROM strategy_config WHERE strategy_id = 'v19' AND status = 'active'"
+    ).fetch_optional(&state.db).await.ok().flatten()
+        .map(|(t,)| t)
+        .unwrap_or_else(|| "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".to_string());
 
     let mut results = Vec::new();
     for (name, table, max_gap) in &checks {
-        let extra = if *table == "market_stock_daily_bar_adj" && *name == "ETF日线(原油)" {
-            " WHERE symbol = '501018.SH'"
+        let extra: String = if *table == "market_stock_daily_bar_adj" && *name == "ETF日线(原油)" {
+            " WHERE symbol = '501018.SH'".to_string()
         } else if *table == "multi_factor_value" {
-            " WHERE combo_name = 'phase7_price_volume_expanded_v1'"
+            " WHERE combo_name = 'phase7_price_volume_expanded_v1'".to_string()
         } else if *table == "market_index_daily_bar" {
-            " WHERE symbol = '000300.SH'"
+            " WHERE symbol = '000300.SH'".to_string()
         } else if *table == "backtest_equity_curve" {
-            " WHERE task_id = 'fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e'"
-        } else { "" };
+            format!(" WHERE task_id = '{}'", eq_tid)
+        } else { String::new() };
 
         let sql_str = format!("SELECT MAX(trade_date)::text FROM {} {}", table, extra);
         let max_date: Option<(String,)> = sqlx::query_as(&sql_str).fetch_optional(&state.db).await.ok().flatten();
@@ -278,6 +288,16 @@ pub async fn sync_status(
     }
 
     Json(serde_json::json!({"code": 0, "data": results})).into_response()
+}
+
+/// GET /api/v1/admin/tasks/check-deps
+pub async fn check_task_deps(
+    State(state): State<Arc<AppState>>,
+    admin: UserContext,
+) -> axum::response::Response {
+    if let Err(e) = require_admin(&admin) { return e; }
+    let issues = crate::routes::scheduler::check_task_dependency_order(&state.db).await;
+    Json(serde_json::json!({"code": 0, "data": issues})).into_response()
 }
 
 // ── Data Repair ─────────────────────────────────────────────
@@ -383,7 +403,35 @@ pub async fn repair_sync(
             }
         }
         "权益曲线" => {
-            Json(serde_json::json!({"code": 1, "message": "权益曲线由回测计算产生，无法直接修复"}))
+            // 触发因子回测任务（与 scheduler equity_curve_update 一致）
+            let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+            let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
+            let payload = serde_json::json!({
+                "combo_name": "phase7_price_volume_expanded_v1", "strategy_version_id": "factor-combo-v1",
+                "data_version_id": "dv-20260606-053217534", "top_n": 30,
+                "rebalance": "10", "start_date": "20060101", "end_date": end_date,
+            });
+            match reqwest::Client::new()
+                .post(format!("http://localhost:{}/api/v1/quant/backtests/run-factor", port))
+                .json(&payload).timeout(std::time::Duration::from_secs(600)).send().await
+            {
+                Ok(resp) => {
+                    if let Ok(result) = resp.json::<serde_json::Value>().await {
+                        if let Some(tid) = result["data"]["task_id"].as_str() {
+                            // 自动更新 strategy_config 中的 equity_curve_task_id
+                            let _ = sqlx::query(
+                                "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() WHERE strategy_id = 'v19' AND status = 'active'"
+                            ).bind(tid).execute(&state.db).await;
+                            Json(serde_json::json!({"code": 0, "message": format!("权益曲线回测已触发: {}", tid)}))
+                        } else {
+                            Json(serde_json::json!({"code": 1, "message": "回测提交失败，未返回task_id"}))
+                        }
+                    } else {
+                        Json(serde_json::json!({"code": 1, "message": "回测响应解析失败"}))
+                    }
+                }
+                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)})),
+            }
         }
         _ => {
             Json(serde_json::json!({"code": 1, "message": format!("未知数据项: {}", req.name)}))

@@ -1,7 +1,6 @@
 //! 应用布局组件 — 顶部导航栏 + 连接状态 + 内容区域
 
 use dioxus::prelude::*;
-use dioxus_router::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::api;

@@ -40,7 +40,7 @@ pub fn UsersPage() -> Element {
         });
     };
 
-    let do_delete = move |uid: String, uname: String| {
+    let _do_delete = move |uid: String, uname: String| {
         spawn(async move {
             if !web_sys::window().and_then(|w| w.confirm_with_message(&format!("确认删除用户 {}？", uname)).ok()).unwrap_or(false) { return; }
             match api::admin_delete_user(&uid).await {
@@ -51,7 +51,7 @@ pub fn UsersPage() -> Element {
         });
     };
 
-    let open_edit = move |u: Value| {
+    let _open_edit = move |u: Value| {
         e_role.set(u.get("role").and_then(|v| v.as_str()).unwrap_or("user").into());
         e_st.set(u.get("status").and_then(|v| v.as_str()).unwrap_or("active").into());
         e_pw.set(String::new());
