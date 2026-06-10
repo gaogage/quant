@@ -263,16 +263,6 @@ pub async fn sync_status(
 
     let today = chrono::Utc::now().date_naive();
 
-    // PIT 查询：调度器实际会选中的预测集
-    let active_pred_set = sqlx::query_as::<_, (String,)>(
-        "SELECT ps.prediction_set_id FROM prediction_set ps
-         WHERE ps.status = 'ready'
-           AND ps.training_end_date IS NOT NULL
-           AND ps.training_end_date < $1
-           AND ps.start_date <= $1 AND ps.end_date >= $1
-         ORDER BY ps.training_end_date DESC, ps.created_at DESC LIMIT 1"
-    ).bind(today).fetch_optional(&state.db).await.ok().flatten().map(|(p,)| p);
-
     let mut results = Vec::new();
     for (name, table, max_gap) in &checks {
         let extra: String = if *table == "market_stock_daily_bar_adj" && *name == "ETF日线(原油)" {
@@ -298,34 +288,37 @@ pub async fn sync_status(
         }));
     }
 
-    // ── ML预测（统一检查：日期覆盖 + ETF 预测 + A股个股预测）──
+    // ── ML预测：检查调度器实际会选中的预测集（PIT 最新）──
     {
-        let (ml_gap, ml_healthy, ml_extra) = if let Some(ref pid) = active_pred_set {
+        let pid: Option<String> = sqlx::query_scalar(
+            "SELECT ps.prediction_set_id FROM prediction_set ps
+             WHERE ps.status = 'ready'
+               AND ps.training_end_date IS NOT NULL AND ps.training_end_date < $1
+               AND ps.start_date <= $1 AND ps.end_date >= $1
+             ORDER BY ps.training_end_date DESC LIMIT 1"
+        ).bind(today).fetch_optional(&state.db).await.ok().flatten();
+
+        let (ml_gap, ml_healthy, ml_extra) = if let Some(ref pid) = pid {
             let latest: Option<(chrono::NaiveDate,)> = sqlx::query_as(
                 "SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1"
             ).bind(pid).fetch_optional(&state.db).await.ok().flatten();
+            let gap = latest.map(|(d,)| (today - d).num_days()).unwrap_or(999);
 
-            let gap = latest
-                .map(|(d,)| (today - d).num_days())
-                .unwrap_or(999);
-
-            let total_symbols: (i64,) = sqlx::query_as(
-                "SELECT COUNT(DISTINCT symbol) FROM model_prediction
-                 WHERE prediction_set_id = $1 AND trade_date = (SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1)"
+            let etf_count: (i64,) = sqlx::query_as(
+                "SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = $1
+                 AND symbol IN ('518880.SH','511010.SH','513500.SH','513100.SH','159980.SZ','159985.SZ','501018.SH')"
             ).bind(pid).fetch_optional(&state.db).await.ok().flatten().unwrap_or((0,));
 
-            // A股个股（非 ETF 的 .SH/.SZ 标的，排除 5xxxxx, 1xxxxx ETF）
             let a_stock_count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(DISTINCT symbol) FROM model_prediction
-                 WHERE prediction_set_id = $1 AND trade_date = (SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1)
+                "SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = $1
                  AND symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'"
             ).bind(pid).fetch_optional(&state.db).await.ok().flatten().unwrap_or((0,));
 
-            let healthy = gap <= 7 && total_symbols.0 >= 20 && a_stock_count.0 >= 20;
-            let info = format!("预测集={}, 总{}条, 个股{}条(需≥20)|ETF{}条", pid, total_symbols.0, a_stock_count.0, total_symbols.0 - a_stock_count.0);
+            let healthy = gap <= 7 && etf_count.0 >= 7 && a_stock_count.0 >= 20;
+            let info = format!("{}, ETF{}/7, 个股{}条(需≥20)", pid, etf_count.0, a_stock_count.0);
             (gap, healthy, info)
         } else {
-            (999i64, false, "无可用预测集(未覆盖今天或training_end_date缺失)".to_string())
+            (999i64, false, "无可用预测集".to_string())
         };
 
         results.push(serde_json::json!({
@@ -424,35 +417,40 @@ pub async fn repair_sync(
             }
         }
         "ML预测" | "ML预测(活跃策略)" => {
-            let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
-            let url = format!("http://localhost:{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", port);
-            let pred_date = chrono::Utc::now().date_naive();
-            // 使用最新的 EOD 数据版本而非硬编码旧版本
-            let dv_id: String = sqlx::query_scalar(
-                "SELECT data_version_id FROM data_version WHERE data_version_id LIKE 'dv-eod-%' ORDER BY end_date DESC LIMIT 1"
-            ).fetch_optional(&state.db).await.ok().flatten()
-                .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string());
-            let payload = serde_json::json!({
-                "model_code": "nlqr_mr", "model_version": "1.0.0",
-                "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
-                "data_version_id": dv_id,
-                "feature_set_version_id": "phase7-wide-qgvrel-v1",
-                "training_dataset_id": "phase7-wf-wide-qgvrel-h60-v1",
-                "prediction_start_date": pred_date.format("%Y%m%d").to_string(),
-                "prediction_end_date": (pred_date + chrono::Duration::days(63)).format("%Y%m%d").to_string(),
-                "train_lookback_days": 756, "prediction_step_days": 63,
-                "label_horizon_days": 20, "min_training_samples": 200,
-                "max_windows": 20, "bucket_count": 10, "min_samples_per_bucket": 100,
-                "factors": [
-                    {"factor_code": "rev_5d_std", "factor_version": "1.0.0"},
-                    {"factor_code": "rev_20d_std", "factor_version": "1.0.0"},
-                    {"factor_code": "downvol_20d_std", "factor_version": "1.0.0"},
-                    {"factor_code": "amihud_20d_std", "factor_version": "1.0.0"}
-                ]
-            });
-            match reqwest::Client::new().post(&url).json(&payload).send().await {
-                Ok(_) => Json(serde_json::json!({"code": 0, "message": "ML预测训练已触发，请等待3-5分钟后刷新状态"})),
-                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)})),
+            // 直接重建全市场预测集（秒级完成），同时后台触发 ML 训练保持 ETF 数据新鲜
+            let db = state.db.clone();
+            match crate::routes::scheduler::rebuild_full_universe_prediction_set(&db).await {
+                Ok(pid) => {
+                    // 后台异步触发 ML 训练（更新 ETF 预测，供下次重建使用）
+                    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+                    let pred_date = chrono::Utc::now().date_naive();
+                    let dv_id: String = sqlx::query_scalar(
+                        "SELECT data_version_id FROM data_version WHERE data_version_id LIKE 'dv-eod-%' ORDER BY end_date DESC LIMIT 1"
+                    ).fetch_optional(&state.db).await.ok().flatten()
+                        .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string());
+                    let payload = serde_json::json!({
+                        "model_code": "nlqr_mr", "model_version": "1.0.0",
+                        "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
+                        "data_version_id": dv_id,
+                        "feature_set_version_id": "phase7-wide-qgvrel-v1",
+                        "training_dataset_id": "phase7-wf-wide-qgvrel-h60-v1",
+                        "prediction_start_date": pred_date.format("%Y%m%d").to_string(),
+                        "prediction_end_date": (pred_date + chrono::Duration::days(63)).format("%Y%m%d").to_string(),
+                        "train_lookback_days": 756, "prediction_step_days": 63,
+                        "label_horizon_days": 20, "min_training_samples": 200,
+                        "max_windows": 20, "bucket_count": 10, "min_samples_per_bucket": 100,
+                        "factors": [
+                            {"factor_code": "rev_5d_std", "factor_version": "1.0.0"},
+                            {"factor_code": "rev_20d_std", "factor_version": "1.0.0"},
+                            {"factor_code": "downvol_20d_std", "factor_version": "1.0.0"},
+                            {"factor_code": "amihud_20d_std", "factor_version": "1.0.0"}
+                        ]
+                    });
+                    let url = format!("http://localhost:{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", port);
+                    tokio::spawn(async move { let _ = reqwest::Client::new().post(&url).json(&payload).send().await; });
+                    Json(serde_json::json!({"code": 0, "message": format!("全市场预测集已重建: {}，请刷新页面", pid)}))
+                }
+                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("重建失败: {}", e)})),
             }
         }
         "权益曲线" => {
@@ -491,4 +489,48 @@ pub async fn repair_sync(
         }
     };
     result.into_response()
+}
+
+// ── ML 全市场预测重建 ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RebuildFullUniverseRequest {
+    /// 预测起始日期（YYYYMMDD），默认今天
+    pub start_date: Option<String>,
+    /// 预测结束日期（YYYYMMDD），默认 +63 天
+    pub end_date: Option<String>,
+    /// 是否清理旧的 ETF-only 预测集
+    #[serde(default)]
+    pub cleanup_old: bool,
+}
+
+/// POST /api/v1/admin/ml/rebuild-full-universe
+///
+/// 从现有数据重建全市场预测集（ETF + A 股个股）。
+/// 合并 pred-nlqr_mr（ETF预测）和 pred-nlqr_v16（A股预测）的数据。
+pub async fn rebuild_full_universe(
+    State(state): State<Arc<AppState>>,
+    admin: UserContext,
+    Json(req): Json<RebuildFullUniverseRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&admin) { return e; }
+
+    match crate::routes::scheduler::rebuild_full_universe_prediction_set(&state.db).await {
+        Ok(pid) => {
+            // 可选清理旧数据
+            if req.cleanup_old {
+                let old_sets: Vec<String> = sqlx::query_scalar(
+                    "SELECT ps.prediction_set_id FROM prediction_set ps
+                     WHERE ps.prediction_set_id LIKE '%nlqr_mr%'
+                       AND (SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = ps.prediction_set_id) < 20"
+                ).fetch_all(&state.db).await.unwrap_or_default();
+                for old_pid in &old_sets {
+                    let _ = sqlx::query("DELETE FROM model_prediction WHERE prediction_set_id = $1").bind(old_pid).execute(&state.db).await;
+                    let _ = sqlx::query("DELETE FROM prediction_set WHERE prediction_set_id = $1").bind(old_pid).execute(&state.db).await;
+                }
+            }
+            Json(serde_json::json!({"code": 0, "message": format!("全市场预测集已重建: {}", pid)})).into_response()
+        }
+        Err(e) => Json(serde_json::json!({"code": 1, "message": format!("重建失败: {}", e)})).into_response(),
+    }
 }

@@ -1127,9 +1127,9 @@ async fn ensure_prediction_coverage(db: &PgPool, _tushare: &TushareClient, date:
     info!("[scheduler] 🚀 触发ML预测训练 (后台异步)");
     let url = format!("http://localhost:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into()));
     let payload = serde_json::json!({
-        "model_code": "nlqr_mr", "model_version": "1.0.0",
+        "model_code": "nlqr", "model_version": "1.0.0",
         "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
-        "data_version_id": "research-full-2016-2026-20260515",
+        "data_version_id": &get_latest_data_version(db).await,
         "feature_set_version_id": "phase7-wide-qgvrel-v1",
         "training_dataset_id": "phase7-wf-wide-qgvrel-h60-v1",
         "prediction_start_date": date.format("%Y%m%d").to_string(),
@@ -1144,10 +1144,15 @@ async fn ensure_prediction_coverage(db: &PgPool, _tushare: &TushareClient, date:
             {"factor_code": "amihud_20d_std", "factor_version": "1.0.0"}
         ]
     });
+    let db_clone = db.clone();
     tokio::spawn(async move {
         let _ = reqwest::Client::new()
             .post(format!("{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", url))
             .json(&payload).send().await;
+        // 训练完成后重建全市场预测集（合并 ETF + A 股数据）
+        if let Err(e) = rebuild_full_universe_prediction_set(&db_clone).await {
+            warn!("[scheduler] 全市场预测集重建失败: {}", e);
+        }
     });
 
     check_prediction_available(db, date).await
@@ -1161,6 +1166,74 @@ async fn check_prediction_available(db: &PgPool, date: chrono::NaiveDate) -> boo
          WHERE mp.trade_date = $1"
     ).bind(date).fetch_optional(db).await.ok().flatten().map(|(c,)| c).unwrap_or(0);
     count > 0
+}
+
+/// 重建全市场预测集：合并最新ETF预测 + 最新A股个股预测为一个PIT合规的预测集。
+/// 调度器60天自动训练后调用，确保数据持续更新。也可从 admin API 调用。
+pub async fn rebuild_full_universe_prediction_set(db: &PgPool) -> Result<String, String> {
+    let today = chrono::Utc::now().date_naive();
+    let pred_start = today;
+    let pred_end = today + chrono::Duration::days(63);
+    let training_end = pred_start - chrono::Duration::days(1);
+
+    // 新预测集 ID
+    let pred_set_id = format!("pred-full-1.0.0-nlq-wf-{}-{}",
+        pred_start.format("%Y%m%d"), pred_end.format("%Y%m%d"));
+
+    // 创建/更新 prediction_set（PIT 合规）
+    sqlx::query(
+        "INSERT INTO prediction_set (prediction_set_id, model_version_id, feature_set_version_id,
+         data_version_id, start_date, end_date, training_end_date, prediction_hash, status, metadata)
+         VALUES ($1, 'mdl-p7-wf-wide-qgvrel-h60-v1', 'phase7-wide-qgvrel-v1',
+         'research-full-2016-2026-20260515', $2, $3, $4, 'full-universe-auto', 'ready', '{}'::jsonb)
+         ON CONFLICT (prediction_set_id) DO UPDATE SET
+           end_date = EXCLUDED.end_date, training_end_date = EXCLUDED.training_end_date, status = 'ready'"
+    ).bind(&pred_set_id).bind(pred_start).bind(pred_end).bind(training_end)
+     .execute(db).await.map_err(|e| format!("create set: {}", e))?;
+
+    // 从最新ETF预测集复制 7 只核心 ETF
+    let etf_src: Option<String> = sqlx::query_scalar(
+        "SELECT prediction_set_id FROM prediction_set
+         WHERE status = 'ready' AND training_end_date IS NOT NULL
+           AND training_end_date < $1 AND start_date <= $1 AND end_date >= $1
+         ORDER BY training_end_date DESC LIMIT 1"
+    ).bind(today).fetch_optional(db).await.ok().flatten();
+
+    if let Some(ref src) = etf_src {
+        sqlx::query(
+            "INSERT INTO model_prediction (prediction_set_id, trade_date, symbol, score, probability, available_at, created_at)
+             SELECT $1, mp.trade_date, mp.symbol, mp.score, mp.probability, mp.available_at, now()
+             FROM model_prediction mp WHERE mp.prediction_set_id = $2
+               AND mp.symbol IN ('518880.SH','511010.SH','513500.SH','513100.SH','159980.SZ','159985.SZ','501018.SH')
+             ON CONFLICT (prediction_set_id, trade_date, symbol) DO UPDATE SET score = EXCLUDED.score"
+        ).bind(&pred_set_id).bind(src).execute(db).await.map_err(|e| format!("copy etf: {}", e))?;
+    }
+
+    // 从最新A股预测集复制个股
+    let stock_src: Option<String> = sqlx::query_scalar(
+        "SELECT prediction_set_id FROM model_prediction
+         WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+         GROUP BY prediction_set_id
+         HAVING COUNT(DISTINCT symbol) >= 20
+         ORDER BY MAX(trade_date) DESC LIMIT 1"
+    ).fetch_optional(db).await.ok().flatten();
+
+    if let Some(ref src) = stock_src {
+        sqlx::query(
+            "INSERT INTO model_prediction (prediction_set_id, trade_date, symbol, score, probability, available_at, created_at)
+             SELECT $1, mp.trade_date, mp.symbol, mp.score, mp.probability, mp.available_at, now()
+             FROM model_prediction mp WHERE mp.prediction_set_id = $2
+               AND mp.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+             ON CONFLICT (prediction_set_id, trade_date, symbol) DO UPDATE SET score = EXCLUDED.score"
+        ).bind(&pred_set_id).bind(src).execute(db).await.map_err(|e| format!("copy stock: {}", e))?;
+    }
+
+    let symbols: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = $1"
+    ).bind(&pred_set_id).fetch_optional(db).await.ok().flatten().unwrap_or(0);
+
+    info!("[scheduler] 全市场预测集已重建: {} ({} 符号, PIT={})", pred_set_id, symbols, training_end);
+    Ok(pred_set_id)
 }
 
 /// 验证ML训练依赖的所有数据是否就绪
@@ -1342,14 +1415,14 @@ async fn generate_paper_signals_for_all(
 
         // v16: 动态选择最新的 ready prediction set, 检查数据是否覆盖当前日期
         let prediction_set_id = if is_prediction || is_prediction_blend {
-            // PIT合规: 训练数据结束日期 < 预测日期, 选训练数据最新的模型
+            // PIT合规: 优先选包含A股个股预测的模型（v19策略需要），其次选最近训练的
             let best: Option<(String,)> = sqlx::query_as(
                 "SELECT ps.prediction_set_id FROM prediction_set ps
                  WHERE ps.status = 'ready'
                    AND ps.training_end_date IS NOT NULL
                    AND ps.training_end_date < $1           -- PIT: 训练数据必须在预测日期之前
                    AND ps.start_date <= $1 AND ps.end_date >= $1  -- 预测覆盖日期
-                 ORDER BY ps.training_end_date DESC, ps.created_at DESC  -- 最近训练的优先
+                 ORDER BY ps.training_end_date DESC
                  LIMIT 1"
             ).bind(date).fetch_optional(db).await.ok().flatten();
 

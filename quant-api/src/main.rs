@@ -519,6 +519,7 @@ async fn main() {
         .route("/api/v1/admin/tasks/{name}", axum::routing::put(routes::admin::update_task))
         .route("/api/v1/admin/tasks/{name}/run", post(routes::admin::run_task))
         .route("/api/v1/admin/tasks/check-deps", get(routes::admin::check_task_deps))
+        .route("/api/v1/admin/ml/rebuild-full-universe", post(routes::admin::rebuild_full_universe))
         .route("/api/v1/admin/sync/status", get(routes::admin::sync_status))
         .route("/api/v1/admin/sync/repair", post(routes::admin::repair_sync))
         // ── 策略 ──

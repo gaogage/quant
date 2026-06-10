@@ -81,7 +81,7 @@ fn DataSyncItem(data: Value, on_repaired: Callback<()>) -> Element {
                                 format!("📡 {} — 自动检测中…", msg),
                             ]);
                             let mut poll_count = 0u32;
-                            let max_polls = 30u32; // 最多轮询 30 次（30×5=150秒）
+                            let max_polls = 120u32; // 最多轮询 120 次（120×5=600秒=10分钟）
                             loop {
                                 gloo_timers::future::TimeoutFuture::new(5_000).await;
                                 poll_count += 1;
