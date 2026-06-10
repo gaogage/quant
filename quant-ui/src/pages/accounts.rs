@@ -197,6 +197,7 @@ pub fn AccountsContent() -> Element {
                                         match api::account_reset(&id, c, &d).await {
                                             Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => {
                                                 message.set(v["message"].as_str().unwrap_or("重置成功").to_string());
+                                                reset_loading.set(false);
                                                 reset_modal.set(None);
                                                 load(String::new());
                                             }
@@ -558,8 +559,41 @@ pub fn AccountsContent() -> Element {
                                             div { class: "flex items-center gap-3",
                                                 h3 { class: "font-semibold text-gray-900 dark:text-white text-lg", "{name}" }
                                                 span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400", "{type_label}" }
-                                                if status == "active" { span { class: "text-xs px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-400", "正常" } }
-                                                else { span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500", "已停用" } }
+                                                if status == "active" {
+                                                    {
+                                                        let aid_toggle = aid.clone();
+                                                        rsx! {
+                                                            button { class: "text-xs px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-400 hover:bg-red-100 dark:hover:bg-red-900/50 hover:text-red-600 dark:hover:text-red-400 cursor-pointer transition",
+                                                                onclick: move |evt| {
+                                                                    evt.stop_propagation();
+                                                                    let a = aid_toggle.clone();
+                                                                    spawn(async move {
+                                                                        let _ = api::update_account(&a, &serde_json::json!({"status": "inactive"})).await;
+                                                                        load(String::new());
+                                                                    });
+                                                                },
+                                                                "正常"
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    {
+                                                        let aid_toggle = aid.clone();
+                                                        rsx! {
+                                                            button { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500 hover:bg-green-100 dark:hover:bg-green-900/50 hover:text-green-600 dark:hover:text-green-400 cursor-pointer transition",
+                                                                onclick: move |evt| {
+                                                                    evt.stop_propagation();
+                                                                    let a = aid_toggle.clone();
+                                                                    spawn(async move {
+                                                                        let _ = api::update_account(&a, &serde_json::json!({"status": "active"})).await;
+                                                                        load(String::new());
+                                                                    });
+                                                                },
+                                                                "已停用"
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                             div { class: "flex items-center gap-2",
                                                 span { class: "text-xs text-gray-400 dark:text-gray-600", if is_open { "收起 ▲" } else { "展开 ▼" } }

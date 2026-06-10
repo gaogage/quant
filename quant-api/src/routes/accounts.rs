@@ -466,7 +466,7 @@ pub async fn reset_account(
         "UPDATE paper_account SET
          initial_capital = $1, cash = $1, current_nav = $1, peak_nav = $1,
          margin_amount = 0, max_drawdown_pct = 0, total_trades = 0,
-         status = 'active', created_at = $2, updated_at = NOW()
+         created_at = $2, updated_at = NOW()
          WHERE paper_account_id = $3"
     )
     .bind(cap).bind(start_date).bind(&account_id)
