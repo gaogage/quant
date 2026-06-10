@@ -106,6 +106,19 @@ pub fn AccountsContent() -> Element {
     let mut replay_loading = use_signal(|| false);
     let mut replay_result = use_signal(|| Option::<Value>::None);
 
+    // ── 编辑弹窗状态 ──────────────────────────────────
+    let mut edit_modal = use_signal(|| Option::<Value>::None);
+    let mut edit_name = use_signal(String::new);
+    let mut edit_signal = use_signal(|| "factor".to_string());
+    let mut edit_leverage = use_signal(|| false);
+    let mut edit_lev_mode = use_signal(|| "fixed".to_string());
+    let mut edit_lev_mult = use_signal(String::new);
+    let mut edit_dingtalk = use_signal(String::new);
+    let mut edit_margin = use_signal(String::new);
+    let mut edit_cash = use_signal(String::new);
+    let mut edit_saving = use_signal(|| false);
+    let mut edit_result = use_signal(String::new);
+
     let mut inited = use_signal(|| false);
 
     // 加载账号列表（接收过滤参数），保持 FilterBar 始终挂载
@@ -126,6 +139,153 @@ pub fn AccountsContent() -> Element {
 
     // 用 use_memo 创建稳定回调引用，避免 FilterBar 因父组件重渲染而丢失输入值
     let on_filter_search = use_memo(move || Callback::new(move |f: String| load(f)));
+
+    // ── 编辑弹窗（提前返回，避免在 rsx! 中使用 if let）───
+    let show_edit = edit_modal.read().is_some();
+    if show_edit {
+        let edit_acc = edit_modal.read().clone().unwrap();
+        let acc_id = edit_acc.get("paper_account_id").or(edit_acc.get("account_id"))
+            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let acc_name = edit_acc.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
+        let name_val = edit_name.read().clone();
+        let signal_val = edit_signal.read().clone();
+        let leverage_val = *edit_leverage.read();
+        let lev_mode_val = edit_lev_mode.read().clone();
+        let lev_mult_val = edit_lev_mult.read().clone();
+        let dingtalk_val = edit_dingtalk.read().clone();
+        let margin_val = edit_margin.read().clone();
+        let cash_val = edit_cash.read().clone();
+        let saving = *edit_saving.read();
+        let result_msg = edit_result.read().clone();
+
+        return rsx! {
+            div { class: "fixed inset-0 bg-black/60 z-50 flex items-center justify-center",
+                onclick: move |_| { edit_modal.set(None); },
+                div { class: "bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto shadow-2xl",
+                    onclick: move |e| e.stop_propagation(),
+                    h2 { class: "text-lg font-bold text-gray-900 dark:text-white mb-1", "编辑账号" }
+                    p { class: "text-sm text-gray-500 dark:text-gray-400 mb-5", "{acc_name}" }
+                    div { class: "space-y-4",
+                        // 名称
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "名称" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                value: "{name_val}", oninput: move |e| edit_name.set(e.value()),
+                            }
+                        }
+                        // 信号源
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "信号源" }
+                            select { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                value: "{signal_val}", onchange: move |e| edit_signal.set(e.value()),
+                                option { value: "factor", "因子选股" }
+                                option { value: "prediction", "ML预测" }
+                                option { value: "prediction_blend", "ML混合" }
+                            }
+                        }
+                        // 杠杆开关
+                        div { class: "flex items-center gap-3",
+                            label { class: "text-xs text-gray-500 dark:text-gray-400", "启用杠杆" }
+                            input { r#type: "checkbox", checked: leverage_val,
+                                onchange: move |e| edit_leverage.set(e.value() == "true"),
+                            }
+                        }
+                        // 杠杆模式 + 倍率
+                        if leverage_val {
+                            div { class: "grid grid-cols-2 gap-3",
+                                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆模式" }
+                                    select { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                        value: "{lev_mode_val}", onchange: move |e| edit_lev_mode.set(e.value()),
+                                        option { value: "fixed", "固定倍率" }
+                                        option { value: "vol_target", "波动率目标" }
+                                    }
+                                }
+                                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "倍率" }
+                                    input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                        value: "{lev_mult_val}", oninput: move |e| edit_lev_mult.set(e.value()),
+                                    }
+                                }
+                            }
+                        }
+                        // 钉钉 Webhook URL
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "钉钉 Webhook URL" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                placeholder: "https://oapi.dingtalk.com/robot/send?access_token=...",
+                                value: "{dingtalk_val}", oninput: move |e| edit_dingtalk.set(e.value()),
+                            }
+                        }
+                        // 现金
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "现金" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                value: "{cash_val}", oninput: move |e| edit_cash.set(e.value()),
+                            }
+                        }
+                        // 融资金额
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "融资金额（无杠杆则为0）" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                value: "{margin_val}", oninput: move |e| edit_margin.set(e.value()),
+                            }
+                        }
+                    }
+                    // 操作按钮
+                    div { class: "flex gap-3 mt-6",
+                        button { class: "flex-1 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-lg text-sm text-gray-700 dark:text-gray-300 transition",
+                            onclick: move |_| edit_modal.set(None), "取消"
+                        }
+                        button { class: "flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 dark:disabled:bg-gray-600 disabled:text-gray-500 rounded-lg text-sm text-white transition",
+                            disabled: saving,
+                            onclick: {
+                                let aid = acc_id.clone();
+                                let n = name_val.clone();
+                                move |_| {
+                                    edit_saving.set(true);
+                                    edit_result.set(String::new());
+                                    let id = aid.clone();
+                                    let name = edit_name.read().clone();
+                                    let sig = edit_signal.read().clone();
+                                    let lev = *edit_leverage.read();
+                                    let lmode = edit_lev_mode.read().clone();
+                                    let lmult = edit_lev_mult.read().clone();
+                                    let dt = edit_dingtalk.read().clone();
+                                    let mg = edit_margin.read().clone();
+                                    let ca = edit_cash.read().clone();
+                                    spawn(async move {
+                                        let lev_mult: Option<f64> = lmult.parse().ok();
+                                        let margin: Option<f64> = mg.parse().ok();
+                                        let cash: Option<f64> = ca.parse().ok();
+                                        let payload = serde_json::json!({
+                                            "name": name,
+                                            "signal_source": sig,
+                                            "leverage_enabled": lev,
+                                            "leverage_mode": lmode,
+                                            "leverage_multiplier": lev_mult,
+                                            "dingtalk_webhook_url": if dt.is_empty() { None::<String> } else { Some(dt) },
+                                            "margin_amount": margin,
+                                            "cash": cash,
+                                        });
+                                        match api::update_account(&id, &payload).await {
+                                            Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => {
+                                                edit_result.set("✅ 保存成功".to_string());
+                                                edit_modal.set(None);
+                                                load(String::new());
+                                            }
+                                            Ok(v) => { edit_result.set(format!("❌ {}", v["message"].as_str().unwrap_or("失败"))); edit_saving.set(false); }
+                                            Err(e) => { edit_result.set(format!("❌ {}", e)); edit_saving.set(false); }
+                                        }
+                                    });
+                                }
+                            },
+                            if saving { "保存中…" } else { "保存" }
+                        }
+                    }
+                    if !result_msg.is_empty() {
+                        {
+                            let cls = if result_msg.starts_with("✅") { "text-green-600" } else { "text-red-600" };
+                            rsx! { div { class: "mt-3 text-sm {cls}", "{result_msg}" } }
+                        }
+                    }
+                }
+            }
+        };
+    }
 
     // ── 回放弹窗（提前返回，避免在 rsx! 中使用 if let）───
     let show_replay = replay_modal.read().is_some();
@@ -319,6 +479,29 @@ pub fn AccountsContent() -> Element {
                                             }
                                             div { class: "flex items-center gap-2",
                                                 span { class: "text-xs text-gray-400 dark:text-gray-600", if is_open { "收起 ▲" } else { "展开 ▼" } }
+                                                // 编辑按钮
+                                                {
+                                                    let a_clone = acc.clone();
+                                                    rsx! {
+                                                        button { class: "text-xs px-3 py-1.5 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-600 dark:text-gray-300 transition",
+                                                            onclick: move |evt| {
+                                                                evt.stop_propagation();
+                                                                edit_name.set(a_clone.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                                                                edit_signal.set(a_clone.get("signal_source").and_then(|v| v.as_str()).unwrap_or("factor").to_string());
+                                                                edit_leverage.set(a_clone.get("leverage_enabled").and_then(|v| v.as_bool()).unwrap_or(false));
+                                                                edit_lev_mode.set(a_clone.get("leverage_mode").and_then(|v| v.as_str()).unwrap_or("fixed").to_string());
+                                                                edit_lev_mult.set(a_clone.get("leverage_multiplier").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_default());
+                                                                edit_dingtalk.set(a_clone.get("dingtalk_webhook_url").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                                                                edit_margin.set(a_clone.get("margin_amount").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_default());
+                                                                edit_cash.set(a_clone.get("cash").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_default());
+                                                                edit_result.set(String::new());
+                                                                edit_modal.set(Some(a_clone.clone()));
+                                                            },
+                                                            "编辑"
+                                                        }
+                                                    }
+                                                }
+                                                // 回放按钮
                                                 {
                                                     let a_clone = acc.clone();
                                                     rsx! {
@@ -335,6 +518,27 @@ pub fn AccountsContent() -> Element {
                                                         }
                                                     }
                                                 }
+                                                // 推送按钮
+                                                {
+                                                    let a_id = aid.clone();
+                                                    rsx! {
+                                                        button { class: "text-xs px-3 py-1.5 bg-green-100 dark:bg-green-900/50 hover:bg-green-200 dark:hover:bg-green-800 rounded-lg text-green-600 dark:text-green-400 transition",
+                                                            onclick: move |evt| {
+                                                                evt.stop_propagation();
+                                                                let id = a_id.clone();
+                                                                spawn(async move {
+                                                                    match api::account_push_dingtalk(&id).await {
+                                                                        Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => message.set(v["message"].as_str().unwrap_or("推送成功").to_string()),
+                                                                        Ok(v) => error.set(v["message"].as_str().unwrap_or("推送失败").to_string()),
+                                                                        Err(e) => error.set(e),
+                                                                    }
+                                                                });
+                                                            },
+                                                            "推送"
+                                                        }
+                                                    }
+                                                }
+                                                // 删除按钮
                                                 button { class: "text-xs px-3 py-1.5 bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800 rounded-lg text-red-600 dark:text-red-400 transition",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
@@ -352,7 +556,12 @@ pub fn AccountsContent() -> Element {
                                             }
                                         }
                                         div { class: "grid grid-cols-2 md:grid-cols-4 gap-4 text-sm",
-                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "资金/净值" } div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{cap as i64}/¥{nav as i64}" } }
+                                            {
+                                                let cash_val = acc["cash"].as_f64().unwrap_or(cap);
+                                                rsx! {
+                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产/净值/现金" } div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{nav as i64} / ¥{cap as i64} / ¥{cash_val as i64}" } }
+                                                }
+                                            }
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆" } if leverage && lev_mult > 1.0 { div { class: "text-yellow-600 dark:text-yellow-400 text-sm", "{lev_mode} ×{lev_mult}" } } else { div { class: "text-gray-500 dark:text-gray-400 text-sm", "无杠杆" } } }
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "信号源" } if signal == "prediction_blend" { div { class: "text-blue-600 dark:text-blue-400 text-sm", "ML混合" } } else if signal == "prediction" { div { class: "text-blue-600 dark:text-blue-400 text-sm", "ML预测" } } else { div { class: "text-gray-700 dark:text-gray-300 text-sm", "因子选股" } } }
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "最大回撤" } div { class: "text-red-600 dark:text-red-400 text-sm", "{mdd}%" } }

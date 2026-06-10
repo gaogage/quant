@@ -40,6 +40,9 @@ pub struct UpdateAccountRequest {
     pub leverage_multiplier: Option<f64>,
     pub signal_source: Option<String>,
     pub status: Option<String>,
+    pub dingtalk_webhook_url: Option<String>,
+    pub margin_amount: Option<f64>,
+    pub cash: Option<f64>,
 }
 
 // ── 列表 ────────────────────────────────────────────────
@@ -115,7 +118,8 @@ pub async fn list_accounts(
     let sql = format!(
         "SELECT paper_account_id, account_type, name, initial_capital::double precision,
                 leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status,
-                user_id, current_nav::double precision, max_drawdown_pct::double precision
+                user_id, current_nav::double precision, COALESCE(cash, initial_capital)::double precision,
+                max_drawdown_pct::double precision
          FROM paper_account
          WHERE {}
          ORDER BY status ASC, created_at DESC",
@@ -124,19 +128,19 @@ pub async fn list_accounts(
 
     let rows: Vec<(
         String, String, String, f64, bool, String, f64, String, String, Option<String>,
-        Option<f64>, Option<f64>,
+        Option<f64>, f64, Option<f64>,
     )> = sqlx::query_as(&sql).fetch_all(&state.db).await.unwrap_or_default();
 
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(aid, at, name, cap, le, lm, lmp, ss, st, uid, nav, mdd)| {
+        .map(|(aid, at, name, cap, le, lm, lmp, ss, st, uid, nav, cash, mdd)| {
             serde_json::json!({
                 "account_id": aid, "account_type": at,
                 "name": name, "initial_capital": cap,
                 "leverage_enabled": le, "leverage_mode": lm,
                 "leverage_multiplier": lmp, "signal_source": ss, "status": st,
                 "owner": uid.unwrap_or_default(),
-                "current_nav": nav, "max_drawdown": mdd,
+                "current_nav": nav, "cash": cash, "max_drawdown": mdd,
             })
         })
         .collect();
@@ -167,16 +171,18 @@ pub async fn account_detail(
 
     // 基本信息
     let acc: Option<(
-        String, String, String, f64, f64, bool, String, f64, String, String, Option<String>, Option<f64>, Option<chrono::DateTime<chrono::Utc>>,
+        String, String, String, f64, f64, f64, f64, bool, String, f64, String, String, Option<String>, Option<f64>, Option<chrono::DateTime<chrono::Utc>>,
     )> = sqlx::query_as(
         "SELECT paper_account_id, account_type, name, initial_capital::double precision,
                 COALESCE(current_nav, initial_capital)::double precision as nav,
+                COALESCE(cash, initial_capital)::double precision as cash,
+                COALESCE(margin_amount, 0)::double precision as margin_amount,
                 leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status,
                 user_id, max_drawdown_pct::double precision, created_at
          FROM paper_account WHERE paper_account_id = $1"
     ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
 
-    let Some((aid, at, name, cap, nav, le, lm, lmp, ss, st, uid, mdd, created)) = acc else {
+    let Some((aid, at, name, cap, nav, cash, margin, le, lm, lmp, ss, st, uid, mdd, created)) = acc else {
         return Json(serde_json::json!({"code": 404, "message": "账号不存在"})).into_response();
     };
 
@@ -272,6 +278,7 @@ pub async fn account_detail(
         "code": 0, "data": {
             "account_id": aid, "account_type": at, "name": name,
             "initial_capital": cap, "current_nav": nav,
+            "cash": cash, "margin_amount": margin,
             "leverage_enabled": le, "leverage_mode": lm,
             "leverage_multiplier": lmp, "signal_source": ss,
             "status": st, "owner": uid.unwrap_or_default(),
@@ -354,12 +361,17 @@ pub async fn update_account(
          leverage_multiplier = COALESCE($4, leverage_multiplier),
          signal_source = COALESCE($5, signal_source),
          status = COALESCE($6, status),
+         dingtalk_webhook_url = COALESCE($7, dingtalk_webhook_url),
+         margin_amount = COALESCE($8, margin_amount),
+         cash = COALESCE($9, cash),
          updated_at = NOW()
-         WHERE paper_account_id = $7"
+         WHERE paper_account_id = $10"
     )
     .bind(&req.name).bind(req.leverage_enabled)
     .bind(&req.leverage_mode).bind(req.leverage_multiplier)
     .bind(&req.signal_source).bind(&req.status)
+    .bind(&req.dingtalk_webhook_url).bind(req.margin_amount)
+    .bind(req.cash)
     .bind(&account_id)
     .execute(&state.db).await;
 
@@ -429,5 +441,110 @@ fn classify_asset(symbol: &str) -> String {
         "159985.SZ" => "商品ETF".into(),
         s if s.ends_with(".SH") || s.ends_with(".SZ") => "A股".into(),
         _ => "其他".into(),
+    }
+}
+
+// ── 钉钉推送（单账号） ──────────────────────────────────
+
+/// POST /api/v1/accounts/{id}/push-dingtalk — 推送当日持仓摘要到钉钉
+pub async fn push_account_dingtalk(
+    State(state): State<Arc<AppState>>,
+    user: UserContext,
+    Path(account_id): Path<String>,
+) -> impl IntoResponse {
+    use super::dingtalk;
+
+    // 权限校验
+    let is_admin = user.role == "admin";
+    if !is_admin {
+        let owner = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT user_id FROM paper_account WHERE paper_account_id = $1"
+        ).bind(&account_id).fetch_optional(&state.db).await;
+        match owner {
+            Ok(Some((Some(oid),))) if oid == user.user_id => {}
+            Ok(Some((None,))) => {}
+            _ => return Json(serde_json::json!({"code": 403, "message": "无权操作"})).into_response(),
+        }
+    }
+
+    // 查询账号信息
+    let acc: Option<(String, String, Option<String>, f64, f64, f64)> = sqlx::query_as(
+        "SELECT name, account_type, dingtalk_webhook_url,
+                COALESCE(current_nav, initial_capital)::double precision,
+                COALESCE(cash, initial_capital)::double precision,
+                COALESCE(margin_amount, 0)::double precision
+         FROM paper_account WHERE paper_account_id = $1"
+    ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let (name, acc_type, webhook_url, nav, cash, _margin) = match acc {
+        Some(a) => a,
+        None => return Json(serde_json::json!({"code": 404, "message": "账号不存在"})).into_response(),
+    };
+
+    // 解析 webhook URL：优先账号级，fallback 环境变量
+    let webhook = match webhook_url.filter(|u| !u.is_empty()) {
+        Some(u) => u,
+        None => match dingtalk::build_dingtalk_webhook_url() {
+            Some(u) => u,
+            None => return Json(serde_json::json!({
+                "code": 1, "message": "未配置钉钉 Webhook：请在账号编辑中配置 dingtalk_webhook_url 或设置 DINGTALK_CLIENT_ID 环境变量"
+            })).into_response(),
+        },
+    };
+
+    // 最新快照日期
+    let snap: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT snapshot_date FROM paper_nav_snapshot WHERE paper_account_id = $1 ORDER BY snapshot_date DESC LIMIT 1"
+    ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let trade_date = snap.map(|(d,)| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+
+    // 累计收益 & 最大回撤
+    let perf: Option<(Option<f64>,)> = sqlx::query_as(
+        "SELECT max_drawdown_pct::double precision FROM paper_account WHERE paper_account_id = $1"
+    ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let mdd = perf.and_then(|(m,)| m).unwrap_or(0.0) / 100.0; // pct → decimal
+    let cum_ret = if nav > 0.0 {
+        // 从 paper_account 获取 initial_capital 计算
+        let cap: Option<(f64,)> = sqlx::query_as(
+            "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1"
+        ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+        let init = cap.map(|(c,)| c).unwrap_or(nav);
+        if init > 0.0 { nav / init - 1.0 } else { 0.0 }
+    } else { 0.0 };
+
+    // 当前持仓
+    let positions: Vec<serde_json::Value> = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
+        "SELECT symbol, quantity, avg_cost, market_price
+         FROM paper_position WHERE paper_account_id = $1 AND ABS(quantity) > 0"
+    ).bind(&account_id).fetch_all(&state.db).await.unwrap_or_default()
+        .into_iter()
+        .map(|(sym, qty, _cost, price)| {
+            let q: f64 = qty.as_ref().and_then(|v| v.to_string().parse().ok()).unwrap_or(0.0);
+            let p: f64 = price.as_ref().and_then(|v| v.to_string().parse().ok()).unwrap_or(0.0);
+            let mv = (q * p).to_string();
+            serde_json::json!({
+                "symbol": sym,
+                "name": "",
+                "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
+                "current_price": price.map(|v| v.to_string()).unwrap_or_default(),
+                "market_value": mv,
+            })
+        })
+        .collect();
+
+    // 资产大类分布
+    let class_breakdown = asset_allocation(&positions);
+
+    let text = dingtalk::build_position_summary_notification(
+        &name, &acc_type, &trade_date,
+        nav, cash, &positions, cum_ret, mdd, &class_breakdown,
+    );
+
+    match dingtalk::send_dingtalk_markdown(&webhook, "持仓摘要", &text).await {
+        Ok(()) => Json(serde_json::json!({"code": 0, "message": "推送成功"})).into_response(),
+        Err(e) => Json(serde_json::json!({"code": 1, "message": format!("推送失败: {}", e)})).into_response(),
     }
 }

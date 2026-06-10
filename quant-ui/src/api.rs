@@ -243,6 +243,10 @@ pub async fn delete_account(id: &str) -> Result<Value, String> {
     delete(&format!("/api/v1/accounts/{}", id)).await
 }
 
+pub async fn account_push_dingtalk(id: &str) -> Result<Value, String> {
+    post(&format!("/api/v1/accounts/{}/push-dingtalk", id), &serde_json::json!({})).await
+}
+
 // ── Admin ─────────────────────────────────────────────
 
 pub async fn admin_list_users() -> Result<Value, String> {

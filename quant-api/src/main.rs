@@ -407,10 +407,6 @@ async fn main() {
             post(routes::paper::create_paper_account),
         )
         .route(
-            "/api/v1/quant/paper/accounts/{account_id}/notify-position",
-            post(routes::paper::notify_position),
-        )
-        .route(
             "/api/v1/quant/paper/accounts/{account_id}",
             get(routes::paper::paper_account_summary),
         )
@@ -445,10 +441,6 @@ async fn main() {
         .route(
             "/api/v1/quant/paper/historical-replay",
             post(routes::paper::historical_replay),
-        )
-        .route(
-            "/api/v1/quant/paper/notify",
-            post(routes::paper::send_dingtalk_notification),
         )
         // 参数优化
         .route(
@@ -541,6 +533,7 @@ async fn main() {
         .route("/api/v1/accounts/{id}", get(routes::accounts::account_detail))
         .route("/api/v1/accounts/{id}", axum::routing::put(routes::accounts::update_account))
         .route("/api/v1/accounts/{id}", axum::routing::delete(routes::accounts::delete_account))
+        .route("/api/v1/accounts/{id}/push-dingtalk", post(routes::accounts::push_account_dingtalk))
         .layer(CorsLayer::permissive())
         .layer(trace_layer);
 
