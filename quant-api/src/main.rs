@@ -533,6 +533,7 @@ async fn main() {
         .route("/api/v1/accounts/{id}", get(routes::accounts::account_detail))
         .route("/api/v1/accounts/{id}", axum::routing::put(routes::accounts::update_account))
         .route("/api/v1/accounts/{id}", axum::routing::delete(routes::accounts::delete_account))
+        .route("/api/v1/accounts/{id}/reset", post(routes::accounts::reset_account))
         .route("/api/v1/accounts/{id}/push-dingtalk", post(routes::accounts::push_account_dingtalk))
         .layer(CorsLayer::permissive())
         .layer(trace_layer);

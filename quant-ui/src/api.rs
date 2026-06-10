@@ -243,6 +243,10 @@ pub async fn delete_account(id: &str) -> Result<Value, String> {
     delete(&format!("/api/v1/accounts/{}", id)).await
 }
 
+pub async fn account_reset(id: &str, initial_capital: f64, start_date: &str) -> Result<Value, String> {
+    post(&format!("/api/v1/accounts/{}/reset", id), &serde_json::json!({"initial_capital": initial_capital, "start_date": start_date})).await
+}
+
 pub async fn account_push_dingtalk(id: &str) -> Result<Value, String> {
     post(&format!("/api/v1/accounts/{}/push-dingtalk", id), &serde_json::json!({})).await
 }

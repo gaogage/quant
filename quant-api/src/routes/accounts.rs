@@ -421,6 +421,60 @@ pub async fn delete_account(
     Json(serde_json::json!({"code": 0, "message": "已停用"}))
 }
 
+// ── 重置 ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ResetAccountRequest {
+    pub initial_capital: f64,
+    /// 账号起始日期，格式 YYYY-MM-DD
+    pub start_date: String,
+}
+
+/// POST /api/v1/accounts/{id}/reset — 重置账号：清空交易记录并重新初始化
+pub async fn reset_account(
+    State(state): State<Arc<AppState>>,
+    user: UserContext,
+    Path(account_id): Path<String>,
+    Json(req): Json<ResetAccountRequest>,
+) -> impl IntoResponse {
+    let is_admin = user.role == "admin";
+    if !is_admin {
+        let owner = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT user_id FROM paper_account WHERE paper_account_id = $1"
+        ).bind(&account_id).fetch_optional(&state.db).await;
+        match owner {
+            Ok(Some((Some(oid),))) if oid == user.user_id => {}
+            Ok(Some((None,))) => {}
+            _ => return Json(serde_json::json!({"code": 403, "message": "只能重置自己的账号"})).into_response(),
+        }
+    }
+
+    let start_date = match chrono::NaiveDate::parse_from_str(&req.start_date, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return Json(serde_json::json!({"code": 1, "message": "日期格式错误，需要 YYYY-MM-DD"})).into_response(),
+    };
+
+    // 清空关联数据
+    for table in &["paper_order", "paper_fill", "paper_position", "paper_nav_snapshot", "paper_replay", "paper_margin_trade"] {
+        let sql = format!("DELETE FROM {} WHERE paper_account_id = $1", table);
+        let _ = sqlx::query(&sql).bind(&account_id).execute(&state.db).await;
+    }
+
+    // 重置账号状态
+    let cap = req.initial_capital;
+    let _ = sqlx::query(
+        "UPDATE paper_account SET
+         initial_capital = $1, cash = $1, current_nav = $1, peak_nav = $1,
+         margin_amount = 0, max_drawdown_pct = 0, total_trades = 0,
+         status = 'active', created_at = $2, updated_at = NOW()
+         WHERE paper_account_id = $3"
+    )
+    .bind(cap).bind(start_date).bind(&account_id)
+    .execute(&state.db).await;
+
+    Json(serde_json::json!({"code": 0, "message": format!("账号已重置，起始资金¥{}，起始日期{}", cap as i64, req.start_date)})).into_response()
+}
+
 
 /// 根据持仓列表计算资产大类占比
 fn asset_allocation(positions: &[serde_json::Value]) -> Vec<serde_json::Value> {

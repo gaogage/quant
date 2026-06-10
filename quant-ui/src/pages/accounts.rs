@@ -120,6 +120,12 @@ pub fn AccountsContent() -> Element {
     let mut edit_saving = use_signal(|| false);
     let mut edit_result = use_signal(String::new);
 
+    // ── 重置弹窗状态 ──────────────────────────────────
+    let mut reset_modal = use_signal(|| Option::<Value>::None);
+    let mut reset_capital = use_signal(|| "1000000".to_string());
+    let mut reset_date = use_signal(|| "2026-06-01".to_string());
+    let mut reset_loading = use_signal(|| false);
+
     let mut inited = use_signal(|| false);
 
     // 加载账号列表（接收过滤参数），保持 FilterBar 始终挂载
@@ -140,6 +146,73 @@ pub fn AccountsContent() -> Element {
 
     // 用 use_memo 创建稳定回调引用，避免 FilterBar 因父组件重渲染而丢失输入值
     let on_filter_search = use_memo(move || Callback::new(move |f: String| load(f)));
+
+    // ── 重置弹窗（提前返回）───
+    let show_reset = reset_modal.read().is_some();
+    if show_reset {
+        let reset_acc = reset_modal.read().clone().unwrap();
+        let acc_name = reset_acc.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
+        let acc_id = reset_acc.get("paper_account_id").or(reset_acc.get("account_id"))
+            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let cap_val = reset_capital.read().clone();
+        let date_val = reset_date.read().clone();
+        let is_loading = *reset_loading.read();
+
+        return rsx! {
+            div { class: "fixed inset-0 bg-black/60 z-50 flex items-center justify-center",
+                onclick: move |_| { reset_modal.set(None); },
+                div { class: "bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl",
+                    onclick: move |e| e.stop_propagation(),
+                    h2 { class: "text-lg font-bold text-red-600 dark:text-red-400 mb-1", "⚠ 重置账号" }
+                    p { class: "text-sm text-gray-500 dark:text-gray-400 mb-5", "{acc_name} — 将清空所有交易记录和持仓" }
+                    div { class: "space-y-4",
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "初始资金" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm font-mono",
+                                value: "{cap_val}", oninput: move |e| reset_capital.set(e.value()),
+                            }
+                        }
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "起始日期" }
+                            input { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
+                                r#type: "date", value: "{date_val}",
+                                oninput: move |e| reset_date.set(e.value()),
+                            }
+                        }
+                    }
+                    div { class: "flex gap-3 mt-6",
+                        button { class: "flex-1 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-lg text-sm text-gray-700 dark:text-gray-300 transition",
+                            onclick: move |_| reset_modal.set(None), "取消"
+                        }
+                        button { class: "flex-1 py-2.5 bg-red-600 hover:bg-red-500 disabled:bg-gray-300 dark:disabled:bg-gray-600 disabled:text-gray-500 rounded-lg text-sm text-white transition",
+                            disabled: is_loading,
+                            onclick: {
+                                let aid = acc_id.clone();
+                                let cap = cap_val.clone();
+                                let date = date_val.clone();
+                                move |_| {
+                                    reset_loading.set(true);
+                                    let id = aid.clone();
+                                    let c: f64 = cap.parse().unwrap_or(1000000.0);
+                                    let d = date.clone();
+                                    spawn(async move {
+                                        match api::account_reset(&id, c, &d).await {
+                                            Ok(v) if v["code"].as_i64().unwrap_or(-1) == 0 => {
+                                                message.set(v["message"].as_str().unwrap_or("重置成功").to_string());
+                                                reset_modal.set(None);
+                                                load(String::new());
+                                            }
+                                            Ok(v) => { error.set(v["message"].as_str().unwrap_or("重置失败").to_string()); reset_loading.set(false); }
+                                            Err(e) => { error.set(e); reset_loading.set(false); }
+                                        }
+                                    });
+                                }
+                            },
+                            if is_loading { "重置中…" } else { "确认重置" }
+                        }
+                    }
+                }
+            }
+        };
+    }
 
     // ── 编辑弹窗（提前返回，避免在 rsx! 中使用 if let）───
     let show_edit = edit_modal.read().is_some();
@@ -490,6 +563,21 @@ pub fn AccountsContent() -> Element {
                                             }
                                             div { class: "flex items-center gap-2",
                                                 span { class: "text-xs text-gray-400 dark:text-gray-600", if is_open { "收起 ▲" } else { "展开 ▼" } }
+                                                // 重置按钮
+                                                {
+                                                    let a_clone = acc.clone();
+                                                    rsx! {
+                                                        button { class: "text-xs px-3 py-1.5 bg-orange-100 dark:bg-orange-900/50 hover:bg-orange-200 dark:hover:bg-orange-800 rounded-lg text-orange-600 dark:text-orange-400 transition",
+                                                            onclick: move |evt| {
+                                                                evt.stop_propagation();
+                                                                reset_capital.set(a_clone.get("initial_capital").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_else(|| "1000000".to_string()));
+                                                                reset_date.set("2026-06-10".to_string());
+                                                                reset_modal.set(Some(a_clone.clone()));
+                                                            },
+                                                            "重置"
+                                                        }
+                                                    }
+                                                }
                                                 // 编辑按钮
                                                 {
                                                     let a_clone = acc.clone();
