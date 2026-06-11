@@ -354,4 +354,59 @@ mod tests {
             "unlev AR too low: {:.1}% (A股选股层待优化)", m_unlev.annual_return * 100.0
         );
     }
+
+    /// 参数扫描：遍历 dynamic_target 上限，输出 AR/DD/Sharpe/Sortino/Calmar，找 AR/DD 最优平衡。
+    /// DATABASE_URL=... cargo test --release -p quant-api scan_target -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_scan_target_cap() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
+        let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
+
+        println!("\n{:>6} | {:>5} {:>5} {:>5} {:>5} {:>5} | {:>5} {:>5} {:>5}",
+                 "tgt", "AR", "DD", "Shrp", "Sort", "Clmr", "LvAR", "LvDD", "LvShrp");
+        for cap in ["0.06", "0.08", "0.10", "0.12", "0.14", "0.16", "0.18"] {
+            std::env::set_var("MVO_TARGET_CAP", cap);
+            let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed").await.expect("u");
+            let mu = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+            let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target").await.expect("l");
+            let ml = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>());
+            println!("{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2} | {:>4.1}% {:>4.1}% {:>5.2}",
+                     cap, mu.annual_return*100.0, mu.max_drawdown*100.0, mu.sharpe, mu.sortino, mu.calmar,
+                     ml.annual_return*100.0, ml.max_drawdown*100.0, ml.sharpe);
+        }
+        std::env::remove_var("MVO_TARGET_CAP");
+    }
+
+    /// 杠杆维度扫描：vol_target × leverage_cap，找杠杆账号 AR/DD/Sharpe 最优。
+    /// DATABASE_URL=... cargo test --release -p quant-api scan_leverage -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_scan_leverage() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let mut sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
+        let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
+        std::env::set_var("MVO_TARGET_CAP", "0.06"); // target 固定在已知最优
+
+        println!("\n{:>5} {:>4} | {:>5} {:>5} {:>5} {:>5} {:>5}",
+                 "vol", "cap", "AR", "DD", "Shrp", "Sort", "Clmr");
+        for vt in [0.20, 0.25, 0.30] {
+            for cap in [2.0, 2.5, 3.0] {
+                sc.vol_target = vt;
+                sc.leverage_cap = cap;
+                let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target").await.expect("l");
+                let m = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                println!("{:>5.2} {:>4.1} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
+                         vt, cap, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.sortino, m.calmar);
+            }
+        }
+        std::env::remove_var("MVO_TARGET_CAP");
+    }
 }

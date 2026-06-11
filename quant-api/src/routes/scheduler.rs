@@ -1553,8 +1553,8 @@ async fn generate_paper_signals_for_all(
 
 /// 波动率目标杠杆：根据 trailing 60日组合NAV变化计算波动率，动态调整杠杆。
 /// 目标年化波动率 20%，杠杆 = 20% / trailing_vol，clamp [0.5, 2.0]。
-async fn compute_vol_target_leverage(db: &PgPool, account_id: &str) -> f64 {
-    let target_vol = 0.20;
+async fn compute_vol_target_leverage(db: &PgPool, account_id: &str, sc: &StrategyConfig) -> f64 {
+    let target_vol = sc.vol_target;
     let rows = sqlx::query_as::<_, (rust_decimal::Decimal,)>(
         "SELECT nav FROM paper_nav_snapshot
          WHERE paper_account_id = $1
@@ -1597,7 +1597,7 @@ async fn compute_vol_target_leverage(db: &PgPool, account_id: &str) -> f64 {
     }
 
     let lev = target_vol / annual_vol;
-    lev.clamp(0.5, 2.0)
+    lev.clamp(0.5, sc.leverage_cap)
 }
 
 async fn sync_positions_from_backtest(
@@ -1659,7 +1659,7 @@ async fn sync_positions_from_backtest(
     let leverage_mult = if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
         if leverage_mode == "vol_target" {
             // 波动率目标杠杆: 目标20%年化波动率, 根据trailing 60日实际波动率动态调整
-            let vol_lev = compute_vol_target_leverage(db, account_id).await;
+            let vol_lev = compute_vol_target_leverage(db, account_id, sc).await;
             info!("[paper] Vol-target leverage {:.2}x applied for {}", vol_lev, account_id);
             rust_decimal::Decimal::from_f64_retain(vol_lev).unwrap_or(rust_decimal::Decimal::ONE)
         } else {
