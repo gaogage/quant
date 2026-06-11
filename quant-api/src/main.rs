@@ -442,6 +442,10 @@ async fn main() {
             "/api/v1/quant/paper/historical-replay",
             post(routes::paper::historical_replay),
         )
+        .route(
+            "/api/v1/quant/paper/historical-replay-v19",
+            post(routes::paper_v19_replay::historical_replay_v19),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",

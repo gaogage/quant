@@ -109,7 +109,7 @@ pub fn AccountsContent() -> Element {
     // ── 编辑弹窗状态 ──────────────────────────────────
     let mut edit_modal = use_signal(|| Option::<Value>::None);
     let mut edit_name = use_signal(String::new);
-    let mut edit_signal = use_signal(|| "factor".to_string());
+    let mut edit_strategy = use_signal(|| "v19".to_string());
     let mut edit_leverage = use_signal(|| false);
     let mut edit_lev_mode = use_signal(|| "fixed".to_string());
     let mut edit_lev_mult = use_signal(String::new);
@@ -223,7 +223,7 @@ pub fn AccountsContent() -> Element {
             .and_then(|v| v.as_str()).unwrap_or("").to_string();
         let acc_name = edit_acc.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
         let name_val = edit_name.read().clone();
-        let signal_val = edit_signal.read().clone();
+        let strategy_val = edit_strategy.read().clone();
         let leverage_val = *edit_leverage.read();
         let lev_mode_val = edit_lev_mode.read().clone();
         let lev_mult_val = edit_lev_mult.read().clone();
@@ -248,13 +248,12 @@ pub fn AccountsContent() -> Element {
                                 value: "{name_val}", oninput: move |e| edit_name.set(e.value()),
                             }
                         }
-                        // 信号源
-                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "信号源" }
+                        // 策略（A股选股方式由策略内部定义，见策略管理页）
+                        div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "策略" }
                             select { class: "w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm",
-                                value: "{signal_val}", onchange: move |e| edit_signal.set(e.value()),
-                                option { value: "factor", "因子选股" }
-                                option { value: "prediction", "ML预测" }
-                                option { value: "prediction_blend", "ML混合" }
+                                value: "{strategy_val}", onchange: move |e| edit_strategy.set(e.value()),
+                                option { value: "v19", "v19 生产策略 (MVO 8资产 + GA + vol_target)" }
+                                option { value: "v20", "v20 Regime Router" }
                             }
                         }
                         // 杠杆开关
@@ -322,7 +321,7 @@ pub fn AccountsContent() -> Element {
                                     edit_result.set(String::new());
                                     let id = aid.clone();
                                     let name = edit_name.read().clone();
-                                    let sig = edit_signal.read().clone();
+                                    let strat = edit_strategy.read().clone();
                                     let lev = *edit_leverage.read();
                                     let lmode = edit_lev_mode.read().clone();
                                     let lmult = edit_lev_mult.read().clone();
@@ -337,7 +336,7 @@ pub fn AccountsContent() -> Element {
                                         let reserve: Option<f64> = ra.parse().ok();
                                         let payload = serde_json::json!({
                                             "name": name,
-                                            "signal_source": sig,
+                                            "strategy_version_id": strat,
                                             "leverage_enabled": lev,
                                             "leverage_mode": lmode,
                                             "leverage_multiplier": lev_mult,
@@ -620,7 +619,7 @@ pub fn AccountsContent() -> Element {
                                                             onclick: move |evt| {
                                                                 evt.stop_propagation();
                                                                 edit_name.set(a_clone.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string());
-                                                                edit_signal.set(a_clone.get("signal_source").and_then(|v| v.as_str()).unwrap_or("factor").to_string());
+                                                                edit_strategy.set(a_clone.get("strategy_version_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("v19").to_string());
                                                                 edit_leverage.set(a_clone.get("leverage_enabled").and_then(|v| v.as_bool()).unwrap_or(false));
                                                                 edit_lev_mode.set(a_clone.get("leverage_mode").and_then(|v| v.as_str()).unwrap_or("fixed").to_string());
                                                                 edit_lev_mult.set(a_clone.get("leverage_multiplier").and_then(|v| v.as_f64()).map(|v| v.to_string()).unwrap_or_default());

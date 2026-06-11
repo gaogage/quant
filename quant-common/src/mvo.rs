@@ -309,6 +309,8 @@ pub fn nonlinear_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
 //   - Dirichlet initialization for uniform simplex coverage
 
 use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 /// GA optimization parameters
 struct GaParams {
@@ -437,18 +439,57 @@ fn mutate(weights: &mut [f64], scale: f64, rng: &mut impl Rng) {
 }
 
 /// Ensure weights satisfy constraints: sum=1, min_stock, max_single.
+///
+/// Clamp + re-normalize must iterate: a single normalize after clamping can push
+/// already-capped weights back above max_single (e.g. [0.80,0.05] → normalize →
+/// [0.94,0.06]). Repeat clamp→redistribute until the cap holds, distributing the
+/// excess onto the uncapped assets (water-filling), so no single asset exceeds
+/// max_single in the returned vector.
 fn enforce_constraints(weights: &mut [f64], min_stock: f64, max_single: f64) {
-    // Enforce min_stock on first asset
-    weights[0] = weights[0].max(min_stock);
-    // Clamp to max_single
+    let n = weights.len();
+    // No-shorting + initial normalize
     for w in weights.iter_mut() {
-        *w = w.clamp(0.0, max_single);
+        if *w < 0.0 { *w = 0.0; }
     }
-    // Re-normalize
     let s: f64 = weights.iter().sum();
     if s > 0.0 {
+        for w in weights.iter_mut() { *w /= s; }
+    } else {
+        for w in weights.iter_mut() { *w = 1.0 / n as f64; }
+    }
+
+    // Iteratively cap at max_single, redistributing excess to uncapped assets.
+    // max_single * n >= 1 guarantees feasibility; bounded iterations as a backstop.
+    for _ in 0..n + 2 {
+        let mut excess = 0.0;
+        let mut uncapped_sum = 0.0;
+        for w in weights.iter() {
+            if *w > max_single + 1e-9 {
+                excess += *w - max_single;
+            } else {
+                uncapped_sum += *w;
+            }
+        }
+        if excess <= 1e-9 { break; }
         for w in weights.iter_mut() {
-            *w /= s;
+            if *w > max_single + 1e-9 {
+                *w = max_single;
+            } else if uncapped_sum > 0.0 {
+                *w += excess * (*w / uncapped_sum);
+            }
+        }
+    }
+
+    // Enforce min_stock on A股 (first asset); take the deficit pro-rata from others.
+    if weights[0] < min_stock {
+        let deficit = min_stock - weights[0];
+        let others: f64 = weights[1..].iter().sum();
+        weights[0] = min_stock;
+        if others > 0.0 {
+            for w in weights[1..].iter_mut() {
+                *w -= deficit * (*w / others);
+                if *w < 0.0 { *w = 0.0; }
+            }
         }
     }
 }
@@ -500,7 +541,16 @@ fn ga_optimize_with_params(
         return None;
     }
 
-    let mut rng = rand::thread_rng();
+    // 确定性种子：从输入(mu+cov对角)派生，保证同输入同结果(可复现)，
+    // 不同调仓窗口因数据不同而独立。500×200 种群代数保证收敛到全局最优附近。
+    let mut seed: u64 = 0x9E3779B97F4A7C15;
+    for v in mu_annual.iter() {
+        seed = seed.wrapping_mul(31).wrapping_add(((v * 1e6) as i64) as u64);
+    }
+    for i in 0..n_assets {
+        seed = seed.wrapping_mul(31).wrapping_add(((cov[(i, i)] * 1e6) as i64) as u64);
+    }
+    let mut rng = StdRng::seed_from_u64(seed);
 
     // Fitness function: MinVariance or MaxSharpe depending on target
     let fitness = |w: &[f64]| -> f64 {

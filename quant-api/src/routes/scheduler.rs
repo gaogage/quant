@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use super::trading;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
 async fn get_latest_data_version(db: &PgPool) -> String {
@@ -125,28 +125,44 @@ struct DailyState {
 }
 
 /// MVO 权重缓存（季度更新）
-struct MvoWeightCache {
+pub struct MvoWeightCache {
     quarter: String,              // e.g. "2026-Q2"
     weights: Vec<f64>,            // [A股, 黄金, 国债, SP500, 纳指, 有色, 豆粕, 原油]
 }
 
 /// 从数据库加载的策略配置（运行时缓存，启动时加载）
 #[derive(Debug, Clone, serde::Deserialize)]
-struct StrategyConfig {
-    strategy_id: String,
-    name: String,
-    etf_symbols: Vec<String>,
-    equity_curve_task_id: String,
-    min_stock: f64,
-    max_single: f64,
-    max_single_bull: f64,
-    momentum_blend_ratio: f64,
-    ga_population: usize,
-    ga_generations: usize,
-    vol_target: f64,
-    leverage_cap: f64,
-    default_weights: Vec<f64>,
+pub struct StrategyConfig {
+    pub strategy_id: String,
+    pub name: String,
+    pub etf_symbols: Vec<String>,
+    pub equity_curve_task_id: String,
+    pub min_stock: f64,
+    pub max_single: f64,
+    pub max_single_bull: f64,
+    pub momentum_blend_ratio: f64,
+    pub ga_population: usize,
+    pub ga_generations: usize,
+    pub vol_target: f64,
+    pub leverage_cap: f64,
+    pub default_weights: Vec<f64>,
+    // A股大类选股方式（下沉到策略，不再挂账号）
+    #[serde(default = "default_signal_source")]
+    pub signal_source: String,
+    #[serde(default = "default_blend_weight")]
+    pub prediction_blend_weight: f64,
+    #[serde(default = "default_combo_name")]
+    pub combo_name: String,
+    #[serde(default = "default_top_n")]
+    pub top_n: i64,
+    #[serde(default)]
+    pub prediction_set_id: Option<String>,
 }
+
+fn default_signal_source() -> String { "prediction_blend".into() }
+fn default_blend_weight() -> f64 { 0.5 }
+fn default_combo_name() -> String { "phase7_price_volume_expanded_v1".into() }
+fn default_top_n() -> i64 { 30 }
 
 impl Default for StrategyConfig {
     fn default() -> Self {
@@ -159,12 +175,17 @@ impl Default for StrategyConfig {
             momentum_blend_ratio: 0.5, ga_population: 500, ga_generations: 200,
             vol_target: 0.20, leverage_cap: 2.0,
             default_weights: vec![0.12, 0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
+            signal_source: "prediction_blend".into(),
+            prediction_blend_weight: 0.5,
+            combo_name: "phase7_price_volume_expanded_v1".into(),
+            top_n: 30,
+            prediction_set_id: None,
         }
     }
 }
 
 /// 从数据库加载活跃策略配置，失败时回退到硬编码默认值
-async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig {
+pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig {
     match sqlx::query_as::<_, (serde_json::Value,)>(
         "SELECT jsonb_build_object(
             'strategy_id', strategy_id,
@@ -179,7 +200,12 @@ async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig 
             'ga_generations', ga_generations,
             'vol_target', vol_target,
             'leverage_cap', leverage_cap,
-            'default_weights', default_weights
+            'default_weights', default_weights,
+            'signal_source', signal_source,
+            'prediction_blend_weight', prediction_blend_weight,
+            'combo_name', combo_name,
+            'top_n', top_n,
+            'prediction_set_id', prediction_set_id
         ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'"
     ).bind(strategy_id).fetch_optional(db).await
     {
@@ -1307,8 +1333,8 @@ async fn generate_paper_signals_for_all(
     db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate, sc: &StrategyConfig,
     tushare: &TushareClient,
 ) -> Result<(), String> {
-    let accounts = sqlx::query_as::<_, (String, String, bool, String, f64, String)>(
-        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(signal_source, 'factor'), COALESCE(leverage_multiplier, 1.0), COALESCE(leverage_mode, 'fixed') FROM paper_account
+    let accounts = sqlx::query_as::<_, (String, String, bool, f64, String, Option<String>)>(
+        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(leverage_multiplier, 1.0), COALESCE(leverage_mode, 'fixed'), strategy_version_id FROM paper_account
          WHERE status = 'active' AND account_type = 'simulated'",
     )
     .fetch_all(db).await
@@ -1316,12 +1342,15 @@ async fn generate_paper_signals_for_all(
 
     if accounts.is_empty() { return Ok(()); }
 
-    for (account_id, name, leverage_enabled, signal_source, leverage_multiplier, leverage_mode) in &accounts {
+    for (account_id, name, leverage_enabled, leverage_multiplier, leverage_mode, strategy_version_id) in &accounts {
         let leverage_enabled = *leverage_enabled;
         let leverage_multiplier = *leverage_multiplier;
         let leverage_mode = leverage_mode.as_str();
-        let signal_source = signal_source.as_str();
-        info!("[paper] {} ({}) leverage={}x mode={} signal={}", name, account_id, leverage_multiplier, leverage_mode, signal_source);
+        // 账号挂策略(strategy_version_id) → 加载该策略配置；A股选股方式从策略读，不再挂账号
+        let acct_sc = load_strategy_config(db, strategy_version_id.as_deref().unwrap_or(&sc.strategy_id)).await;
+        let sc = &acct_sc;
+        let signal_source = sc.signal_source.as_str();
+        info!("[paper] {} ({}) strategy={} leverage={}x mode={} signal={}", name, account_id, sc.strategy_id, leverage_multiplier, leverage_mode, signal_source);
 
         // 检查今日是否已有交易
         let done: (i64,) = sqlx::query_as(
@@ -1342,9 +1371,9 @@ async fn generate_paper_signals_for_all(
 
         let combo_name = wfa_params.get("combo_name")
             .and_then(|v| v.as_str())
-            .unwrap_or("phase7_price_volume_expanded_v1");
+            .unwrap_or(sc.combo_name.as_str());
         let top_n = wfa_params.get("top_n")
-            .and_then(|v| v.as_u64()).unwrap_or(15) as usize;
+            .and_then(|v| v.as_u64()).unwrap_or(sc.top_n as u64) as usize;
         let portfolio_method = wfa_params.get("portfolio_method")
             .and_then(|v| v.as_str()).unwrap_or("heuristic");
         let score_direction = wfa_params.get("score_direction")
@@ -1413,8 +1442,12 @@ async fn generate_paper_signals_for_all(
         let is_prediction = signal_source == "prediction";
         let is_prediction_blend = signal_source == "prediction_blend";
 
-        // v16: 动态选择最新的 ready prediction set, 检查数据是否覆盖当前日期
+        // v16: 动态选择预测集 — 优先用策略配置指定的，否则选最新 PIT 集
         let prediction_set_id = if is_prediction || is_prediction_blend {
+            if let Some(ref pid) = sc.prediction_set_id {
+                info!("[paper] 策略指定 prediction set: {}", pid);
+                Some(pid.clone())
+            } else {
             // PIT合规: 优先选包含A股个股预测的模型（v19策略需要），其次选最近训练的
             let best: Option<(String,)> = sqlx::query_as(
                 "SELECT ps.prediction_set_id FROM prediction_set ps
@@ -1436,6 +1469,7 @@ async fn generate_paper_signals_for_all(
                     None
                 }
             }
+            }
         } else {
             None
         };
@@ -1445,11 +1479,11 @@ async fn generate_paper_signals_for_all(
             let mut blend_body = body.clone();
             if let Some(ref pid) = prediction_set_id {
                 blend_body["prediction_set_id"] = serde_json::json!(pid);
-                blend_body["prediction_blend_weight"] = serde_json::json!(0.5);
+                blend_body["prediction_blend_weight"] = serde_json::json!(sc.prediction_blend_weight);
             }
             // v16 专用参数
             if !wfa_used {
-                blend_body["top_n"] = serde_json::json!(30);
+                blend_body["top_n"] = serde_json::json!(sc.top_n);
                 blend_body["rebalance"] = serde_json::json!("biweekly");
                 blend_body["kelly_fraction"] = serde_json::json!(0.25);
                 blend_body["score_candidate_pool_size"] = serde_json::json!(200);
@@ -1624,16 +1658,20 @@ async fn sync_positions_from_backtest(
         let scaled_q = q * scale;
         let scaled_m = m * scale;
 
-        let oid = format!("po-{}", short_id());
-        sqlx::query("INSERT INTO paper_order (order_id,paper_account_id,symbol,side,order_type,quantity,limit_price,status,strategy_version_id) VALUES ($1,$2,$3,'buy','market',$4,$5,'pending','phase7-professional-v1')")
-            .bind(&oid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).execute(db).await.map_err(|e|format!("order:{}",e))?;
-        let fid = format!("pf-{}", short_id());
-        sqlx::query("INSERT INTO paper_fill (fill_id,order_id,paper_account_id,symbol,fill_time,side,quantity,price,amount,planned_order_id) VALUES ($1,$2,$3,$4,now(),'buy',$5,$6,$7,$2)")
-            .bind(&fid).bind(&oid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).execute(db).await.map_err(|e|format!("fill:{}",e))?;
-        sqlx::query("UPDATE paper_order SET status='filled' WHERE order_id=$1").bind(&oid).execute(db).await.map_err(|e|format!("upd:{}",e))?;
+        // 统一交易路径：计划+实际交易经 trading 模块落库（与回放一致）
+        let trade = trading::PlannedTrade {
+            account_id: account_id.to_string(),
+            symbol: symbol.clone(), side: "buy".into(),
+            target_quantity: scaled_q, target_price: price,
+            price_upper_limit: None, price_lower_limit: None, slippage_pct: 0.0,
+            target_value: scaled_m,
+            reason: Some(format!("v19实盘调仓 A股 regime={:.0}%", regime_exposure * 100.0)),
+            strategy_version_id: Some("phase7-professional-v1".to_string()),
+        };
+        trading::execute_simulated_trade(db, &trade).await.map_err(|e| format!("a trade: {}", e))?;
         let pid = format!("pp-{}", short_id());
         sqlx::query("INSERT INTO paper_position (paper_position_id,paper_account_id,symbol,quantity,avg_cost,market_price,market_value,target_weight) VALUES ($1,$2,$3,$4,$5,$5,$6,$7) ON CONFLICT (paper_account_id,symbol) DO UPDATE SET quantity=EXCLUDED.quantity,market_price=EXCLUDED.market_price,market_value=EXCLUDED.market_value,avg_cost=EXCLUDED.avg_cost")
-            .bind(&pid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).bind(rust_decimal::Decimal::from_f64_retain(mvo_a_pct / positions.len() as f64).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("pos:{}",e))?;
+            .bind(&pid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).bind(rust_decimal::Decimal::from_f64_retain(mvo_a_pct / positions.len().max(1) as f64).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("pos:{}",e))?;
     }
 
     // v16: 7资产MVO Grid Search统一优化 (精简相关性冗余)
@@ -1668,13 +1706,16 @@ async fn sync_positions_from_backtest(
         let price = rust_decimal::Decimal::from_f64_retain(price_val).unwrap_or(rust_decimal::Decimal::ONE);
         let qty = if price > rust_decimal::Decimal::ZERO { alloc_amount / price } else { rust_decimal::Decimal::ZERO };
 
-        let oid = format!("po-{}", short_id());
-        sqlx::query("INSERT INTO paper_order (order_id,paper_account_id,symbol,side,order_type,quantity,limit_price,status,strategy_version_id) VALUES ($1,$2,$3,'buy','market',$4,$5,'pending','phase7-professional-v1')")
-            .bind(&oid).bind(account_id).bind(etf_symbol).bind(qty).bind(price).execute(db).await.map_err(|e|format!("etf order:{}",e))?;
-        let fid = format!("pf-{}", short_id());
-        sqlx::query("INSERT INTO paper_fill (fill_id,order_id,paper_account_id,symbol,fill_time,side,quantity,price,amount,planned_order_id) VALUES ($1,$2,$3,$4,now(),'buy',$5,$6,$7,$2)")
-            .bind(&fid).bind(&oid).bind(account_id).bind(etf_symbol).bind(qty).bind(price).bind(alloc_amount).execute(db).await.map_err(|e|format!("etf fill:{}",e))?;
-        sqlx::query("UPDATE paper_order SET status='filled' WHERE order_id=$1").bind(&oid).execute(db).await.map_err(|e|format!("upd:{}",e))?;
+        let trade = trading::PlannedTrade {
+            account_id: account_id.to_string(),
+            symbol: etf_symbol.to_string(), side: "buy".into(),
+            target_quantity: qty, target_price: price,
+            price_upper_limit: None, price_lower_limit: None, slippage_pct: 0.0,
+            target_value: alloc_amount,
+            reason: Some(format!("v19实盘调仓 ETF w={:.1}%", *alloc_pct * 100.0)),
+            strategy_version_id: Some("phase7-professional-v1".to_string()),
+        };
+        trading::execute_simulated_trade(db, &trade).await.map_err(|e| format!("etf trade: {}", e))?;
         let pid = format!("pp-{}", short_id());
         sqlx::query("INSERT INTO paper_position (paper_position_id,paper_account_id,symbol,quantity,avg_cost,market_price,market_value,target_weight) VALUES ($1,$2,$3,$4,$5,$5,$6,$7) ON CONFLICT (paper_account_id,symbol) DO UPDATE SET quantity=EXCLUDED.quantity,market_price=EXCLUDED.market_price,market_value=EXCLUDED.market_value,avg_cost=EXCLUDED.avg_cost")
             .bind(&pid).bind(account_id).bind(etf_symbol).bind(qty).bind(price).bind(alloc_amount).bind(rust_decimal::Decimal::from_f64_retain(*alloc_pct).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("etf pos:{}",e))?;
@@ -1697,17 +1738,21 @@ async fn sync_positions_from_backtest(
 /// 体制检测：Trailing 12-month CSI300 return。
 /// 深熊（12月跌 >10%）：仓位降至 60%，规避系统性风险。
 /// 其余时间：满仓，让 LW-MVO 自主调配。
-async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
+pub async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
+    // 真正的 trailing-12m 回报 = 最新收盘 / 252日前收盘 - 1。
+    // （旧实现用 MAX/MIN-1，永远为正 → 降仓从不触发，2015股灾/2018熊市全程满仓）
     let trail: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
         "WITH dates AS (
-            SELECT trade_date, close::double precision FROM market_index_daily_bar
+            SELECT trade_date, close::double precision AS close FROM market_index_daily_bar
             WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 252
-        ) SELECT (MAX(close)/MIN(close) - 1) FROM dates"
+        )
+        SELECT (SELECT close FROM dates ORDER BY trade_date DESC LIMIT 1)
+             / NULLIF((SELECT close FROM dates ORDER BY trade_date ASC LIMIT 1), 0) - 1"
     ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
 
     match trail {
         Some(t) if t < -0.10 => {
-            info!("[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%", t * 100.0);
+            debug!("[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%", t * 100.0);
             0.60
         }
         _ => 1.00, // 满仓
@@ -1953,11 +1998,16 @@ async fn compute_lw_mvo_weights(
 
         if let Some(arr) = Array2::from_shape_vec((n_rows, n_total_assets), flat).ok() {
             // v19: momentum-adjusted μ (50/50) + GA MinVariance + adaptive max_single
+            // dynamic_target 上限 0.06：高 target(0.18) 会把 MinVariance 逼向单资产集中、
+            // DD 翻倍(13%→25%)。0.06 与 ROADMAP 验证 v19 22.6% 时的原始配置一致，保持跨资产分散。
+            // 可用 MVO_TARGET_CAP 覆盖做调参实验。
+            let target_cap = std::env::var("MVO_TARGET_CAP").ok()
+                .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.06);
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
-                (trail_12m + 0.05).clamp(0.08, 0.18)
+                (trail_12m + 0.05).clamp(0.08_f64.min(target_cap), target_cap)
             } else {
-                0.12
+                0.12_f64.min(target_cap)
             };
             // Momentum-adjusted expected returns (50/50 blend)
             let hist_mu = ndarray::Array1::from_vec(
@@ -1984,18 +2034,13 @@ async fn compute_lw_mvo_weights(
             } else { adaptive_min_stock };
             if let Some(result) = mvo::mvo_allocate_ga_with_max_single(&arr, &adj_mu, adaptive_ms, dynamic_target, 0.10, adaptive_max) {
                 let w = result.weights.to_vec();
+                let wg = |i: usize| (w.get(i).copied().unwrap_or(0.0) * 100.0).round();
                 info!(
                     quarter = %quarter,
-                    a = %(w[0] * 100.0).round(),
-                    gold = %(w[1] * 100.0).round(),
-                    bond = %(w[2] * 100.0).round(),
-                    sp500 = %(w[3] * 100.0).round(),
-                    nq = %(w[4] * 100.0).round(),
-                    color = %(w[5] * 100.0).round(),
-                    meal = %(w[6] * 100.0).round(),
-                    oil = %(w.get(7).copied().unwrap_or(0.0) * 100.0).round(),
+                    a = %wg(0), gold = %wg(1), bond = %wg(2), sp500 = %wg(3),
+                    nq = %wg(4), color = %wg(5), meal = %wg(6), oil = %wg(7),
                     sharpe = %(result.sharpe * 100.0).round() / 100.0,
-                    "v18 7-asset MVO 权重已更新 (momentum μ + ms=12%)"
+                    "v19 MVO 权重已更新 (momentum μ + adaptive)"
                 );
                 weights = w;
             }
@@ -2005,6 +2050,16 @@ async fn compute_lw_mvo_weights(
     let mut guard = cache.lock().await;
     *guard = Some(MvoWeightCache { quarter, weights: weights.clone() });
     weights
+}
+
+/// 公开版本：不依赖调度器 MvoWeightCache，用于回放等场景按日期独立计算 MVO 权重
+pub async fn compute_mvo_weights_for_date(
+    db: &PgPool,
+    date: NaiveDate,
+    sc: &StrategyConfig,
+) -> Vec<f64> {
+    let cache = tokio::sync::Mutex::new(None::<MvoWeightCache>);
+    compute_lw_mvo_weights(db, date, &cache, sc).await
 }
 
 /// 从 multi_factor_value 获取因子的月度收益（top-15等权组合的近似月收益）

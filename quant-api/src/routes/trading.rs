@@ -8,7 +8,6 @@
 //! - repay:  融资归还（还钱），cash↓ margin_amount↓
 
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 

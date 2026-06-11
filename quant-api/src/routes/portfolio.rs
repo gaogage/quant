@@ -7,7 +7,6 @@ use axum::{
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use ndarray::Array2;
@@ -1437,68 +1436,6 @@ fn mvo_sim_default_leverage_mult() -> f64 { 1.0 }
 ///
 /// 对已完成回测叠加 Ledoit-Wolf MVO 多资产配置，模拟完整绩效。
 /// ETF 数据从有数据的日期开始使用（PIT 合规）。
-/// 计算组合绩效指标
-fn compute_portfolio_metrics(rets: &[f64]) -> Value {
-    let n = rets.len() as f64;
-    if n < 60.0 { return json!({"error": "insufficient data"}); }
-
-    let mean = rets.iter().sum::<f64>() / n;
-    let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    let std = var.sqrt();
-    let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
-    let ann_vol = std * (252.0_f64).sqrt();
-    let sharpe = if ann_vol > 0.0 { (ann_ret - 0.02) / ann_vol } else { 0.0 };
-
-    let mut nav = 1.0_f64; let mut peak = 1.0_f64; let mut max_dd = 0.0_f64;
-    for r in rets { nav *= 1.0 + r; peak = peak.max(nav); max_dd = max_dd.max((peak - nav) / peak); }
-    let cumulative = nav - 1.0;
-    let calmar = if max_dd > 0.0 { ann_ret / max_dd } else { 0.0 };
-
-    let downside: Vec<f64> = rets.iter().filter(|&&r| r < 0.0).copied().collect();
-    let down_std = if downside.len() > 1 {
-        let down_mean = downside.iter().sum::<f64>() / downside.len() as f64;
-        (downside.iter().map(|r| (r - down_mean).powi(2)).sum::<f64>() / (downside.len() - 1) as f64).sqrt()
-    } else { 0.0 };
-    let sortino = if down_std > 0.0 { (ann_ret - 0.02) / (down_std * (252.0_f64).sqrt()) } else { 0.0 };
-    let pos = rets.iter().filter(|&&r| r > 0.0).count();
-    let win_rate = pos as f64 / n;
-
-    json!({
-        "trading_days": n as usize, "annual_return_pct": (ann_ret * 1000.0).round() / 10.0,
-        "cumulative_return_pct": (cumulative * 1000.0).round() / 10.0,
-        "volatility_pct": (ann_vol * 1000.0).round() / 10.0,
-        "sharpe_ratio": (sharpe * 100.0).round() / 100.0, "sortino_ratio": (sortino * 100.0).round() / 100.0,
-        "max_drawdown_pct": (max_dd * 1000.0).round() / 10.0, "calmar_ratio": (calmar * 100.0).round() / 100.0,
-        "win_rate_pct": (win_rate * 1000.0).round() / 10.0,
-    })
-}
-
-/// 从日收益计算逐年收益
-fn compute_yearly_returns(daily_returns: &[(NaiveDate, Vec<f64>)], mvo_rets: &[f64], mvo_start_idx: usize) -> Vec<Value> {
-    let mut yearly: Vec<Value> = Vec::new();
-    let mut yr_nav: f64 = 1.0;
-    let mut prev_yr: Option<String> = None;
-    let mut yr_start_nav: f64 = 1.0;
-
-    for (idx, &r) in mvo_rets.iter().enumerate() {
-        let di = mvo_start_idx + idx;
-        if di < daily_returns.len() {
-            let yr = format!("{}", daily_returns[di].0.format("%Y"));
-            if prev_yr.as_deref() != Some(&yr) {
-                if let Some(py) = prev_yr {
-                    yearly.push(json!({"year": py, "return_pct": ((yr_nav / yr_start_nav - 1.0) * 1000.0).round() / 10.0}));
-                }
-                yr_start_nav = yr_nav; prev_yr = Some(yr);
-            }
-        }
-        yr_nav *= 1.0 + r;
-    }
-    if let Some(py) = prev_yr {
-        yearly.push(json!({"year": py, "return_pct": ((yr_nav / yr_start_nav - 1.0) * 1000.0).round() / 10.0}));
-    }
-    yearly
-}
-
 pub async fn mvo_simulate(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -1511,329 +1448,109 @@ pub async fn mvo_simulate(
 }
 
 async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateRequest) -> Result<Value, String> {
+    // 统一到共享 v19 核心：权重来自 scheduler::compute_mvo_weights_for_date（真 v19 GA），
+    // 不再用已被 ROADMAP 判定为负优化的 sortino-max / MA200趋势 / 体制25-35% 逻辑。
     let task_id = task_id.trim();
-    let lookback = req.mvo_lookback_months.max(12).min(60);
-    let min_stock = req.min_stock.clamp(0.0, 1.0);
-    let is_quarterly = req.rebalance_freq == "quarterly";
 
-    // 1. 加载 A 股权益曲线
-    let eq_rows = sqlx::query_as::<_, (NaiveDate, Decimal)>(
+    // 以 v19 策略配置为基底，用传入的回测曲线作为 A 股权益源。
+    // ETF 阵容固定用 v19 的 7 资产（统一到真 v19，不受请求默认 4-ETF 影响）。
+    let mut sc = crate::routes::scheduler::load_strategy_config(db, "v19").await;
+    sc.equity_curve_task_id = task_id.to_string();
+
+    // 曲线日期范围
+    let (first_d, last_d): (NaiveDate, NaiveDate) = sqlx::query_as(
+        "SELECT MIN(trade_date), MAX(trade_date) FROM backtest_equity_curve WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("加载权益曲线失败: {e}"))?;
+
+    let lev_enabled = req.leverage_mode == "vol_target" || req.leverage_multiplier > 1.0;
+
+    // 共享核心逐日模拟（含 regime 降仓 + vol_target/fixed 杠杆）
+    let daily = crate::routes::mvo_engine::simulate_v19_daily_returns(
+        db, &sc, first_d, last_d, lev_enabled, req.leverage_multiplier, &req.leverage_mode,
+    )
+    .await?;
+    if daily.len() < 252 {
+        return Err("回测数据不足（需至少 1 年）".into());
+    }
+
+    let mvo_rets: Vec<f64> = daily.iter().map(|d| d.net_return).collect();
+    let gross_rets: Vec<f64> = daily.iter().map(|d| d.gross_return).collect();
+
+    // 纯 A 股日收益（对照基准）
+    let a_eq = sqlx::query_as::<_, (NaiveDate, Decimal)>(
         "SELECT trade_date, portfolio_value FROM backtest_equity_curve WHERE task_id = $1 ORDER BY trade_date",
     )
     .bind(task_id)
     .fetch_all(db)
     .await
-    .map_err(|e| format!("加载权益曲线失败: {e}"))?;
-
-    if eq_rows.len() < 252 {
-        return Err("回测数据不足（需至少 1 年）".into());
-    }
-
-    // v17: 加载 CSI300 用于体制检测
-    let csi_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
-        "SELECT trade_date, close::double precision FROM market_index_daily_bar
-         WHERE symbol = '000300.SH' ORDER BY trade_date",
-    )
-    .fetch_all(db)
-    .await
-    .map_err(|e| format!("加载CSI300失败: {e}"))?;
-    let csi_closes: Vec<(NaiveDate, f64)> = csi_rows;
-
-    // v17: PIT体制检测 — 返回动态 min_stock
-    let get_regime_min = |d: NaiveDate| -> f64 {
-        let closes: Vec<f64> = csi_closes.iter()
-            .filter(|(td, _)| *td <= d)
-            .map(|(_, c)| *c)
-            .collect();
-        if closes.len() < 250 { return min_stock; }
-        let t12 = closes.last().unwrap() / closes[closes.len() - 250] - 1.0;
-        let ma60: f64 = closes.iter().rev().take(60).sum::<f64>() / 60.0;
-        let ma250: f64 = closes.iter().rev().take(250).sum::<f64>() / 250.0;
-        if t12 > 0.10 && ma60 > ma250 { 0.35 }
-        else if t12 < -0.15 { 0.00 }
-        else { min_stock.max(0.25) }  // neutral: 25% (P2最优) or request default
-    };
-
-    let a_nav: Vec<(NaiveDate, f64)> = eq_rows
-        .iter()
-        .map(|(d, v)| (*d, v.to_string().parse::<f64>().unwrap_or(0.0)))
-        .filter(|(_, v)| *v > 0.0)
-        .collect();
-
-    // 2. 加载 ETF 日线价格 — v17: 7资产(6 ETFs + A股)
-    // 518880=黄金, 511010=国债, 513500=SP500, 513100=纳指, 159980=有色, 159985=豆粕
-    let default_etfs = vec![
-        "518880.SH".to_string(), "511010.SH".to_string(), "513500.SH".to_string(),
-        "513100.SH".to_string(), "159980.SZ".to_string(), "159985.SZ".to_string(),
-    ];
-    let etf_symbols = if req.etf_symbols.is_empty() { &default_etfs } else { &req.etf_symbols };
-    let etf_count = etf_symbols.len();
-
-    // ETF数据起始日期: 回测起始日 - MVO回看期 - 1年缓冲
-    let etf_start = a_nav.first().map(|(d, _)| {
-        (*d - chrono::Duration::days(lookback as i64 * 31 + 365)).max(NaiveDate::from_ymd_opt(2013, 3, 25).unwrap())
-    }).unwrap_or(NaiveDate::from_ymd_opt(2013, 3, 25).unwrap());
-
-    // 动态构建 SQL IN 子句
-    let placeholders: Vec<String> = (1..=etf_count).map(|i| format!("${}", i)).collect();
-    let in_clause = placeholders.join(", ");
-    let sql = format!(
-        "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar_adj
-         WHERE symbol IN ({}) AND trade_date >= ${} ORDER BY trade_date",
-        in_clause, etf_count + 1
-    );
-
-    let mut query = sqlx::query_as::<_, (NaiveDate, String, f64)>(&sql);
-    for sym in etf_symbols {
-        query = query.bind(sym);
-    }
-    query = query.bind(etf_start);
-
-    let etf_rows = query.fetch_all(db).await.map_err(|e| format!("加载 ETF 数据失败: {e}"))?;
-
-    let mut etf_prices: HashMap<String, HashMap<NaiveDate, f64>> = HashMap::new();
-    for (d, sym, price) in &etf_rows {
-        etf_prices.entry(sym.clone()).or_default().insert(*d, *price);
-    }
-
-    // 3. 计算日收益率
-    let mut daily_returns: Vec<(NaiveDate, Vec<f64>)> = Vec::new(); // [A, ETF1, ETF2, ...]
-    for i in 1..a_nav.len() {
-        let (d, nav) = a_nav[i];
-        let (prev_d, prev_nav) = a_nav[i - 1];
-        if prev_nav <= 0.0 { continue; }
-        let a_ret = nav / prev_nav - 1.0;
-        if a_ret.abs() > 0.5 { continue; }
-
-        let mut row = vec![a_ret];
-        let mut valid = true;
-        for sym in etf_symbols {
-            let prices = etf_prices.get(sym.as_str());
-            let pp = prices.and_then(|p| p.get(&prev_d)).copied().unwrap_or(0.0);
-            let pc = prices.and_then(|p| p.get(&d)).copied().unwrap_or(0.0);
-            if pp > 0.0 && pc > 0.0 {
-                let r = pc / pp - 1.0;
-                if r.abs() > 0.5 { valid = false; }
-                row.push(r);
-            } else {
-                row.push(0.0);
-            }
-        }
-        if valid { daily_returns.push((d, row)); }
-    }
-
-    if daily_returns.is_empty() {
-        return Err("无有效日收益率".into());
-    }
-
-    let n_assets = 1 + etf_count;
-
-    // 4. 月度聚合
-    let mut monthly_rets: Vec<(String, Vec<f64>)> = Vec::new();
-    let mut current_month: Option<(String, Vec<f64>)> = None;
-
-    for (d, rets) in &daily_returns {
-        let mk = format!("{}-{:02}", d.format("%Y"), d.month());
-        match &mut current_month {
-            Some((m, cum)) if *m == mk => {
-                for j in 0..n_assets {
-                    cum[j] = (1.0 + cum[j]) * (1.0 + rets[j]) - 1.0;
-                }
-            }
-            _ => {
-                if let Some((m, cum)) = current_month.take() {
-                    monthly_rets.push((m, cum));
-                }
-                current_month = Some((mk, rets.clone()));
-            }
+    .unwrap_or_default();
+    let a_navs: Vec<f64> = a_eq.iter().map(|(_, v)| v.to_string().parse::<f64>().unwrap_or(0.0)).filter(|v| *v > 0.0).collect();
+    let mut a_rets: Vec<f64> = Vec::new();
+    for i in 1..a_navs.len() {
+        if a_navs[i - 1] > 0.0 {
+            let r = a_navs[i] / a_navs[i - 1] - 1.0;
+            if r.abs() <= 0.5 { a_rets.push(r); }
         }
     }
-    if let Some((m, cum)) = current_month {
-        monthly_rets.push((m, cum));
+
+    let mvo_m = crate::routes::mvo_engine::compute_metrics(&mvo_rets);
+    let gross_m = crate::routes::mvo_engine::compute_metrics(&gross_rets);
+    let a_m = crate::routes::mvo_engine::compute_metrics(&a_rets);
+
+    // 逐年收益（基于 MVO 杠杆后日收益）
+    let mut yearly: Vec<Value> = Vec::new();
+    {
+        let mut cur_year = 0i32;
+        let mut yr_nav = 1.0f64;
+        for d in &daily {
+            let y = d.date.year();
+            if y != cur_year {
+                if cur_year != 0 {
+                    yearly.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
+                }
+                cur_year = y; yr_nav = 1.0;
+            }
+            yr_nav *= 1.0 + d.net_return;
+        }
+        if cur_year != 0 {
+            yearly.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
+        }
     }
 
-    let mvo_start_month = monthly_rets.iter().position(|(_, r)| {
-        // 第一列是 A 股，其余是 ETF；只要至少有 2 个 ETF 有数据即可开始 MVO
-        let etf_count = r.iter().skip(1).filter(|&&x| x != 0.0).count();
-        etf_count >= 2
+    let metrics_json = |m: &crate::routes::mvo_engine::Metrics| json!({
+        "trading_days": m.trading_days,
+        "annual_return_pct": (m.annual_return * 1000.0).round() / 10.0,
+        "cumulative_return_pct": (m.cumulative_return * 1000.0).round() / 10.0,
+        "volatility_pct": (m.volatility * 1000.0).round() / 10.0,
+        "sharpe_ratio": (m.sharpe * 100.0).round() / 100.0,
+        "sortino_ratio": (m.sortino * 100.0).round() / 100.0,
+        "max_drawdown_pct": (m.max_drawdown * 1000.0).round() / 10.0,
+        "calmar_ratio": (m.calmar * 100.0).round() / 100.0,
+        "win_rate_pct": (m.win_rate * 1000.0).round() / 10.0,
     });
-
-    // ═══ 数据完整性检查 ═══
-    crate::routes::data_validation::validate_equity_curve(&a_nav, a_nav.first().map(|(d,_)| *d).unwrap_or(NaiveDate::from_ymd_opt(2014,1,1).unwrap()))?;
-    crate::routes::data_validation::validate_data_coverage(
-        &a_nav, &etf_prices, etf_symbols,
-        a_nav.first().map(|(d,_)| *d).unwrap_or(NaiveDate::from_ymd_opt(2014,1,1).unwrap()),
-        a_nav.last().map(|(d,_)| *d).unwrap_or(NaiveDate::from_ymd_opt(2026,1,1).unwrap()),
-    )?;
-
-    // 5. MVO 季度调仓模拟
-    let mut weights = vec![min_stock];
-    let mut remaining = 1.0 - min_stock;
-    for _ in 1..n_assets {
-        let w = remaining / (n_assets - 1) as f64;
-        weights.push(w);
-        remaining -= w;
-    }
-
-    let mut last_rebalance_key = String::new();
-    let mut weight_history: Vec<Value> = Vec::new();
-    let mut mvo_daily_rets: Vec<f64> = Vec::new();
-    let mut a_only_daily_rets: Vec<f64> = Vec::new();
-
-    let mut month_idx_map: HashMap<&str, usize> = HashMap::new();
-    for (i, (mk, _)) in monthly_rets.iter().enumerate() {
-        month_idx_map.insert(mk.as_str(), i);
-    }
-
-    for (d, rets) in &daily_returns {
-        let mk = format!("{}-{:02}", d.format("%Y"), d.month());
-
-        // 确定调仓时机
-        let should_rebalance = if is_quarterly {
-            let month_num = d.month();
-            let is_q_month = matches!(month_num, 1 | 4 | 7 | 10);
-            let q_key = format!("{}-Q{}", d.format("%Y"), (month_num - 1) / 3 + 1);
-            let is_new = q_key != last_rebalance_key;
-            is_q_month && is_new
-        } else {
-            mk != last_rebalance_key
-        };
-
-        if should_rebalance {
-            if let Some(&mi) = month_idx_map.get(mk.as_str()) {
-                if mi >= lookback {
-                    last_rebalance_key = if is_quarterly {
-                        let month_num = d.month();
-                        format!("{}-Q{}", d.format("%Y"), (month_num - 1) / 3 + 1)
-                    } else {
-                        mk.clone()
-                    };
-
-                    let train: Vec<Vec<f64>> = monthly_rets[mi - lookback..mi]
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect();
-
-                    let n_months = train.len();
-                    if n_months >= 12 {
-                        let flat: Vec<f64> = train.iter().flatten().copied().collect();
-                        if let Some(arr) = Array2::from_shape_vec((n_months, n_assets), flat).ok() {
-                            // v17: Sortino-max MVO (target=6%) + dynamic regime min_stock
-                            let regime_ms = get_regime_min(*d);
-                            if let Some(result) = mvo::mvo_allocate_sortino_n(&arr, regime_ms, 0.06, 0.10) {
-                                weights = result.weights.to_vec();
-
-                                // v17: ETF MA200 趋势过滤
-                                for (ei, sym) in etf_symbols.iter().enumerate() {
-                                    let wi = ei + 1;
-                                    if wi >= weights.len() || weights[wi] <= 0.0 { continue; }
-                                    if let Some(prices) = etf_prices.get(sym.as_str()) {
-                                        let mut sorted_dates: Vec<NaiveDate> = prices.keys().copied().collect();
-                                        sorted_dates.sort();
-                                        if sorted_dates.len() >= 200 {
-                                            let recent: Vec<f64> = sorted_dates.iter()
-                                                .filter(|&&pd| pd <= *d)
-                                                .rev().take(200)
-                                                .map(|pd| prices.get(pd).copied().unwrap_or(0.0))
-                                                .collect();
-                                            if recent.len() >= 200 {
-                                                let ma200: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
-                                                let latest = recent[0];
-                                                if latest < ma200 && latest > 0.0 {
-                                                    weights[wi] = 0.0;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                // 重新归一化
-                                let w_sum: f64 = weights.iter().sum();
-                                if w_sum > 0.0 {
-                                    for w in &mut weights { *w /= w_sum; }
-                                }
-
-                                weight_history.push(json!({
-                                    "date": d.format("%Y-%m-%d").to_string(),
-                                    "weights": weights.iter().map(|&w| (w * 1000.0).round() / 10.0).collect::<Vec<f64>>(),
-                                    "sharpe": (result.sharpe * 100.0).round() / 100.0,
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 应用权重
-        let mvo_ret: f64 = weights.iter().zip(rets.iter()).map(|(w, r)| w * r).sum();
-        mvo_daily_rets.push(mvo_ret);
-        a_only_daily_rets.push(rets[0]);
-    }
-
-    // 6. v15 增强: 在 MVO 日收益上叠加 vol-target 杠杆
-    let target_vol: f64 = 0.20;
-    let use_vol_target = req.leverage_mode == "vol_target";
-    let fixed_lev = if !use_vol_target { req.leverage_multiplier.max(1.0) } else { 1.0 };
-
-    let mut v15_rets: Vec<f64> = Vec::new();
-    let mut trail_60: Vec<f64> = Vec::new();
-
-    for &mvo_r in &mvo_daily_rets {
-        trail_60.push(mvo_r);
-        if trail_60.len() > 60 { trail_60.remove(0); }
-
-        let lev = if use_vol_target && trail_60.len() >= 20 {
-            let n = trail_60.len() as f64;
-            let mean = trail_60.iter().sum::<f64>() / n;
-            let var = if n > 1.0 {
-                trail_60.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0)
-            } else { 0.0 };
-            let ann_vol = var.sqrt() * (252.0_f64).sqrt();
-            if ann_vol > 0.05 { (target_vol / ann_vol).clamp(0.5, 2.0) } else { 1.0 }
-        } else if fixed_lev > 1.0 { fixed_lev } else { 1.0 };
-
-        v15_rets.push(mvo_r * lev);
-    }
-
-    // 7. 计算指标
-    let mvo_start_idx = mvo_start_month.map(|mi| {
-        daily_returns.iter().position(|(d, _)| {
-            let mk = format!("{}-{:02}", d.format("%Y"), d.month());
-            mk >= monthly_rets[mi].0
-        }).unwrap_or(0)
-    }).unwrap_or(0);
-
-    let mvo_rets = &v15_rets[mvo_start_idx..];
-    let a_rets = &a_only_daily_rets;
-
-    let mvo_metrics = compute_portfolio_metrics(mvo_rets);
-    let a_metrics = compute_portfolio_metrics(a_rets);
-    let yearly_returns = compute_yearly_returns(&daily_returns, mvo_rets, mvo_start_idx);
-
-    let first_date = daily_returns.first().map(|(d, _)| d.format("%Y-%m-%d").to_string());
-    let last_date = daily_returns.last().map(|(d, _)| d.format("%Y-%m-%d").to_string());
-    let mvo_start_date = daily_returns.get(mvo_start_idx).map(|(d, _)| d.format("%Y-%m-%d").to_string());
 
     Ok(json!({
         "backtest_task_id": task_id,
         "date_range": {
-            "full_start": first_date,
-            "full_end": last_date,
-            "mvo_start": mvo_start_date,
+            "full_start": first_d.format("%Y-%m-%d").to_string(),
+            "full_end": last_d.format("%Y-%m-%d").to_string(),
+            "mvo_start": first_d.format("%Y-%m-%d").to_string(),
         },
         "config": {
-            "etf_symbols": req.etf_symbols,
-            "lookback_months": lookback,
-            "min_stock_pct": (min_stock * 100.0),
-            "rebalance": if is_quarterly { "quarterly" } else { "monthly" },
-            "n_assets": n_assets,
+            "engine": "v19_shared_core",
+            "etf_symbols": sc.etf_symbols,
+            "n_assets": 1 + sc.etf_symbols.len(),
             "leverage_mode": req.leverage_mode,
             "leverage_multiplier": req.leverage_multiplier,
         },
-        "a_share_only": a_metrics,
-        "mvo_blended": mvo_metrics,
-        "yearly_returns": yearly_returns,
-        "weight_history": weight_history.iter().rev().take(8).collect::<Vec<_>>(),
+        "a_share_only": metrics_json(&a_m),
+        "mvo_gross": metrics_json(&gross_m),
+        "mvo_blended": metrics_json(&mvo_m),
+        "yearly_returns": yearly,
     }))
 }
 

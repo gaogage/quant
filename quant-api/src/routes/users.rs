@@ -9,7 +9,6 @@
 use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 

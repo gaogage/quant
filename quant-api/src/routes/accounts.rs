@@ -44,6 +44,7 @@ pub struct UpdateAccountRequest {
     pub margin_amount: Option<f64>,
     pub cash: Option<f64>,
     pub reserve_amount: Option<f64>,
+    pub strategy_version_id: Option<String>,
 }
 
 // ── 列表 ────────────────────────────────────────────────
@@ -121,7 +122,8 @@ pub async fn list_accounts(
                 leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status,
                 user_id, current_nav::double precision, COALESCE(cash, initial_capital)::double precision,
                 max_drawdown_pct::double precision, COALESCE(margin_amount,0)::double precision,
-                COALESCE(reserve_amount,0)::double precision
+                COALESCE(reserve_amount,0)::double precision,
+                strategy_version_id
          FROM paper_account
          WHERE {}
          ORDER BY status ASC, created_at DESC",
@@ -130,12 +132,12 @@ pub async fn list_accounts(
 
     let rows: Vec<(
         String, String, String, f64, bool, String, f64, String, String, Option<String>,
-        Option<f64>, f64, Option<f64>, f64, f64,
+        Option<f64>, f64, Option<f64>, f64, f64, Option<String>,
     )> = sqlx::query_as(&sql).fetch_all(&state.db).await.unwrap_or_default();
 
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(aid, at, name, cap, le, lm, lmp, ss, st, uid, nav, cash, mdd, margin, reserve)| {
+        .map(|(aid, at, name, cap, le, lm, lmp, ss, st, uid, nav, cash, mdd, margin, reserve, strat)| {
             serde_json::json!({
                 "account_id": aid, "account_type": at,
                 "name": name, "initial_capital": cap,
@@ -144,6 +146,7 @@ pub async fn list_accounts(
                 "owner": uid.unwrap_or_default(),
                 "current_nav": nav, "cash": cash, "max_drawdown": mdd,
                 "margin_amount": margin, "reserve_amount": reserve,
+                "strategy_version_id": strat.unwrap_or_default(),
             })
         })
         .collect();
@@ -379,6 +382,7 @@ pub async fn update_account(
          margin_amount = COALESCE($8, margin_amount),
          cash = COALESCE($9, cash),
          reserve_amount = COALESCE($10, reserve_amount),
+         strategy_version_id = COALESCE($12, strategy_version_id),
          updated_at = NOW()
          WHERE paper_account_id = $11"
     )
@@ -388,6 +392,7 @@ pub async fn update_account(
     .bind(&req.dingtalk_webhook_url).bind(req.margin_amount)
     .bind(req.cash).bind(req.reserve_amount)
     .bind(&account_id)
+    .bind(&req.strategy_version_id)
     .execute(&state.db).await;
 
     Json(serde_json::json!({"code": 0}))
