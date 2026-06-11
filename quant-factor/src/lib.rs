@@ -17,7 +17,9 @@ pub mod factors {
 }
 
 // Re-export key types for convenience
-pub use combine::{combine_and_persist, compute_weights, CombineMethod, FactorWeight};
+pub use combine::{
+    combine_and_persist, compute_weights, compute_weights_pit, CombineMethod, FactorWeight,
+};
 pub use evaluate::evaluate;
 pub use standardize::standardize;
 pub use types::*;
