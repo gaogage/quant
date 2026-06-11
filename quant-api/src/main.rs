@@ -279,6 +279,10 @@ async fn main() {
             post(routes::factors::backfill_phase7_price_volume_background),
         )
         .route(
+            "/api/v1/quant/factors/materialize-pit-combo/background",
+            post(routes::factors::materialize_pit_combo_background),
+        )
+        .route(
             "/api/v1/quant/factors/phase7-financial-quality-backfill/background",
             post(routes::factors::backfill_phase7_financial_quality_background),
         )

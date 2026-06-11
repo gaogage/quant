@@ -7231,6 +7231,176 @@ fn phase7_combo_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
+/// PIT 滚动 ICIR combo 物化入口（可复用，供未来实盘调度器增量触发保鲜）。
+///
+/// 对 `[start, end]` 区间内每个交易日，用其所属季度调仓点（季度首个交易日）的
+/// PIT 滚动 ICIR 权重（只取 `end_date <= 调仓点` 的最新 IC，绝不用未来），
+/// 加权 `factor_value.normalized_value` 得 combo 分，幂等写入 `multi_factor_value`。
+///
+/// 候选池 = 量价技术因子（排除未过数据审计的基本面/另类因子）。
+/// 增量保鲜：实盘只需传最近季度区间，ON CONFLICT 刷新即可。
+pub async fn materialize_pit_combo(
+    db: &sqlx::PgPool,
+    combo_name: &str,
+    factor_version: &str,
+    horizon: i16,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<u64, String> {
+    // 逐季度循环：每季用其调仓点(季度首个交易日)的 PIT 权重，单独 execute（自动提交）。
+    // 可观测(逐季写入)、可增量(实盘只重跑最近季度)、避免单事务过重。
+    let quarters: Vec<NaiveDate> = sqlx::query_scalar::<_, NaiveDate>(
+        "SELECT MIN(trade_date) AS as_of
+         FROM (SELECT DISTINCT trade_date FROM market_stock_daily_bar_adj
+               WHERE trade_date >= $1 AND trade_date <= $2) d
+         GROUP BY date_trunc('quarter', trade_date)
+         ORDER BY 1",
+    )
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("materialize_pit_combo quarters: {}", e))?;
+
+    // $4 = as_of（季度调仓点，同时是 PIT 截止日）；$5 = 下季 as_of（开区间末）
+    let per_quarter_sql = r#"
+WITH pit AS (
+    SELECT DISTINCT ON (fe.factor_code) fe.factor_code, fe.mean_ic, fe.ic_ir
+    FROM factor_evaluation fe
+    WHERE fe.horizon = $3 AND fe.end_date <= $4
+      AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
+      AND fe.factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)'
+    ORDER BY fe.factor_code, fe.end_date DESC
+),
+wsum AS (SELECT SUM(ABS(ic_ir)) AS tot FROM pit),
+scores AS (
+    SELECT fv.symbol, fv.trade_date,
+        SUM(fv.normalized_value * (p.ic_ir / NULLIF(w.tot, 0.0)) * SIGN(p.mean_ic)) AS raw_score,
+        MAX(COALESCE(fv.available_at, fv.trade_date)) AS available_at
+    FROM pit p CROSS JOIN wsum w
+    JOIN factor_value fv
+      ON fv.factor_code = p.factor_code AND fv.factor_version = $2
+     AND fv.trade_date >= $4 AND fv.trade_date < $5 AND fv.normalized_value IS NOT NULL
+    GROUP BY fv.symbol, fv.trade_date
+)
+INSERT INTO multi_factor_value
+    (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+SELECT $1, $2, symbol, trade_date, raw_score, raw_score, available_at
+FROM scores
+ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+    raw_score = EXCLUDED.raw_score,
+    normalized_score = EXCLUDED.normalized_score,
+    available_at = EXCLUDED.available_at,
+    created_at = NOW()
+"#;
+
+    let mut total: u64 = 0;
+    for (i, as_of) in quarters.iter().enumerate() {
+        let q_end = quarters
+            .get(i + 1)
+            .copied()
+            .unwrap_or_else(|| end_date + chrono::Duration::days(1));
+        let res = sqlx::query(per_quarter_sql)
+            .bind(combo_name)
+            .bind(factor_version)
+            .bind(horizon)
+            .bind(as_of)
+            .bind(q_end)
+            .execute(db)
+            .await
+            .map_err(|e| format!("materialize_pit_combo q={}: {}", as_of, e))?;
+        total += res.rows_affected();
+        info!(combo = combo_name, quarter = %as_of, rows = res.rows_affected(), "PIT combo 季度物化");
+    }
+    Ok(total)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MaterializePitComboRequest {
+    pub combo_name: String,
+    #[serde(default = "default_pit_combo_version")]
+    pub version: String,
+    #[serde(default = "default_pit_horizon")]
+    pub horizon: i16,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+fn default_pit_combo_version() -> String {
+    "1.0.0".to_string()
+}
+
+fn default_pit_horizon() -> i16 {
+    20
+}
+
+/// POST /api/v1/quant/factors/materialize-pit-combo/background
+///
+/// 后台物化 PIT 滚动 ICIR combo（供未来实盘调度器增量触发保鲜）。
+/// 默认区间 2017-01-01 ~ 今（滚动 IC 从 2016 起、2017 才有完整历史窗口）。
+pub async fn materialize_pit_combo_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MaterializePitComboRequest>,
+) -> impl IntoResponse {
+    let start = req
+        .start_date
+        .as_deref()
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok())
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2017, 1, 1).unwrap());
+    let end = req
+        .end_date
+        .as_deref()
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive());
+    let combo_name = req.combo_name.clone();
+    let version = req.version.clone();
+    let horizon = req.horizon;
+    let task_id = background_factor_task_id();
+
+    let _ = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at, started_at)
+         VALUES ($1, 'materialize_pit_combo', 'factor', $2, $3, 'running', 0, 0, 0, 0, now(), now())",
+    )
+    .bind(&task_id)
+    .bind(start)
+    .bind(end)
+    .execute(&state.db)
+    .await;
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    tokio::spawn(async move {
+        match materialize_pit_combo(&state.db, &combo_name, &version, horizon, start, end).await {
+            Ok(rows) => {
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task SET status='completed', total_count=$2, success_count=$2,
+                     progress=100, last_heartbeat_at=now(), completed_at=now() WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(rows as i32)
+                .execute(&state.db)
+                .await;
+                info!(task_id = %tid, rows = rows, "PIT combo 物化完成");
+            }
+            Err(e) => {
+                tracing::error!(task_id = %tid, error = %e, "PIT combo 物化失败");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task SET status='failed', error_message=$2,
+                     last_heartbeat_at=now(), completed_at=now() WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&e)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({"code": 0, "data": {"task_id": task_id, "status": "running"}}))
+}
+
 fn phase7_alpha_blend_backfill_sql(combo_method: &str) -> &'static str {
     match combo_method {
         "weighted_combo_optional_overlay" => phase7_optional_overlay_blend_backfill_sql(),
