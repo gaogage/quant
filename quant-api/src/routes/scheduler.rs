@@ -237,16 +237,39 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 run_data_quality_check(db).await;
             }
             "equity_curve_update" => {
-                let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or("phase7_price_volume_expanded_v1");
-                let top_n = params.get("top_n").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
-                info!("[scheduler] 权益曲线更新: combo={} top_n={}", combo, top_n);
+                // 从 v19 策略配置读 A股选股方式，权益曲线与策略一致（因子+ML混合）
+                let sc = load_strategy_config(db, "v19").await;
+                let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or(sc.combo_name.as_str());
+                let top_n = params.get("top_n").and_then(|v| v.as_u64()).unwrap_or(sc.top_n as u64) as usize;
+                info!("[scheduler] 权益曲线更新: combo={} top_n={} signal={}", combo, top_n, sc.signal_source);
                 let client = reqwest::Client::new();
                 let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
-                let payload = serde_json::json!({
+                let dv = get_latest_data_version(db).await;
+                let mut payload = serde_json::json!({
                     "combo_name": combo, "strategy_version_id": "factor-combo-v1",
-                    "data_version_id": "dv-20260606-053217534", "top_n": top_n,
+                    "data_version_id": dv, "top_n": top_n,
                     "rebalance": "10", "start_date": "20060101", "end_date": end_date,
+                    "max_position_pct": 0.10, "max_gross_exposure": 0.95,
+                    "benchmark": "000300.SH", "universe_profile": "main_board_non_st",
                 });
+                // 因子+ML混合：带上策略指定的全周期预测集（无则选最新覆盖区间的 PIT 集）
+                if sc.signal_source == "prediction_blend" || sc.signal_source == "prediction" {
+                    let pid = if let Some(ref p) = sc.prediction_set_id {
+                        Some(p.clone())
+                    } else {
+                        sqlx::query_scalar::<_, String>(
+                            "SELECT prediction_set_id FROM prediction_set WHERE status='ready' AND training_end_date IS NOT NULL
+                             ORDER BY (end_date - start_date) DESC, end_date DESC LIMIT 1"
+                        ).fetch_optional(db).await.ok().flatten()
+                    };
+                    if let Some(pid) = pid {
+                        payload["prediction_set_id"] = serde_json::json!(pid);
+                        payload["prediction_blend_weight"] = serde_json::json!(sc.prediction_blend_weight);
+                        payload["kelly_fraction"] = serde_json::json!(0.25);
+                        payload["score_candidate_pool_size"] = serde_json::json!(200);
+                        info!("[scheduler] 权益曲线启用 prediction_blend: set={} w={}", pid, sc.prediction_blend_weight);
+                    }
+                }
                 match client.post("http://localhost:8080/api/v1/quant/backtests/run-factor")
                     .json(&payload).timeout(std::time::Duration::from_secs(600)).send().await
                 {
