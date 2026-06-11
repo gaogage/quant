@@ -382,9 +382,39 @@ mod tests {
         std::env::remove_var("MVO_TARGET_CAP");
     }
 
-    /// 杠杆维度扫描：vol_target × leverage_cap，找杠杆账号 AR/DD/Sharpe 最优。
-    /// DATABASE_URL=... cargo test --release -p quant-api scan_leverage -- --ignored --nocapture
+    /// 阶段2 Task C：32因子PIT combo 代入组合层 vs 旧基线，同区间(2017-2026)对照。
+    /// DATABASE_URL=... cargo test --release -p quant-api test_scan_pit_combo -- --ignored --nocapture
     #[tokio::test]
+    #[ignore]
+    async fn test_scan_pit_combo() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        // 同区间 2017-2026（新 combo 曲线起点 2017）
+        let start = NaiveDate::from_ymd_opt(2017, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
+
+        // 两条 A股曲线：新 PIT combo vs 旧 5因子基线
+        let curves = [
+            ("PIT-37f", "fbt-697279b1-7209-4a4f-b522-d9be16fe3aa9"),
+            ("base-5f", "fbt-f24aa67e-9171-42d5-9bd6-530f631762fc"),
+        ];
+        for (label, curve) in curves {
+            let mut sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
+            sc.equity_curve_task_id = curve.to_string();
+            println!("\n=== {} ({}) 同区间2017-2026 ===", label, curve);
+            println!("{:>6} | {:>5} {:>5} {:>5} {:>5} {:>5}",
+                     "tgt", "AR", "DD", "Shrp", "Sort", "Clmr");
+            for cap in ["0.06", "0.08", "0.10", "0.12"] {
+                std::env::set_var("MVO_TARGET_CAP", cap);
+                let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed").await.expect("u");
+                let m = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                println!("{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
+                         cap, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.sortino, m.calmar);
+            }
+            std::env::remove_var("MVO_TARGET_CAP");
+        }
+    }
     #[ignore]
     async fn test_scan_leverage() {
         let url = std::env::var("DATABASE_URL")
