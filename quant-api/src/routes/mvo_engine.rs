@@ -415,6 +415,48 @@ mod tests {
             std::env::remove_var("MVO_TARGET_CAP");
         }
     }
+
+    /// 阶段2 验证补强：target OOS 防过拟合 + 杠杆腿。
+    /// IS(2017-2021)扫target各档，OOS(2022-2026)用各档实测——看 IS 最优是否在 OOS 站住。
+    /// 同时输出无杠杆 + 杠杆(vol_target×1.5)。PIT-37f vs base-5f。
+    /// DATABASE_URL=... cargo test --release -p quant-api test_pit_oos_lev -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_pit_oos_lev() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let is_start = NaiveDate::from_ymd_opt(2017, 1, 1).unwrap();
+        let is_end = NaiveDate::from_ymd_opt(2021, 12, 31).unwrap();
+        let oos_start = NaiveDate::from_ymd_opt(2022, 1, 1).unwrap();
+        let oos_end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
+        let curves = [
+            ("PIT-37f", "fbt-697279b1-7209-4a4f-b522-d9be16fe3aa9"),
+            ("base-5f", "fbt-f24aa67e-9171-42d5-9bd6-530f631762fc"),
+        ];
+        for (label, curve) in curves {
+            let mut sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
+            sc.equity_curve_task_id = curve.to_string();
+            println!("\n=== {} ({}) ===", label, curve);
+            println!("{:>4} | {:>14} | {:>14} | {:>14}",
+                     "tgt", "IS17-21 unlev", "OOS22-26 unlev", "OOS22-26 LEV");
+            for cap in ["0.06", "0.08", "0.10", "0.12"] {
+                std::env::set_var("MVO_TARGET_CAP", cap);
+                let is_u = simulate_v19_daily_returns(&db, &sc, is_start, is_end, false, 1.0, "fixed").await.expect("is");
+                let mis = compute_metrics(&is_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                let oos_u = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, false, 1.0, "fixed").await.expect("oos");
+                let moos = compute_metrics(&oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                let oos_l = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, true, 1.5, "vol_target").await.expect("oosl");
+                let mlev = compute_metrics(&oos_l.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                println!("{:>4} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2}",
+                         cap,
+                         mis.annual_return*100.0, mis.max_drawdown*100.0, mis.sharpe,
+                         moos.annual_return*100.0, moos.max_drawdown*100.0, moos.sharpe,
+                         mlev.annual_return*100.0, mlev.max_drawdown*100.0, mlev.sharpe);
+            }
+            std::env::remove_var("MVO_TARGET_CAP");
+        }
+    }
     #[ignore]
     async fn test_scan_leverage() {
         let url = std::env::var("DATABASE_URL")
