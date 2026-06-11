@@ -2055,7 +2055,13 @@ async fn compute_lw_mvo_weights(
             let adaptive_ms = if trail_12m_a > 0.10 {
                 (adaptive_min_stock * 0.7).max(0.08)
             } else { adaptive_min_stock };
-            if let Some(result) = mvo::mvo_allocate_ga_with_max_single(&arr, &adj_mu, adaptive_ms, dynamic_target, 0.10, adaptive_max) {
+            // 目标函数实验开关 MVO_OBJECTIVE=maxsharpe（默认 minvariance）
+            let mvo_result = if std::env::var("MVO_OBJECTIVE").as_deref() == Ok("maxsharpe") {
+                mvo::mvo_allocate_ga_maxsharpe_with_max_single(&arr, &adj_mu, adaptive_ms, adaptive_max)
+            } else {
+                mvo::mvo_allocate_ga_with_max_single(&arr, &adj_mu, adaptive_ms, dynamic_target, 0.10, adaptive_max)
+            };
+            if let Some(result) = mvo_result {
                 let w = result.weights.to_vec();
                 let wg = |i: usize| (w.get(i).copied().unwrap_or(0.0) * 100.0).round();
                 info!(

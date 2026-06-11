@@ -131,6 +131,10 @@ async fn main() {
             post(routes::sync::sync_adj_factor_background),
         )
         .route(
+            "/api/v1/quant/data/sync/fund-adj",
+            post(routes::sync::sync_fund_adj),
+        )
+        .route(
             "/api/v1/quant/data/sync/moneyflow-hsgt",
             post(routes::sync::sync_moneyflow_hsgt),
         )

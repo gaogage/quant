@@ -861,6 +861,18 @@ pub fn mvo_allocate_ga_with_max_single(
     ga_optimize_min_variance(custom_mu, &cov, min_stock, max_single, return_target)
 }
 
+/// GA MVO with MaxSharpe objective + configurable max_single（最大化 Sharpe，非最小方差）。
+/// 用于干净 ETF 数据下的目标函数对比实验。
+pub fn mvo_allocate_ga_maxsharpe_with_max_single(
+    monthly_returns: &Array2<f64>,
+    custom_mu: &Array1<f64>,
+    min_stock: f64,
+    max_single: f64,
+) -> Option<MvoWeights> {
+    let cov = ledoit_wolf_shrinkage(monthly_returns);
+    ga_optimize(custom_mu, &cov, min_stock, max_single)
+}
+
 /// GA MVO with nonlinear shrinkage covariance.
 pub fn mvo_allocate_ga_nl(
     monthly_returns: &Array2<f64>,

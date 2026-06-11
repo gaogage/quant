@@ -1285,6 +1285,25 @@ pub async fn sync_adj_factor(
     }
 }
 
+/// POST /api/v1/quant/data/sync/fund-adj — 同步 ETF/基金复权因子（Tushare fund_adj）
+pub async fn sync_fund_adj(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncAdjFactorReq>,
+) -> impl IntoResponse {
+    let dv_id = req.data_version_id.unwrap_or_else(generated_data_version_id);
+    info!(data_version_id = %dv_id, symbols = req.symbols.len(), "同步基金复权因子");
+    match quant_data::sync::sync_fund_adj(
+        &state.db, &state.tushare, &req.symbols, &req.start_date, &req.end_date, &dv_id,
+    )
+    .await
+    {
+        Ok(count) => Json(
+            json!({"code": 0, "data": {"task_id": dv_id, "status": "completed", "count": count}}),
+        ),
+        Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
+    }
+}
+
 /// POST /api/v1/quant/data/sync/adj-factor/background
 ///
 /// 大批量后台同步复权因子，立即返回 task_id。

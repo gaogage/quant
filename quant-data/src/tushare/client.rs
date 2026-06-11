@@ -584,6 +584,24 @@ impl TushareClient {
             .await
     }
 
+    /// 获取基金(ETF/LOF)复权因子 — Tushare `fund_adj` 接口（股票用 adj_factor，基金必须用此接口）
+    pub async fn fund_adj(
+        &self,
+        ts_code: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params = vec![("ts_code", ts_code)];
+        if let Some(sd) = start_date {
+            params.push(("start_date", sd));
+        }
+        if let Some(ed) = end_date {
+            params.push(("end_date", ed));
+        }
+        self.call_api::<Vec<serde_json::Value>>("fund_adj", params, &[])
+            .await
+    }
+
     /// 获取指数日线
     pub async fn index_daily(
         &self,

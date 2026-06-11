@@ -1399,6 +1399,75 @@ pub async fn sync_adj_factor(
     Ok(ok)
 }
 
+// ─── sync_fund_adj ───────────────────────────────────────────────
+
+/// 同步基金(ETF/LOF)复权因子 — 用 Tushare `fund_adj` 接口（股票 adj_factor 接口对基金无数据）。
+/// 复权因子写入同一张 market_adjustment_factor 表，复权视图自动生效。
+pub async fn sync_fund_adj(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool, &task_id, "fund_adj", "tushare",
+        Some(symbols), Some(s), Some(e), "running", None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool, dv_id, "fund adj sync", "tushare",
+        &["market_adjustment_factor"], s, e,
+    )
+    .await?;
+
+    let total = symbols.len();
+    let mut ok = 0usize;
+    let mut fail = 0usize;
+
+    for sym in symbols {
+        match client.fund_adj(sym, Some(start), Some(end)).await {
+            Ok(resp) => {
+                if let Some(data) = resp.data {
+                    let maps = data.to_maps();
+                    let factors: Vec<MarketAdjustmentFactor> = maps
+                        .iter()
+                        .filter_map(|item| {
+                            Some(MarketAdjustmentFactor {
+                                symbol: sym.clone(),
+                                trade_date: to_date(&get_str(item, "trade_date"))?,
+                                adj_factor: to_decimal(get_f64(item, "adj_factor")),
+                            })
+                        })
+                        .collect();
+                    if !factors.is_empty() {
+                        repository::upsert_adj_factors_batch(pool, &factors, dv_id, "tushare")
+                            .await?;
+                        ok += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("{} 基金复权因子失败: {}", sym, e);
+                fail += 1;
+            }
+        }
+    }
+
+    repository::update_sync_task(
+        pool, &task_id,
+        if fail > 0 { "partial" } else { "completed" },
+        total as i32, ok as i32, fail as i32,
+    )
+    .await?;
+    info!("基金复权因子同步完成: ok={}/{}, fail={}", ok, total, fail);
+    Ok(ok)
+}
+
 // ─── sync_index_daily ────────────────────────────────────────────
 
 /// 同步指数日线行情
