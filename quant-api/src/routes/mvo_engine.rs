@@ -135,10 +135,8 @@ pub async fn simulate_v19_daily_returns(
     let mut trail_60: Vec<f64> = Vec::new();
     let mut out: Vec<DailyReturn> = Vec::with_capacity(a_daily.len());
 
-    // 杠杆账号强平/警告线状态（峰值回撤口径）
+    // 杠杆账号维保门控状态：账号净值随杠杆后日收益演进（归一化初始=1.0）
     let mut acct_nav = 1.0_f64;
-    let mut acct_peak = 1.0_f64;
-    let mut liquidated = false;
 
     // 上一交易日（用于 ETF 收益的 prev/cur 取价）
     let mut prev_date: Option<NaiveDate> = None;
@@ -215,26 +213,23 @@ pub async fn simulate_v19_daily_returns(
             1.0
         };
 
-        // 杠杆账号强平/警告线（维持担保比例口径，与真实券商一致）：
+        // 杠杆账号强平/警告线（维持担保比例口径，与真实券商 + 实盘 scheduler 一致）：
         // 维保 = 总资产/融资额 = (净值 + 融资额) / 融资额。
-        // 融资额 debt 固定 = (杠杆倍数-1)×初始净值（归一化初始净值=1.0）。
-        // 净值 acct_nav 随杠杆后日收益演进，跌则维保降。债务为 0（无杠杆）时维保视为正无穷（永不触发）。
-        let debt = (leverage_multiplier - 1.0).max(0.0);
+        // 融资额 debt = (当前生效杠杆-1)×净值，随杠杆浮动（与实盘"每次调仓重算维保"对齐）。
+        // 口径=「去杠杆不清仓」：维保<平仓线→杠杆降至1.0(卖融资仓、还债，自有仓续持)；
+        //   维保<警告线→杠杆≤1.0(禁新增)。均不锁死——维保回升后下一日可按 vol_target 重新加杠杆。
+        let debt = (leverage - 1.0).max(0.0) * acct_nav;
         let maint = if debt > 1e-9 { (acct_nav + debt) / debt } else { f64::INFINITY };
-        let leverage = if liquidated {
-            0.0 // 已强平：清仓，后续不再波动
-        } else if liq_threshold.is_some_and(|t| maint < t) {
-            liquidated = true; // 维保跌破平仓线：当日起清仓
-            0.0
+        let leverage = if liq_threshold.is_some_and(|t| maint < t) {
+            1.0 // 维保跌破平仓线：去杠杆至 1.0（不清仓自有仓位）
         } else if warn_threshold.is_some_and(|t| maint < t) {
-            leverage.min(1.0) // 警告区：禁止加杠杆（只许 ≤1，即只卖不买新杠杆仓）
+            leverage.min(1.0) // 警告区：禁止加杠杆（只许 ≤1）
         } else {
             leverage
         };
 
         let net = gross * leverage;
         acct_nav *= 1.0 + net;
-        acct_peak = acct_peak.max(acct_nav);
 
         out.push(DailyReturn {
             date: d,
