@@ -157,12 +157,18 @@ pub struct StrategyConfig {
     pub top_n: i64,
     #[serde(default)]
     pub prediction_set_id: Option<String>,
+    #[serde(default = "default_dynamic_target_cap")]
+    pub dynamic_target_cap: f64,
+    #[serde(default = "default_score_direction")]
+    pub score_direction: String,
 }
 
 fn default_signal_source() -> String { "prediction_blend".into() }
 fn default_blend_weight() -> f64 { 0.5 }
 fn default_combo_name() -> String { "phase7_price_volume_expanded_v1".into() }
 fn default_top_n() -> i64 { 30 }
+fn default_dynamic_target_cap() -> f64 { 0.06 }
+fn default_score_direction() -> String { "descending".into() }
 
 impl Default for StrategyConfig {
     fn default() -> Self {
@@ -180,6 +186,8 @@ impl Default for StrategyConfig {
             combo_name: "phase7_price_volume_expanded_v1".into(),
             top_n: 30,
             prediction_set_id: None,
+            dynamic_target_cap: 0.06,
+            score_direction: "descending".into(),
         }
     }
 }
@@ -205,7 +213,9 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'prediction_blend_weight', prediction_blend_weight,
             'combo_name', combo_name,
             'top_n', top_n,
-            'prediction_set_id', prediction_set_id
+            'prediction_set_id', prediction_set_id,
+            'dynamic_target_cap', dynamic_target_cap,
+            'score_direction', score_direction
         ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'"
     ).bind(strategy_id).fetch_optional(db).await
     {
@@ -251,6 +261,7 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     "rebalance": "10", "start_date": "20060101", "end_date": end_date,
                     "max_position_pct": 0.10, "max_gross_exposure": 0.95,
                     "benchmark": "000300.SH", "universe_profile": "main_board_non_st",
+                    "score_direction": sc.score_direction,
                 });
                 // 因子+ML混合：带上策略指定的全周期预测集（无则选最新覆盖区间的 PIT 集）
                 if sc.signal_source == "prediction_blend" || sc.signal_source == "prediction" {
@@ -2024,8 +2035,10 @@ async fn compute_lw_mvo_weights(
             // dynamic_target 上限 0.06：高 target(0.18) 会把 MinVariance 逼向单资产集中、
             // DD 翻倍(13%→25%)。0.06 与 ROADMAP 验证 v19 22.6% 时的原始配置一致，保持跨资产分散。
             // 可用 MVO_TARGET_CAP 覆盖做调参实验。
+            // target 上限：优先读策略配置 sc.dynamic_target_cap（生产持久化），
+            // MVO_TARGET_CAP env 仍可覆盖做调参实验。
             let target_cap = std::env::var("MVO_TARGET_CAP").ok()
-                .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.06);
+                .and_then(|s| s.parse::<f64>().ok()).unwrap_or(sc.dynamic_target_cap);
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
                 (trail_12m + 0.05).clamp(0.08_f64.min(target_cap), target_cap)
