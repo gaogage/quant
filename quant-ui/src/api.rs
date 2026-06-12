@@ -300,6 +300,23 @@ pub async fn admin_repair_data(name: &str) -> Result<Value, String> {
     post("/api/v1/admin/sync/repair", &serde_json::json!({"name": name})).await
 }
 
+/// 组件4: 账号依赖加工数据健康检查。无 start/end=轻量新鲜度；带=逐年深度扫描。
+pub async fn admin_account_data_health(
+    start_date: Option<String>,
+    end_date: Option<String>,
+) -> Result<Value, String> {
+    post(
+        "/api/v1/quant/data/account-data-health",
+        &serde_json::json!({"start_date": start_date, "end_date": end_date}),
+    )
+    .await
+}
+
+/// 组件4: 按检查项返回的 fix_endpoint + fix_params 通用触发修复。
+pub async fn admin_repair_by_endpoint(endpoint: &str, params: &Value) -> Result<Value, String> {
+    post(endpoint, params).await
+}
+
 pub async fn trigger_dingtalk_notify() -> Result<Value, String> {
     post("/api/v1/quant/paper/notify", &serde_json::json!({})).await
 }

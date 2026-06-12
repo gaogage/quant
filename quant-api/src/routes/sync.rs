@@ -3834,3 +3834,178 @@ pub async fn sync_historical(
 
     Json(json!({"code": 0, "data": {"results": results}}))
 }
+
+/// 组件4: 账号依赖加工数据健康检查请求。
+/// 无 start_date/end_date = 轻量新鲜度检查；带时间段 = 逐年深度红黄绿扫描。
+#[derive(Debug, serde::Deserialize)]
+pub struct AccountDataHealthReq {
+    pub user_id: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+/// POST /api/v1/quant/data/account-data-health
+/// 遍历激活账号(模拟+实盘) → 其策略依赖的加工数据(combo因子/PIT combo/权益曲线/滚动IC) → 红黄绿。
+pub async fn account_data_health(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AccountDataHealthReq>,
+) -> impl IntoResponse {
+    let db = &state.db;
+    let deep = req.start_date.is_some() && req.end_date.is_some();
+    let mut checks: Vec<serde_json::Value> = Vec::new();
+
+    // 活跃账号(可选按 user 过滤)
+    let accounts: Vec<(String, String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT paper_account_id, name, strategy_version_id, COALESCE(leverage_enabled,false)
+         FROM paper_account WHERE status='active'
+           AND ($1::text IS NULL OR user_id = $1)
+         ORDER BY name",
+    )
+    .bind(req.user_id.as_deref())
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    for (acct_id, acct_name, strat_id, _lev) in &accounts {
+        let sid = strat_id.as_deref().unwrap_or("v19");
+        // 取该账号策略的依赖配置
+        let cfg: Option<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT combo_name, equity_curve_task_id, prediction_set_id
+             FROM strategy_config WHERE strategy_id=$1 AND status='active'",
+        )
+        .bind(sid)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let (combo, curve, pred_set) = match cfg {
+            Some(c) => c,
+            None => {
+                checks.push(serde_json::json!({
+                    "account": acct_name, "strategy": sid, "item": "策略配置",
+                    "level": "red", "detail": "strategy_config 未找到激活配置"
+                }));
+                continue;
+            }
+        };
+        checks.extend(check_account_deps(db, acct_name, sid, &combo, &curve, pred_set.as_deref(), deep, req.start_date.as_deref(), req.end_date.as_deref()).await);
+    }
+
+    let red = checks.iter().filter(|c| c["level"]=="red").count();
+    let yellow = checks.iter().filter(|c| c["level"]=="yellow").count();
+    Json(serde_json::json!({
+        "code": 0,
+        "data": {
+            "mode": if deep {"deep_yearly"} else {"freshness"},
+            "accounts_checked": accounts.len(),
+            "red": red, "yellow": yellow,
+            "checks": checks
+        }
+    }))
+}
+
+/// 检查单个账号策略依赖的加工数据。deep=true 逐年扫描，否则只查最新鲜度。
+#[allow(clippy::too_many_arguments)]
+async fn check_account_deps(
+    db: &sqlx::PgPool, acct: &str, sid: &str, combo: &str, curve: &str,
+    pred_set: Option<&str>, deep: bool, start: Option<&str>, end: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let today = chrono::Utc::now().date_naive();
+    // 最新交易日(行情)
+    let last_mkt: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj"
+    ).fetch_one(db).await.ok().flatten();
+    let last_mkt = last_mkt.unwrap_or(today);
+
+    // ① PIT combo 物化新鲜度
+    let combo_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name=$1"
+    ).bind(combo).fetch_one(db).await.ok().flatten();
+    match combo_last {
+        Some(d) => {
+            let lag = (last_mkt - d).num_days();
+            out.push(serde_json::json!({
+                "account": acct, "strategy": sid, "item": format!("combo物化({})", combo),
+                "level": if lag > 7 {"red"} else if lag > 2 {"yellow"} else {"green"},
+                "detail": format!("最新 {} (落后行情 {} 天)", d, lag),
+                "fix_endpoint": "/api/v1/quant/factors/materialize-pit-combo/background",
+                "fix_params": {"combo_name": combo, "version":"1.0.0", "horizon":20}
+            }));
+        }
+        None => out.push(serde_json::json!({
+            "account": acct, "strategy": sid, "item": format!("combo物化({})", combo),
+            "level": "red", "detail": "combo 无任何物化数据",
+            "fix_endpoint": "/api/v1/quant/factors/materialize-pit-combo/background",
+            "fix_params": {"combo_name": combo, "version":"1.0.0", "horizon":20}
+        })),
+    }
+
+    // ② 权益曲线新鲜度
+    let curve_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM backtest_equity_curve WHERE task_id=$1"
+    ).bind(curve).fetch_one(db).await.ok().flatten();
+    match curve_last {
+        Some(d) => {
+            let lag = (last_mkt - d).num_days();
+            out.push(serde_json::json!({
+                "account": acct, "strategy": sid, "item": "A股权益曲线",
+                "level": if lag > 10 {"red"} else if lag > 4 {"yellow"} else {"green"},
+                "detail": format!("最新 {} (落后 {} 天, task={})", d, lag, curve),
+            }));
+        }
+        None => out.push(serde_json::json!({
+            "account": acct, "strategy": sid, "item": "A股权益曲线",
+            "level": "red", "detail": format!("曲线 {} 无数据", curve),
+        })),
+    }
+
+    // ③ 滚动 IC 新鲜度
+    let ic_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(end_date) FROM factor_evaluation WHERE horizon=20"
+    ).fetch_one(db).await.ok().flatten();
+    if let Some(d) = ic_last {
+        let lag = (last_mkt - d).num_days();
+        out.push(serde_json::json!({
+            "account": acct, "strategy": sid, "item": "滚动IC窗口",
+            "level": if lag > 100 {"yellow"} else {"green"},
+            "detail": format!("最新IC窗口 {} (距今 {} 天)", d, lag),
+            "fix_endpoint": "/api/v1/quant/factors/evaluate-all/background",
+        }));
+    }
+
+    // ④ ML 预测集新鲜度(若策略用 blend)
+    if let Some(ps) = pred_set {
+        let ml_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+            "SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id=$1"
+        ).bind(ps).fetch_one(db).await.ok().flatten();
+        if let Some(d) = ml_last {
+            let lag = (last_mkt - d).num_days();
+            out.push(serde_json::json!({
+                "account": acct, "strategy": sid, "item": "ML预测集",
+                "level": if lag > 30 {"yellow"} else {"green"},
+                "detail": format!("最新 {} (落后 {} 天)", d, lag),
+            }));
+        }
+    }
+
+    // 深度模式: 逐年扫描权益曲线缺口
+    if deep {
+        if let (Some(s), Some(e)) = (start, end) {
+            let yearly: Vec<(f64, i64)> = sqlx::query_as(
+                "SELECT EXTRACT(YEAR FROM trade_date)::float8, COUNT(*)::int8
+                 FROM backtest_equity_curve WHERE task_id=$1
+                   AND trade_date >= $2::date AND trade_date <= $3::date
+                 GROUP BY 1 ORDER BY 1"
+            ).bind(curve).bind(s).bind(e).fetch_all(db).await.unwrap_or_default();
+            for (yr, days) in yearly {
+                out.push(serde_json::json!({
+                    "account": acct, "strategy": sid, "item": format!("曲线{}年", yr as i32),
+                    "level": if days < 200 {"yellow"} else {"green"},
+                    "detail": format!("{} 交易日", days),
+                }));
+            }
+        }
+    }
+    out
+}

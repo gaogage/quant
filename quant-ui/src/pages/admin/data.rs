@@ -39,6 +39,8 @@ pub fn DataSyncPage() -> Element {
                     }
                 }
             }
+
+            AccountDataHealthSection {}
         }
     }
 }
@@ -209,6 +211,143 @@ fn DataSyncItem(data: Value, on_repaired: Callback<()>) -> Element {
                             onclick: move |_| result_ok.set(None),
                             "关闭"
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 组件4: 账号依赖加工数据健康检查区块。
+/// 轻量模式(默认)查新鲜度；输入时间段则逐年深度扫描。异常项可点击修复。
+#[component]
+pub fn AccountDataHealthSection() -> Element {
+    let mut checks = use_signal(Vec::<serde_json::Value>::new);
+    let mut summary = use_signal(String::new);
+    let mut loading = use_signal(|| false);
+    let mut start_date = use_signal(String::new);
+    let mut end_date = use_signal(String::new);
+
+    let mut run = move || {
+        loading.set(true);
+        let s = start_date.read().clone();
+        let e = end_date.read().clone();
+        spawn(async move {
+            let (sd, ed) = if s.is_empty() || e.is_empty() {
+                (None, None)
+            } else {
+                (Some(s), Some(e))
+            };
+            match crate::api::admin_account_data_health(sd, ed).await {
+                Ok(v) => {
+                    let d = &v["data"];
+                    let arr = d["checks"].as_array().cloned().unwrap_or_default();
+                    summary.set(format!(
+                        "{} 账号 · {} · 红{} 黄{}",
+                        d["accounts_checked"].as_i64().unwrap_or(0),
+                        if d["mode"]=="deep_yearly" {"逐年深度"} else {"新鲜度"},
+                        d["red"].as_i64().unwrap_or(0),
+                        d["yellow"].as_i64().unwrap_or(0),
+                    ));
+                    checks.set(arr);
+                }
+                Err(e) => summary.set(format!("检查失败: {}", e)),
+            }
+            loading.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "mt-6 border-t border-gray-200 dark:border-gray-700 pt-4",
+            div { class: "flex items-center justify-between mb-3",
+                h3 { class: "text-lg font-semibold text-gray-800 dark:text-gray-100",
+                    "账号依赖加工数据检查"
+                }
+                div { class: "flex items-center gap-2",
+                    input {
+                        class: "px-2 py-1 text-sm border rounded dark:bg-gray-800 dark:border-gray-600",
+                        r#type: "date", value: "{start_date}",
+                        oninput: move |e| start_date.set(e.value()),
+                    }
+                    span { class: "text-gray-400", "~" }
+                    input {
+                        class: "px-2 py-1 text-sm border rounded dark:bg-gray-800 dark:border-gray-600",
+                        r#type: "date", value: "{end_date}",
+                        oninput: move |e| end_date.set(e.value()),
+                    }
+                    button {
+                        class: "px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50",
+                        disabled: loading(),
+                        onclick: move |_| run(),
+                        if loading() { "检查中..." } else { "检查" }
+                    }
+                }
+            }
+            if !summary.read().is_empty() {
+                p { class: "text-sm text-gray-600 dark:text-gray-400 mb-2", "{summary}" }
+            }
+            div { class: "space-y-1",
+                for c in checks.read().iter() {
+                    AccountDataHealthItem { check: c.clone() }
+                }
+            }
+        }
+    }
+}
+
+/// 组件4: 单个账号数据检查项（红黄绿 + 异常可点击修复）。
+#[component]
+fn AccountDataHealthItem(check: serde_json::Value) -> Element {
+    let mut fixing = use_signal(|| false);
+    let mut fix_msg = use_signal(String::new);
+
+    let level = check["level"].as_str().unwrap_or("green").to_string();
+    let account = check["account"].as_str().unwrap_or("-").to_string();
+    let item = check["item"].as_str().unwrap_or("-").to_string();
+    let detail = check["detail"].as_str().unwrap_or("").to_string();
+    let fix_ep = check["fix_endpoint"].as_str().map(|s| s.to_string());
+    let fix_params = check.get("fix_params").cloned();
+
+    let (dot, badge) = match level.as_str() {
+        "red" => ("bg-red-500", "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-400"),
+        "yellow" => ("bg-yellow-500", "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400"),
+        _ => ("bg-green-500", "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400"),
+    };
+    let can_fix = level != "green" && fix_ep.is_some();
+
+    let do_fix = move |_| {
+        if *fixing.read() { return; }
+        let (Some(ep), Some(params)) = (fix_ep.clone(), fix_params.clone()) else { return; };
+        fixing.set(true);
+        fix_msg.set("修复触发中...".into());
+        spawn(async move {
+            match crate::api::admin_repair_by_endpoint(&ep, &params).await {
+                Ok(_) => fix_msg.set("✅ 已触发修复(后台运行,稍后重新检查)".into()),
+                Err(e) => fix_msg.set(format!("❌ {}", e)),
+            }
+            fixing.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "flex items-center justify-between py-1.5 px-3 rounded bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800",
+            div { class: "flex items-center gap-2 min-w-0",
+                span { class: "w-2 h-2 rounded-full flex-shrink-0 {dot}" }
+                span { class: "text-xs text-gray-500 dark:text-gray-500 w-32 truncate", "{account}" }
+                span { class: "text-sm text-gray-800 dark:text-gray-200 font-medium", "{item}" }
+                span { class: "text-xs text-gray-400 truncate", "{detail}" }
+            }
+            div { class: "flex items-center gap-2 flex-shrink-0",
+                if !fix_msg.read().is_empty() {
+                    span { class: "text-xs text-gray-500", "{fix_msg}" }
+                }
+                span { class: "text-xs px-2 py-0.5 rounded-full {badge}", "{level}" }
+                if can_fix {
+                    button {
+                        class: "text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50",
+                        disabled: fixing(),
+                        onclick: do_fix,
+                        if fixing() { "..." } else { "修复" }
                     }
                 }
             }

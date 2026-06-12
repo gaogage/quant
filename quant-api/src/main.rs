@@ -186,6 +186,10 @@ async fn main() {
             "/api/v1/quant/data/quality-check",
             post(routes::sync::quality_check),
         )
+        .route(
+            "/api/v1/quant/data/account-data-health",
+            post(routes::sync::account_data_health),
+        )
         // 数据清理
         .route(
             "/api/v1/quant/data/cleanup/stats",
