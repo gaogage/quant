@@ -567,11 +567,23 @@ async fn main() {
     // dist 路径：env QUANT_UI_DIST(生产) 优先，否则相对 quant-ui/dist(本地开发)
     let ui_dist = std::env::var("QUANT_UI_DIST")
         .unwrap_or_else(|_| "quant-ui/dist".to_string());
-    let index_html = format!("{}/index.html", ui_dist);
+    // 静态服务：未命中文件回退 index.html(SPA)。
+    // 配套 no-cache 中间件(下方)强制浏览器每次 revalidate —— 防止部署新版后
+    // 浏览器用旧缓存的 index.html(引用已删除的旧 hash WASM)导致白屏/点击无反应。
     let app = app.fallback_service(
-        ServeDir::new(&ui_dist).fallback(ServeFile::new(index_html)),
+        ServeDir::new(&ui_dist).fallback(ServeFile::new(format!("{}/index.html", ui_dist))),
     );
-    info!(%ui_dist, "前端静态托管已挂载 (SPA fallback)");
+    // 全局加 Cache-Control: no-cache。带 hash 的 WASM/JS 内容寻址，no-cache 仅多
+    // 一次 304 校验；API 本就不该缓存。用 from_fn 处理标准 axum 响应，类型明确。
+    let app = app.layer(axum::middleware::from_fn(
+        |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| async move {
+            let mut resp = next.run(req).await;
+            resp.headers_mut().entry(axum::http::header::CACHE_CONTROL)
+                .or_insert(axum::http::HeaderValue::from_static("no-cache"));
+            resp
+        },
+    ));
+    info!(%ui_dist, "前端静态托管已挂载 (SPA fallback + no-cache)");
 
     let port: u16 = std::env::var("PORT")
         .ok()
