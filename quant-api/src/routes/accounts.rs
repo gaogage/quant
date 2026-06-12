@@ -659,10 +659,11 @@ pub async fn push_account_dingtalk(
         .filter_map(|p| p.get("market_value").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
         .sum();
     let net_worth = mv + cash - margin;
+    let total_assets = mv + cash; // 总资产=持仓市值+现金(含融资买入部分)；净资产=总资产-融资额
 
     let text = dingtalk::build_position_summary_notification(
         &name, &acc_type, &trade_date,
-        nav, cash, margin, mv, net_worth, &positions, cum_ret, mdd, &class_breakdown,
+        total_assets, cash, margin, mv, net_worth, &positions, cum_ret, mdd, &class_breakdown,
     );
 
     match dingtalk::send_dingtalk_markdown(&webhook, "持仓摘要", &text).await {
