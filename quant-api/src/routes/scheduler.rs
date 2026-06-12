@@ -1682,7 +1682,7 @@ async fn sync_positions_from_backtest(
     };
 
     // 杠杆：regime green(>0.9) + leverage_enabled → 使用配置的倍率
-    let leverage_mult = if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
+    let mut leverage_mult = if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
         if leverage_mode == "vol_target" {
             // 波动率目标杠杆: 目标20%年化波动率, 根据trailing 60日实际波动率动态调整
             let vol_lev = compute_vol_target_leverage(db, account_id, sc).await;
@@ -1695,6 +1695,34 @@ async fn sync_positions_from_backtest(
     } else {
         rust_decimal::Decimal::ONE
     };
+
+    // ── 维保比例门控（与回放 mvo_engine 口径一致，真实券商风控）──
+    // 维保 = 总资产/融资额 = (上一日持仓市值 + cash) / margin_amount。
+    // < 平仓线: 杠杆降至 1.0（实盘不强行卖出 A 股，但停止一切融资加仓，等下次调仓自然去杠杆）。
+    // < 警告线: 杠杆 clamp ≤ 1.0（只许去杠杆、禁新增融资仓）。
+    // 阈值从账号读(不写死)；仅杠杆账号(margin_amount>0)生效。
+    if leverage_enabled {
+        let (mv, cash_now, margin, liq_thr, warn_thr): (
+            rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal, Option<f64>, Option<f64>,
+        ) = sqlx::query_as(
+            "SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1),
+                    COALESCE(cash,0), COALESCE(margin_amount,0), liquidation_threshold, warning_threshold
+             FROM paper_account WHERE paper_account_id=$1",
+        )
+        .bind(account_id).fetch_one(db).await.map_err(|e| format!("maint query: {}", e))?;
+        let margin_f = margin.to_string().parse::<f64>().unwrap_or(0.0);
+        if margin_f > 1e-6 {
+            let total_assets = (mv + cash_now).to_string().parse::<f64>().unwrap_or(0.0);
+            let maint = total_assets / margin_f;
+            if liq_thr.is_some_and(|t| maint < t) {
+                warn!("[paper] 维保 {:.0}% < 平仓线 {:.0}% — 停止融资加仓({})", maint * 100.0, liq_thr.unwrap() * 100.0, account_id);
+                leverage_mult = rust_decimal::Decimal::ONE;
+            } else if warn_thr.is_some_and(|t| maint < t) {
+                warn!("[paper] 维保 {:.0}% < 警告线 {:.0}% — 禁止新增杠杆仓({})", maint * 100.0, warn_thr.unwrap() * 100.0, account_id);
+                leverage_mult = leverage_mult.min(rust_decimal::Decimal::ONE);
+            }
+        }
+    }
     let scale = base_scale * leverage_mult;
 
     // Create A-share positions (scaled by MVO weight)

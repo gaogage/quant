@@ -487,26 +487,130 @@ mod tests {
             std::env::remove_var("MVO_TARGET_CAP");
         }
     }
+    /// 杠杆参数优化（含强平/警告线约束）。
+    /// 用真实保证金账户模型重建维保轨迹：gross 日收益（含 regime、不含杠杆）为输入；
+    /// 季度调仓点按 vol_target 设杠杆并锁定融资 debt=(L-1)×nav，季内总资产随市值浮动、债务不变；
+    /// 逐日维保=总资产/融资额，<130% 强平清仓（季内持现金），<150% 警告。
+    /// 找"不爆仓前提下风险调整收益最优"的 (vol_target, leverage_cap)。
+    #[tokio::test]
     #[ignore]
-    async fn test_scan_leverage() {
+    async fn test_optimize_leverage_with_liquidation() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
-        let mut sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
+        let sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
-        std::env::set_var("MVO_TARGET_CAP", "0.06"); // target 固定在已知最优
+        // target 必须用生产真实值 sc.dynamic_target_cap(=0.12)。
+        // 历史杠杆回放 AR22.7% 即在 0.12 下产生；用 0.06 会把绩效压低一半，扫描失真。
+        let target = sc.dynamic_target_cap;
+        std::env::set_var("MVO_TARGET_CAP", format!("{}", target));
 
-        println!("\n{:>5} {:>4} | {:>5} {:>5} {:>5} {:>5} {:>5}",
-                 "vol", "cap", "AR", "DD", "Shrp", "Sort", "Clmr");
-        for vt in [0.20, 0.25, 0.30] {
+        // base 逐日 (date, gross_return, regime)：杠杆无关，作保证金模拟输入。
+        // regime 用于杠杆门控（与生产 simulate_v19_daily_returns 一致：regime≤0.9 不加杠杆）
+        let base = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
+            .await.expect("base");
+        let gross: Vec<(NaiveDate, f64, f64)> =
+            base.iter().map(|d| (d.date, d.gross_return, d.regime)).collect();
+        std::env::remove_var("MVO_TARGET_CAP");
+
+        // 强平/警告线：从生产杠杆账号读真实配置，不写死——保证扫描审计与生产一致。
+        // 账号未配则回退券商通行档(平仓130%/警告150%)。
+        let (liq, warn): (f64, f64) = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
+            "SELECT liquidation_threshold, warning_threshold FROM paper_account \
+             WHERE leverage_enabled = true AND status = 'active' \
+             ORDER BY paper_account_id LIMIT 1",
+        )
+        .fetch_optional(&db).await.ok().flatten()
+        .map(|(l, w)| (l.unwrap_or(1.30), w.unwrap_or(1.50)))
+        .unwrap_or((1.30, 1.50));
+        println!("[强平审计阈值] 平仓={:.0}% 警告={:.0}% (源自 active 杠杆账号配置)", liq * 100.0, warn * 100.0);
+
+        // 保证金账户强平审计模型（drift 口径，真实券商）：
+        // 季度调仓 / regime 跨 0.9 阈值时，按 vol_target 设杠杆并锁定融资 debt=(L-1)×nav；
+        // 期间债务不变、总资产随市值浮动；逐日维保=总资产/融资额，<liq 强平、<warn 警告。
+        // regime≤0.9 段强制 lev=1.0（与生产 simulate 的杠杆门控一致）。
+        // 返回 (最差维保, 警告天数, 强平次数, 首次强平日)。
+        let audit = |fixed_lev: Option<f64>, vol_target: f64, cap: f64|
+            -> (f64, usize, usize, Option<NaiveDate>) {
+            let mut ta = 1.0_f64;       // 总资产
+            let mut debt = 0.0_f64;     // 融资额
+            let mut in_cash = false;    // 季内已强平、持现金
+            let mut last_q = String::new();
+            let mut prev_hi = false;    // 上一日 regime 是否 >0.9
+            let mut trail: Vec<f64> = Vec::new();
+            let (mut min_maint, mut warn_days, mut liq_n, mut liq_date) =
+                (f64::INFINITY, 0usize, 0usize, None);
+            for (d, g, rg) in &gross {
+                trail.push(*g);
+                if trail.len() > 60 { trail.remove(0); }
+                let hi = *rg > 0.9;
+                let q = format!("{}-Q{}", d.year(), (d.month() - 1) / 3 + 1);
+                // 调仓时机：季度边界 或 regime 跨越 0.9 门控（与生产逐日门控对齐）
+                if q != last_q || hi != prev_hi {
+                    last_q = q;
+                    prev_hi = hi;
+                    let cur_nav = ta - debt;
+                    let lev = if !hi { 1.0 }  // regime 降仓段不加杠杆
+                        else if let Some(fl) = fixed_lev { fl }
+                        else if trail.len() >= 20 {
+                            let n = trail.len() as f64;
+                            let mean = trail.iter().sum::<f64>() / n;
+                            let var = trail.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                            let av = var.sqrt() * (252.0_f64).sqrt();
+                            if av > 0.05 { (vol_target / av).clamp(1.0, cap) } else { 1.0 }
+                        } else { 1.0 };
+                    ta = lev * cur_nav;
+                    debt = (lev - 1.0) * cur_nav;
+                    in_cash = false;
+                }
+                if in_cash { continue; }
+                ta *= 1.0 + g;
+                let maint = if debt > 1e-9 { ta / debt } else { f64::INFINITY };
+                if maint.is_finite() && maint < min_maint { min_maint = maint; }
+                if maint < liq {
+                    liq_n += 1;
+                    liq_date.get_or_insert(*d);
+                    ta = (ta - debt).max(0.0);
+                    debt = 0.0;
+                    in_cash = true;
+                } else if maint < warn {
+                    warn_days += 1;
+                }
+            }
+            (min_maint, warn_days, liq_n, liq_date)
+        };
+
+        // 绩效 ground truth：直接用生产函数 simulate_v19_daily_returns（逐日重置杠杆 +
+        // regime 门控，与实盘/历史验证完全同路径）。绝不另造绩效模型，避免口径分歧。
+        let perf = |label: String, rets: Vec<f64>, a: (f64, usize, usize, Option<NaiveDate>)| {
+            let m = compute_metrics(&rets);
+            let mm = if a.0.is_finite() { format!("{:>5.0}%", a.0 * 100.0) } else { "  inf".into() };
+            let ld = a.3.map(|d| d.to_string()).unwrap_or_else(|| "-".into());
+            println!("{:<16} | {:>5.1}% {:>5.1}% {:>5.2} {:>5.2} {:>5.2} | {} {:>4} {:>3} {}",
+                     label, m.annual_return * 100.0, m.max_drawdown * 100.0,
+                     m.sharpe, m.sortino, m.calmar, mm, a.1, a.2, ld);
+        };
+
+        println!("\n[target={}] 绩效=生产函数 simulate_v19_daily_returns | 强平=维保审计模型(regime门控)", target);
+        println!("{:<16} | {:>6} {:>6} {:>5} {:>5} {:>5} | {:>5} {:>4} {:>3} {}",
+                 "config", "AR", "DD", "Shrp", "Sort", "Clmr", "minMt", "warn", "liq", "first");
+        std::env::set_var("MVO_TARGET_CAP", format!("{}", target));
+        for fl in [1.0, 1.5, 2.0, 2.5, 3.0] {
+            let r = simulate_v19_daily_returns(&db, &sc, start, end, fl > 1.0, fl, "fixed", None, None)
+                .await.expect("fixed");
+            let rets: Vec<f64> = r.iter().map(|d| d.net_return).collect();
+            perf(format!("fixed {:.1}x", fl), rets, audit(Some(fl), 0.0, 0.0));
+        }
+        for vt in [0.15, 0.20, 0.25, 0.30] {
             for cap in [2.0, 2.5, 3.0] {
-                sc.vol_target = vt;
-                sc.leverage_cap = cap;
-                let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None).await.expect("l");
-                let m = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                println!("{:>5.2} {:>4.1} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
-                         vt, cap, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.sortino, m.calmar);
+                let mut scv = sc.clone();
+                scv.vol_target = vt;
+                scv.leverage_cap = cap;
+                let r = simulate_v19_daily_returns(&db, &scv, start, end, true, 1.5, "vol_target", None, None)
+                    .await.expect("vt");
+                let rets: Vec<f64> = r.iter().map(|d| d.net_return).collect();
+                perf(format!("vt{:.2} cap{:.1}", vt, cap), rets, audit(None, vt, cap));
             }
         }
         std::env::remove_var("MVO_TARGET_CAP");
