@@ -266,10 +266,9 @@ pub fn build_position_summary_notification(
     if !class_breakdown.is_empty() {
         text.push_str("\n\n**资产大类分布**:  \n");
         for cls in class_breakdown {
-            let cn = cls.get("class").and_then(|v| v.as_str()).unwrap_or("?");
-            let pct = cls.get("weight_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let indent = if cn.starts_with("  ") { "" } else { "" };
-            text.push_str(&format!("{}- {}: {:.1}%  \n", indent, cn, pct));
+            let cn = cls.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let pct = cls.get("pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            text.push_str(&format!("- {}: {:.1}%  \n", cn, pct));
         }
     }
 
