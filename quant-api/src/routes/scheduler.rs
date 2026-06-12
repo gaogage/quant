@@ -281,7 +281,8 @@ async fn run_scheduled_tasks(db: &PgPool) {
                         info!("[scheduler] 权益曲线启用 prediction_blend: set={} w={}", pid, sc.prediction_blend_weight);
                     }
                 }
-                match client.post("http://localhost:8080/api/v1/quant/backtests/run-factor")
+                let api_base = format!("http://localhost:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into()));
+                match client.post(format!("{}/api/v1/quant/backtests/run-factor", api_base))
                     .json(&payload).timeout(std::time::Duration::from_secs(600)).send().await
                 {
                     Ok(resp) => {
@@ -535,7 +536,7 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
                 let client = reqwest::Client::new();
                 let backfill_start = (sync_date - chrono::Duration::days(7)).format("%Y%m%d").to_string();
                 let _ = client
-                    .post("http://localhost:8080/api/v1/quant/factors/phase7-price-volume-backfill/background")
+                    .post(format!("http://localhost:{}/api/v1/quant/factors/phase7-price-volume-backfill/background", port))
                     .json(&serde_json::json!({"start_date": backfill_start, "end_date": sync_date_str}))
                     .timeout(std::time::Duration::from_secs(10))
                     .send().await;
@@ -840,8 +841,9 @@ async fn validate_pre_trade_data(
         let client = reqwest::Client::new();
         let backfill_start = (today - chrono::Duration::days(30)).format("%Y%m%d").to_string();
         let today_str_clone = today_str.clone();
+        let api_base = format!("http://localhost:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into()));
         let trigger_ok = client
-            .post("http://localhost:8080/api/v1/quant/factors/phase7-price-volume-backfill/background")
+            .post(format!("{}/api/v1/quant/factors/phase7-price-volume-backfill/background", api_base))
             .json(&serde_json::json!({"start_date": backfill_start, "end_date": today_str_clone}))
             .timeout(std::time::Duration::from_secs(10))
             .send().await

@@ -7,11 +7,19 @@ use serde_json::Value;
 
 use crate::auth::AuthState;
 
-const BASE_URL: &str = "http://localhost:8080";
+/// API 基址：自适应当前页面 origin（前端从哪个端口加载就请求哪个端口的后端）。
+/// 后端单端口同时托管前端静态文件 + API，故 origin 即后端地址。
+/// 生产 8080 → 请求 8080；本地 8081 → 请求 8081。零硬编码端口。
+fn base_url() -> String {
+    web_sys::window()
+        .and_then(|w| w.location().origin().ok())
+        .filter(|o| o.starts_with("http"))
+        .unwrap_or_else(|| "http://localhost:8080".into())
+}
 
 /// 健康检查 — 轻量级，不含认证
 pub async fn health_check() -> Result<(), String> {
-    let resp = http::Request::get(&format!("{}/health", BASE_URL))
+    let resp = http::Request::get(&format!("{}/health", base_url()))
         .send()
         .await
         .map_err(|e| format!("连接失败: {}", e))?;
@@ -46,7 +54,7 @@ async fn try_refresh() -> bool {
         AuthState::logout();
         return false;
     }
-    let url = format!("{}/api/v1/auth/refresh", BASE_URL);
+    let url = format!("{}/api/v1/auth/refresh", base_url());
     let body_str = serde_json::to_string(&serde_json::json!({"refresh_token": refresh})).unwrap();
 
     let builder = http::Request::post(&url).header("Content-Type", "application/json");
@@ -74,7 +82,7 @@ async fn try_refresh() -> bool {
 // ── Generic helpers ───────────────────────────────────
 
 async fn get(path: &str) -> Result<Value, String> {
-    let url = format!("{}{}", BASE_URL, path);
+    let url = format!("{}{}", base_url(), path);
     // first try
     let builder1 = http::Request::get(&url).header("Content-Type", "application/json");
     let resp = add_auth(builder1).send().await.map_err(|e| format!("网络错误: {}", e))?;
@@ -88,7 +96,7 @@ async fn get(path: &str) -> Result<Value, String> {
 }
 
 async fn post(path: &str, payload: &Value) -> Result<Value, String> {
-    let url = format!("{}{}", BASE_URL, path);
+    let url = format!("{}{}", base_url(), path);
     let body_str = serde_json::to_string(payload).map_err(|e| format!("序列化失败: {}", e))?;
     // first try
     let b1 = http::Request::post(&url).header("Content-Type", "application/json");
@@ -105,7 +113,7 @@ async fn post(path: &str, payload: &Value) -> Result<Value, String> {
 }
 
 async fn put(path: &str, payload: &Value) -> Result<Value, String> {
-    let url = format!("{}{}", BASE_URL, path);
+    let url = format!("{}{}", base_url(), path);
     let body_str = serde_json::to_string(payload).map_err(|e| format!("序列化失败: {}", e))?;
     // first try
     let b1 = http::Request::put(&url).header("Content-Type", "application/json");
@@ -123,7 +131,7 @@ async fn put(path: &str, payload: &Value) -> Result<Value, String> {
 
 #[allow(dead_code)]
 async fn delete(path: &str) -> Result<Value, String> {
-    let url = format!("{}{}", BASE_URL, path);
+    let url = format!("{}{}", base_url(), path);
     let b1 = http::Request::delete(&url).header("Content-Type", "application/json");
     let resp = add_auth(b1).send().await.map_err(|e| format!("网络错误: {}", e))?;
     if resp.status() == 401 && try_refresh().await {
@@ -162,7 +170,7 @@ pub struct UserInfo {
 pub async fn login(username: &str, password: &str) -> Result<LoginData, String> {
     let body = serde_json::json!({"username": username, "password": password});
     let body_str = serde_json::to_string(&body).unwrap();
-    let req = http::Request::post(&format!("{}/api/v1/auth/login", BASE_URL))
+    let req = http::Request::post(&format!("{}/api/v1/auth/login", base_url()))
         .header("Content-Type", "application/json")
         .body(body_str)
         .map_err(|e| format!("构建请求失败: {}", e))?;

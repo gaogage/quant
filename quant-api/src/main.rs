@@ -9,6 +9,7 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{info, info_span, Span};
 use tracing_subscriber::EnvFilter;
@@ -558,6 +559,19 @@ async fn main() {
     // 提取 db 用于后台调度器 (必须在 with_state 之前, 因为 state 会被 move)
     let db_for_scheduler = state.db.clone();
     let app = app.with_state(state);
+
+    // 前端静态托管：单端口同时供 API + 前端 SPA。
+    // /api/* 已由上面路由匹配，未匹配的请求落到此处：
+    //   - 命中静态文件(wasm/js/css) → ServeDir 返回
+    //   - 其余(SPA 前端路由) → 回退 index.html
+    // dist 路径：env QUANT_UI_DIST(生产) 优先，否则相对 quant-ui/dist(本地开发)
+    let ui_dist = std::env::var("QUANT_UI_DIST")
+        .unwrap_or_else(|_| "quant-ui/dist".to_string());
+    let index_html = format!("{}/index.html", ui_dist);
+    let app = app.fallback_service(
+        ServeDir::new(&ui_dist).fallback(ServeFile::new(index_html)),
+    );
+    info!(%ui_dist, "前端静态托管已挂载 (SPA fallback)");
 
     let port: u16 = std::env::var("PORT")
         .ok()
