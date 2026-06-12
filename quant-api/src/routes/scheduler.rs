@@ -304,6 +304,21 @@ async fn run_scheduled_tasks(db: &PgPool) {
             "factor_backfill" => {
                 // 因子回填已在 T+1 补同步中处理
             }
+            "pit_combo_refresh" => {
+                // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
+                // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。
+                let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or("full_pit_icir_37f");
+                let ver = params.get("version").and_then(|v| v.as_str()).unwrap_or("1.0.0");
+                let horizon = params.get("horizon").and_then(|v| v.as_i64()).unwrap_or(20) as i16;
+                // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
+                let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
+                let refresh_end = chrono::Utc::now().date_naive();
+                info!("[scheduler] PIT combo 保鲜: combo={} 区间 {}~{}", combo, refresh_start, refresh_end);
+                match crate::routes::factors::materialize_pit_combo(db, combo, ver, horizon, refresh_start, refresh_end).await {
+                    Ok(rows) => info!("[scheduler] PIT combo 保鲜完成: {} 行", rows),
+                    Err(e) => warn!("[scheduler] PIT combo 保鲜失败: {}", e),
+                }
+            }
             _ => {}
         }
 
