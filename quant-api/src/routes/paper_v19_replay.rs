@@ -245,6 +245,18 @@ async fn build_final_positions(
         .bind(Decimal::from_f64_retain(margin).unwrap_or(Decimal::ZERO))
         .bind(account_id).execute(db).await.ok();
 
+    // 融资流水追溯：margin>0 时补一条 borrow 流水（账户余额已上方直接设定，此处仅落流水不重复改账户）
+    if margin > 0.0 {
+        let mt_id = format!("mt-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+        sqlx::query(
+            "INSERT INTO paper_margin_trade (margin_trade_id, paper_account_id, side, amount, reason)
+             VALUES ($1, $2, 'borrow', $3, 'v19回放杠杆建仓融资')",
+        )
+        .bind(&mt_id).bind(account_id)
+        .bind(Decimal::from_f64_retain(margin).unwrap_or(Decimal::ZERO))
+        .execute(db).await.ok();
+    }
+
     let _ = update_current_nav(db, account_id).await;
     Ok(n)
 }
