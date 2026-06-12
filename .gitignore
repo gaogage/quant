@@ -6,6 +6,8 @@
 logs
 */target
 /target/
+# 前端 trunk 编译产物（由 quant-deploy 构建部署，不入库）
+quant-ui/dist/
 hibernate.cfg.xml
 hibernate.xml
 .idea
