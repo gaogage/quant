@@ -145,7 +145,7 @@ pub fn LoginPage() -> Element {
 
                 // 底部信息
                 p { class: "mt-6 text-center text-xs text-gray-400 dark:text-gray-600",
-                    "Quant Platform v0.1 · SCP Quantitative Trading"
+                    "Quant Platform v0.1 · 量化交易系统"
                 }
             }
         }

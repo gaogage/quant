@@ -13,7 +13,6 @@ use dioxus::events::{Key, KeyboardEvent};
 fn FilterBar(on_search: Callback<String>) -> Element {
     let mut f_name = use_signal(String::new);
     let mut f_leverage = use_signal(|| "all".to_string());
-    let mut f_signal = use_signal(|| "all".to_string());
     let mut f_lev_min = use_signal(String::new);
     let mut f_lev_max = use_signal(String::new);
     let mut f_status = use_signal(|| "all".to_string());
@@ -22,7 +21,6 @@ fn FilterBar(on_search: Callback<String>) -> Element {
         let mut p = Vec::new();
         let n = f_name.read(); if !n.is_empty() { p.push(format!("name={}", &*n)); }
         let l = f_leverage.read(); if *l != "all" { p.push(format!("leverage={}", &*l)); }
-        let s = f_signal.read(); if *s != "all" { p.push(format!("signal_source={}", &*s)); }
         let lmin = f_lev_min.read(); if !lmin.is_empty() { p.push(format!("lev_mult_min={}", &*lmin)); }
         let lmax = f_lev_max.read(); if !lmax.is_empty() { p.push(format!("lev_mult_max={}", &*lmax)); }
         let st = f_status.read(); if *st != "all" { p.push(format!("status={}", &*st)); }
@@ -32,7 +30,6 @@ fn FilterBar(on_search: Callback<String>) -> Element {
     let mut do_reset = move || {
         f_name.set(String::new());
         f_leverage.set("all".to_string());
-        f_signal.set("all".to_string());
         f_lev_min.set(String::new());
         f_lev_max.set(String::new());
         f_status.set("all".to_string());
@@ -52,12 +49,6 @@ fn FilterBar(on_search: Callback<String>) -> Element {
                     select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm",
                         value: "{f_leverage}", onchange: move |e| f_leverage.set(e.value()),
                         option { value: "all", "全部" } option { value: "enabled", "已启用" } option { value: "disabled", "未启用" }
-                    }
-                }
-                div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "信号源" }
-                    select { class: "px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white text-sm",
-                        value: "{f_signal}", onchange: move |e| f_signal.set(e.value()),
-                        option { value: "all", "全部" } option { value: "factor", "因子" } option { value: "prediction", "ML预测" } option { value: "prediction_blend", "ML混合" }
                     }
                 }
                 div { label { class: "block text-xs text-gray-500 dark:text-gray-400 mb-1", "倍率从" }
@@ -529,7 +520,7 @@ pub fn AccountsContent() -> Element {
                             let leverage = acc["leverage_enabled"].as_bool().unwrap_or(false);
                             let lev_mode = acc["leverage_mode"].as_str().unwrap_or("fixed");
                             let lev_mult = acc["leverage_multiplier"].as_f64().unwrap_or(1.0);
-                            let signal = acc["signal_source"].as_str().unwrap_or("factor");
+                            let strategy = acc["strategy_version_id"].as_str().filter(|s| !s.is_empty()).unwrap_or("v19");
                             let _owner = acc["owner"].as_str().unwrap_or("");
                             let type_label = if acc_type == "real" { "🔴 实盘" } else { "🟡 模拟" };
                             let is_open = *expanded.read() == aid;
@@ -696,7 +687,7 @@ pub fn AccountsContent() -> Element {
                                                 }
                                             }
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆" } if leverage && lev_mult > 1.0 { div { class: "text-yellow-600 dark:text-yellow-400 text-sm", "{lev_mode} ×{lev_mult}" } } else { div { class: "text-gray-500 dark:text-gray-400 text-sm", "无杠杆" } } }
-                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "信号源" } if signal == "prediction_blend" { div { class: "text-blue-600 dark:text-blue-400 text-sm", "ML混合" } } else if signal == "prediction" { div { class: "text-blue-600 dark:text-blue-400 text-sm", "ML预测" } } else { div { class: "text-gray-700 dark:text-gray-300 text-sm", "因子选股" } } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "策略" } div { class: "text-blue-600 dark:text-blue-400 text-sm", "{strategy}" } }
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "最大回撤" } div { class: "text-red-600 dark:text-red-400 text-sm", "{mdd}%" } }
                                         }
                                     }

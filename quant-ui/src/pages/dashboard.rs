@@ -172,14 +172,14 @@ pub fn DashboardContent() -> Element {
 fn AccountCard(data: Value) -> Element {
     let name = data["name"].as_str().unwrap_or("-");
     let acc_type = data["account_type"].as_str().unwrap_or("-");
-    let signal = data["signal_source"].as_str().unwrap_or("-");
+    let strategy = data["strategy_version_id"].as_str().filter(|s| !s.is_empty()).unwrap_or("-");
     let cap = data["initial_capital"].as_f64().unwrap_or(0.0) as i64;
     let status = data["status"].as_str().unwrap_or("-");
     rsx! {
         div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4 flex items-center justify-between",
             div {
                 div { class: "font-medium text-gray-900 dark:text-white text-sm", "{name}" }
-                div { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "{acc_type} · {signal}" }
+                div { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "{acc_type} · {strategy}" }
             }
             div { class: "text-right",
                 div { class: "text-sm text-gray-700 dark:text-gray-300", "¥{cap}" }
