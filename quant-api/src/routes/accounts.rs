@@ -17,6 +17,33 @@ use uuid::Uuid;
 use crate::auth::middleware::UserContext;
 use crate::AppState;
 
+/// 账号列表行（含 strategy_config 杠杆上限 + paper_replay 绩效，LEFT JOIN）。
+/// 用 FromRow struct 突破 sqlx 16 元组列限制。
+#[derive(sqlx::FromRow)]
+struct AccountListRow {
+    paper_account_id: String,
+    account_type: String,
+    name: String,
+    initial_capital: f64,
+    leverage_enabled: bool,
+    leverage_mode: String,
+    leverage_multiplier: f64,
+    status: String,
+    user_id: Option<String>,
+    current_nav: Option<f64>,
+    cash: f64,
+    max_drawdown_pct: Option<f64>,
+    margin_amount: f64,
+    reserve_amount: f64,
+    strategy_version_id: Option<String>,
+    leverage_cap: Option<f64>,
+    annual_return_pct: Option<f64>,
+    cumulative_return_pct: Option<f64>,
+    sharpe_ratio: Option<f64>,
+    sortino_ratio: Option<f64>,
+    calmar_ratio: Option<f64>,
+}
+
 // ── 请求体 ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -118,38 +145,51 @@ pub async fn list_accounts(
     };
 
     let sql = format!(
-        "SELECT pa.paper_account_id, pa.account_type, pa.name, pa.initial_capital::double precision,
+        "SELECT pa.paper_account_id, pa.account_type, pa.name, pa.initial_capital::double precision AS initial_capital,
                 pa.leverage_enabled, pa.leverage_mode, pa.leverage_multiplier, pa.status,
-                pa.user_id, pa.current_nav::double precision, COALESCE(pa.cash, pa.initial_capital)::double precision,
-                pa.max_drawdown_pct::double precision, COALESCE(pa.margin_amount,0)::double precision,
-                COALESCE(pa.reserve_amount,0)::double precision,
+                pa.user_id, pa.current_nav::double precision AS current_nav,
+                COALESCE(pa.cash, pa.initial_capital)::double precision AS cash,
+                pa.max_drawdown_pct::double precision AS max_drawdown_pct,
+                COALESCE(pa.margin_amount,0)::double precision AS margin_amount,
+                COALESCE(pa.reserve_amount,0)::double precision AS reserve_amount,
                 pa.strategy_version_id,
-                sc.leverage_cap::double precision
+                sc.leverage_cap::double precision AS leverage_cap,
+                rp.annual_return_pct::double precision AS annual_return_pct,
+                rp.cumulative_return_pct::double precision AS cumulative_return_pct,
+                rp.sharpe_ratio::double precision AS sharpe_ratio,
+                rp.sortino_ratio::double precision AS sortino_ratio,
+                rp.calmar_ratio::double precision AS calmar_ratio
          FROM paper_account pa
          LEFT JOIN strategy_config sc ON sc.strategy_id = pa.strategy_version_id AND sc.status = 'active'
+         LEFT JOIN LATERAL (
+             SELECT annual_return_pct, cumulative_return_pct, sharpe_ratio, sortino_ratio, calmar_ratio
+             FROM paper_replay WHERE paper_account_id = pa.paper_account_id LIMIT 1
+         ) rp ON true
          WHERE {}
          ORDER BY pa.status ASC, pa.created_at DESC",
         where_sql
     );
 
-    let rows: Vec<(
-        String, String, String, f64, bool, String, f64, String, Option<String>,
-        Option<f64>, f64, Option<f64>, f64, f64, Option<String>, Option<f64>,
-    )> = sqlx::query_as(&sql).fetch_all(&state.db).await.unwrap_or_default();
+    let rows: Vec<AccountListRow> = sqlx::query_as(&sql).fetch_all(&state.db).await.unwrap_or_default();
 
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(aid, at, name, cap, le, lm, lmp, st, uid, nav, cash, mdd, margin, reserve, strat, lcap)| {
+        .map(|r| {
             serde_json::json!({
-                "account_id": aid, "account_type": at,
-                "name": name, "initial_capital": cap,
-                "leverage_enabled": le, "leverage_mode": lm,
-                "leverage_multiplier": lmp, "status": st,
-                "owner": uid.unwrap_or_default(),
-                "current_nav": nav, "cash": cash, "max_drawdown": mdd,
-                "leverage_cap": lcap,
-                "margin_amount": margin, "reserve_amount": reserve,
-                "strategy_version_id": strat.unwrap_or_default(),
+                "account_id": r.paper_account_id, "account_type": r.account_type,
+                "name": r.name, "initial_capital": r.initial_capital,
+                "leverage_enabled": r.leverage_enabled, "leverage_mode": r.leverage_mode,
+                "leverage_multiplier": r.leverage_multiplier, "status": r.status,
+                "owner": r.user_id.unwrap_or_default(),
+                "current_nav": r.current_nav, "cash": r.cash, "max_drawdown": r.max_drawdown_pct,
+                "leverage_cap": r.leverage_cap,
+                "margin_amount": r.margin_amount, "reserve_amount": r.reserve_amount,
+                "strategy_version_id": r.strategy_version_id.unwrap_or_default(),
+                "annual_return_pct": r.annual_return_pct,
+                "cumulative_return_pct": r.cumulative_return_pct,
+                "sharpe_ratio": r.sharpe_ratio,
+                "sortino_ratio": r.sortino_ratio,
+                "calmar_ratio": r.calmar_ratio,
             })
         })
         .collect();

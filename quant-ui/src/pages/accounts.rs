@@ -491,7 +491,7 @@ pub fn AccountsContent() -> Element {
 
     // 注意：不在此处提前返回 loading spinner！否则 FilterBar 会被卸载，信号重置，查询条件丢失。
     rsx! {
-        div { class: "p-6 max-w-6xl mx-auto",
+        div { class: "p-6 max-w-7xl mx-auto",
             div { class: "flex items-center justify-between mb-4",
                 h1 { class: "text-2xl font-bold text-gray-900 dark:text-white", "投资账号" }
             }
@@ -680,13 +680,22 @@ pub fn AccountsContent() -> Element {
                                                 }
                                             }
                                         }
-                                        div { class: "grid grid-cols-2 md:grid-cols-4 gap-4 text-sm",
+                                        // 第一行：资产 + 杠杆 + 策略 + 累计收益率（杠杆↔策略已互换，最大回撤位改累计收益率）
+                                        div { class: "grid grid-cols-2 md:grid-cols-5 gap-4 text-sm",
                                             {
                                                 let cash_val = acc["cash"].as_f64().unwrap_or(cap);
+                                                let reserve_val = acc["reserve_amount"].as_f64().unwrap_or(0.0);
                                                 rsx! {
-                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产/净值/现金" } div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{nav as i64} / ¥{cap as i64} / ¥{cash_val as i64}" } }
+                                                    // 总资产/净值/现金(预留) — col-span-2 加宽
+                                                    div { class: "col-span-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3",
+                                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产 / 净值 / 现金(预留)" }
+                                                        div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{nav as i64} / ¥{cap as i64} / ¥{cash_val as i64}(¥{reserve_val as i64})" }
+                                                    }
                                                 }
                                             }
+                                            // 策略（与杠杆互换，现居前）
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "策略" } div { class: "text-blue-600 dark:text-blue-400 text-sm", "{strategy}" } }
+                                            // 杠杆（与策略互换，现居后）
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆" }
                                                 if leverage && lev_mode == "vol_target" {
                                                     div { class: "text-yellow-600 dark:text-yellow-400 text-sm", "波动率目标 · 上限 {lev_cap}x" }
@@ -696,8 +705,39 @@ pub fn AccountsContent() -> Element {
                                                     div { class: "text-gray-500 dark:text-gray-400 text-sm", "无杠杆" }
                                                 }
                                             }
-                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "策略" } div { class: "text-blue-600 dark:text-blue-400 text-sm", "{strategy}" } }
-                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "最大回撤" } div { class: "text-red-600 dark:text-red-400 text-sm", "{mdd}%" } }
+                                            // 累计收益率（原最大回撤位置）
+                                            {
+                                                let cum = acc["cumulative_return_pct"].as_f64();
+                                                let cum_color = if cum.unwrap_or(0.0) >= 0.0 { "text-green-600 dark:text-green-400" } else { "text-red-600 dark:text-red-400" };
+                                                rsx! {
+                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "累计收益率" }
+                                                        match cum {
+                                                            Some(v) => rsx!{ div { class: "{cum_color} text-sm font-medium", "{v:.2}%" } },
+                                                            None => rsx!{ div { class: "text-gray-400 text-sm", "—" } },
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // 第二行：绩效指标（年化/Sharpe/Sortino/Calmar/最大回撤）
+                                        {
+                                            let ar = acc["annual_return_pct"].as_f64();
+                                            let sh = acc["sharpe_ratio"].as_f64();
+                                            let so = acc["sortino_ratio"].as_f64();
+                                            let ca = acc["calmar_ratio"].as_f64();
+                                            let ar_color = if ar.unwrap_or(0.0) >= 0.0 { "text-green-600 dark:text-green-400" } else { "text-red-600 dark:text-red-400" };
+                                            let fmt2 = |v: Option<f64>| v.map(|x| format!("{:.2}", x)).unwrap_or_else(|| "—".into());
+                                            rsx! {
+                                                div { class: "grid grid-cols-2 md:grid-cols-5 gap-4 text-sm mt-3",
+                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "年化收益率" }
+                                                        match ar { Some(v) => rsx!{ div { class: "{ar_color} text-sm font-medium", "{v:.2}%" } }, None => rsx!{ div { class: "text-gray-400 text-sm", "—" } } }
+                                                    }
+                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Sharpe" } div { class: "text-gray-900 dark:text-white text-sm", "{fmt2(sh)}" } }
+                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Sortino" } div { class: "text-gray-900 dark:text-white text-sm", "{fmt2(so)}" } }
+                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Calmar" } div { class: "text-gray-900 dark:text-white text-sm", "{fmt2(ca)}" } }
+                                                    div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "最大回撤" } div { class: "text-red-600 dark:text-red-400 text-sm", "{mdd:.2}%" } }
+                                                }
+                                            }
                                         }
                                     }
                                     // 展开详情
