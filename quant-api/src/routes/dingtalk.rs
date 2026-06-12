@@ -254,9 +254,13 @@ pub fn build_position_summary_notification(
         let short = if name.chars().count() > 6 {
             format!("{}…", name.chars().take(5).collect::<String>())
         } else { name.to_string() };
-        let qty = pos.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let price = pos.get("current_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let mval = pos.get("market_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        // 字段可能是数值或字符串(不同调用方构建方式不同)，两种都兼容
+        let num = |v: Option<&Value>| -> f64 {
+            v.and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0.0)
+        };
+        let qty = num(pos.get("quantity"));
+        let price = num(pos.get("current_price"));
+        let mval = num(pos.get("market_value"));
         let w = if net_worth > 0.0 { mval / net_worth * 100.0 } else { 0.0 };
         text.push_str(&format!("| {} | {} | {:.0} | {:.2} | ¥{:.0} | {:.1}% |  \n",
             symbol, short, qty, price, mval, w));
