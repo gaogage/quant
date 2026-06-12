@@ -70,21 +70,21 @@ pub async fn list_accounts(
 
     // 权限过滤
     if !is_admin {
-        where_clauses.push(format!("(user_id = '{}' OR (user_id IS NULL AND status = 'active'))", user.user_id));
+        where_clauses.push(format!("(pa.user_id = '{}' OR (pa.user_id IS NULL AND pa.status = 'active'))", user.user_id));
     }
 
     // 名称模糊搜索
     if let Some(ref name) = filter.name {
         if !name.is_empty() {
-            where_clauses.push(format!("name ILIKE '%{}%'", name.replace('\'', "''")));
+            where_clauses.push(format!("pa.name ILIKE '%{}%'", name.replace('\'', "''")));
         }
     }
 
     // 杠杆开关
     if let Some(ref lev) = filter.leverage {
         match lev.as_str() {
-            "enabled" => where_clauses.push("leverage_enabled = true".into()),
-            "disabled" => where_clauses.push("leverage_enabled = false".into()),
+            "enabled" => where_clauses.push("pa.leverage_enabled = true".into()),
+            "disabled" => where_clauses.push("pa.leverage_enabled = false".into()),
             _ => {}
         }
     }
@@ -92,22 +92,22 @@ pub async fn list_accounts(
     // 信号源
     if let Some(ref ss) = filter.signal_source {
         if !ss.is_empty() && ss != "all" {
-            where_clauses.push(format!("signal_source = '{}'", ss.replace('\'', "''")));
+            where_clauses.push(format!("pa.signal_source = '{}'", ss.replace('\'', "''")));
         }
     }
 
     // 杠杆倍率范围
     if let Some(min) = filter.lev_mult_min {
-        where_clauses.push(format!("leverage_multiplier >= {}", min));
+        where_clauses.push(format!("pa.leverage_multiplier >= {}", min));
     }
     if let Some(max) = filter.lev_mult_max {
-        where_clauses.push(format!("leverage_multiplier <= {}", max));
+        where_clauses.push(format!("pa.leverage_multiplier <= {}", max));
     }
 
     // 状态
     if let Some(ref st) = filter.status {
         if !st.is_empty() && st != "all" {
-            where_clauses.push(format!("status = '{}'", st.replace('\'', "''")));
+            where_clauses.push(format!("pa.status = '{}'", st.replace('\'', "''")));
         }
     }
 
@@ -118,33 +118,36 @@ pub async fn list_accounts(
     };
 
     let sql = format!(
-        "SELECT paper_account_id, account_type, name, initial_capital::double precision,
-                leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status,
-                user_id, current_nav::double precision, COALESCE(cash, initial_capital)::double precision,
-                max_drawdown_pct::double precision, COALESCE(margin_amount,0)::double precision,
-                COALESCE(reserve_amount,0)::double precision,
-                strategy_version_id
-         FROM paper_account
+        "SELECT pa.paper_account_id, pa.account_type, pa.name, pa.initial_capital::double precision,
+                pa.leverage_enabled, pa.leverage_mode, pa.leverage_multiplier, pa.status,
+                pa.user_id, pa.current_nav::double precision, COALESCE(pa.cash, pa.initial_capital)::double precision,
+                pa.max_drawdown_pct::double precision, COALESCE(pa.margin_amount,0)::double precision,
+                COALESCE(pa.reserve_amount,0)::double precision,
+                pa.strategy_version_id,
+                sc.leverage_cap::double precision
+         FROM paper_account pa
+         LEFT JOIN strategy_config sc ON sc.strategy_id = pa.strategy_version_id AND sc.status = 'active'
          WHERE {}
-         ORDER BY status ASC, created_at DESC",
+         ORDER BY pa.status ASC, pa.created_at DESC",
         where_sql
     );
 
     let rows: Vec<(
-        String, String, String, f64, bool, String, f64, String, String, Option<String>,
-        Option<f64>, f64, Option<f64>, f64, f64, Option<String>,
+        String, String, String, f64, bool, String, f64, String, Option<String>,
+        Option<f64>, f64, Option<f64>, f64, f64, Option<String>, Option<f64>,
     )> = sqlx::query_as(&sql).fetch_all(&state.db).await.unwrap_or_default();
 
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(aid, at, name, cap, le, lm, lmp, ss, st, uid, nav, cash, mdd, margin, reserve, strat)| {
+        .map(|(aid, at, name, cap, le, lm, lmp, st, uid, nav, cash, mdd, margin, reserve, strat, lcap)| {
             serde_json::json!({
                 "account_id": aid, "account_type": at,
                 "name": name, "initial_capital": cap,
                 "leverage_enabled": le, "leverage_mode": lm,
-                "leverage_multiplier": lmp, "signal_source": ss, "status": st,
+                "leverage_multiplier": lmp, "status": st,
                 "owner": uid.unwrap_or_default(),
                 "current_nav": nav, "cash": cash, "max_drawdown": mdd,
+                "leverage_cap": lcap,
                 "margin_amount": margin, "reserve_amount": reserve,
                 "strategy_version_id": strat.unwrap_or_default(),
             })

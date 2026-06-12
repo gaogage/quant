@@ -520,6 +520,7 @@ pub fn AccountsContent() -> Element {
                             let leverage = acc["leverage_enabled"].as_bool().unwrap_or(false);
                             let lev_mode = acc["leverage_mode"].as_str().unwrap_or("fixed");
                             let lev_mult = acc["leverage_multiplier"].as_f64().unwrap_or(1.0);
+                            let lev_cap = acc["leverage_cap"].as_f64().unwrap_or(lev_mult);
                             let strategy = acc["strategy_version_id"].as_str().filter(|s| !s.is_empty()).unwrap_or("v19");
                             let _owner = acc["owner"].as_str().unwrap_or("");
                             let type_label = if acc_type == "real" { "🔴 实盘" } else { "🟡 模拟" };
@@ -686,7 +687,15 @@ pub fn AccountsContent() -> Element {
                                                     div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产/净值/现金" } div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{nav as i64} / ¥{cap as i64} / ¥{cash_val as i64}" } }
                                                 }
                                             }
-                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆" } if leverage && lev_mult > 1.0 { div { class: "text-yellow-600 dark:text-yellow-400 text-sm", "{lev_mode} ×{lev_mult}" } } else { div { class: "text-gray-500 dark:text-gray-400 text-sm", "无杠杆" } } }
+                                            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "杠杆" }
+                                                if leverage && lev_mode == "vol_target" {
+                                                    div { class: "text-yellow-600 dark:text-yellow-400 text-sm", "波动率目标 · 上限 {lev_cap}x" }
+                                                } else if leverage && lev_mult > 1.0 {
+                                                    div { class: "text-yellow-600 dark:text-yellow-400 text-sm", "固定 ×{lev_mult}" }
+                                                } else {
+                                                    div { class: "text-gray-500 dark:text-gray-400 text-sm", "无杠杆" }
+                                                }
+                                            }
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "策略" } div { class: "text-blue-600 dark:text-blue-400 text-sm", "{strategy}" } }
                                             div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "最大回撤" } div { class: "text-red-600 dark:text-red-400 text-sm", "{mdd}%" } }
                                         }
