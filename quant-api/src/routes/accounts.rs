@@ -632,19 +632,21 @@ pub async fn push_account_dingtalk(
         if init > 0.0 { nav / init - 1.0 } else { 0.0 }
     } else { 0.0 };
 
-    // 当前持仓
-    let positions: Vec<serde_json::Value> = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
-        "SELECT symbol, quantity, avg_cost, market_price
-         FROM paper_position WHERE paper_account_id = $1 AND ABS(quantity) > 0"
+    // 当前持仓（LEFT JOIN market_stock 取中文名）
+    let positions: Vec<serde_json::Value> = sqlx::query_as::<_, (String, Option<String>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
+        "SELECT pp.symbol, ms.name, pp.quantity, pp.avg_cost, pp.market_price
+         FROM paper_position pp
+         LEFT JOIN market_stock ms ON ms.symbol = pp.symbol
+         WHERE pp.paper_account_id = $1 AND ABS(pp.quantity) > 0"
     ).bind(&account_id).fetch_all(&state.db).await.unwrap_or_default()
         .into_iter()
-        .map(|(sym, qty, _cost, price)| {
+        .map(|(sym, name, qty, _cost, price)| {
             let q: f64 = qty.as_ref().and_then(|v| v.to_string().parse().ok()).unwrap_or(0.0);
             let p: f64 = price.as_ref().and_then(|v| v.to_string().parse().ok()).unwrap_or(0.0);
             let mv = (q * p).to_string();
             serde_json::json!({
                 "symbol": sym,
-                "name": "",
+                "name": name.unwrap_or_default(),
                 "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
                 "current_price": price.map(|v| v.to_string()).unwrap_or_default(),
                 "market_value": mv,
