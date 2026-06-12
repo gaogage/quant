@@ -215,14 +215,18 @@ pub async fn simulate_v19_daily_returns(
             1.0
         };
 
-        // 杠杆账号强平/警告线（峰值回撤口径 (peak-nav)/peak）
-        let dd = if acct_peak > 0.0 { (acct_peak - acct_nav) / acct_peak } else { 0.0 };
+        // 杠杆账号强平/警告线（维持担保比例口径，与真实券商一致）：
+        // 维保 = 总资产/融资额 = (净值 + 融资额) / 融资额。
+        // 融资额 debt 固定 = (杠杆倍数-1)×初始净值（归一化初始净值=1.0）。
+        // 净值 acct_nav 随杠杆后日收益演进，跌则维保降。债务为 0（无杠杆）时维保视为正无穷（永不触发）。
+        let debt = (leverage_multiplier - 1.0).max(0.0);
+        let maint = if debt > 1e-9 { (acct_nav + debt) / debt } else { f64::INFINITY };
         let leverage = if liquidated {
             0.0 // 已强平：清仓，后续不再波动
-        } else if liq_threshold.is_some_and(|t| dd >= t) {
-            liquidated = true; // 触强平线：当日起清仓
+        } else if liq_threshold.is_some_and(|t| maint < t) {
+            liquidated = true; // 维保跌破平仓线：当日起清仓
             0.0
-        } else if warn_threshold.is_some_and(|t| dd >= t) {
+        } else if warn_threshold.is_some_and(|t| maint < t) {
             leverage.min(1.0) // 警告区：禁止加杠杆（只许 ≤1，即只卖不买新杠杆仓）
         } else {
             leverage
