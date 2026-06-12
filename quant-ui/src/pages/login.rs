@@ -18,6 +18,7 @@ pub fn LoginPage() -> Element {
 
     let mut username = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
+    let mut show_pwd = use_signal(|| false);
     let mut error = use_signal(|| String::new());
     let mut loading = use_signal(|| false);
 
@@ -83,15 +84,25 @@ pub fn LoginPage() -> Element {
                     // 密码
                     div {
                         label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1", "密码" }
-                        input {
-                            class: "w-full px-4 py-2.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg
-                                    text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500
-                                    focus:ring-1 focus:ring-blue-500 transition",
-                            r#type: "password",
-                            placeholder: "请输入密码",
-                            value: "{password}",
-                            oninput: move |evt| password.set(evt.value()),
-                            onkeydown: on_keydown,
+                        div { class: "relative",
+                            input {
+                                class: "w-full px-4 py-2.5 pr-11 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg
+                                        text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500
+                                        focus:ring-1 focus:ring-blue-500 transition",
+                                r#type: if *show_pwd.read() { "text" } else { "password" },
+                                placeholder: "请输入密码",
+                                value: "{password}",
+                                oninput: move |evt| password.set(evt.value()),
+                                onkeydown: on_keydown,
+                            }
+                            // 显示/隐藏密码切换
+                            button {
+                                r#type: "button",
+                                class: "absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none",
+                                title: if *show_pwd.read() { "隐藏密码" } else { "显示密码" },
+                                onclick: move |_| { let v = *show_pwd.read(); show_pwd.set(!v); },
+                                if *show_pwd.read() { "🙈" } else { "👁" }
+                            }
                         }
                     }
                     // 提交按钮
