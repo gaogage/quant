@@ -44,11 +44,11 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     let start = parse_date(&req.start_date)?;
     let end = parse_date(&req.end_date)?;
 
-    // 1. 账号信息（策略 + 杠杆 + 初始资金）
-    let (strategy_id, lev_enabled, lev_mult, lev_mode, init_cap): (Option<String>, bool, f64, String, Decimal) =
+    // 1. 账号信息（策略 + 杠杆 + 初始资金 + 强平/警告线）
+    let (strategy_id, lev_enabled, lev_mult, lev_mode, init_cap, liq_thr, warn_thr): (Option<String>, bool, f64, String, Decimal, Option<f64>, Option<f64>) =
         sqlx::query_as(
             "SELECT strategy_version_id, COALESCE(leverage_enabled,false), COALESCE(leverage_multiplier,1.0),
-                    COALESCE(leverage_mode,'fixed'), initial_capital
+                    COALESCE(leverage_mode,'fixed'), initial_capital, liquidation_threshold, warning_threshold
              FROM paper_account WHERE paper_account_id = $1",
         )
         .bind(&account_id)
@@ -69,7 +69,7 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
         .bind(init_cap).bind(start).bind(&account_id).execute(db).await.map_err(|e| format!("reset: {}", e))?;
 
     // 4. 共享核心：逐日 v19 收益（真 GA 权重 + 体制 + vol_target 杠杆）
-    let daily = simulate_v19_daily_returns(db, &sc, start, end, lev_enabled, lev_mult, &lev_mode).await?;
+    let daily = simulate_v19_daily_returns(db, &sc, start, end, lev_enabled, lev_mult, &lev_mode, liq_thr, warn_thr).await?;
     if daily.is_empty() {
         return Err("v19 模拟无有效交易日".into());
     }

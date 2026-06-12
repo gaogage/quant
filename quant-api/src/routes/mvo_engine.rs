@@ -93,9 +93,11 @@ async fn load_etf_prices(
 ///
 /// - `sc`: 策略配置（含 equity_curve_task_id、etf_symbols、vol_target、leverage_cap）
 /// - `leverage_enabled` / `leverage_multiplier` / `leverage_mode`: 账号杠杆属性
+/// - `liq_threshold` / `warn_threshold`: 杠杆账号强平线/警告线（峰值回撤口径，None=无强平建模）
 /// - `start` / `end`: 模拟区间（含端点）
 ///
 /// 权重逐季度由 `compute_mvo_weights_for_date` 刷新（真 v19 GA），叠加 regime 降仓 + 杠杆。
+/// 强平：账号峰值回撤≥liq_threshold→后续清仓(net_return=0)；≥warn_threshold→禁止加杠杆(lev≤1)。
 pub async fn simulate_v19_daily_returns(
     db: &PgPool,
     sc: &StrategyConfig,
@@ -104,6 +106,8 @@ pub async fn simulate_v19_daily_returns(
     leverage_enabled: bool,
     leverage_multiplier: f64,
     leverage_mode: &str,
+    liq_threshold: Option<f64>,
+    warn_threshold: Option<f64>,
 ) -> Result<Vec<DailyReturn>, String> {
     // 1. A股日收益（区间过滤）
     let a_daily: Vec<(NaiveDate, f64)> = load_a_share_daily(db, &sc.equity_curve_task_id)
@@ -130,6 +134,11 @@ pub async fn simulate_v19_daily_returns(
     let mut cached_regime: f64 = 1.0;
     let mut trail_60: Vec<f64> = Vec::new();
     let mut out: Vec<DailyReturn> = Vec::with_capacity(a_daily.len());
+
+    // 杠杆账号强平/警告线状态（峰值回撤口径）
+    let mut acct_nav = 1.0_f64;
+    let mut acct_peak = 1.0_f64;
+    let mut liquidated = false;
 
     // 上一交易日（用于 ETF 收益的 prev/cur 取价）
     let mut prev_date: Option<NaiveDate> = None;
@@ -205,6 +214,23 @@ pub async fn simulate_v19_daily_returns(
         } else {
             1.0
         };
+
+        // 杠杆账号强平/警告线（峰值回撤口径 (peak-nav)/peak）
+        let dd = if acct_peak > 0.0 { (acct_peak - acct_nav) / acct_peak } else { 0.0 };
+        let leverage = if liquidated {
+            0.0 // 已强平：清仓，后续不再波动
+        } else if liq_threshold.is_some_and(|t| dd >= t) {
+            liquidated = true; // 触强平线：当日起清仓
+            0.0
+        } else if warn_threshold.is_some_and(|t| dd >= t) {
+            leverage.min(1.0) // 警告区：禁止加杠杆（只许 ≤1，即只卖不买新杠杆仓）
+        } else {
+            leverage
+        };
+
+        let net = gross * leverage;
+        acct_nav *= 1.0 + net;
+        acct_peak = acct_peak.max(acct_nav);
 
         out.push(DailyReturn {
             date: d,
@@ -317,7 +343,7 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
 
-        let unlev = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed")
+        let unlev = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
             .await
             .expect("unlev sim");
         let unlev_rets: Vec<f64> = unlev.iter().map(|d| d.net_return).collect();
@@ -328,7 +354,7 @@ mod tests {
             m_unlev.sharpe, m_unlev.sortino, m_unlev.cumulative_return * 100.0, m_unlev.trading_days
         );
 
-        let lev = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target")
+        let lev = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None)
             .await
             .expect("lev sim");
         let lev_rets: Vec<f64> = lev.iter().map(|d| d.net_return).collect();
@@ -371,9 +397,9 @@ mod tests {
                  "tgt", "AR", "DD", "Shrp", "Sort", "Clmr", "LvAR", "LvDD", "LvShrp");
         for cap in ["0.06", "0.08", "0.10", "0.12", "0.14", "0.16", "0.18"] {
             std::env::set_var("MVO_TARGET_CAP", cap);
-            let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed").await.expect("u");
+            let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None).await.expect("u");
             let mu = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-            let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target").await.expect("l");
+            let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None).await.expect("l");
             let ml = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>());
             println!("{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2} | {:>4.1}% {:>4.1}% {:>5.2}",
                      cap, mu.annual_return*100.0, mu.max_drawdown*100.0, mu.sharpe, mu.sortino, mu.calmar,
@@ -407,7 +433,7 @@ mod tests {
                      "tgt", "AR", "DD", "Shrp", "Sort", "Clmr");
             for cap in ["0.06", "0.08", "0.10", "0.12"] {
                 std::env::set_var("MVO_TARGET_CAP", cap);
-                let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed").await.expect("u");
+                let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None).await.expect("u");
                 let m = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
                 println!("{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
                          cap, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.sortino, m.calmar);
@@ -442,11 +468,11 @@ mod tests {
                      "tgt", "IS17-21 unlev", "OOS22-26 unlev", "OOS22-26 LEV");
             for cap in ["0.06", "0.08", "0.10", "0.12"] {
                 std::env::set_var("MVO_TARGET_CAP", cap);
-                let is_u = simulate_v19_daily_returns(&db, &sc, is_start, is_end, false, 1.0, "fixed").await.expect("is");
+                let is_u = simulate_v19_daily_returns(&db, &sc, is_start, is_end, false, 1.0, "fixed", None, None).await.expect("is");
                 let mis = compute_metrics(&is_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                let oos_u = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, false, 1.0, "fixed").await.expect("oos");
+                let oos_u = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, false, 1.0, "fixed", None, None).await.expect("oos");
                 let moos = compute_metrics(&oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                let oos_l = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, true, 1.5, "vol_target").await.expect("oosl");
+                let oos_l = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, true, 1.5, "vol_target", None, None).await.expect("oosl");
                 let mlev = compute_metrics(&oos_l.iter().map(|d| d.net_return).collect::<Vec<_>>());
                 println!("{:>4} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2}",
                          cap,
@@ -473,7 +499,7 @@ mod tests {
             for cap in [2.0, 2.5, 3.0] {
                 sc.vol_target = vt;
                 sc.leverage_cap = cap;
-                let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target").await.expect("l");
+                let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None).await.expect("l");
                 let m = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>());
                 println!("{:>5.2} {:>4.1} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
                          vt, cap, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.sortino, m.calmar);

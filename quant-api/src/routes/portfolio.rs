@@ -1470,7 +1470,7 @@ async fn run_mvo_simulate(db: &sqlx::PgPool, task_id: &str, req: &MvoSimulateReq
 
     // 共享核心逐日模拟（含 regime 降仓 + vol_target/fixed 杠杆）
     let daily = crate::routes::mvo_engine::simulate_v19_daily_returns(
-        db, &sc, first_d, last_d, lev_enabled, req.leverage_multiplier, &req.leverage_mode,
+        db, &sc, first_d, last_d, lev_enabled, req.leverage_multiplier, &req.leverage_mode, None, None,
     )
     .await?;
     if daily.len() < 252 {
