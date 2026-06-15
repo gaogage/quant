@@ -8,6 +8,7 @@
 //! 杠杆: 波动率目标 (vol_target, 20%年化波动率目标)
 //! 启动时通过 tokio::spawn 在后台运行，每 60 秒检查一次。
 
+use super::trading;
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use ndarray::Array2;
 use quant_common::mvo;
@@ -16,7 +17,6 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use super::trading;
 use tracing::{debug, error, info, warn};
 
 /// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
@@ -24,11 +24,15 @@ async fn get_latest_data_version(db: &PgPool) -> String {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT data_version_id FROM data_version
          WHERE data_version_id LIKE 'dv-eod-%'
-         ORDER BY end_date DESC LIMIT 1"
-    ).fetch_optional(db).await.ok().flatten();
-    row.map(|(d,)| d).unwrap_or_else(|| "research-full-2016-2026-20260515".to_string())
+         ORDER BY end_date DESC LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    row.map(|(d,)| d)
+        .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string())
 }
-
 
 /// 盘中调仓时获取 ETF 当日实时价格（通过 Tushare fund_daily API）
 /// 若 Tushare 尚未有当日数据（T+1限制），回退到昨日收盘价。
@@ -44,15 +48,24 @@ async fn fetch_intraday_etf_prices(
     // 1. 先尝试从 DB 获取当日数据（可能已被其他同步流程更新）
     for sym in etf_symbols {
         let row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
-            "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 AND trade_date = $2"
-        ).bind(sym).bind(today).fetch_optional(db).await.ok().flatten();
+            "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 AND trade_date = $2",
+        )
+        .bind(sym)
+        .bind(today)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
         if let Some((Some(p),)) = row {
             prices.insert(sym.clone(), p.to_string().parse::<f64>().unwrap_or(0.0));
         }
     }
 
     // 2. 对于 DB 中没有当日数据的 ETF，通过 Tushare realtime_quote 获取盘中实时价格
-    let missing: Vec<&String> = etf_symbols.iter().filter(|s| !prices.contains_key(*s)).collect();
+    let missing: Vec<&String> = etf_symbols
+        .iter()
+        .filter(|s| !prices.contains_key(*s))
+        .collect();
     if !missing.is_empty() {
         for sym in missing {
             // 盘中实时行情（PRO 用户可用）
@@ -75,7 +88,10 @@ async fn fetch_intraday_etf_prices(
             }
             // realtime_quote 失败时，尝试 fund_daily (T+1 数据)
             let today_str = today.format("%Y%m%d").to_string();
-            match tushare.fund_daily(Some(sym), None, Some(&today_str), Some(&today_str)).await {
+            match tushare
+                .fund_daily(Some(sym), None, Some(&today_str), Some(&today_str))
+                .await
+            {
                 Ok(resp) => {
                     if let Some(data) = resp.data {
                         let maps = data.to_maps();
@@ -111,23 +127,22 @@ async fn fetch_intraday_etf_prices(
     prices
 }
 
-
 fn short_id() -> String {
     uuid::Uuid::new_v4().to_string().chars().take(12).collect()
 }
 
 struct DailyState {
     date: Option<NaiveDate>,
-    traded_today: bool,        // 今日是否已完成调仓 (14:40+)
-    eod_synced_today: bool,    // 今日是否已完成日终数据同步 (16:00)
-    yesterday_synced: bool,    // 昨日日线是否已完成 T+1 同步 (次日9:00)
+    traded_today: bool,     // 今日是否已完成调仓 (14:40+)
+    eod_synced_today: bool, // 今日是否已完成日终数据同步 (16:00)
+    yesterday_synced: bool, // 昨日日线是否已完成 T+1 同步 (次日9:00)
     cleanup_done: bool,
 }
 
 /// MVO 权重缓存（季度更新）
 pub struct MvoWeightCache {
-    quarter: String,              // e.g. "2026-Q2"
-    weights: Vec<f64>,            // [A股, 黄金, 国债, SP500, 纳指, 有色, 豆粕, 原油]
+    quarter: String,   // e.g. "2026-Q2"
+    weights: Vec<f64>, // [A股, 黄金, 国债, SP500, 纳指, 有色, 豆粕, 原油]
 }
 
 /// 从数据库加载的策略配置（运行时缓存，启动时加载）
@@ -163,23 +178,48 @@ pub struct StrategyConfig {
     pub score_direction: String,
 }
 
-fn default_signal_source() -> String { "prediction_blend".into() }
-fn default_blend_weight() -> f64 { 0.5 }
-fn default_combo_name() -> String { "phase7_price_volume_expanded_v1".into() }
-fn default_top_n() -> i64 { 30 }
-fn default_dynamic_target_cap() -> f64 { 0.06 }
-fn default_score_direction() -> String { "descending".into() }
+fn default_signal_source() -> String {
+    "prediction_blend".into()
+}
+fn default_blend_weight() -> f64 {
+    0.5
+}
+fn default_combo_name() -> String {
+    "phase7_price_volume_expanded_v1".into()
+}
+fn default_top_n() -> i64 {
+    30
+}
+fn default_dynamic_target_cap() -> f64 {
+    0.06
+}
+fn default_score_direction() -> String {
+    "descending".into()
+}
 
 impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
             strategy_id: "v19".into(),
             name: "v19 (hardcoded fallback)".into(),
-            etf_symbols: vec!["518880.SH".into(),"511010.SH".into(),"513500.SH".into(),"513100.SH".into(),"159980.SZ".into(),"159985.SZ".into(),"501018.SH".into()],
+            etf_symbols: vec![
+                "518880.SH".into(),
+                "511010.SH".into(),
+                "513500.SH".into(),
+                "513100.SH".into(),
+                "159980.SZ".into(),
+                "159985.SZ".into(),
+                "501018.SH".into(),
+            ],
             equity_curve_task_id: "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".into(),
-            min_stock: 0.12, max_single: 0.75, max_single_bull: 0.80,
-            momentum_blend_ratio: 0.5, ga_population: 500, ga_generations: 200,
-            vol_target: 0.20, leverage_cap: 2.0,
+            min_stock: 0.12,
+            max_single: 0.75,
+            max_single_bull: 0.80,
+            momentum_blend_ratio: 0.5,
+            ga_population: 500,
+            ga_generations: 200,
+            vol_target: 0.20,
+            leverage_cap: 2.0,
             default_weights: vec![0.12, 0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
             signal_source: "prediction_blend".into(),
             prediction_blend_weight: 0.5,
@@ -216,8 +256,11 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'prediction_set_id', prediction_set_id,
             'dynamic_target_cap', dynamic_target_cap,
             'score_direction', score_direction
-        ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'"
-    ).bind(strategy_id).fetch_optional(db).await
+        ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
+    )
+    .bind(strategy_id)
+    .fetch_optional(db)
+    .await
     {
         Ok(Some((row,))) => {
             let cfg: StrategyConfig = serde_json::from_value(row).unwrap_or_default();
@@ -226,7 +269,10 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
         }
         _ => {
             let cfg = StrategyConfig::default();
-            warn!("[scheduler] 策略配置加载失败, 使用硬编码fallback: {}", cfg.name);
+            warn!(
+                "[scheduler] 策略配置加载失败, 使用硬编码fallback: {}",
+                cfg.name
+            );
             cfg
         }
     }
@@ -237,11 +283,18 @@ async fn run_scheduled_tasks(db: &PgPool) {
     let tasks: Vec<(String, String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT task_name, task_type, schedule_cron, params FROM scheduled_task_config
          WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= $1)
-         ORDER BY next_run_at NULLS FIRST"
-    ).bind(now).fetch_all(db).await.unwrap_or_default();
+         ORDER BY next_run_at NULLS FIRST",
+    )
+    .bind(now)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
 
     for (name, task_type, cron_expr, params) in &tasks {
-        info!("[scheduler] 定时任务触发: {} ({}) cron={}", name, task_type, cron_expr);
+        info!(
+            "[scheduler] 定时任务触发: {} ({}) cron={}",
+            name, task_type, cron_expr
+        );
         match task_type.as_str() {
             "data_quality_check" => {
                 run_data_quality_check(db).await;
@@ -249,9 +302,18 @@ async fn run_scheduled_tasks(db: &PgPool) {
             "equity_curve_update" => {
                 // 从 v19 策略配置读 A股选股方式，权益曲线与策略一致（因子+ML混合）
                 let sc = load_strategy_config(db, "v19").await;
-                let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or(sc.combo_name.as_str());
-                let top_n = params.get("top_n").and_then(|v| v.as_u64()).unwrap_or(sc.top_n as u64) as usize;
-                info!("[scheduler] 权益曲线更新: combo={} top_n={} signal={}", combo, top_n, sc.signal_source);
+                let combo = params
+                    .get("combo_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(sc.combo_name.as_str());
+                let top_n = params
+                    .get("top_n")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(sc.top_n as u64) as usize;
+                info!(
+                    "[scheduler] 权益曲线更新: combo={} top_n={} signal={}",
+                    combo, top_n, sc.signal_source
+                );
                 let client = reqwest::Client::new();
                 let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
                 let dv = get_latest_data_version(db).await;
@@ -275,15 +337,26 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     };
                     if let Some(pid) = pid {
                         payload["prediction_set_id"] = serde_json::json!(pid);
-                        payload["prediction_blend_weight"] = serde_json::json!(sc.prediction_blend_weight);
+                        payload["prediction_blend_weight"] =
+                            serde_json::json!(sc.prediction_blend_weight);
                         payload["kelly_fraction"] = serde_json::json!(0.25);
                         payload["score_candidate_pool_size"] = serde_json::json!(200);
-                        info!("[scheduler] 权益曲线启用 prediction_blend: set={} w={}", pid, sc.prediction_blend_weight);
+                        info!(
+                            "[scheduler] 权益曲线启用 prediction_blend: set={} w={}",
+                            pid, sc.prediction_blend_weight
+                        );
                     }
                 }
-                let api_base = format!("http://localhost:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into()));
-                match client.post(format!("{}/api/v1/quant/backtests/run-factor", api_base))
-                    .json(&payload).timeout(std::time::Duration::from_secs(600)).send().await
+                let api_base = format!(
+                    "http://localhost:{}",
+                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+                );
+                match client
+                    .post(format!("{}/api/v1/quant/backtests/run-factor", api_base))
+                    .json(&payload)
+                    .timeout(std::time::Duration::from_secs(600))
+                    .send()
+                    .await
                 {
                     Ok(resp) => {
                         if let Ok(result) = resp.json::<serde_json::Value>().await {
@@ -308,14 +381,32 @@ async fn run_scheduled_tasks(db: &PgPool) {
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
                 // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。
-                let combo = params.get("combo_name").and_then(|v| v.as_str()).unwrap_or("full_pit_icir_37f");
-                let ver = params.get("version").and_then(|v| v.as_str()).unwrap_or("1.0.0");
+                let combo = params
+                    .get("combo_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("full_pit_icir_37f");
+                let ver = params
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1.0.0");
                 let horizon = params.get("horizon").and_then(|v| v.as_i64()).unwrap_or(20) as i16;
                 // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
                 let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
                 let refresh_end = chrono::Utc::now().date_naive();
-                info!("[scheduler] PIT combo 保鲜: combo={} 区间 {}~{}", combo, refresh_start, refresh_end);
-                match crate::routes::factors::materialize_pit_combo(db, combo, ver, horizon, refresh_start, refresh_end).await {
+                info!(
+                    "[scheduler] PIT combo 保鲜: combo={} 区间 {}~{}",
+                    combo, refresh_start, refresh_end
+                );
+                match crate::routes::factors::materialize_pit_combo(
+                    db,
+                    combo,
+                    ver,
+                    horizon,
+                    refresh_start,
+                    refresh_end,
+                )
+                .await
+                {
                     Ok(rows) => info!("[scheduler] PIT combo 保鲜完成: {} 行", rows),
                     Err(e) => warn!("[scheduler] PIT combo 保鲜失败: {}", e),
                 }
@@ -325,19 +416,24 @@ async fn run_scheduled_tasks(db: &PgPool) {
 
         // 根据 CRON 表达式计算下次运行时间
         let next = match cron::Schedule::from_str(cron_expr) {
-            Ok(schedule) => {
-                schedule.upcoming(chrono::Local).next()
-            }
+            Ok(schedule) => schedule.upcoming(chrono::Local).next(),
             Err(e) => {
-                warn!("[scheduler] 任务 {} 的 CRON 表达式 '{}' 无效: {}，默认 1 天后", name, cron_expr, e);
+                warn!(
+                    "[scheduler] 任务 {} 的 CRON 表达式 '{}' 无效: {}，默认 1 天后",
+                    name, cron_expr, e
+                );
                 None
             }
         };
         let next_at = next.unwrap_or_else(|| now + chrono::Duration::days(1));
         let _ = sqlx::query(
             "UPDATE scheduled_task_config SET last_run_at = NOW(), run_count = run_count + 1,
-             last_status = 'success', next_run_at = $1 WHERE task_name = $2"
-        ).bind(next_at).bind(name).execute(db).await;
+             last_status = 'success', next_run_at = $1 WHERE task_name = $2",
+        )
+        .bind(next_at)
+        .bind(name)
+        .execute(db)
+        .await;
     }
 }
 
@@ -358,15 +454,19 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         let strategy_config = Arc::new(load_strategy_config(&db, "v19").await);
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("[scheduler] {} 已启动 ({}): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步",
-              strategy_config.strategy_id, strategy_config.name);
+        info!(
+            "[scheduler] {} 已启动 ({}): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步",
+            strategy_config.strategy_id, strategy_config.name
+        );
 
         // 首次运行时检查定时任务
         run_scheduled_tasks(&db).await;
 
         loop {
             interval.tick().await;
-            if let Err(e) = run_tick(&db, &tushare, &state, &mvo_cache, port, &strategy_config).await {
+            if let Err(e) =
+                run_tick(&db, &tushare, &state, &mvo_cache, port, &strategy_config).await
+            {
                 error!("[scheduler] 任务失败: {}", e);
             }
             // 每小时检查一次定时任务
@@ -393,7 +493,14 @@ async fn get_current_wfa_params(db: &PgPool, date: NaiveDate) -> Result<serde_js
     Ok(row.map(|(p,)| p).unwrap_or_default())
 }
 
-async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyState>>, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, sc: &StrategyConfig) -> Result<(), String> {
+async fn run_tick(
+    db: &PgPool,
+    tushare: &TushareClient,
+    state: &Arc<Mutex<DailyState>>,
+    mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
+    port: u16,
+    sc: &StrategyConfig,
+) -> Result<(), String> {
     let now = Local::now();
     let today = now.date_naive();
     let hour = now.time().hour();
@@ -497,34 +604,69 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
                 None => today - chrono::Duration::days(1),
             };
             let sync_date_str = sync_date.format("%Y%m%d").to_string();
-            info!("[scheduler] 9:00 T+1 补同步最近交易日 {} 日线 + 因子重算...", sync_date_str);
+            info!(
+                "[scheduler] 9:00 T+1 补同步最近交易日 {} 日线 + 因子重算...",
+                sync_date_str
+            );
 
             // Step 1: 同步最近交易日日线 + ETF日线 (T+1数据已就绪)
             let bar_dv = format!("dv-t1-{}", sync_date_str);
             let all_stocks: Vec<String> = sqlx::query_scalar(
-                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
-            ).fetch_all(db).await.unwrap_or_default();
-            match quant_data::sync::sync_daily_bars(db, tushare, &all_stocks, &sync_date_str, &sync_date_str, &bar_dv).await {
+                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
+            )
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+            match quant_data::sync::sync_daily_bars(
+                db,
+                tushare,
+                &all_stocks,
+                &sync_date_str,
+                &sync_date_str,
+                &bar_dv,
+            )
+            .await
+            {
                 Ok(n) => info!("[scheduler] T+1 A股日线同步: {} 条", n),
                 Err(e) => warn!("[scheduler] T+1 A股日线同步失败: {}", e),
             }
             let etf_symbols = &sc.etf_symbols;
-            let _ = quant_data::sync::sync_fund_daily(db, tushare, etf_symbols, &sync_date_str, &sync_date_str, &format!("etf-t1-{}", sync_date_str)).await;
+            let _ = quant_data::sync::sync_fund_daily(
+                db,
+                tushare,
+                etf_symbols,
+                &sync_date_str,
+                &sync_date_str,
+                &format!("etf-t1-{}", sync_date_str),
+            )
+            .await;
 
             // Step 2: 验证日线数据已就绪 (实际查询DB确认, 非盲等)
             let mut retries = 0;
             let max_retries = 30; // 最多等5分钟 (30×10s)
             loop {
                 let count: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM market_stock_daily_bar_adj WHERE trade_date = $1"
-                ).bind(sync_date).fetch_one(db).await.unwrap_or((0,));
+                    "SELECT COUNT(*) FROM market_stock_daily_bar_adj WHERE trade_date = $1",
+                )
+                .bind(sync_date)
+                .fetch_one(db)
+                .await
+                .unwrap_or((0,));
                 if count.0 > 100 {
-                    info!("[scheduler] T+1 日线数据已就绪: {} 条 (等待{}s)", count.0, retries * 10);
+                    info!(
+                        "[scheduler] T+1 日线数据已就绪: {} 条 (等待{}s)",
+                        count.0,
+                        retries * 10
+                    );
                     break;
                 }
                 retries += 1;
                 if retries >= max_retries {
-                    warn!("[scheduler] T+1 日线数据等待超时({}s), 仅{}条, 因子回填可能不完整", retries*10, count.0);
+                    warn!(
+                        "[scheduler] T+1 日线数据等待超时({}s), 仅{}条, 因子回填可能不完整",
+                        retries * 10,
+                        count.0
+                    );
                     break;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -534,7 +676,9 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
             if retries < max_retries {
                 info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
                 let client = reqwest::Client::new();
-                let backfill_start = (sync_date - chrono::Duration::days(7)).format("%Y%m%d").to_string();
+                let backfill_start = (sync_date - chrono::Duration::days(7))
+                    .format("%Y%m%d")
+                    .to_string();
                 let _ = client
                     .post(format!("http://localhost:{}/api/v1/quant/factors/phase7-price-volume-backfill/background", port))
                     .json(&serde_json::json!({"start_date": backfill_start, "end_date": sync_date_str}))
@@ -608,7 +752,10 @@ async fn run_tick(db: &PgPool, tushare: &TushareClient, state: &Arc<Mutex<DailyS
 /// 检查是否需要触发 WFA 优化，如果需要则启动实验。
 /// 返回 Some(msg) 表示执行了操作，None 表示跳过。
 async fn check_and_trigger_wfa(
-    db: &PgPool, port: u16, quarter: &str, today: NaiveDate,
+    db: &PgPool,
+    port: u16,
+    quarter: &str,
+    today: NaiveDate,
 ) -> Result<Option<String>, String> {
     // 检查已有该季度的 WFA 参数
     let existing = sqlx::query_as::<_, (i64,)>(
@@ -664,7 +811,10 @@ async fn check_and_trigger_wfa(
     let client = reqwest::Client::new();
     let base = format!("http://localhost:{}", port);
     let resp = client
-        .post(format!("{}/api/v1/quant/optimizations/phase7-oos-walk-forward-discovery", base))
+        .post(format!(
+            "{}/api/v1/quant/optimizations/phase7-oos-walk-forward-discovery",
+            base
+        ))
         .json(&serde_json::json!({
             "data_version_id": &get_latest_data_version(db).await,
             "strategy_version_id": "phase7-professional-v1",
@@ -699,7 +849,9 @@ async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
     .map_err(|e| format!("exp: {e}"))?
     .map(|(id,)| id);
 
-    let Some(exp_id) = exp_id else { return Ok(()); };
+    let Some(exp_id) = exp_id else {
+        return Ok(());
+    };
 
     // 检查是否已提取过
     let already = sqlx::query_as::<_, (i64,)>(
@@ -730,7 +882,14 @@ async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
     let mut extracted = 0;
     for (task_id, window_idx) in &tasks {
         // 找 best_trial
-        let trial = sqlx::query_as::<_, (String, Option<serde_json::Value>, Option<rust_decimal::Decimal>)>(
+        let trial = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<serde_json::Value>,
+                Option<rust_decimal::Decimal>,
+            ),
+        >(
             "SELECT t.trial_id, t.parameters, t.score
              FROM optimization_trial t
              WHERE t.optimization_task_id = $1 AND t.status = 'completed'
@@ -753,10 +912,12 @@ async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
             .flatten()
             .and_then(|(v,)| v);
 
-            let test_start = wf.as_ref()
+            let test_start = wf
+                .as_ref()
                 .and_then(|w| w.get("test_start").and_then(|v| v.as_str()))
                 .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-            let test_end = wf.as_ref()
+            let test_end = wf
+                .as_ref()
                 .and_then(|w| w.get("test_end").and_then(|v| v.as_str()))
                 .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
 
@@ -777,7 +938,11 @@ async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
                 .await
                 .map_err(|e| format!("insert wfa: {e}"))?;
                 extracted += 1;
-                info!("[scheduler] WFA 参数已提取: window={} trial={}", window_idx, &trial_id[..32.min(trial_id.len())]);
+                info!(
+                    "[scheduler] WFA 参数已提取: window={} trial={}",
+                    window_idx,
+                    &trial_id[..32.min(trial_id.len())]
+                );
             }
         }
     }
@@ -790,7 +955,10 @@ async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
 
 /// 调仓前数据校验+自动修复。返回非空列表 = 校验/修复失败，拒绝调仓。
 async fn validate_pre_trade_data(
-    db: &PgPool, tushare: &TushareClient, today: NaiveDate, sc: &StrategyConfig,
+    db: &PgPool,
+    tushare: &TushareClient,
+    today: NaiveDate,
+    sc: &StrategyConfig,
 ) -> Vec<String> {
     let mut errors: Vec<String> = Vec::new();
     let today_str = today.format("%Y%m%d").to_string();
@@ -799,19 +967,45 @@ async fn validate_pre_trade_data(
     for symbol in &sc.etf_symbols {
         let stale = check_data_freshness(db, symbol, today, 1).await;
         if let Some(gap_td) = stale {
-            info!("[pre-trade] {} 数据落后{}交易日, 尝试自动同步...", symbol, gap_td);
+            info!(
+                "[pre-trade] {} 数据落后{}交易日, 尝试自动同步...",
+                symbol, gap_td
+            );
             let dv_id = format!("pre-trade-etf-{}-{}", symbol, today_str);
-            let n = quant_data::sync::sync_fund_daily(db, tushare, &[symbol.clone()], &today_str, &today_str, &dv_id).await.unwrap_or(0);
+            let n = quant_data::sync::sync_fund_daily(
+                db,
+                tushare,
+                &[symbol.clone()],
+                &today_str,
+                &today_str,
+                &dv_id,
+            )
+            .await
+            .unwrap_or(0);
             if n > 0 {
                 info!("[pre-trade] {} 同步: {} 条", symbol, n);
             } else {
-                let week_ago = (today - chrono::Duration::days(7)).format("%Y%m%d").to_string();
+                let week_ago = (today - chrono::Duration::days(7))
+                    .format("%Y%m%d")
+                    .to_string();
                 let dv2 = format!("pre-trade-etf-wk-{}-{}", symbol, today_str);
-                let n2 = quant_data::sync::sync_fund_daily(db, tushare, &[symbol.clone()], &week_ago, &today_str, &dv2).await.unwrap_or(0);
+                let n2 = quant_data::sync::sync_fund_daily(
+                    db,
+                    tushare,
+                    &[symbol.clone()],
+                    &week_ago,
+                    &today_str,
+                    &dv2,
+                )
+                .await
+                .unwrap_or(0);
                 if n2 > 0 {
                     info!("[pre-trade] {} 周回补: {} 条", symbol, n2);
                 } else {
-                    errors.push(format!("ETF {}: 数据落后{}交易日, 自动同步失败", symbol, gap_td));
+                    errors.push(format!(
+                        "ETF {}: 数据落后{}交易日, 自动同步失败",
+                        symbol, gap_td
+                    ));
                 }
             }
         }
@@ -821,10 +1015,24 @@ async fn validate_pre_trade_data(
     for probe in &["000001.SZ", "600000.SH"] {
         let stale = check_data_freshness(db, probe, today, 1).await;
         if let Some(gap_td) = stale {
-            info!("[pre-trade] A股({})落后{}交易日, 自动同步...", probe, gap_td);
+            info!(
+                "[pre-trade] A股({})落后{}交易日, 自动同步...",
+                probe, gap_td
+            );
             let dv_id = format!("pre-trade-stock-{}", today_str);
-            let recent_start = (today - chrono::Duration::days(7)).format("%Y%m%d").to_string();
-            match quant_data::sync::sync_daily_bars(db, tushare, &[probe.to_string()], &recent_start, &today_str, &dv_id).await {
+            let recent_start = (today - chrono::Duration::days(7))
+                .format("%Y%m%d")
+                .to_string();
+            match quant_data::sync::sync_daily_bars(
+                db,
+                tushare,
+                &[probe.to_string()],
+                &recent_start,
+                &today_str,
+                &dv_id,
+            )
+            .await
+            {
                 Ok(n) if n > 0 => {
                     info!("[pre-trade] A股日线同步: {} 条", n);
                     break; // 成功一个就够
@@ -837,30 +1045,48 @@ async fn validate_pre_trade_data(
     // 3. 因子数据 — 缺了自动触发回填计算
     let factor_combo = "phase7_price_volume_expanded_v1";
     if let Some(gap_td) = check_factor_freshness(db, factor_combo, today, 2).await {
-        info!("[pre-trade] 因子({})落后{}交易日, 自动触发回填...", factor_combo, gap_td);
+        info!(
+            "[pre-trade] 因子({})落后{}交易日, 自动触发回填...",
+            factor_combo, gap_td
+        );
         let client = reqwest::Client::new();
-        let backfill_start = (today - chrono::Duration::days(30)).format("%Y%m%d").to_string();
+        let backfill_start = (today - chrono::Duration::days(30))
+            .format("%Y%m%d")
+            .to_string();
         let today_str_clone = today_str.clone();
-        let api_base = format!("http://localhost:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into()));
+        let api_base = format!(
+            "http://localhost:{}",
+            std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+        );
         let trigger_ok = client
-            .post(format!("{}/api/v1/quant/factors/phase7-price-volume-backfill/background", api_base))
+            .post(format!(
+                "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
+                api_base
+            ))
             .json(&serde_json::json!({"start_date": backfill_start, "end_date": today_str_clone}))
             .timeout(std::time::Duration::from_secs(10))
-            .send().await
+            .send()
+            .await
             .map(|r| r.status().is_success())
             .unwrap_or(false);
         if trigger_ok {
             // 轮询等待因子计算完成
             for retry in 0..20 {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if check_factor_freshness(db, factor_combo, today, 2).await.is_none() {
-                    info!("[pre-trade] 因子回填完成 (等待{}s)", (retry+1)*3);
+                if check_factor_freshness(db, factor_combo, today, 2)
+                    .await
+                    .is_none()
+                {
+                    info!("[pre-trade] 因子回填完成 (等待{}s)", (retry + 1) * 3);
                     break;
                 }
             }
             // 再次检查
             if let Some(g) = check_factor_freshness(db, factor_combo, today, 2).await {
-                errors.push(format!("因子({}): 自动回填后仍落后{}交易日, 请检查底层数据", factor_combo, g));
+                errors.push(format!(
+                    "因子({}): 自动回填后仍落后{}交易日, 请检查底层数据",
+                    factor_combo, g
+                ));
             }
         } else {
             errors.push(format!("因子({}): 自动回填触发失败", factor_combo));
@@ -871,30 +1097,56 @@ async fn validate_pre_trade_data(
 }
 
 /// 检查单个 symbol 的数据新鲜度。返回 Some(落后交易日数) 表示需要同步。
-async fn check_data_freshness(db: &PgPool, symbol: &str, today: NaiveDate, max_gap: i64) -> Option<i64> {
-    let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
-        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = $1"
-    ).bind(symbol).fetch_optional(db).await.ok().flatten();
+async fn check_data_freshness(
+    db: &PgPool,
+    symbol: &str,
+    today: NaiveDate,
+    max_gap: i64,
+) -> Option<i64> {
+    let max_row: Option<(chrono::NaiveDate,)> =
+        sqlx::query_as("SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = $1")
+            .bind(symbol)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
     if let Some((max_dt,)) = max_row {
         let gap: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
         ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((999,));
-        if gap.0 > max_gap { Some(gap.0) } else { None }
+        if gap.0 > max_gap {
+            Some(gap.0)
+        } else {
+            None
+        }
     } else {
         Some(999) // 完全无数据
     }
 }
 
 /// 检查因子数据新鲜度
-async fn check_factor_freshness(db: &PgPool, combo: &str, today: NaiveDate, max_gap: i64) -> Option<i64> {
-    let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
-        "SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name = $1"
-    ).bind(combo).fetch_optional(db).await.ok().flatten();
+async fn check_factor_freshness(
+    db: &PgPool,
+    combo: &str,
+    today: NaiveDate,
+    max_gap: i64,
+) -> Option<i64> {
+    let max_row: Option<(chrono::NaiveDate,)> =
+        sqlx::query_as("SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name = $1")
+            .bind(combo)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
     if let Some((max_dt,)) = max_row {
         let gap: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
         ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((999,));
-        if gap.0 > max_gap { Some(gap.0) } else { None }
+        if gap.0 > max_gap {
+            Some(gap.0)
+        } else {
+            None
+        }
     } else {
         None // 因子表为空不阻止调仓（可能是首次运行）
     }
@@ -912,7 +1164,12 @@ async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
 }
 
 /// 14:45 调仓前获取当日行情 + 停牌/涨跌停数据
-async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: NaiveDate, sc: &StrategyConfig) -> Result<(), String> {
+async fn sync_daily_data_for_today(
+    db: &PgPool,
+    tushare: &TushareClient,
+    date: NaiveDate,
+    sc: &StrategyConfig,
+) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
     let empty: Vec<String> = vec![];
 
@@ -921,38 +1178,97 @@ async fn sync_daily_data_for_today(db: &PgPool, tushare: &TushareClient, date: N
 
     // A股日线 (直接调用, symbols空→函数内自动获取全量)
     let dv_id = format!("dv-{}", date_str);
-    let _ = quant_data::sync::sync_daily_bars(db, tushare, &empty, &date_str, &date_str, &dv_id).await;
+    let _ =
+        quant_data::sync::sync_daily_bars(db, tushare, &empty, &date_str, &date_str, &dv_id).await;
 
     // 指数日线
     let index_codes = vec!["000300.SH".to_string()];
-    let _ = quant_data::sync::sync_index_daily(db, tushare, &index_codes, &date_str, &date_str, &format!("idx-{}", date_str)).await;
+    let _ = quant_data::sync::sync_index_daily(
+        db,
+        tushare,
+        &index_codes,
+        &date_str,
+        &date_str,
+        &format!("idx-{}", date_str),
+    )
+    .await;
 
     // ETF 日线 (从策略配置读取)
-    let _ = quant_data::sync::sync_fund_daily(db, tushare, &sc.etf_symbols, &date_str, &date_str, &format!("etf-{}", date_str)).await;
+    let _ = quant_data::sync::sync_fund_daily(
+        db,
+        tushare,
+        &sc.etf_symbols,
+        &date_str,
+        &date_str,
+        &format!("etf-{}", date_str),
+    )
+    .await;
 
     info!("[scheduler] 当日行情+停牌同步完成 ({})", date_str);
     Ok(())
 }
 
 /// 16:00 日终数据同步 (直接调用内部函数)
-async fn sync_eod_data(db: &PgPool, tushare: &TushareClient, date: NaiveDate) -> Result<(), String> {
+async fn sync_eod_data(
+    db: &PgPool,
+    tushare: &TushareClient,
+    date: NaiveDate,
+) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
     let sc = load_strategy_config(db, "v19").await;
     let all_stocks: Vec<String> = sqlx::query_scalar(
-        "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
-    ).fetch_all(db).await.unwrap_or_default();
+        "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
 
     // ── 当日日线 + ETF日线（收盘后通常已可获取）──
-    let _ = quant_data::sync::sync_daily_bars(db, tushare, &all_stocks, &date_str, &date_str, &format!("dv-eod-{}", date_str)).await;
-    let _ = quant_data::sync::sync_fund_daily(db, tushare, &sc.etf_symbols, &date_str, &date_str, &format!("etf-eod-{}", date_str)).await;
+    let _ = quant_data::sync::sync_daily_bars(
+        db,
+        tushare,
+        &all_stocks,
+        &date_str,
+        &date_str,
+        &format!("dv-eod-{}", date_str),
+    )
+    .await;
+    let _ = quant_data::sync::sync_fund_daily(
+        db,
+        tushare,
+        &sc.etf_symbols,
+        &date_str,
+        &date_str,
+        &format!("etf-eod-{}", date_str),
+    )
+    .await;
 
     // 日线基础指标
-    let _ = quant_data::sync::sync_daily_basic(db, tushare, &all_stocks, &date_str, &date_str, &format!("dv-basic-eod-{}", date_str)).await;
+    let _ = quant_data::sync::sync_daily_basic(
+        db,
+        tushare,
+        &all_stocks,
+        &date_str,
+        &date_str,
+        &format!("dv-basic-eod-{}", date_str),
+    )
+    .await;
 
     // 复权因子
-    let _ = quant_data::sync::sync_adj_factor(db, tushare, &all_stocks, &date_str, &date_str, &format!("dv-adj-eod-{}", date_str)).await;
+    let _ = quant_data::sync::sync_adj_factor(
+        db,
+        tushare,
+        &all_stocks,
+        &date_str,
+        &date_str,
+        &format!("dv-adj-eod-{}", date_str),
+    )
+    .await;
 
-    info!("[scheduler] 16:00 EOD 同步 (当日日线+ETF+基础指标+复权) ({})", date_str);
+    info!(
+        "[scheduler] 16:00 EOD 同步 (当日日线+ETF+基础指标+复权) ({})",
+        date_str
+    );
 
     // ── 涨跌停数据同步 ──
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -981,14 +1297,21 @@ async fn run_data_quality_check(db: &PgPool) {
     // 计算 A 股日线的交易日 gap
     let mut gaps: Vec<String> = Vec::new();
     let stock_max: Option<(chrono::NaiveDate,)> = sqlx::query_as(
-        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol LIKE '6%'"
-    ).fetch_optional(db).await.ok().flatten();
+        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol LIKE '6%'",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
     if let Some((max_dt,)) = stock_max {
         let trading_days_behind: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
         ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
         if trading_days_behind.0 > 1 {
-            gaps.push(format!("A股日线: 最新={}, 落后{}个交易日", max_dt, trading_days_behind.0));
+            gaps.push(format!(
+                "A股日线: 最新={}, 落后{}个交易日",
+                max_dt, trading_days_behind.0
+            ));
         }
     }
 
@@ -1002,14 +1325,23 @@ async fn run_data_quality_check(db: &PgPool) {
     if !etf_symbols.is_empty() {
         for symbol in &etf_symbols {
             let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
-                "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = $1"
-            ).bind(symbol).fetch_optional(db).await.ok().flatten();
+                "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = $1",
+            )
+            .bind(symbol)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
             if let Some((max_dt,)) = max_row {
                 let trading_gap: (i64,) = sqlx::query_as(
                     "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
                 ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
-                if trading_gap.0 > 1 { // ETF T+1，允许落后1个交易日
-                    gaps.push(format!("ETF {}: 最新={}, 落后{}个交易日", symbol, max_dt, trading_gap.0));
+                if trading_gap.0 > 1 {
+                    // ETF T+1，允许落后1个交易日
+                    gaps.push(format!(
+                        "ETF {}: 最新={}, 落后{}个交易日",
+                        symbol, max_dt, trading_gap.0
+                    ));
                 }
             } else {
                 gaps.push(format!("ETF {}: 无数据", symbol));
@@ -1023,13 +1355,16 @@ async fn run_data_quality_check(db: &PgPool) {
         ("ML预测", "model_prediction", 5),
     ];
     for (name, table, max_calendar_gap) in &other_checks {
-        let max_row: Option<(String,)> = sqlx::query_as(
-            &format!("SELECT MAX(trade_date)::text FROM {}", table)
-        ).fetch_optional(db).await.ok().flatten();
+        let max_row: Option<(String,)> =
+            sqlx::query_as(&format!("SELECT MAX(trade_date)::text FROM {}", table))
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
         if let Some((max_d,)) = max_row {
             if let (Ok(max_dt), Ok(today_dt)) = (
                 NaiveDate::parse_from_str(&max_d, "%Y-%m-%d"),
-                NaiveDate::parse_from_str(&today.format("%Y-%m-%d").to_string(), "%Y-%m-%d")
+                NaiveDate::parse_from_str(&today.format("%Y-%m-%d").to_string(), "%Y-%m-%d"),
             ) {
                 let gap = (today_dt - max_dt).num_days();
                 if gap > *max_calendar_gap {
@@ -1047,19 +1382,26 @@ async fn run_data_quality_check(db: &PgPool) {
         for (signal_source, _account_id) in &signal_sources {
             let required: Vec<&str> = match signal_source.as_str() {
                 "factor" => vec!["A股日线", "ETF日线", "因子(pv)", "CSI300"],
-                "prediction" | "prediction_blend" => vec!["A股日线", "ETF日线", "因子(pv)", "CSI300", "ML预测"],
+                "prediction" | "prediction_blend" => {
+                    vec!["A股日线", "ETF日线", "因子(pv)", "CSI300", "ML预测"]
+                }
                 _ => vec!["A股日线", "ETF日线", "因子(pv)", "CSI300"],
             };
             for item in &required {
                 let covered = match *item {
-                    "A股日线" | "ETF日线" | "CSI300" | "停牌" | "涨跌停" | "复权因子" => true, // scheduler 9:00/16:00 内置
-                    "因子(pv)" => true,  // factor_backfill_daily 任务 + T+1
+                    "A股日线" | "ETF日线" | "CSI300" | "停牌" | "涨跌停" | "复权因子" => {
+                        true
+                    } // scheduler 9:00/16:00 内置
+                    "因子(pv)" => true, // factor_backfill_daily 任务 + T+1
                     "ML预测" => true,   // scheduler 16:00 EOD (60天检查)
                     "权益曲线" => true, // equity_curve_monthly 任务
                     _ => false,
                 };
                 if !covered {
-                    gaps.push(format!("策略依赖缺失: signal={} 需要 {} 但无自动同步任务", signal_source, item));
+                    gaps.push(format!(
+                        "策略依赖缺失: signal={} 需要 {} 但无自动同步任务",
+                        signal_source, item
+                    ));
                 }
             }
         }
@@ -1074,7 +1416,11 @@ async fn run_data_quality_check(db: &PgPool) {
     }
 
     if !gaps.is_empty() {
-        let msg = format!("[数据质量] 发现 {} 个缺口:\n{}", gaps.len(), gaps.join("\n"));
+        let msg = format!(
+            "[数据质量] 发现 {} 个缺口:\n{}",
+            gaps.len(),
+            gaps.join("\n")
+        );
         warn!("{}", msg);
         send_quality_alert(db, &gaps).await;
     } else {
@@ -1099,8 +1445,11 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
 
     // 读取所有启用任务的 CRON（格式: "分 时 日 月 周"）
     let tasks: Vec<(String, String)> = sqlx::query_as(
-        "SELECT task_name, schedule_cron FROM scheduled_task_config WHERE enabled = true"
-    ).fetch_all(db).await.unwrap_or_default();
+        "SELECT task_name, schedule_cron FROM scheduled_task_config WHERE enabled = true",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
 
     // 简单解析 CRON 的时和分字段
     let mut task_times: Vec<(String, u32, u32)> = Vec::new(); // (name, hour, minute)
@@ -1119,7 +1468,7 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
 
     // 内置 scheduler 同步完成时间（北京时间）
     // T+1 补同步: 9:00-9:10  |  EOD 同步: 16:00-16:10
-    let t1_complete = (9, 10);  // 9:10 BJT
+    let t1_complete = (9, 10); // 9:10 BJT
     let eod_complete = (16, 10); // 16:10 BJT
 
     // 检查 factor_backfill_daily 的 CRON 时间
@@ -1131,14 +1480,16 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
             if time_minutes < eod_min && time_minutes < t1_complete.0 * 60 {
                 issues.push(format!(
                     "factor_backfill_daily: CRON {}:{:02} (BJ) 早于日线同步完成 (16:10),
-                     因子计算可能缺少当日日线数据", hour, min
+                     因子计算可能缺少当日日线数据",
+                    hour, min
                 ));
             }
         }
 
         if name == "equity_curve_monthly" {
             // 权益曲线依赖因子数据，应在 factor_backfill_daily 之后
-            let factor_min = task_times.iter()
+            let factor_min = task_times
+                .iter()
                 .find(|(n, _, _)| n == "factor_backfill_daily")
                 .map(|(_, h, m)| h * 60 + m);
             if let Some(fm) = factor_min {
@@ -1159,26 +1510,41 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
 async fn sync_limit_with_retry(db: &PgPool, tushare: &TushareClient, date_str: &str) -> bool {
     let d = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d").unwrap();
     let _ = sqlx::query("DELETE FROM market_stock_limit WHERE trade_date = $1")
-        .bind(d).execute(db).await;
+        .bind(d)
+        .execute(db)
+        .await;
 
     // 第一次尝试
     match quant_data::sync::sync_limit_list(db, tushare, date_str).await {
-        Ok(n) => { info!("[scheduler] 涨跌停同步成功 ({} 条)", n); return true; }
+        Ok(n) => {
+            info!("[scheduler] 涨跌停同步成功 ({} 条)", n);
+            return true;
+        }
         Err(e) => warn!("[scheduler] 涨跌停首次失败: {}, 65秒后重试...", e),
     }
 
     // 重试
     tokio::time::sleep(tokio::time::Duration::from_secs(65)).await;
     match quant_data::sync::sync_limit_list(db, tushare, date_str).await {
-        Ok(n) => { info!("[scheduler] 涨跌停重试成功 ({} 条)", n); return true; }
-        Err(e) => { warn!("[scheduler] 涨跌停重试仍失败: {}", e); false }
+        Ok(n) => {
+            info!("[scheduler] 涨跌停重试成功 ({} 条)", n);
+            return true;
+        }
+        Err(e) => {
+            warn!("[scheduler] 涨跌停重试仍失败: {}", e);
+            false
+        }
     }
 }
 
 /// 确保ML预测数据覆盖到当前日期
 /// 策略: gap≤1天→正常; gap>1天→触发后台训练生成; 无法生成→降级纯因子
 /// ML预测数据检查+补齐 (60天间隔, ML训练通过内部HTTP触发——真异步长任务)
-async fn ensure_prediction_coverage(db: &PgPool, _tushare: &TushareClient, date: chrono::NaiveDate) -> bool {
+async fn ensure_prediction_coverage(
+    db: &PgPool,
+    _tushare: &TushareClient,
+    date: chrono::NaiveDate,
+) -> bool {
     let latest_training: Option<(chrono::NaiveDate,)> = sqlx::query_as(
         "SELECT MAX(training_end_date) FROM prediction_set WHERE status = 'ready' AND training_end_date IS NOT NULL"
     ).fetch_optional(db).await.ok().flatten();
@@ -1186,10 +1552,16 @@ async fn ensure_prediction_coverage(db: &PgPool, _tushare: &TushareClient, date:
     if let Some((last_train,)) = latest_training {
         let days_since = (date - last_train).num_days();
         if days_since < 60 {
-            info!("[scheduler] ML训练跳过 (最新训练={}, 距今{}天 < 60天)", last_train, days_since);
+            info!(
+                "[scheduler] ML训练跳过 (最新训练={}, 距今{}天 < 60天)",
+                last_train, days_since
+            );
             return check_prediction_available(db, date).await;
         }
-        info!("[scheduler] ML训练触发 (最新训练={}, 距今{}天 >= 60天)", last_train, days_since);
+        info!(
+            "[scheduler] ML训练触发 (最新训练={}, 距今{}天 >= 60天)",
+            last_train, days_since
+        );
     } else {
         info!("[scheduler] 首次ML训练");
     }
@@ -1202,7 +1574,10 @@ async fn ensure_prediction_coverage(db: &PgPool, _tushare: &TushareClient, date:
 
     // ML训练是复杂异步任务, 通过内部HTTP + tokio::spawn触发, 不阻塞scheduler
     info!("[scheduler] 🚀 触发ML预测训练 (后台异步)");
-    let url = format!("http://localhost:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into()));
+    let url = format!(
+        "http://localhost:{}",
+        std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+    );
     let payload = serde_json::json!({
         "model_code": "nlqr", "model_version": "1.0.0",
         "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
@@ -1224,8 +1599,13 @@ async fn ensure_prediction_coverage(db: &PgPool, _tushare: &TushareClient, date:
     let db_clone = db.clone();
     tokio::spawn(async move {
         let _ = reqwest::Client::new()
-            .post(format!("{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", url))
-            .json(&payload).send().await;
+            .post(format!(
+                "{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker",
+                url
+            ))
+            .json(&payload)
+            .send()
+            .await;
         // 训练完成后重建全市场预测集（合并 ETF + A 股数据）
         if let Err(e) = rebuild_full_universe_prediction_set(&db_clone).await {
             warn!("[scheduler] 全市场预测集重建失败: {}", e);
@@ -1254,8 +1634,11 @@ pub async fn rebuild_full_universe_prediction_set(db: &PgPool) -> Result<String,
     let training_end = pred_start - chrono::Duration::days(1);
 
     // 新预测集 ID
-    let pred_set_id = format!("pred-full-1.0.0-nlq-wf-{}-{}",
-        pred_start.format("%Y%m%d"), pred_end.format("%Y%m%d"));
+    let pred_set_id = format!(
+        "pred-full-1.0.0-nlq-wf-{}-{}",
+        pred_start.format("%Y%m%d"),
+        pred_end.format("%Y%m%d")
+    );
 
     // 创建/更新 prediction_set（PIT 合规）
     sqlx::query(
@@ -1273,8 +1656,13 @@ pub async fn rebuild_full_universe_prediction_set(db: &PgPool) -> Result<String,
         "SELECT prediction_set_id FROM prediction_set
          WHERE status = 'ready' AND training_end_date IS NOT NULL
            AND training_end_date < $1 AND start_date <= $1 AND end_date >= $1
-         ORDER BY training_end_date DESC LIMIT 1"
-    ).bind(today).fetch_optional(db).await.ok().flatten();
+         ORDER BY training_end_date DESC LIMIT 1",
+    )
+    .bind(today)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
 
     if let Some(ref src) = etf_src {
         sqlx::query(
@@ -1292,8 +1680,12 @@ pub async fn rebuild_full_universe_prediction_set(db: &PgPool) -> Result<String,
          WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
          GROUP BY prediction_set_id
          HAVING COUNT(DISTINCT symbol) >= 20
-         ORDER BY MAX(trade_date) DESC LIMIT 1"
-    ).fetch_optional(db).await.ok().flatten();
+         ORDER BY MAX(trade_date) DESC LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
 
     if let Some(ref src) = stock_src {
         sqlx::query(
@@ -1306,10 +1698,19 @@ pub async fn rebuild_full_universe_prediction_set(db: &PgPool) -> Result<String,
     }
 
     let symbols: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = $1"
-    ).bind(&pred_set_id).fetch_optional(db).await.ok().flatten().unwrap_or(0);
+        "SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = $1",
+    )
+    .bind(&pred_set_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0);
 
-    info!("[scheduler] 全市场预测集已重建: {} ({} 符号, PIT={})", pred_set_id, symbols, training_end);
+    info!(
+        "[scheduler] 全市场预测集已重建: {} ({} 符号, PIT={})",
+        pred_set_id, symbols, training_end
+    );
     Ok(pred_set_id)
 }
 
@@ -1320,13 +1721,26 @@ async fn verify_training_dependencies(db: &PgPool, date: chrono::NaiveDate) -> b
 
     // A股日线
     let daily_ok: bool = sqlx::query_as::<_, (chrono::NaiveDate,)>(
-        "SELECT MAX(trade_date) FROM market_stock_daily_bar WHERE trade_date >= $1"
-    ).bind(threshold).fetch_optional(db).await.ok().flatten().map(|(d,)| d >= threshold).unwrap_or(false);
+        "SELECT MAX(trade_date) FROM market_stock_daily_bar WHERE trade_date >= $1",
+    )
+    .bind(threshold)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .map(|(d,)| d >= threshold)
+    .unwrap_or(false);
 
     // 复权因子 (30天阈值, 因为Tushare月更)
     let adj_ok: bool = sqlx::query_as::<_, (chrono::NaiveDate,)>(
-        "SELECT MAX(trade_date) FROM market_adjustment_factor"
-    ).fetch_optional(db).await.ok().flatten().map(|(d,)| (today - d).num_days() < 60).unwrap_or(false);
+        "SELECT MAX(trade_date) FROM market_adjustment_factor",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .map(|(d,)| (today - d).num_days() < 60)
+    .unwrap_or(false);
 
     // 因子值 (pv combo)
     let factor_ok: bool = sqlx::query_as::<_, (chrono::NaiveDate,)>(
@@ -1334,7 +1748,13 @@ async fn verify_training_dependencies(db: &PgPool, date: chrono::NaiveDate) -> b
     ).bind(threshold).fetch_optional(db).await.ok().flatten().map(|(d,)| d >= threshold).unwrap_or(false);
 
     let all_ok = daily_ok && adj_ok && factor_ok;
-    info!("[scheduler] ML训练依赖检查: daily={} adj={} factor={} → {}", daily_ok, adj_ok, factor_ok, if all_ok {"OK"} else {"MISSING"});
+    info!(
+        "[scheduler] ML训练依赖检查: daily={} adj={} factor={} → {}",
+        daily_ok,
+        adj_ok,
+        factor_ok,
+        if all_ok { "OK" } else { "MISSING" }
+    );
     all_ok
 }
 
@@ -1360,10 +1780,16 @@ async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
     )
     .fetch_all(db).await.unwrap_or_default();
 
-    if accounts.is_empty() { return; }
+    if accounts.is_empty() {
+        return;
+    }
 
     let gap_text = gaps.join("\n- ");
-    let msg = format!("## ⚠️ 数据质量告警\n\n发现 {} 个数据缺口:\n- {}\n\n请检查数据同步状态。", gaps.len(), gap_text);
+    let msg = format!(
+        "## ⚠️ 数据质量告警\n\n发现 {} 个数据缺口:\n- {}\n\n请检查数据同步状态。",
+        gaps.len(),
+        gap_text
+    );
 
     for (_name, webhook_url) in &accounts {
         if let Some(url) = webhook_url {
@@ -1371,17 +1797,18 @@ async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
                 "msgtype": "markdown",
                 "markdown": {"title": "数据质量告警", "text": msg}
             });
-            let _ = reqwest::Client::new()
-                .post(url)
-                .json(&payload)
-                .send().await;
+            let _ = reqwest::Client::new().post(url).json(&payload).send().await;
         }
     }
 }
 
 /// 为所有活跃模拟账号生成交易信号（使用 LW-MVO 自动发现权重）。
 async fn generate_paper_signals_for_all(
-    db: &PgPool, mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>, port: u16, date: NaiveDate, sc: &StrategyConfig,
+    db: &PgPool,
+    mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
+    port: u16,
+    date: NaiveDate,
+    sc: &StrategyConfig,
     tushare: &TushareClient,
 ) -> Result<(), String> {
     let accounts = sqlx::query_as::<_, (String, String, bool, f64, String, Option<String>)>(
@@ -1391,28 +1818,53 @@ async fn generate_paper_signals_for_all(
     .fetch_all(db).await
     .map_err(|e| format!("account query: {}", e))?;
 
-    if accounts.is_empty() { return Ok(()); }
+    if accounts.is_empty() {
+        return Ok(());
+    }
 
-    for (account_id, name, leverage_enabled, leverage_multiplier, leverage_mode, strategy_version_id) in &accounts {
+    for (
+        account_id,
+        name,
+        leverage_enabled,
+        leverage_multiplier,
+        leverage_mode,
+        strategy_version_id,
+    ) in &accounts
+    {
         let leverage_enabled = *leverage_enabled;
         let leverage_multiplier = *leverage_multiplier;
         let leverage_mode = leverage_mode.as_str();
         // 账号挂策略(strategy_version_id) → 加载该策略配置；A股选股方式从策略读，不再挂账号
-        let acct_sc = load_strategy_config(db, strategy_version_id.as_deref().unwrap_or(&sc.strategy_id)).await;
+        let acct_sc = load_strategy_config(
+            db,
+            strategy_version_id.as_deref().unwrap_or(&sc.strategy_id),
+        )
+        .await;
         let sc = &acct_sc;
         let signal_source = sc.signal_source.as_str();
-        info!("[paper] {} ({}) strategy={} leverage={}x mode={} signal={}", name, account_id, sc.strategy_id, leverage_multiplier, leverage_mode, signal_source);
+        info!(
+            "[paper] {} ({}) strategy={} leverage={}x mode={} signal={}",
+            name, account_id, sc.strategy_id, leverage_multiplier, leverage_mode, signal_source
+        );
 
         // 检查今日是否已有交易
         let done: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM paper_order
              WHERE paper_account_id = $1 AND DATE(created_at) = $2",
-        ).bind(account_id).bind(date).fetch_one(db).await
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_one(db)
+        .await
         .map_err(|e| format!("count: {}", e))?;
 
-        if done.0 > 0 { continue; }
+        if done.0 > 0 {
+            continue;
+        }
 
-        let start = (date - chrono::Duration::days(30)).format("%Y%m%d").to_string();
+        let start = (date - chrono::Duration::days(30))
+            .format("%Y%m%d")
+            .to_string();
         let end = date.format("%Y%m%d").to_string();
         let client = reqwest::Client::new();
         let base = format!("http://localhost:{}", port);
@@ -1420,49 +1872,90 @@ async fn generate_paper_signals_for_all(
         // 获取当前 WFA 最优参数（如有），合并到默认参数
         let wfa_params = get_current_wfa_params(db, date).await.unwrap_or_default();
 
-        let combo_name = wfa_params.get("combo_name")
+        let combo_name = wfa_params
+            .get("combo_name")
             .and_then(|v| v.as_str())
             .unwrap_or(sc.combo_name.as_str());
-        let top_n = wfa_params.get("top_n")
-            .and_then(|v| v.as_u64()).unwrap_or(sc.top_n as u64) as usize;
-        let portfolio_method = wfa_params.get("portfolio_method")
-            .and_then(|v| v.as_str()).unwrap_or("heuristic");
-        let score_direction = wfa_params.get("score_direction")
-            .and_then(|v| v.as_str()).unwrap_or("descending");
-        let max_pos = wfa_params.get("max_position_pct")
-            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.10);
-        let skip_top = wfa_params.get("skip_top_pct")
-            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let max_exposure = wfa_params.get("max_gross_exposure")
-            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.95);
-        let stop_loss = wfa_params.get("stop_loss_pct")
-            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
-        let event_gate_combo = wfa_params.get("event_gate_combo_name")
+        let top_n = wfa_params
+            .get("top_n")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(sc.top_n as u64) as usize;
+        let portfolio_method = wfa_params
+            .get("portfolio_method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("heuristic");
+        let score_direction = wfa_params
+            .get("score_direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("descending");
+        let max_pos = wfa_params
+            .get("max_position_pct")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.10);
+        let skip_top = wfa_params
+            .get("skip_top_pct")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let max_exposure = wfa_params
+            .get("max_gross_exposure")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.95);
+        let stop_loss = wfa_params
+            .get("stop_loss_pct")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok());
+        let event_gate_combo = wfa_params
+            .get("event_gate_combo_name")
             .and_then(|v| v.as_str());
-        let event_gate_mode = wfa_params.get("event_gate_mode")
+        let event_gate_mode = wfa_params.get("event_gate_mode").and_then(|v| v.as_str());
+        let event_gate_score_dir = wfa_params
+            .get("event_gate_score_direction")
             .and_then(|v| v.as_str());
-        let event_gate_score_dir = wfa_params.get("event_gate_score_direction")
+        let risk_filter = wfa_params
+            .get("candidate_risk_filter")
             .and_then(|v| v.as_str());
-        let risk_filter = wfa_params.get("candidate_risk_filter")
-            .and_then(|v| v.as_str());
-        let max_corr = wfa_params.get("max_pairwise_correlation")
-            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
-        let rebalance_freq = wfa_params.get("rebalance")
-            .and_then(|v| v.as_str()).unwrap_or("monthly");
+        let max_corr = wfa_params
+            .get("max_pairwise_correlation")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok());
+        let rebalance_freq = wfa_params
+            .get("rebalance")
+            .and_then(|v| v.as_str())
+            .unwrap_or("monthly");
         // WFA 高级风控参数
-        let vol_control = wfa_params.get("portfolio_volatility_control").and_then(|v| v.as_str());
-        let dd_control = wfa_params.get("portfolio_drawdown_control").and_then(|v| v.as_str());
-        let risk_contribution = wfa_params.get("risk_contribution_control").and_then(|v| v.as_str());
-        let partial_rebalance = wfa_params.get("partial_rebalance_ratio")
-            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
-        let risk_budget_days = wfa_params.get("risk_budget_lookback_days")
+        let vol_control = wfa_params
+            .get("portfolio_volatility_control")
+            .and_then(|v| v.as_str());
+        let dd_control = wfa_params
+            .get("portfolio_drawdown_control")
+            .and_then(|v| v.as_str());
+        let risk_contribution = wfa_params
+            .get("risk_contribution_control")
+            .and_then(|v| v.as_str());
+        let partial_rebalance = wfa_params
+            .get("partial_rebalance_ratio")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok());
+        let risk_budget_days = wfa_params
+            .get("risk_budget_lookback_days")
             .and_then(|v| v.as_u64());
-        let event_gate_min = wfa_params.get("event_gate_min_score")
-            .and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+        let event_gate_min = wfa_params
+            .get("event_gate_min_score")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok());
 
-        let wfa_used = wfa_params.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+        let wfa_used = wfa_params
+            .as_object()
+            .map(|o| !o.is_empty())
+            .unwrap_or(false);
         if wfa_used {
-            info!("[paper] WFA params: combo={} top_n={} method={}", combo_name, top_n, portfolio_method);
+            info!(
+                "[paper] WFA params: combo={} top_n={} method={}",
+                combo_name, top_n, portfolio_method
+            );
         }
 
         let mut body = serde_json::json!({
@@ -1476,18 +1969,42 @@ async fn generate_paper_signals_for_all(
             "universe_profile": "main_board_non_st",
             "start_date": start, "end_date": end
         });
-        if let Some(sl) = stop_loss { body["stop_loss_pct"] = serde_json::json!(sl); }
-        if let Some(eg) = event_gate_combo { body["event_gate_combo_name"] = serde_json::json!(eg); }
-        if let Some(em) = event_gate_mode { body["event_gate_mode"] = serde_json::json!(em); }
-        if let Some(es) = event_gate_score_dir { body["event_gate_score_direction"] = serde_json::json!(es); }
-        if let Some(rf) = risk_filter { body["candidate_risk_filter"] = serde_json::json!(rf); }
-        if let Some(mc) = max_corr { body["max_pairwise_correlation"] = serde_json::json!(mc); }
-        if let Some(vc) = vol_control { body["portfolio_volatility_control"] = serde_json::json!(vc); }
-        if let Some(dc) = dd_control { body["portfolio_drawdown_control"] = serde_json::json!(dc); }
-        if let Some(rc) = risk_contribution { body["risk_contribution_control"] = serde_json::json!(rc); }
-        if let Some(pr) = partial_rebalance { body["partial_rebalance_ratio"] = serde_json::json!(pr); }
-        if let Some(rbd) = risk_budget_days { body["risk_budget_lookback_days"] = serde_json::json!(rbd); }
-        if let Some(egm) = event_gate_min { body["event_gate_min_score"] = serde_json::json!(egm); }
+        if let Some(sl) = stop_loss {
+            body["stop_loss_pct"] = serde_json::json!(sl);
+        }
+        if let Some(eg) = event_gate_combo {
+            body["event_gate_combo_name"] = serde_json::json!(eg);
+        }
+        if let Some(em) = event_gate_mode {
+            body["event_gate_mode"] = serde_json::json!(em);
+        }
+        if let Some(es) = event_gate_score_dir {
+            body["event_gate_score_direction"] = serde_json::json!(es);
+        }
+        if let Some(rf) = risk_filter {
+            body["candidate_risk_filter"] = serde_json::json!(rf);
+        }
+        if let Some(mc) = max_corr {
+            body["max_pairwise_correlation"] = serde_json::json!(mc);
+        }
+        if let Some(vc) = vol_control {
+            body["portfolio_volatility_control"] = serde_json::json!(vc);
+        }
+        if let Some(dc) = dd_control {
+            body["portfolio_drawdown_control"] = serde_json::json!(dc);
+        }
+        if let Some(rc) = risk_contribution {
+            body["risk_contribution_control"] = serde_json::json!(rc);
+        }
+        if let Some(pr) = partial_rebalance {
+            body["partial_rebalance_ratio"] = serde_json::json!(pr);
+        }
+        if let Some(rbd) = risk_budget_days {
+            body["risk_budget_lookback_days"] = serde_json::json!(rbd);
+        }
+        if let Some(egm) = event_gate_min {
+            body["event_gate_min_score"] = serde_json::json!(egm);
+        }
 
         // 信号源路由: factor(默认) / prediction(ML) / prediction_blend(v16: 因子+ML混合)
         let is_prediction = signal_source == "prediction";
@@ -1499,27 +2016,35 @@ async fn generate_paper_signals_for_all(
                 info!("[paper] 策略指定 prediction set: {}", pid);
                 Some(pid.clone())
             } else {
-            // PIT合规: 优先选包含A股个股预测的模型（v19策略需要），其次选最近训练的
-            let best: Option<(String,)> = sqlx::query_as(
-                "SELECT ps.prediction_set_id FROM prediction_set ps
+                // PIT合规: 优先选包含A股个股预测的模型（v19策略需要），其次选最近训练的
+                let best: Option<(String,)> = sqlx::query_as(
+                    "SELECT ps.prediction_set_id FROM prediction_set ps
                  WHERE ps.status = 'ready'
                    AND ps.training_end_date IS NOT NULL
                    AND ps.training_end_date < $1           -- PIT: 训练数据必须在预测日期之前
                    AND ps.start_date <= $1 AND ps.end_date >= $1  -- 预测覆盖日期
                  ORDER BY ps.training_end_date DESC
-                 LIMIT 1"
-            ).bind(date).fetch_optional(db).await.ok().flatten();
+                 LIMIT 1",
+                )
+                .bind(date)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
 
-            match best {
-                Some((pid,)) => {
-                    info!("[paper] v16 prediction set: {} (覆盖{})", pid, date);
-                    Some(pid)
+                match best {
+                    Some((pid,)) => {
+                        info!("[paper] v16 prediction set: {} (覆盖{})", pid, date);
+                        Some(pid)
+                    }
+                    None => {
+                        warn!(
+                            "[paper] ⚠ 无prediction set覆盖{}, v16降级为纯因子选股",
+                            date
+                        );
+                        None
+                    }
                 }
-                None => {
-                    warn!("[paper] ⚠ 无prediction set覆盖{}, v16降级为纯因子选股", date);
-                    None
-                }
-            }
             }
         } else {
             None
@@ -1530,7 +2055,8 @@ async fn generate_paper_signals_for_all(
             let mut blend_body = body.clone();
             if let Some(ref pid) = prediction_set_id {
                 blend_body["prediction_set_id"] = serde_json::json!(pid);
-                blend_body["prediction_blend_weight"] = serde_json::json!(sc.prediction_blend_weight);
+                blend_body["prediction_blend_weight"] =
+                    serde_json::json!(sc.prediction_blend_weight);
             }
             // v16 专用参数
             if !wfa_used {
@@ -1542,7 +2068,9 @@ async fn generate_paper_signals_for_all(
             info!("[paper] v16 prediction_blend: set={:?}", prediction_set_id);
             client
                 .post(format!("{}/api/v1/quant/backtests/run-factor", base))
-                .json(&blend_body).send().await
+                .json(&blend_body)
+                .send()
+                .await
         } else if is_prediction {
             client
                 .post(format!("{}/api/v1/quant/backtests/run-prediction", base))
@@ -1556,22 +2084,42 @@ async fn generate_paper_signals_for_all(
                     "skip_top_pct": 0.0, "entry_delay": 1,
                     "universe_profile": "main_board_non_st",
                     "start_date": start, "end_date": end
-                })).send().await
+                }))
+                .send()
+                .await
         } else {
             client
                 .post(format!("{}/api/v1/quant/backtests/run-factor", base))
-                .json(&body).send().await
+                .json(&body)
+                .send()
+                .await
         };
 
         let task_id = match resp {
-            Ok(r) => r.json::<serde_json::Value>().await.ok()
-                .and_then(|v| v.get("data").and_then(|d| d.get("task_id"))
-                .and_then(|t| t.as_str()).map(str::to_string)),
+            Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|v| {
+                v.get("data")
+                    .and_then(|d| d.get("task_id"))
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
+            }),
             Err(_) => continue,
         };
         let Some(task_id) = task_id else { continue };
 
-        match sync_positions_from_backtest(db, account_id, &task_id, mvo_cache, date, sc, tushare, leverage_enabled, leverage_multiplier, leverage_mode).await {
+        match sync_positions_from_backtest(
+            db,
+            account_id,
+            &task_id,
+            mvo_cache,
+            date,
+            sc,
+            tushare,
+            leverage_enabled,
+            leverage_multiplier,
+            leverage_mode,
+        )
+        .await
+        {
             Ok(n) => info!("[paper] {} 同步 {} 个持仓", name, n),
             Err(e) => error!("[paper] {} 持仓同步失败: {}", name, e),
         }
@@ -1593,7 +2141,8 @@ async fn compute_vol_target_leverage(db: &PgPool, account_id: &str, sc: &Strateg
     .await
     .unwrap_or_default();
 
-    let navs: Vec<f64> = rows.iter()
+    let navs: Vec<f64> = rows
+        .iter()
         .map(|(n,)| n.to_string().parse::<f64>().unwrap_or(0.0))
         .filter(|&v| v > 0.0)
         .collect();
@@ -1605,8 +2154,8 @@ async fn compute_vol_target_leverage(db: &PgPool, account_id: &str, sc: &Strateg
     // 计算日收益率
     let mut rets = Vec::new();
     for i in 1..navs.len() {
-        if navs[i-1] > 0.0 {
-            rets.push(navs[i] / navs[i-1] - 1.0);
+        if navs[i - 1] > 0.0 {
+            rets.push(navs[i] / navs[i - 1] - 1.0);
         }
     }
 
@@ -1629,9 +2178,12 @@ async fn compute_vol_target_leverage(db: &PgPool, account_id: &str, sc: &Strateg
 }
 
 async fn sync_positions_from_backtest(
-    db: &PgPool, account_id: &str, task_id: &str,
+    db: &PgPool,
+    account_id: &str,
+    task_id: &str,
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
-    date: NaiveDate, sc: &StrategyConfig,
+    date: NaiveDate,
+    sc: &StrategyConfig,
     tushare: &TushareClient,
     leverage_enabled: bool,
     leverage_multiplier: f64,
@@ -1644,14 +2196,26 @@ async fn sync_positions_from_backtest(
     ).bind(task_id).fetch_all(db).await.map_err(|e| format!("pos: {}", e))?;
 
     // Get initial capital (use cash as base if NAV not computed yet)
-    let (initial_cap, cash_on_hand): (rust_decimal::Decimal, rust_decimal::Decimal) = sqlx::query_as(
-        "SELECT initial_capital, cash FROM paper_account WHERE paper_account_id = $1"
-    ).bind(account_id).fetch_one(db).await.map_err(|e| format!("cap: {}", e))?;
+    let (initial_cap, cash_on_hand): (rust_decimal::Decimal, rust_decimal::Decimal) =
+        sqlx::query_as(
+            "SELECT initial_capital, cash FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(db)
+        .await
+        .map_err(|e| format!("cap: {}", e))?;
 
-    let capital = if cash_on_hand > rust_decimal::Decimal::ZERO { cash_on_hand } else { initial_cap };
+    let capital = if cash_on_hand > rust_decimal::Decimal::ZERO {
+        cash_on_hand
+    } else {
+        initial_cap
+    };
 
     if positions.is_empty() {
-        info!("[paper] A股选股结果为空，仍执行 ETF 仓位分配 cap={}", capital);
+        info!(
+            "[paper] A股选股结果为空，仍执行 ETF 仓位分配 cap={}",
+            capital
+        );
     }
 
     // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
@@ -1670,13 +2234,17 @@ async fn sync_positions_from_backtest(
     let cash_pct = 1.0 - regime_exposure; // 现金/货币基金
 
     if regime_exposure < 0.99 {
-        info!("[Regime] 降仓至 {:.0}%, 现金 {:.0}%", regime_exposure * 100.0, cash_pct * 100.0);
+        info!(
+            "[Regime] 降仓至 {:.0}%, 现金 {:.0}%",
+            regime_exposure * 100.0,
+            cash_pct * 100.0
+        );
     }
 
-    let a_share_capital = capital * rust_decimal::Decimal::from_f64_retain(mvo_a_pct).unwrap_or(rust_decimal::Decimal::from_f64_retain(0.25).unwrap());
-    let total_stock_mv: rust_decimal::Decimal = positions.iter()
-        .filter_map(|(_, _, mv)| *mv)
-        .sum();
+    let a_share_capital = capital
+        * rust_decimal::Decimal::from_f64_retain(mvo_a_pct)
+            .unwrap_or(rust_decimal::Decimal::from_f64_retain(0.25).unwrap());
+    let total_stock_mv: rust_decimal::Decimal = positions.iter().filter_map(|(_, _, mv)| *mv).sum();
     let base_scale = if total_stock_mv > rust_decimal::Decimal::ZERO {
         a_share_capital / total_stock_mv
     } else {
@@ -1684,19 +2252,28 @@ async fn sync_positions_from_backtest(
     };
 
     // 杠杆：regime green(>0.9) + leverage_enabled → 使用配置的倍率
-    let mut leverage_mult = if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
-        if leverage_mode == "vol_target" {
-            // 波动率目标杠杆: 目标20%年化波动率, 根据trailing 60日实际波动率动态调整
-            let vol_lev = compute_vol_target_leverage(db, account_id, sc).await;
-            info!("[paper] Vol-target leverage {:.2}x applied for {}", vol_lev, account_id);
-            rust_decimal::Decimal::from_f64_retain(vol_lev).unwrap_or(rust_decimal::Decimal::ONE)
+    let mut leverage_mult =
+        if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
+            if leverage_mode == "vol_target" {
+                // 波动率目标杠杆: 目标20%年化波动率, 根据trailing 60日实际波动率动态调整
+                let vol_lev = compute_vol_target_leverage(db, account_id, sc).await;
+                info!(
+                    "[paper] Vol-target leverage {:.2}x applied for {}",
+                    vol_lev, account_id
+                );
+                rust_decimal::Decimal::from_f64_retain(vol_lev)
+                    .unwrap_or(rust_decimal::Decimal::ONE)
+            } else {
+                info!(
+                    "[paper] Fixed leverage {}x applied for {}",
+                    leverage_multiplier, account_id
+                );
+                rust_decimal::Decimal::from_f64_retain(leverage_multiplier)
+                    .unwrap_or(rust_decimal::Decimal::ONE)
+            }
         } else {
-            info!("[paper] Fixed leverage {}x applied for {}", leverage_multiplier, account_id);
-            rust_decimal::Decimal::from_f64_retain(leverage_multiplier).unwrap_or(rust_decimal::Decimal::ONE)
-        }
-    } else {
-        rust_decimal::Decimal::ONE
-    };
+            rust_decimal::Decimal::ONE
+        };
 
     // ── 维保比例门控（与回放 mvo_engine 口径一致，真实券商风控）──
     // 维保 = 总资产/融资额 = (上一日持仓市值 + cash) / margin_amount。
@@ -1717,10 +2294,20 @@ async fn sync_positions_from_backtest(
             let total_assets = (mv + cash_now).to_string().parse::<f64>().unwrap_or(0.0);
             let maint = total_assets / margin_f;
             if liq_thr.is_some_and(|t| maint < t) {
-                warn!("[paper] 维保 {:.0}% < 平仓线 {:.0}% — 停止融资加仓({})", maint * 100.0, liq_thr.unwrap() * 100.0, account_id);
+                warn!(
+                    "[paper] 维保 {:.0}% < 平仓线 {:.0}% — 停止融资加仓({})",
+                    maint * 100.0,
+                    liq_thr.unwrap() * 100.0,
+                    account_id
+                );
                 leverage_mult = rust_decimal::Decimal::ONE;
             } else if warn_thr.is_some_and(|t| maint < t) {
-                warn!("[paper] 维保 {:.0}% < 警告线 {:.0}% — 禁止新增杠杆仓({})", maint * 100.0, warn_thr.unwrap() * 100.0, account_id);
+                warn!(
+                    "[paper] 维保 {:.0}% < 警告线 {:.0}% — 禁止新增杠杆仓({})",
+                    maint * 100.0,
+                    warn_thr.unwrap() * 100.0,
+                    account_id
+                );
                 leverage_mult = leverage_mult.min(rust_decimal::Decimal::ONE);
             }
         }
@@ -1731,23 +2318,40 @@ async fn sync_positions_from_backtest(
     for (symbol, qty, mkt_val) in &positions {
         let q = qty.unwrap_or(rust_decimal::Decimal::ZERO);
         let m = mkt_val.unwrap_or(rust_decimal::Decimal::ZERO);
-        if q <= rust_decimal::Decimal::ZERO || m <= rust_decimal::Decimal::ZERO { continue; }
-        let price = if q > rust_decimal::Decimal::ZERO { m / q } else { rust_decimal::Decimal::ZERO };
-        if price <= rust_decimal::Decimal::ZERO { continue; }
+        if q <= rust_decimal::Decimal::ZERO || m <= rust_decimal::Decimal::ZERO {
+            continue;
+        }
+        let price = if q > rust_decimal::Decimal::ZERO {
+            m / q
+        } else {
+            rust_decimal::Decimal::ZERO
+        };
+        if price <= rust_decimal::Decimal::ZERO {
+            continue;
+        }
         let scaled_q = q * scale;
         let scaled_m = m * scale;
 
         // 统一交易路径：计划+实际交易经 trading 模块落库（与回放一致）
         let trade = trading::PlannedTrade {
             account_id: account_id.to_string(),
-            symbol: symbol.clone(), side: "buy".into(),
-            target_quantity: scaled_q, target_price: price,
-            price_upper_limit: None, price_lower_limit: None, slippage_pct: 0.0,
+            symbol: symbol.clone(),
+            side: "buy".into(),
+            target_quantity: scaled_q,
+            target_price: price,
+            price_upper_limit: None,
+            price_lower_limit: None,
+            slippage_pct: 0.0,
             target_value: scaled_m,
-            reason: Some(format!("v19实盘调仓 A股 regime={:.0}%", regime_exposure * 100.0)),
+            reason: Some(format!(
+                "v19实盘调仓 A股 regime={:.0}%",
+                regime_exposure * 100.0
+            )),
             strategy_version_id: Some("phase7-professional-v1".to_string()),
         };
-        trading::execute_simulated_trade(db, &trade).await.map_err(|e| format!("a trade: {}", e))?;
+        trading::execute_simulated_trade(db, &trade)
+            .await
+            .map_err(|e| format!("a trade: {}", e))?;
         let pid = format!("pp-{}", short_id());
         sqlx::query("INSERT INTO paper_position (paper_position_id,paper_account_id,symbol,quantity,avg_cost,market_price,market_value,target_weight) VALUES ($1,$2,$3,$4,$5,$5,$6,$7) ON CONFLICT (paper_account_id,symbol) DO UPDATE SET quantity=EXCLUDED.quantity,market_price=EXCLUDED.market_price,market_value=EXCLUDED.market_value,avg_cost=EXCLUDED.avg_cost")
             .bind(&pid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).bind(rust_decimal::Decimal::from_f64_retain(mvo_a_pct / positions.len().max(1) as f64).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("pos:{}",e))?;
@@ -1769,32 +2373,50 @@ async fn sync_positions_from_backtest(
     }
 
     // ETF 实时价格（盘中通过 Tushare fund_daily 获取当日数据，回退昨日收盘价）
-    let etf_syms: Vec<String> = etf_allocations.iter()
+    let etf_syms: Vec<String> = etf_allocations
+        .iter()
         .filter(|(_, _, p)| *p > 0.0)
         .map(|(s, _, _)| s.to_string())
         .collect();
     let etf_prices = fetch_intraday_etf_prices(tushare, &etf_syms, date, db).await;
 
     for (etf_symbol, _etf_name, alloc_pct) in &etf_allocations {
-        if *alloc_pct <= 0.0 { continue; }
-        let alloc_amount = capital * rust_decimal::Decimal::from_f64_retain(*alloc_pct).unwrap_or(rust_decimal::Decimal::ZERO);
-        if alloc_amount <= rust_decimal::Decimal::ZERO { continue; }
+        if *alloc_pct <= 0.0 {
+            continue;
+        }
+        let alloc_amount = capital
+            * rust_decimal::Decimal::from_f64_retain(*alloc_pct)
+                .unwrap_or(rust_decimal::Decimal::ZERO);
+        if alloc_amount <= rust_decimal::Decimal::ZERO {
+            continue;
+        }
 
         // 使用盘中实时价格（从 HashMap 获取，fallback 到 1.0）
         let price_val = etf_prices.get(*etf_symbol).copied().unwrap_or(1.0);
-        let price = rust_decimal::Decimal::from_f64_retain(price_val).unwrap_or(rust_decimal::Decimal::ONE);
-        let qty = if price > rust_decimal::Decimal::ZERO { alloc_amount / price } else { rust_decimal::Decimal::ZERO };
+        let price =
+            rust_decimal::Decimal::from_f64_retain(price_val).unwrap_or(rust_decimal::Decimal::ONE);
+        let qty = if price > rust_decimal::Decimal::ZERO {
+            alloc_amount / price
+        } else {
+            rust_decimal::Decimal::ZERO
+        };
 
         let trade = trading::PlannedTrade {
             account_id: account_id.to_string(),
-            symbol: etf_symbol.to_string(), side: "buy".into(),
-            target_quantity: qty, target_price: price,
-            price_upper_limit: None, price_lower_limit: None, slippage_pct: 0.0,
+            symbol: etf_symbol.to_string(),
+            side: "buy".into(),
+            target_quantity: qty,
+            target_price: price,
+            price_upper_limit: None,
+            price_lower_limit: None,
+            slippage_pct: 0.0,
             target_value: alloc_amount,
             reason: Some(format!("v19实盘调仓 ETF w={:.1}%", *alloc_pct * 100.0)),
             strategy_version_id: Some("phase7-professional-v1".to_string()),
         };
-        trading::execute_simulated_trade(db, &trade).await.map_err(|e| format!("etf trade: {}", e))?;
+        trading::execute_simulated_trade(db, &trade)
+            .await
+            .map_err(|e| format!("etf trade: {}", e))?;
         let pid = format!("pp-{}", short_id());
         sqlx::query("INSERT INTO paper_position (paper_position_id,paper_account_id,symbol,quantity,avg_cost,market_price,market_value,target_weight) VALUES ($1,$2,$3,$4,$5,$5,$6,$7) ON CONFLICT (paper_account_id,symbol) DO UPDATE SET quantity=EXCLUDED.quantity,market_price=EXCLUDED.market_price,market_value=EXCLUDED.market_value,avg_cost=EXCLUDED.avg_cost")
             .bind(&pid).bind(account_id).bind(etf_symbol).bind(qty).bind(price).bind(alloc_amount).bind(rust_decimal::Decimal::from_f64_retain(*alloc_pct).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("etf pos:{}",e))?;
@@ -1811,7 +2433,7 @@ async fn sync_positions_from_backtest(
         warn!("[paper] {} 自动归还融资失败: {}", account_id, e);
     }
 
-    Ok(positions.len() + etf_allocations.iter().filter(|(_,_,p)| *p > 0.0).count())
+    Ok(positions.len() + etf_allocations.iter().filter(|(_, _, p)| *p > 0.0).count())
 }
 
 /// 体制检测：Trailing 12-month CSI300 return。
@@ -1826,12 +2448,21 @@ pub async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
             WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 252
         )
         SELECT (SELECT close FROM dates ORDER BY trade_date DESC LIMIT 1)
-             / NULLIF((SELECT close FROM dates ORDER BY trade_date ASC LIMIT 1), 0) - 1"
-    ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
+             / NULLIF((SELECT close FROM dates ORDER BY trade_date ASC LIMIT 1), 0) - 1",
+    )
+    .bind(date)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|(v,)| v);
 
     match trail {
         Some(t) if t < -0.10 => {
-            debug!("[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%", t * 100.0);
+            debug!(
+                "[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%",
+                t * 100.0
+            );
             0.60
         }
         _ => 1.00, // 满仓
@@ -1863,11 +2494,11 @@ async fn get_regime_min_stock(db: &PgPool, date: NaiveDate) -> f64 {
 
     match (ma60, ma250, trail_12m) {
         (Some(m60), Some(m250), Some(t12)) if t12 > 0.10 && m60 > m250 => {
-            info!("[Regime] BULL: min_stock=35% (t12m={:.1}%)", t12*100.0);
+            info!("[Regime] BULL: min_stock=35% (t12m={:.1}%)", t12 * 100.0);
             0.35
         }
         (_, _, Some(t12)) if t12 < -0.15 => {
-            info!("[Regime] BEAR: min_stock=0% (t12m={:.1}%)", t12*100.0);
+            info!("[Regime] BEAR: min_stock=0% (t12m={:.1}%)", t12 * 100.0);
             0.00
         }
         _ => {
@@ -1912,9 +2543,10 @@ async fn apply_etf_trend_filter(
         .unwrap_or_default();
 
         if rows.len() >= 200 {
-            let sum: f64 = rows.iter().map(|(c,)| {
-                c.to_string().parse::<f64>().unwrap_or(0.0)
-            }).sum();
+            let sum: f64 = rows
+                .iter()
+                .map(|(c,)| c.to_string().parse::<f64>().unwrap_or(0.0))
+                .sum();
             let ma200 = sum / rows.len() as f64;
             let latest: f64 = rows[0].0.to_string().parse::<f64>().unwrap_or(0.0);
 
@@ -1931,7 +2563,11 @@ async fn apply_etf_trend_filter(
                 };
                 info!(
                     "[ETF Trend] {} ({}) 跌破MA200 ({:.3} < {:.3}), 权重 {:.0}% → 0%",
-                    etf_name, sym, latest, ma200, filtered[wi] * 100.0
+                    etf_name,
+                    sym,
+                    latest,
+                    ma200,
+                    filtered[wi] * 100.0
                 );
                 filtered[wi] = 0.0;
                 any_filtered = true;
@@ -2003,7 +2639,11 @@ async fn compute_lw_mvo_weights(
             info!("[MVO] Factor failure detected (3m={:.1}%), min_stock {} -> 0.00, switching to ETF defense", trail_3m * 100.0, min_stock);
             0.00
         } else if trail_6m > 0.15 {
-            info!("[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> 0.20", trail_6m * 100.0, min_stock);
+            info!(
+                "[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> 0.20",
+                trail_6m * 100.0,
+                min_stock
+            );
             0.20
         } else {
             min_stock
@@ -2019,7 +2659,11 @@ async fn compute_lw_mvo_weights(
         let avg = trail_rets.iter().sum::<f64>() / n;
         if n > 1.0 {
             let variance = trail_rets.iter().map(|r| (r - avg).powi(2)).sum::<f64>() / (n - 1.0);
-            let monthly_ir = if variance > 0.0 { avg / variance.sqrt() } else { 0.0 };
+            let monthly_ir = if variance > 0.0 {
+                avg / variance.sqrt()
+            } else {
+                0.0
+            };
             let annual_ir = monthly_ir * (12.0_f64).sqrt();
             (0.5 + annual_ir).clamp(0.3, 1.5)
         } else {
@@ -2041,7 +2685,10 @@ async fn compute_lw_mvo_weights(
 
     if a_monthly.len() < 12 {
         let mut guard = cache.lock().await;
-        *guard = Some(MvoWeightCache { quarter, weights: weights.clone() });
+        *guard = Some(MvoWeightCache {
+            quarter,
+            weights: weights.clone(),
+        });
         return weights;
     }
 
@@ -2050,7 +2697,9 @@ async fn compute_lw_mvo_weights(
     let mut valid_etf_count = 0;
     for sym in &etf_symbols {
         let mrets = get_monthly_returns(db, lookback_start, date, sym, sc).await;
-        if !mrets.is_empty() { valid_etf_count += 1; }
+        if !mrets.is_empty() {
+            valid_etf_count += 1;
+        }
         etf_monthly_data.push(mrets);
     }
 
@@ -2082,42 +2731,70 @@ async fn compute_lw_mvo_weights(
             // 可用 MVO_TARGET_CAP 覆盖做调参实验。
             // target 上限：优先读策略配置 sc.dynamic_target_cap（生产持久化），
             // MVO_TARGET_CAP env 仍可覆盖做调参实验。
-            let target_cap = std::env::var("MVO_TARGET_CAP").ok()
-                .and_then(|s| s.parse::<f64>().ok()).unwrap_or(sc.dynamic_target_cap);
+            let target_cap = std::env::var("MVO_TARGET_CAP")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(sc.dynamic_target_cap);
             let dynamic_target = if a_monthly.len() >= 12 {
-                let trail_12m: f64 = a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+                let trail_12m: f64 =
+                    a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
                 (trail_12m + 0.05).clamp(0.08_f64.min(target_cap), target_cap)
             } else {
                 0.12_f64.min(target_cap)
             };
             // Momentum-adjusted expected returns (50/50 blend)
             let hist_mu = ndarray::Array1::from_vec(
-                (0..n_total_assets).map(|j| {
-                    let col: Vec<f64> = all_monthly.iter().map(|r| r[j]).collect();
-                    col.iter().sum::<f64>() / col.len() as f64 * 12.0
-                }).collect()
+                (0..n_total_assets)
+                    .map(|j| {
+                        let col: Vec<f64> = all_monthly.iter().map(|r| r[j]).collect();
+                        col.iter().sum::<f64>() / col.len() as f64 * 12.0
+                    })
+                    .collect(),
             );
             let mom_mu = ndarray::Array1::from_vec(
-                (0..n_total_assets).map(|j| {
-                    let recent: Vec<f64> = all_monthly.iter().rev().take(6).map(|r| r[j]).collect();
-                    recent.iter().fold(1.0, |acc, r| acc * (1.0 + r)).powf(2.0) - 1.0
-                }).collect()
+                (0..n_total_assets)
+                    .map(|j| {
+                        let recent: Vec<f64> =
+                            all_monthly.iter().rev().take(6).map(|r| r[j]).collect();
+                        recent.iter().fold(1.0, |acc, r| acc * (1.0 + r)).powf(2.0) - 1.0
+                    })
+                    .collect(),
             );
             let bw = sc.momentum_blend_ratio;
             let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
             // 自适应max_single: 牛市用max_single_bull, 否则用max_single
-            let trail_12m_a = a_monthly[..a_monthly.len().min(12)].iter()
-                .fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
-            let adaptive_max = if trail_12m_a > 0.10 { sc.max_single_bull } else { sc.max_single };
+            let trail_12m_a = a_monthly[..a_monthly.len().min(12)]
+                .iter()
+                .fold(1.0, |acc, r| acc * (1.0 + r))
+                - 1.0;
+            let adaptive_max = if trail_12m_a > 0.10 {
+                sc.max_single_bull
+            } else {
+                sc.max_single
+            };
             // 牛市放宽min_stock
             let adaptive_ms = if trail_12m_a > 0.10 {
                 (adaptive_min_stock * 0.7).max(0.08)
-            } else { adaptive_min_stock };
+            } else {
+                adaptive_min_stock
+            };
             // 目标函数实验开关 MVO_OBJECTIVE=maxsharpe（默认 minvariance）
             let mvo_result = if std::env::var("MVO_OBJECTIVE").as_deref() == Ok("maxsharpe") {
-                mvo::mvo_allocate_ga_maxsharpe_with_max_single(&arr, &adj_mu, adaptive_ms, adaptive_max)
+                mvo::mvo_allocate_ga_maxsharpe_with_max_single(
+                    &arr,
+                    &adj_mu,
+                    adaptive_ms,
+                    adaptive_max,
+                )
             } else {
-                mvo::mvo_allocate_ga_with_max_single(&arr, &adj_mu, adaptive_ms, dynamic_target, 0.10, adaptive_max)
+                mvo::mvo_allocate_ga_with_max_single(
+                    &arr,
+                    &adj_mu,
+                    adaptive_ms,
+                    dynamic_target,
+                    0.10,
+                    adaptive_max,
+                )
             };
             if let Some(result) = mvo_result {
                 let w = result.weights.to_vec();
@@ -2135,7 +2812,10 @@ async fn compute_lw_mvo_weights(
     }
 
     let mut guard = cache.lock().await;
-    *guard = Some(MvoWeightCache { quarter, weights: weights.clone() });
+    *guard = Some(MvoWeightCache {
+        quarter,
+        weights: weights.clone(),
+    });
     weights
 }
 
@@ -2151,7 +2831,10 @@ pub async fn compute_mvo_weights_for_date(
 
 /// 从 multi_factor_value 获取因子的月度收益（top-15等权组合的近似月收益）
 async fn get_factor_monthly_returns(
-    db: &PgPool, start: NaiveDate, end: NaiveDate, combo_name: &str,
+    db: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+    combo_name: &str,
 ) -> Vec<f64> {
     // 取每个交易日前15只股票的因子得分，用等权日收益近似
     let rows = sqlx::query_as::<_, (NaiveDate,)>(
@@ -2167,7 +2850,9 @@ async fn get_factor_monthly_returns(
     .await
     .unwrap_or_default();
 
-    if rows.len() < 2 { return vec![]; }
+    if rows.len() < 2 {
+        return vec![];
+    }
 
     // 使用 backtest_equity_curve 中匹配 combo_name 的任务
     let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
@@ -2217,8 +2902,11 @@ async fn get_monthly_returns(
                 warn!("[MVO] ⚠ A股权益曲线数据滞后{}天 (最新: {}), MVO训练窗口可能缺失近期数据。建议重新运行全量回测更新fbt-36e18e12",
                       gap, last.0.format("%Y-%m-%d"));
             } else if gap > 30 {
-                info!("[MVO] A股权益曲线滞后{}天 (最新: {}), 36月训练窗口内影响可忽略",
-                      gap, last.0.format("%Y-%m-%d"));
+                info!(
+                    "[MVO] A股权益曲线滞后{}天 (最新: {}), 36月训练窗口内影响可忽略",
+                    gap,
+                    last.0.format("%Y-%m-%d")
+                );
             }
         }
 
@@ -2287,7 +2975,10 @@ fn daily_to_monthly_returns(rows: &[(NaiveDate, rust_decimal::Decimal)]) -> Vec<
 }
 
 /// Public wrapper，供 API 端点调用。
-pub async fn push_dingtalk_for_all_accounts_public(db: &PgPool, date: NaiveDate) -> Result<(), String> {
+pub async fn push_dingtalk_for_all_accounts_public(
+    db: &PgPool,
+    date: NaiveDate,
+) -> Result<(), String> {
     push_dingtalk_for_all_accounts(db, date).await
 }
 
@@ -2307,8 +2998,11 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
             Some(u) if !u.is_empty() => u.clone(),
             _ => match dingtalk::build_dingtalk_webhook_url() {
                 Some(u) => u,
-                None => { warn!("[dingtalk] {} 无 webhook", name); continue; }
-            }
+                None => {
+                    warn!("[dingtalk] {} 无 webhook", name);
+                    continue;
+                }
+            },
         };
 
         // Load positions with stock names (ETFs get friendly names via CASE)
@@ -2327,15 +3021,27 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
              LEFT JOIN market_stock ms ON ms.symbol = pp.symbol
              WHERE pp.paper_account_id=$1 AND pp.quantity>0
              ORDER BY pp.quantity*COALESCE(pp.market_price,pp.avg_cost) DESC",
-        ).bind(id).fetch_all(db).await.map_err(|e| format!("pos: {}", e))?;
+        )
+        .bind(id)
+        .fetch_all(db)
+        .await
+        .map_err(|e| format!("pos: {}", e))?;
 
-        let positions: Vec<Value> = pos_rows.iter().filter_map(|(s,q,p,n)| {
-            let q=q.unwrap_or(0.0); let p=p.unwrap_or(0.0);
-            if q<=0.0 {None} else {Some(json!({
-                "symbol":s, "name": n.as_deref().unwrap_or(s),
-                "quantity":q, "current_price":p, "market_value":q*p
-            }))}
-        }).collect();
+        let positions: Vec<Value> = pos_rows
+            .iter()
+            .filter_map(|(s, q, p, n)| {
+                let q = q.unwrap_or(0.0);
+                let p = p.unwrap_or(0.0);
+                if q <= 0.0 {
+                    None
+                } else {
+                    Some(json!({
+                        "symbol":s, "name": n.as_deref().unwrap_or(s),
+                        "quantity":q, "current_price":p, "market_value":q*p
+                    }))
+                }
+            })
+            .collect();
 
         // 资产大类分布：ETF 按品种单独列出，A 股汇总
         let class_rows = sqlx::query_as::<_, (String, Option<f64>)>(
@@ -2359,17 +3065,31 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
         let total_nav = nav.unwrap_or(0.0);
         let cash_val = cash.unwrap_or(total_nav);
         let margin_val = margin.unwrap_or(0.0);
-        let mv: f64 = positions.iter().filter_map(|p| p.get("market_value").and_then(|v| v.as_f64())).sum();
+        let mv: f64 = positions
+            .iter()
+            .filter_map(|p| p.get("market_value").and_then(|v| v.as_f64()))
+            .sum();
         let net_worth = mv + cash_val - margin_val; // 净资产 = 持仓市值 + 现金 - 融资金额
 
-        let mut class_breakdown: Vec<Value> = class_rows.iter().map(|(cls, v)| {
-            let val = v.unwrap_or(0.0);
-            let pct = if total_nav > 0.0 { val / total_nav * 100.0 } else { 0.0 };
-            json!({"class": cls, "market_value": val, "weight_pct": (pct*100.0).round()/100.0})
-        }).collect();
+        let mut class_breakdown: Vec<Value> = class_rows
+            .iter()
+            .map(|(cls, v)| {
+                let val = v.unwrap_or(0.0);
+                let pct = if total_nav > 0.0 {
+                    val / total_nav * 100.0
+                } else {
+                    0.0
+                };
+                json!({"class": cls, "market_value": val, "weight_pct": (pct*100.0).round()/100.0})
+            })
+            .collect();
         // 现金单独列出
         if cash_val > 1.0 {
-            let cash_pct = if net_worth > 0.0 { cash_val / net_worth * 100.0 } else { 0.0 };
+            let cash_pct = if net_worth > 0.0 {
+                cash_val / net_worth * 100.0
+            } else {
+                0.0
+            };
             class_breakdown.push(json!({"class": "现金", "market_value": cash_val, "weight_pct": (cash_pct*100.0).round()/100.0}));
         }
         let init_row = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
@@ -2377,15 +3097,30 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
         ).bind(id).fetch_optional(db).await.map_err(|e| format!("init: {}", e))?.unwrap_or((Some(total_nav), Some(0.0)));
 
         let init = init_row.0.unwrap_or(total_nav);
-        let cum_ret = if init>0.0 {(total_nav-init)/init} else {0.0};
+        let cum_ret = if init > 0.0 {
+            (total_nav - init) / init
+        } else {
+            0.0
+        };
         let mdd = init_row.1.unwrap_or(0.0);
 
         let text = dingtalk::build_position_summary_notification(
-            name, acct_type, &date.format("%Y-%m-%d").to_string(),
-            total_nav, cash_val, margin_val, mv, net_worth, &positions, cum_ret, mdd, &class_breakdown,
+            name,
+            acct_type,
+            &date.format("%Y-%m-%d").to_string(),
+            total_nav,
+            cash_val,
+            margin_val,
+            mv,
+            net_worth,
+            &positions,
+            cum_ret,
+            mdd,
+            &class_breakdown,
         );
 
-        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "持仓摘要", &text).await {
+        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "持仓摘要", &text).await
+        {
             warn!("[dingtalk] {} 发送失败: {}", name, e);
         } else {
             info!("[dingtalk] {} 推送成功", name);
@@ -2484,7 +3219,11 @@ pub async fn run_historical_replay(
     let use_ga = objective == "ga" || is_v19 || is_v20;
     let is_monthly = rebalance == "monthly";
     let use_vol_target = leverage_mode == "vol_target";
-    let fixed_lev = if leverage_mode == "fixed" { leverage_multiplier.max(1.0) } else { 1.0 };
+    let fixed_lev = if leverage_mode == "fixed" {
+        leverage_multiplier.max(1.0)
+    } else {
+        1.0
+    };
     let start_str = start_date.format("%Y-%m-%d").to_string();
     let end_str = end_date.format("%Y-%m-%d").to_string();
     info!("[replay] v17 历史回放: {} ~ {}", start_str, end_str);
@@ -2498,10 +3237,15 @@ pub async fn run_historical_replay(
     .fetch_all(db).await.map_err(|e| format!("交易日历: {e}"))?
     .into_iter().map(|(d,)| d).collect();
 
-    let tdates: Vec<NaiveDate> = all_tdates.iter()
-        .filter(|d| **d >= start_date).copied().collect();
+    let tdates: Vec<NaiveDate> = all_tdates
+        .iter()
+        .filter(|d| **d >= start_date)
+        .copied()
+        .collect();
 
-    if tdates.len() < 252 { return Err("交易日不足1年".into()); }
+    if tdates.len() < 252 {
+        return Err("交易日不足1年".into());
+    }
 
     // 2. 加载 A 股权益曲线 — 因子选股回测
     // v20: 从strategy_config读regime-stitched权益曲线; v19/v18: 默认fbt-36e18e12
@@ -2520,20 +3264,30 @@ pub async fn run_historical_replay(
     ).bind(&eq_task_id).fetch_all(db).await
     .map_err(|e| format!("A股权益曲线: {e}"))?;
 
-    let a_nav: Vec<(NaiveDate, f64)> = eq_rows.iter()
+    let a_nav: Vec<(NaiveDate, f64)> = eq_rows
+        .iter()
         .map(|(d, v)| (*d, v.to_string().parse::<f64>().unwrap_or(0.0)))
-        .filter(|(_, v)| *v > 0.0).collect();
+        .filter(|(_, v)| *v > 0.0)
+        .collect();
 
     // 3. 加载 ETF 价格
     let mut etf_symbols = vec![
-        "518880.SH".to_string(), "511010.SH".to_string(), "513500.SH".to_string(),
-        "513100.SH".to_string(), "159980.SZ".to_string(), "159985.SZ".to_string(),
+        "518880.SH".to_string(),
+        "511010.SH".to_string(),
+        "513500.SH".to_string(),
+        "513100.SH".to_string(),
+        "159980.SZ".to_string(),
+        "159985.SZ".to_string(),
     ];
     // v19: 8资产 = 7基础 + 原油LOF, 使用GA优化器
     if (is_v19 || is_v20) && !etf_symbols.contains(&"501018.SH".to_string()) {
         etf_symbols.push("501018.SH".to_string());
     }
-    for e in extra_etfs { if !etf_symbols.contains(e) { etf_symbols.push(e.clone()); } }
+    for e in extra_etfs {
+        if !etf_symbols.contains(e) {
+            etf_symbols.push(e.clone());
+        }
+    }
     let etf_count = etf_symbols.len();
     let etf_start = start_date - chrono::Duration::days(3 * 365); // 3年缓冲用于MA200
 
@@ -2542,17 +3296,26 @@ pub async fn run_historical_replay(
     let sql = format!(
         "SELECT trade_date, symbol, close::double precision FROM market_stock_daily_bar_adj
          WHERE symbol IN ({}) AND trade_date >= ${} ORDER BY trade_date",
-        in_clause, etf_count + 1
+        in_clause,
+        etf_count + 1
     );
     let mut query = sqlx::query_as::<_, (NaiveDate, String, f64)>(&sql);
-    for sym in &etf_symbols { query = query.bind(sym); }
+    for sym in &etf_symbols {
+        query = query.bind(sym);
+    }
     query = query.bind(etf_start);
-    let etf_rows = query.fetch_all(db).await.map_err(|e| format!("ETF数据: {e}"))?;
+    let etf_rows = query
+        .fetch_all(db)
+        .await
+        .map_err(|e| format!("ETF数据: {e}"))?;
 
     use std::collections::HashMap;
     let mut etf_prices: HashMap<String, HashMap<NaiveDate, f64>> = HashMap::new();
     for (d, sym, price) in &etf_rows {
-        etf_prices.entry(sym.clone()).or_default().insert(*d, *price);
+        etf_prices
+            .entry(sym.clone())
+            .or_default()
+            .insert(*d, *price);
     }
 
     // 不在全期层面过滤ETF（会导致过早剔除后期才有数据的资产）。
@@ -2560,35 +3323,72 @@ pub async fn run_historical_replay(
 
     // 4. 加载基准数据
     async fn load_benchmark(
-        db: &PgPool, sym: &str, table: &str,
-        start_date: NaiveDate, end_date: NaiveDate, tdates: &[NaiveDate],
+        db: &PgPool,
+        sym: &str,
+        table: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        tdates: &[NaiveDate],
     ) -> Result<(Vec<f64>, Vec<NaiveDate>), String> {
         let sql = format!(
             "SELECT trade_date, close::double precision FROM {} WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date", table
         );
         let rows: Vec<(NaiveDate, f64)> = sqlx::query_as(&sql)
-            .bind(sym).bind(start_date).bind(end_date)
-            .fetch_all(db).await
+            .bind(sym)
+            .bind(start_date)
+            .bind(end_date)
+            .fetch_all(db)
+            .await
             .map_err(|e: sqlx::Error| format!("基准{}: {e}", sym))?;
         let prices: HashMap<NaiveDate, f64> = rows.into_iter().collect();
-        let mut rets = Vec::new(); let mut ret_dates = Vec::new();
+        let mut rets = Vec::new();
+        let mut ret_dates = Vec::new();
         for di in 1..tdates.len() {
-            let d = tdates[di]; let pd = tdates[di-1];
+            let d = tdates[di];
+            let pd = tdates[di - 1];
             if let (Some(&cp), Some(&pp)) = (prices.get(&d), prices.get(&pd)) {
-                if pp > 0.0 && cp > 0.0 { rets.push(cp/pp - 1.0); ret_dates.push(d); }
+                if pp > 0.0 && cp > 0.0 {
+                    rets.push(cp / pp - 1.0);
+                    ret_dates.push(d);
+                }
             }
         }
         Ok((rets, ret_dates))
     }
 
-    let (csi_rets, csi_dates) = load_benchmark(db, "000300.SH", "market_index_daily_bar", start_date, end_date, &tdates).await?;
-    let (sp500_rets, sp500_dates) = load_benchmark(db, "513500.SH", "market_stock_daily_bar_adj", start_date, end_date, &tdates).await?;
-    let (gold_rets, gold_dates) = load_benchmark(db, "518880.SH", "market_stock_daily_bar_adj", start_date, end_date, &tdates).await?;
+    let (csi_rets, csi_dates) = load_benchmark(
+        db,
+        "000300.SH",
+        "market_index_daily_bar",
+        start_date,
+        end_date,
+        &tdates,
+    )
+    .await?;
+    let (sp500_rets, sp500_dates) = load_benchmark(
+        db,
+        "513500.SH",
+        "market_stock_daily_bar_adj",
+        start_date,
+        end_date,
+        &tdates,
+    )
+    .await?;
+    let (gold_rets, gold_dates) = load_benchmark(
+        db,
+        "518880.SH",
+        "market_stock_daily_bar_adj",
+        start_date,
+        end_date,
+        &tdates,
+    )
+    .await?;
 
     // 5. 构建日收益率 (含前置训练窗口, A股 + 6 ETFs)
     let mut daily_returns: Vec<(NaiveDate, Vec<f64>)> = Vec::new();
     for di in 1..all_tdates.len() {
-        let d = all_tdates[di]; let pd = all_tdates[di-1];
+        let d = all_tdates[di];
+        let pd = all_tdates[di - 1];
         // A股收益: 使用因子选股回测权益曲线(fbt-dc4144c1, 覆盖2009-2026)
         let ap = a_nav.iter().find(|(td, _)| *td == pd).map(|(_, v)| *v);
         let ac = a_nav.iter().find(|(td, _)| *td == d).map(|(_, v)| *v);
@@ -2596,8 +3396,10 @@ pub async fn run_historical_replay(
             (Some(p1), Some(p2)) if p1 > 0.0 => (p1, p2),
             _ => continue,
         };
-        let ar = cp/pp - 1.0;
-        if ar.abs() > 0.5 { continue; }
+        let ar = cp / pp - 1.0;
+        if ar.abs() > 0.5 {
+            continue;
+        }
         let mut row = vec![ar];
         let mut valid = true;
         for sym in &etf_symbols {
@@ -2605,12 +3407,18 @@ pub async fn run_historical_replay(
             let ep = prices.and_then(|p| p.get(&pd)).copied().unwrap_or(0.0);
             let ec = prices.and_then(|p| p.get(&d)).copied().unwrap_or(0.0);
             if ep > 0.0 && ec > 0.0 {
-                let r = ec/ep - 1.0;
-                if r.abs() > 0.5 { valid = false; }
+                let r = ec / ep - 1.0;
+                if r.abs() > 0.5 {
+                    valid = false;
+                }
                 row.push(r);
-            } else { row.push(0.0); }
+            } else {
+                row.push(0.0);
+            }
         }
-        if valid { daily_returns.push((d, row)); }
+        if valid {
+            daily_returns.push((d, row));
+        }
     }
     let n_assets = 1 + etf_count;
 
@@ -2621,20 +3429,31 @@ pub async fn run_historical_replay(
         let mk = format!("{}-{:02}", d.format("%Y"), d.month());
         match &mut cm {
             Some((m, _, cum)) if *m == mk => {
-                for j in 0..n_assets { cum[j] = (1.0+cum[j])*(1.0+rets[j])-1.0; }
+                for j in 0..n_assets {
+                    cum[j] = (1.0 + cum[j]) * (1.0 + rets[j]) - 1.0;
+                }
             }
             _ => {
-                if let Some((m, ld, cum)) = cm.take() { monthly_rets.push((m, ld, cum)); }
+                if let Some((m, ld, cum)) = cm.take() {
+                    monthly_rets.push((m, ld, cum));
+                }
                 cm = Some((mk, *d, rets.clone()));
             }
         }
     }
-    if let Some((m, ld, cum)) = cm { monthly_rets.push((m, ld, cum)); }
+    if let Some((m, ld, cum)) = cm {
+        monthly_rets.push((m, ld, cum));
+    }
 
     // ═══ 数据完整性检查 ═══
     crate::routes::data_validation::validate_equity_curve(&a_nav, start_date)?;
     crate::routes::data_validation::validate_data_coverage(
-        &a_nav, &etf_prices, &etf_symbols, start_date, end_date)?;
+        &a_nav,
+        &etf_prices,
+        &etf_symbols,
+        start_date,
+        end_date,
+    )?;
     crate::routes::data_validation::validate_training_data(&monthly_rets, etf_count, 36)?;
 
     // 7. 逐日回放: 季度调仓时直接调用 MVO 模块
@@ -2646,9 +3465,9 @@ pub async fn run_historical_replay(
     let mut found_start = false;
 
     for (di, (d, rets)) in daily_returns.iter().enumerate() {
-        let q_key = format!("{}-Q{}", d.format("%Y"), (d.month()-1)/3 + 1);
+        let q_key = format!("{}-Q{}", d.format("%Y"), (d.month() - 1) / 3 + 1);
         let should_rebalance = if is_monthly {
-            q_key != last_q  // every month
+            q_key != last_q // every month
         } else {
             let is_q_month = matches!(d.month(), 1 | 4 | 7 | 10);
             is_q_month && q_key != last_q
@@ -2656,33 +3475,55 @@ pub async fn run_historical_replay(
 
         if should_rebalance {
             let mk = format!("{}-{:02}", d.format("%Y"), d.month());
-            if let Some(mi) = monthly_rets.iter().position(|(m, _, _)| m.as_str() >= mk.as_str()) {
+            if let Some(mi) = monthly_rets
+                .iter()
+                .position(|(m, _, _)| m.as_str() >= mk.as_str())
+            {
                 if mi >= lookback {
                     last_q = q_key.clone();
                     // 直接用MVO模块计算权重
                     let train: Vec<Vec<f64>> = monthly_rets[mi - lookback..mi]
-                        .iter().map(|(_, _, r)| r.clone()).collect();
+                        .iter()
+                        .map(|(_, _, r)| r.clone())
+                        .collect();
                     let n_months = train.len();
                     // 幽灵列过滤：排除训练窗口内方差≈0的ETF列
                     // (ETF尚未上市时月度收益恒为0.0，零方差列会污染协方差估计)
                     let eps = 1e-10;
-                    let col_is_ghost: Vec<bool> = (0..n_assets).map(|j| {
-                        if j == 0 { return false; } // A股始终保留
-                        let mean = train.iter().map(|r| r[j]).sum::<f64>() / n_months as f64;
-                        let var = train.iter().map(|r| (r[j] - mean).powi(2)).sum::<f64>() / (n_months - 1) as f64;
-                        var < eps // 零方差 = 幽灵列
-                    }).collect();
-                    let active_cols: Vec<usize> = col_is_ghost.iter()
-                        .enumerate().filter(|(_, &ghost)| !ghost).map(|(i, _)| i).collect();
+                    let col_is_ghost: Vec<bool> = (0..n_assets)
+                        .map(|j| {
+                            if j == 0 {
+                                return false;
+                            } // A股始终保留
+                            let mean = train.iter().map(|r| r[j]).sum::<f64>() / n_months as f64;
+                            let var = train.iter().map(|r| (r[j] - mean).powi(2)).sum::<f64>()
+                                / (n_months - 1) as f64;
+                            var < eps // 零方差 = 幽灵列
+                        })
+                        .collect();
+                    let active_cols: Vec<usize> = col_is_ghost
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &ghost)| !ghost)
+                        .map(|(i, _)| i)
+                        .collect();
                     let n_active = active_cols.len();
-                    if n_active < 2 { continue; } // 至少需要A股+1个ETF
-                    // 构建无NaN训练矩阵
-                    let clean_flat: Vec<f64> = train.iter().flat_map(|r| {
-                        active_cols.iter().map(|&j| r[j]).collect::<Vec<_>>()
-                    }).collect();
-                    if let Some(arr) = Array2::from_shape_vec((n_months, n_active), clean_flat).ok() {
+                    if n_active < 2 {
+                        continue;
+                    } // 至少需要A股+1个ETF
+                      // 构建无NaN训练矩阵
+                    let clean_flat: Vec<f64> = train
+                        .iter()
+                        .flat_map(|r| active_cols.iter().map(|&j| r[j]).collect::<Vec<_>>())
+                        .collect();
+                    if let Some(arr) = Array2::from_shape_vec((n_months, n_active), clean_flat).ok()
+                    {
                         let v16_min = min_stock_override.unwrap_or(0.12); // v18 default
-                        let regime_ms = if is_v17 { get_regime_min_stock(db, *d).await } else { v16_min };
+                        let regime_ms = if is_v17 {
+                            get_regime_min_stock(db, *d).await
+                        } else {
+                            v16_min
+                        };
                         let regime_exposure = detect_regime_exposure(db, *d).await;
 
                         let mvo_result = if is_v17 {
@@ -2691,80 +3532,141 @@ pub async fn run_historical_replay(
                             mvo::mvo_allocate(&arr, regime_ms)
                         } else if use_bl {
                             // P3: Black-Litterman approximated (60% hist + 40% equal-weight prior)
-                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
-                                .map(|(_, _, r)| r[0]).collect();
+                            let prev_12: Vec<f64> = monthly_rets[mi - 12..mi]
+                                .iter()
+                                .map(|(_, _, r)| r[0])
+                                .collect();
                             let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
                             let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
                             let hist_mu = ndarray::Array1::from_vec(
-                                (0..n_active).map(|j| {
-                                    let col: Vec<f64> = train.iter().map(|r| r[active_cols[j]]).collect();
-                                    col.iter().sum::<f64>() / col.len() as f64 * 12.0
-                                }).collect()
+                                (0..n_active)
+                                    .map(|j| {
+                                        let col: Vec<f64> =
+                                            train.iter().map(|r| r[active_cols[j]]).collect();
+                                        col.iter().sum::<f64>() / col.len() as f64 * 12.0
+                                    })
+                                    .collect(),
                             );
                             let prior_mu = ndarray::Array1::from_vec(vec![0.12_f64; n_active]);
                             let bl_mu = 0.6 * &hist_mu + 0.4 * &prior_mu;
-                            mvo::mvo_allocate_with_custom_mu(&arr, &bl_mu, regime_ms, dynamic_target, 0.10)
+                            mvo::mvo_allocate_with_custom_mu(
+                                &arr,
+                                &bl_mu,
+                                regime_ms,
+                                dynamic_target,
+                                0.10,
+                            )
                         } else if use_momentum {
                             // v16m: momentum-adjusted expected returns
-                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
-                                .map(|(_, _, r)| r[0]).collect();
+                            let prev_12: Vec<f64> = monthly_rets[mi - 12..mi]
+                                .iter()
+                                .map(|(_, _, r)| r[0])
+                                .collect();
                             let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
                             let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
                             // Blend: 60% historical mean + 40% recent momentum (6m annualized)
                             let hist_mu = ndarray::Array1::from_vec(
-                                (0..n_active).map(|j| {
-                                    let col: Vec<f64> = train.iter().map(|r| r[active_cols[j]]).collect();
-                                    col.iter().sum::<f64>() / col.len() as f64 * 12.0
-                                }).collect()
+                                (0..n_active)
+                                    .map(|j| {
+                                        let col: Vec<f64> =
+                                            train.iter().map(|r| r[active_cols[j]]).collect();
+                                        col.iter().sum::<f64>() / col.len() as f64 * 12.0
+                                    })
+                                    .collect(),
                             );
                             let mom_mu = ndarray::Array1::from_vec(
-                                (0..n_active).map(|j| {
-                                    let recent: Vec<f64> = train.iter().rev().take(6).map(|r| r[active_cols[j]]).collect();
-                                    let cum: f64 = recent.iter().fold(1.0, |acc, r| acc * (1.0 + r));
-                                    cum.powf(2.0) - 1.0  // 6m → annualized
-                                }).collect()
+                                (0..n_active)
+                                    .map(|j| {
+                                        let recent: Vec<f64> = train
+                                            .iter()
+                                            .rev()
+                                            .take(6)
+                                            .map(|r| r[active_cols[j]])
+                                            .collect();
+                                        let cum: f64 =
+                                            recent.iter().fold(1.0, |acc, r| acc * (1.0 + r));
+                                        cum.powf(2.0) - 1.0 // 6m → annualized
+                                    })
+                                    .collect(),
                             );
                             // v19: 50/50 momentum blend (更快响应牛市趋势)
                             let bw = if is_v19 { 0.5 } else { momentum_blend_ratio };
                             let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
-                            let cm: mvo::CovMethod = cov_method.parse().unwrap_or(mvo::CovMethod::LinearLW);
+                            let cm: mvo::CovMethod =
+                                cov_method.parse().unwrap_or(mvo::CovMethod::LinearLW);
                             if use_ga {
                                 // 自适应max_single: 牛市80% vs 默认75%
                                 // 判断: A股12月趋势>10% = 牛市, 允许更集中配置
-                                let trail_12m_a: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0+r)) - 1.0;
+                                let trail_12m_a: f64 =
+                                    prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
                                 let adaptive_max = if trail_12m_a > 0.10 { 0.80 } else { 0.75 };
                                 // 牛市同时放宽min_stock（允许更高弹性）
                                 let adaptive_ms = if trail_12m_a > 0.10 {
                                     (regime_ms * 0.7).max(0.08)
-                                } else { regime_ms };
-                                mvo::mvo_allocate_ga_with_max_single(&arr, &adj_mu, adaptive_ms, dynamic_target, 0.10, adaptive_max)
+                                } else {
+                                    regime_ms
+                                };
+                                mvo::mvo_allocate_ga_with_max_single(
+                                    &arr,
+                                    &adj_mu,
+                                    adaptive_ms,
+                                    dynamic_target,
+                                    0.10,
+                                    adaptive_max,
+                                )
                             } else {
-                                mvo::mvo_allocate_with_cov_method(&arr, &adj_mu, regime_ms, dynamic_target, 0.10, cm)
+                                mvo::mvo_allocate_with_cov_method(
+                                    &arr,
+                                    &adj_mu,
+                                    regime_ms,
+                                    dynamic_target,
+                                    0.10,
+                                    cm,
+                                )
                             }
                         } else if use_ewma {
                             // Exp B: EWMA covariance (λ=0.94) with dynamic target
-                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
-                                .map(|(_, _, r)| r[0]).collect();
+                            let prev_12: Vec<f64> = monthly_rets[mi - 12..mi]
+                                .iter()
+                                .map(|(_, _, r)| r[0])
+                                .collect();
                             let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
                             let dynamic_target = (cum - 1.0 + 0.05).clamp(0.08, 0.18);
                             mvo::mvo_allocate_ewma_n(&arr, regime_ms, dynamic_target, 0.10, 0.94)
                         } else {
                             // v16 baseline with experiment options
-                            let prev_12: Vec<f64> = monthly_rets[mi-12..mi].iter()
-                                .map(|(_, _, r)| r[0]).collect();
+                            let prev_12: Vec<f64> = monthly_rets[mi - 12..mi]
+                                .iter()
+                                .map(|(_, _, r)| r[0])
+                                .collect();
                             let cum: f64 = prev_12.iter().fold(1.0, |acc, r| acc * (1.0 + r));
-                            let return_target = fixed_return_target.unwrap_or(
-                                (cum - 1.0 + 0.05).clamp(0.08, 0.18)
-                            );
+                            let return_target =
+                                fixed_return_target.unwrap_or((cum - 1.0 + 0.05).clamp(0.08, 0.18));
                             // Exp: trend_boost — 趋势确认后提升min_stock
                             let effective_min = if trend_boost {
-                                let trail_3m: f64 = prev_12.iter().rev().take(3).fold(1.0, |acc, r| acc * (1.0+r)) - 1.0;
+                                let trail_3m: f64 = prev_12
+                                    .iter()
+                                    .rev()
+                                    .take(3)
+                                    .fold(1.0, |acc, r| acc * (1.0 + r))
+                                    - 1.0;
                                 // 简化的MA判断: 近3月累计正收益=上升趋势
-                                if trail_3m > 0.0 && cum > 0.0 { 0.20_f64.max(regime_ms) } else { regime_ms }
-                            } else { regime_ms };
+                                if trail_3m > 0.0 && cum > 0.0 {
+                                    0.20_f64.max(regime_ms)
+                                } else {
+                                    regime_ms
+                                }
+                            } else {
+                                regime_ms
+                            };
                             // Exp: vol_budget — 逆波动率风险预算fallback(在MVO失败时用)
                             let _use_vol_budget = vol_budget;
-                            mvo::mvo_allocate_with_target_n(&arr, effective_min, return_target, 0.10)
+                            mvo::mvo_allocate_with_target_n(
+                                &arr,
+                                effective_min,
+                                return_target,
+                                0.10,
+                            )
                         };
 
                         if let Some(result) = mvo_result {
@@ -2772,31 +3674,51 @@ pub async fn run_historical_replay(
                             // 权重映射：MVO只返回活跃列 → 扩展回完整n_assets向量（NaN列填0）
                             let mut w = vec![0.0f64; n_assets];
                             for (j, &orig_idx) in active_cols.iter().enumerate() {
-                                if j < active_w.len() { w[orig_idx] = active_w[j]; }
+                                if j < active_w.len() {
+                                    w[orig_idx] = active_w[j];
+                                }
                             }
                             // 归一化（过滤NaN列后权重和可能<1）
                             let w_sum: f64 = w.iter().sum();
-                            if w_sum > 0.0 { for wi in w.iter_mut() { *wi /= w_sum; } }
+                            if w_sum > 0.0 {
+                                for wi in w.iter_mut() {
+                                    *wi /= w_sum;
+                                }
+                            }
                             // v17 only: ETF MA200 趋势过滤
                             if is_v17 {
                                 for (ei, sym) in etf_symbols.iter().enumerate() {
                                     let wi = ei + 1;
-                                    if wi >= w.len() || w[wi] <= 0.0 { continue; }
+                                    if wi >= w.len() || w[wi] <= 0.0 {
+                                        continue;
+                                    }
                                     if let Some(prices) = etf_prices.get(sym.as_str()) {
-                                        let mut sorted_dates: Vec<NaiveDate> = prices.keys().copied().collect();
+                                        let mut sorted_dates: Vec<NaiveDate> =
+                                            prices.keys().copied().collect();
                                         sorted_dates.sort();
-                                        let recent: Vec<f64> = sorted_dates.iter()
-                                            .filter(|&&pd| pd <= *d).rev().take(200)
-                                            .map(|pd| prices.get(pd).copied().unwrap_or(0.0)).collect();
+                                        let recent: Vec<f64> = sorted_dates
+                                            .iter()
+                                            .filter(|&&pd| pd <= *d)
+                                            .rev()
+                                            .take(200)
+                                            .map(|pd| prices.get(pd).copied().unwrap_or(0.0))
+                                            .collect();
                                         if recent.len() >= 200 {
-                                            let ma200: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
-                                            if recent[0] < ma200 && recent[0] > 0.0 { w[wi] = 0.0; }
+                                            let ma200: f64 =
+                                                recent.iter().sum::<f64>() / recent.len() as f64;
+                                            if recent[0] < ma200 && recent[0] > 0.0 {
+                                                w[wi] = 0.0;
+                                            }
                                         }
                                     }
                                 }
                             }
                             let w_sum: f64 = w.iter().sum();
-                            if w_sum > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum; } }
+                            if w_sum > 0.0 {
+                                for w_i in w.iter_mut() {
+                                    *w_i /= w_sum;
+                                }
+                            }
                             // Exp: vol_budget — 用逆波动率权重做30%混合,增加分散化
                             if vol_budget && train.len() >= 12 {
                                 let mut iv_w = vec![0.0f64; n_assets];
@@ -2805,20 +3727,40 @@ pub async fn run_historical_replay(
                                     let col: Vec<f64> = train.iter().map(|r| r[j]).collect();
                                     let n = col.len() as f64;
                                     let mean = col.iter().sum::<f64>() / n;
-                                    let var = col.iter().map(|x| (x-mean).powi(2)).sum::<f64>() / (n-1.0);
+                                    let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                                        / (n - 1.0);
                                     iv_w[j] = 1.0 / (var.sqrt() + 0.01);
                                     iv_sum += iv_w[j];
                                 }
-                                if iv_sum > 0.0 { for j in 0..n_assets { iv_w[j] /= iv_sum; } }
-                                for j in 0..n_assets { w[j] = 0.7 * w[j] + 0.3 * iv_w[j]; }
+                                if iv_sum > 0.0 {
+                                    for j in 0..n_assets {
+                                        iv_w[j] /= iv_sum;
+                                    }
+                                }
+                                for j in 0..n_assets {
+                                    w[j] = 0.7 * w[j] + 0.3 * iv_w[j];
+                                }
                                 let w_sum3: f64 = w.iter().sum();
-                                if w_sum3 > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum3; } }
+                                if w_sum3 > 0.0 {
+                                    for w_i in w.iter_mut() {
+                                        *w_i /= w_sum3;
+                                    }
+                                }
                             }
-                            for w_i in w.iter_mut() { *w_i *= regime_exposure; }
+                            for w_i in w.iter_mut() {
+                                *w_i *= regime_exposure;
+                            }
                             let w_sum2: f64 = w.iter().sum();
-                            if w_sum2 > 0.0 { for w_i in w.iter_mut() { *w_i /= w_sum2; } }
+                            if w_sum2 > 0.0 {
+                                for w_i in w.iter_mut() {
+                                    *w_i /= w_sum2;
+                                }
+                            }
                             weights = w;
-                            if !found_start { mvo_start_idx = di; found_start = true; }
+                            if !found_start {
+                                mvo_start_idx = di;
+                                found_start = true;
+                            }
                         }
                     }
                 }
@@ -2829,7 +3771,9 @@ pub async fn run_historical_replay(
         mvo_daily_rets.push(mvo_ret);
     }
 
-    if mvo_daily_rets.len() < 60 { return Err("MVO收益序列不足".into()); }
+    if mvo_daily_rets.len() < 60 {
+        return Err("MVO收益序列不足".into());
+    }
 
     // 8. 应用杠杆 (vol_target or fixed)
     let mut leveraged_rets: Vec<f64> = Vec::with_capacity(mvo_daily_rets.len());
@@ -2848,27 +3792,56 @@ pub async fn run_historical_replay(
 
     for (i, &mvo_r) in mvo_daily_rets.iter().enumerate() {
         trail_60.push(mvo_r);
-        if trail_60.len() > 60 { trail_60.remove(0); }
+        if trail_60.len() > 60 {
+            trail_60.remove(0);
+        }
         let lev = if use_vol_target && trail_60.len() >= 20 {
             let n = trail_60.len() as f64;
             let m = trail_60.iter().sum::<f64>() / n;
-            let v = if n > 1.0 { trail_60.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (n - 1.0) } else { 0.0 };
+            let v = if n > 1.0 {
+                trail_60.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (n - 1.0)
+            } else {
+                0.0
+            };
             let ann_vol = v.sqrt() * (252.0_f64).sqrt();
             // P0: 自适应波动率目标 (bull=25%, bear=15%, neutral=20%)
             let target_vol = if adaptive_vol_target && i < csi_trail_12m.len() {
                 let t12 = csi_trail_12m[i];
-                if t12 > 0.10 { 0.25 } else if t12 < -0.15 { 0.15 } else { 0.20 }
-            } else { 0.20 };
+                if t12 > 0.10 {
+                    0.25
+                } else if t12 < -0.15 {
+                    0.15
+                } else {
+                    0.20
+                }
+            } else {
+                0.20
+            };
             let cap = leverage_cap;
-            if ann_vol > 0.05 { (target_vol / ann_vol).clamp(0.5, cap) } else { 1.0 }
-        } else if fixed_lev > 1.0 { fixed_lev } else { 1.0 };
+            if ann_vol > 0.05 {
+                (target_vol / ann_vol).clamp(0.5, cap)
+            } else {
+                1.0
+            }
+        } else if fixed_lev > 1.0 {
+            fixed_lev
+        } else {
+            1.0
+        };
         leveraged_rets.push(mvo_r * lev);
     }
 
     // 9. 计算绩效指标 (使用杠杆后收益)
-    let final_rets = if use_vol_target || fixed_lev > 1.0 { &leveraged_rets } else { &mvo_daily_rets };
+    let final_rets = if use_vol_target || fixed_lev > 1.0 {
+        &leveraged_rets
+    } else {
+        &mvo_daily_rets
+    };
     let mvo_rets = &final_rets[mvo_start_idx..];
-    let mvo_start_date = daily_returns[mvo_start_idx].0.format("%Y-%m-%d").to_string();
+    let mvo_start_date = daily_returns[mvo_start_idx]
+        .0
+        .format("%Y-%m-%d")
+        .to_string();
     let n = mvo_rets.len() as f64;
 
     let mean = mvo_rets.iter().sum::<f64>() / n;
@@ -2877,75 +3850,131 @@ pub async fn run_historical_replay(
     let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
     let ann_vol = daily_vol * (252.0_f64).sqrt();
     let rf = 0.02;
-    let sharpe = if ann_vol > 0.0 { (ann_ret - rf) / ann_vol } else { 0.0 };
+    let sharpe = if ann_vol > 0.0 {
+        (ann_ret - rf) / ann_vol
+    } else {
+        0.0
+    };
 
-    let mut nav = 1.0_f64; let mut peak = 1.0_f64; let mut max_dd = 0.0_f64;
-    for r in mvo_rets { nav *= 1.0 + r; peak = peak.max(nav); max_dd = max_dd.max((peak-nav)/peak); }
+    let mut nav = 1.0_f64;
+    let mut peak = 1.0_f64;
+    let mut max_dd = 0.0_f64;
+    for r in mvo_rets {
+        nav *= 1.0 + r;
+        peak = peak.max(nav);
+        max_dd = max_dd.max((peak - nav) / peak);
+    }
     let cumulative = nav - 1.0;
     let calmar = if max_dd > 0.0 { ann_ret / max_dd } else { 0.0 };
 
     let down: Vec<f64> = mvo_rets.iter().filter(|&&r| r < 0.0).copied().collect();
     let down_std = if down.len() > 1 {
         let dm = down.iter().sum::<f64>() / down.len() as f64;
-        (down.iter().map(|r| (r-dm).powi(2)).sum::<f64>() / (down.len()-1) as f64).sqrt()
-    } else { 0.0 };
+        (down.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (down.len() - 1) as f64).sqrt()
+    } else {
+        0.0
+    };
     let ann_down = down_std * (252.0_f64).sqrt();
-    let sortino = if ann_down > 0.0 { (ann_ret - rf) / ann_down } else { 0.0 };
+    let sortino = if ann_down > 0.0 {
+        (ann_ret - rf) / ann_down
+    } else {
+        0.0
+    };
     let wr = mvo_rets.iter().filter(|&&r| r > 0.0).count() as f64 / mvo_rets.len() as f64;
 
     // 9. 逐年收益
     let mut yearly: Vec<YearlyReturn> = Vec::new();
-    let mut yn: f64 = 1.0; let mut ys: f64 = 1.0; let mut py: Option<String> = None;
+    let mut yn: f64 = 1.0;
+    let mut ys: f64 = 1.0;
+    let mut py: Option<String> = None;
     for (idx, &r) in mvo_rets.iter().enumerate() {
         let di = mvo_start_idx + idx;
         let yr = daily_returns[di].0.format("%Y").to_string();
         if py.as_deref() != Some(&yr) {
             if let Some(ref p) = py {
-                let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
-                yearly.push(YearlyReturn { year: p.clone(), return_pct: ret_pct });
+                let ret_pct: f64 = ((yn / ys - 1.0) * 1000.0).round() / 10.0;
+                yearly.push(YearlyReturn {
+                    year: p.clone(),
+                    return_pct: ret_pct,
+                });
             }
-            ys = yn; py = Some(yr);
+            ys = yn;
+            py = Some(yr);
         }
         yn *= 1.0 + r;
     }
     if let Some(p) = py {
-        let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
-        yearly.push(YearlyReturn { year: p, return_pct: ret_pct });
+        let ret_pct: f64 = ((yn / ys - 1.0) * 1000.0).round() / 10.0;
+        yearly.push(YearlyReturn {
+            year: p,
+            return_pct: ret_pct,
+        });
     }
 
     // 10. 基准指标
     fn bench_metrics_with_yearly(rets: &[f64], dates: &[NaiveDate]) -> BenchmarkMetrics {
-        let n = rets.len() as f64; let rf = 0.02;
-        if n < 60.0 { return BenchmarkMetrics { annual_return_pct:0.,max_drawdown_pct:0.,sharpe_ratio:0.,sortino_ratio:0.,yearly_returns:vec![] }; }
-        let mean = rets.iter().sum::<f64>()/n;
-        let ann_ret = (1.0+mean).powf(252.0)-1.0;
-        let var = rets.iter().map(|r|(r-mean).powi(2)).sum::<f64>()/(n-1.0);
-        let ann_vol = var.sqrt()*(252.0_f64).sqrt();
-        let sharpe = if ann_vol>0.0 {(ann_ret-rf)/ann_vol} else {0.0};
-        let mut nav: f64 = 1.0; let mut peak: f64 = 1.0; let mut mdd: f64 = 0.0;
-        for r in rets { nav *= 1.0 + r; peak = peak.max(nav); mdd = mdd.max((peak - nav) / peak); }
-        let down:Vec<f64> = rets.iter().filter(|&&r|r<0.0).copied().collect();
-        let ds = if down.len()>1 {
-            let dm=down.iter().sum::<f64>()/down.len() as f64;
-            (down.iter().map(|r|(r-dm).powi(2)).sum::<f64>()/(down.len()-1)as f64).sqrt()*(252.0_f64).sqrt()
-        } else {0.01};
-        let sortino = if ds>0.0 {(ann_ret-rf)/ds} else {0.0};
+        let n = rets.len() as f64;
+        let rf = 0.02;
+        if n < 60.0 {
+            return BenchmarkMetrics {
+                annual_return_pct: 0.,
+                max_drawdown_pct: 0.,
+                sharpe_ratio: 0.,
+                sortino_ratio: 0.,
+                yearly_returns: vec![],
+            };
+        }
+        let mean = rets.iter().sum::<f64>() / n;
+        let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
+        let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let ann_vol = var.sqrt() * (252.0_f64).sqrt();
+        let sharpe = if ann_vol > 0.0 {
+            (ann_ret - rf) / ann_vol
+        } else {
+            0.0
+        };
+        let mut nav: f64 = 1.0;
+        let mut peak: f64 = 1.0;
+        let mut mdd: f64 = 0.0;
+        for r in rets {
+            nav *= 1.0 + r;
+            peak = peak.max(nav);
+            mdd = mdd.max((peak - nav) / peak);
+        }
+        let down: Vec<f64> = rets.iter().filter(|&&r| r < 0.0).copied().collect();
+        let ds = if down.len() > 1 {
+            let dm = down.iter().sum::<f64>() / down.len() as f64;
+            (down.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (down.len() - 1) as f64).sqrt()
+                * (252.0_f64).sqrt()
+        } else {
+            0.01
+        };
+        let sortino = if ds > 0.0 { (ann_ret - rf) / ds } else { 0.0 };
         let mut yearly = Vec::new();
-        let mut yn: f64 = 1.0; let mut ys: f64 = 1.0; let mut py: Option<String> = None;
+        let mut yn: f64 = 1.0;
+        let mut ys: f64 = 1.0;
+        let mut py: Option<String> = None;
         for (i, r) in rets.iter().enumerate() {
             let yr = dates[i].format("%Y").to_string();
             if py.as_deref() != Some(&yr) {
                 if let Some(ref p) = py {
-                    let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
-                    yearly.push(YearlyReturn { year: p.clone(), return_pct: ret_pct });
+                    let ret_pct: f64 = ((yn / ys - 1.0) * 1000.0).round() / 10.0;
+                    yearly.push(YearlyReturn {
+                        year: p.clone(),
+                        return_pct: ret_pct,
+                    });
                 }
-                ys = yn; py = Some(yr);
+                ys = yn;
+                py = Some(yr);
             }
             yn *= 1.0 + r;
         }
         if let Some(p) = py {
-            let ret_pct: f64 = ((yn/ys - 1.0) * 1000.0).round() / 10.0;
-            yearly.push(YearlyReturn { year: p, return_pct: ret_pct });
+            let ret_pct: f64 = ((yn / ys - 1.0) * 1000.0).round() / 10.0;
+            yearly.push(YearlyReturn {
+                year: p,
+                return_pct: ret_pct,
+            });
         }
         let ar_pct: f64 = (ann_ret * 1000.0).round() / 10.0;
         let dd_pct: f64 = (mdd * 1000.0).round() / 10.0;
@@ -2966,8 +3995,13 @@ pub async fn run_historical_replay(
         gold: bench_metrics_with_yearly(&gold_rets, &gold_dates),
     };
 
-    info!("[replay] v17 回放完成: AR={:.1}% DD={:.1}% SR={:.2} SO={:.2}",
-        ann_ret*100.0, max_dd*100.0, sharpe, sortino);
+    info!(
+        "[replay] v17 回放完成: AR={:.1}% DD={:.1}% SR={:.2} SO={:.2}",
+        ann_ret * 100.0,
+        max_dd * 100.0,
+        sharpe,
+        sortino
+    );
 
     let ar_pct: f64 = (ann_ret * 1000.0).round() / 10.0;
     let cum_pct: f64 = (cumulative * 1000.0).round() / 10.0;
@@ -2982,34 +4016,57 @@ pub async fn run_historical_replay(
     let perturb = {
         let base_ar = ar_pct;
         // A: min_stock +20% → tighter constraint
-        let ms_up_nav = mvo_rets.iter().fold(1.0f64, |nav, &r| nav * (1.0 + r * 0.97));
+        let ms_up_nav = mvo_rets
+            .iter()
+            .fold(1.0f64, |nav, &r| nav * (1.0 + r * 0.97));
         let ms_up_ar = (ms_up_nav.powf(252.0 / mvo_rets.len() as f64) - 1.0) * 100.0;
         let ar_ms_up = (ms_up_ar * 10.0).round() / 10.0;
         // B: +10% volatility stress scenario
         let mut stress_rets: Vec<f64> = mvo_rets.to_vec();
         let sm = stress_rets.iter().sum::<f64>() / stress_rets.len() as f64;
-        for r in &mut stress_rets { *r = sm + (*r - sm) * 1.10; }
+        for r in &mut stress_rets {
+            *r = sm + (*r - sm) * 1.10;
+        }
         let sn = stress_rets.iter().fold(1.0f64, |nav, &r| nav * (1.0 + r));
         let stress_ar = (sn.powf(252.0 / stress_rets.len() as f64) - 1.0) * 100.0;
         let ar_constrained = (stress_ar * 10.0).round() / 10.0;
-        let mut sp = 1.0f64; let mut sn2 = 1.0f64; let mut sd = 0.0f64;
-        for &r in &stress_rets { sn2 *= 1.0 + r; sp = sp.max(sn2); sd = sd.max((sp - sn2) / sp); }
+        let mut sp = 1.0f64;
+        let mut sn2 = 1.0f64;
+        let mut sd = 0.0f64;
+        for &r in &stress_rets {
+            sn2 *= 1.0 + r;
+            sp = sp.max(sn2);
+            sd = sd.max((sp - sn2) / sp);
+        }
         let dd_inc = ((sd - dd_pct / 100.0).max(0.0) * 1000.0).round() / 10.0;
         let rob = (ms_up_ar.min(stress_ar) / base_ar.max(0.01)).clamp(0.0, 1.0);
         let rs = (rob * 100.0).round() / 100.0;
         let passed = rob >= 0.80 && dd_inc <= 50.0;
         let summary = if passed {
-            format!("通过: AR保留率{:.0}% DD增{:.1}pp", rob*100.0, dd_inc)
+            format!("通过: AR保留率{:.0}% DD增{:.1}pp", rob * 100.0, dd_inc)
         } else {
-            format!("关注: AR保留率{:.0}% DD增{:.1}pp", rob*100.0, dd_inc)
+            format!("关注: AR保留率{:.0}% DD增{:.1}pp", rob * 100.0, dd_inc)
         };
-        PerturbationResult { base_ar_pct: base_ar, ar_ms_up_pct: ar_ms_up, ar_constrained_pct: ar_constrained,
-            max_dd_increase_pct: dd_inc, robustness_score: rs, passed, summary }
+        PerturbationResult {
+            base_ar_pct: base_ar,
+            ar_ms_up_pct: ar_ms_up,
+            ar_constrained_pct: ar_constrained,
+            max_dd_increase_pct: dd_inc,
+            robustness_score: rs,
+            passed,
+            summary,
+        }
     };
 
     Ok(ReplayResult {
-        start_date: tdates.first().map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
-        end_date: tdates.last().map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+        start_date: tdates
+            .first()
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+        end_date: tdates
+            .last()
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
         trading_days: tdates.len(),
         annual_return_pct: ar_pct,
         cumulative_return_pct: cum_pct,

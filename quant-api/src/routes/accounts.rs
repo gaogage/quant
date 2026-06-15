@@ -97,7 +97,10 @@ pub async fn list_accounts(
 
     // 权限过滤
     if !is_admin {
-        where_clauses.push(format!("(pa.user_id = '{}' OR (pa.user_id IS NULL AND pa.status = 'active'))", user.user_id));
+        where_clauses.push(format!(
+            "(pa.user_id = '{}' OR (pa.user_id IS NULL AND pa.status = 'active'))",
+            user.user_id
+        ));
     }
 
     // 名称模糊搜索
@@ -170,7 +173,10 @@ pub async fn list_accounts(
         where_sql
     );
 
-    let rows: Vec<AccountListRow> = sqlx::query_as(&sql).fetch_all(&state.db).await.unwrap_or_default();
+    let rows: Vec<AccountListRow> = sqlx::query_as(&sql)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
 
     let list: Vec<serde_json::Value> = rows
         .into_iter()
@@ -209,18 +215,38 @@ pub async fn account_detail(
     let is_admin = user.role == "admin";
     if !is_admin {
         let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1"
-        ).bind(&account_id).fetch_optional(&state.db).await;
+            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&account_id)
+        .fetch_optional(&state.db)
+        .await;
         match owner {
             Ok(Some((Some(oid),))) if oid == user.user_id => {}
             Ok(Some((None,))) => {}
-            _ => return Json(serde_json::json!({"code": 403, "message": "无权访问"})).into_response(),
+            _ => {
+                return Json(serde_json::json!({"code": 403, "message": "无权访问"}))
+                    .into_response()
+            }
         }
     }
 
     // 基本信息
     let acc: Option<(
-        String, String, String, f64, f64, f64, f64, bool, String, f64, String, String, Option<String>, Option<f64>, Option<chrono::DateTime<chrono::Utc>>,
+        String,
+        String,
+        String,
+        f64,
+        f64,
+        f64,
+        f64,
+        bool,
+        String,
+        f64,
+        String,
+        String,
+        Option<String>,
+        Option<f64>,
+        Option<chrono::DateTime<chrono::Utc>>,
     )> = sqlx::query_as(
         "SELECT paper_account_id, account_type, name, initial_capital::double precision,
                 COALESCE(current_nav, initial_capital)::double precision as nav,
@@ -228,18 +254,28 @@ pub async fn account_detail(
                 COALESCE(margin_amount, 0)::double precision as margin_amount,
                 leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status,
                 user_id, max_drawdown_pct::double precision, created_at
-         FROM paper_account WHERE paper_account_id = $1"
-    ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(&account_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
-    let Some((aid, at, name, cap, nav, cash, margin, le, lm, lmp, ss, st, uid, mdd, created)) = acc else {
+    let Some((aid, at, name, cap, nav, cash, margin, le, lm, lmp, ss, st, uid, mdd, created)) = acc
+    else {
         return Json(serde_json::json!({"code": 404, "message": "账号不存在"})).into_response();
     };
 
     // 绩效指标：从 paper_nav_snapshot 计算
     let metrics = sqlx::query_as::<_, (Option<f64>,)>(
         "SELECT (nav / LAG(nav) OVER (ORDER BY snapshot_date) - 1.0)::double precision as daily_ret
-         FROM paper_nav_snapshot WHERE paper_account_id = $1 ORDER BY snapshot_date"
-    ).bind(&account_id).fetch_all(&state.db).await.unwrap_or_default();
+         FROM paper_nav_snapshot WHERE paper_account_id = $1 ORDER BY snapshot_date",
+    )
+    .bind(&account_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
 
     let returns: Vec<f64> = metrics.iter().filter_map(|(r,)| *r).collect();
     let n = returns.len() as f64;
@@ -247,21 +283,52 @@ pub async fn account_detail(
         let mean_daily = returns.iter().sum::<f64>() / n;
         let ann = (1.0 + mean_daily).powi(252) - 1.0;
         (ann * 10000.0).round() / 100.0
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let sharpe = if n > 1.0 {
         let mean = returns.iter().sum::<f64>() / n;
         let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
         let daily_vol = var.sqrt();
         let annual_vol = daily_vol * (252.0_f64).sqrt();
-        if annual_vol > 0.0 { (annual_return / 100.0) / annual_vol } else { 0.0 }
-    } else { 0.0 };
+        if annual_vol > 0.0 {
+            (annual_return / 100.0) / annual_vol
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
     let sortino = if n > 1.0 {
-        let down_var = returns.iter().filter(|&&r| r < 0.0).map(|r| r.powi(2)).sum::<f64>() / n;
+        let down_var = returns
+            .iter()
+            .filter(|&&r| r < 0.0)
+            .map(|r| r.powi(2))
+            .sum::<f64>()
+            / n;
         let down_vol = down_var.sqrt() * (252.0_f64).sqrt();
-        if down_vol > 0.0 { (annual_return / 100.0) / down_vol } else { 0.0 }
-    } else { 0.0 };
-    let cum_ret = if cap > 0.0 { (nav - cap) / cap * 100.0 } else { 0.0 };
-    let calmar = if let Some(m) = mdd { if m > 0.01 { annual_return / m } else { 0.0 } } else { 0.0 };
+        if down_vol > 0.0 {
+            (annual_return / 100.0) / down_vol
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let cum_ret = if cap > 0.0 {
+        (nav - cap) / cap * 100.0
+    } else {
+        0.0
+    };
+    let calmar = if let Some(m) = mdd {
+        if m > 0.01 {
+            annual_return / m
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
 
     // 如果快照无有效收益数据（回放产生的是聚合指标），从 paper_replay 读取
     let mut yearly_returns_json: Option<serde_json::Value> = None;
@@ -270,25 +337,60 @@ pub async fn account_detail(
         if annual_return == 0.0 && n > 1.0 {
             // 检查是否有回放记录
             let replay: Option<(
-                Option<f64>, Option<f64>, Option<f64>, Option<f64>,
-                Option<f64>, Option<f64>, Option<f64>, Option<i32>,
-                Option<serde_json::Value>, Option<serde_json::Value>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<i32>,
+                Option<serde_json::Value>,
+                Option<serde_json::Value>,
             )> = sqlx::query_as(
                 "SELECT annual_return_pct, cumulative_return_pct, sharpe_ratio, sortino_ratio,
                  calmar_ratio, max_drawdown_pct, volatility_pct, trading_days,
                  yearly_returns, benchmarks
-                 FROM paper_replay WHERE paper_account_id = $1 LIMIT 1"
-            ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+                 FROM paper_replay WHERE paper_account_id = $1 LIMIT 1",
+            )
+            .bind(&account_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
             if let Some((ar, cr, sh, so, ca, md, _vol, td, yr, bm)) = replay {
                 yearly_returns_json = yr;
                 benchmarks_json = bm;
-                (ar.unwrap_or(0.0), sh.unwrap_or(0.0), so.unwrap_or(0.0),
-                 cr.unwrap_or(0.0), ca.unwrap_or(0.0), md, td.unwrap_or(0) as i64)
+                (
+                    ar.unwrap_or(0.0),
+                    sh.unwrap_or(0.0),
+                    so.unwrap_or(0.0),
+                    cr.unwrap_or(0.0),
+                    ca.unwrap_or(0.0),
+                    md,
+                    td.unwrap_or(0) as i64,
+                )
             } else {
-                (annual_return, sharpe, sortino, cum_ret, calmar, mdd, n as i64)
+                (
+                    annual_return,
+                    sharpe,
+                    sortino,
+                    cum_ret,
+                    calmar,
+                    mdd,
+                    n as i64,
+                )
             }
         } else {
-            (annual_return, sharpe, sortino, cum_ret, calmar, mdd, n as i64)
+            (
+                annual_return,
+                sharpe,
+                sortino,
+                cum_ret,
+                calmar,
+                mdd,
+                n as i64,
+            )
         };
 
     // 当前持仓
@@ -307,32 +409,73 @@ pub async fn account_detail(
     }).collect();
 
     // 最近交易记录（实际交易 + 计划交易）
-    let trades: Vec<serde_json::Value> = sqlx::query_as::<_, (String, String, String, String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<chrono::DateTime<chrono::Utc>>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
+    let trades: Vec<serde_json::Value> = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+        ),
+    >(
         "SELECT o.order_id, o.symbol, o.side, o.status, o.quantity, o.limit_price,
                 f.price as fill_price, f.fill_time,
                 o.target_price, o.price_upper_limit, o.price_lower_limit,
                 o.slippage_pct, f.quantity as fill_quantity, f.amount as fill_amount
          FROM paper_order o LEFT JOIN paper_fill f ON o.order_id = f.planned_order_id
          WHERE o.paper_account_id = $1
-         ORDER BY COALESCE(f.fill_time, o.created_at) DESC LIMIT 50"
-    ).bind(&account_id).fetch_all(&state.db).await.unwrap_or_default()
-    .into_iter().map(|(oid, sym, side, sts, qty, lim, fill_price, fill_time, target_price, upper, lower, slip, fill_qty, fill_amt)| {
-        serde_json::json!({
-            "order_id": oid, "symbol": sym, "side": side, "status": sts,
-            "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
-            "limit_price": lim.map(|v| v.to_string()).unwrap_or_default(),
-            "fill_price": fill_price.map(|v| v.to_string()).unwrap_or_default(),
-            "fill_time": fill_time.map(|t| t.to_string()).unwrap_or_default(),
-            "planned": {
-                "target_price": target_price.map(|v| v.to_string()),
-                "price_upper": upper.map(|v| v.to_string()),
-                "price_lower": lower.map(|v| v.to_string()),
-                "slippage_pct": slip.map(|v| v.to_string()),
-            },
-            "fill_quantity": fill_qty.map(|v| v.to_string()),
-            "fill_amount": fill_amt.map(|v| v.to_string()),
-        })
-    }).collect();
+         ORDER BY COALESCE(f.fill_time, o.created_at) DESC LIMIT 50",
+    )
+    .bind(&account_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(
+        |(
+            oid,
+            sym,
+            side,
+            sts,
+            qty,
+            lim,
+            fill_price,
+            fill_time,
+            target_price,
+            upper,
+            lower,
+            slip,
+            fill_qty,
+            fill_amt,
+        )| {
+            serde_json::json!({
+                "order_id": oid, "symbol": sym, "side": side, "status": sts,
+                "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
+                "limit_price": lim.map(|v| v.to_string()).unwrap_or_default(),
+                "fill_price": fill_price.map(|v| v.to_string()).unwrap_or_default(),
+                "fill_time": fill_time.map(|t| t.to_string()).unwrap_or_default(),
+                "planned": {
+                    "target_price": target_price.map(|v| v.to_string()),
+                    "price_upper": upper.map(|v| v.to_string()),
+                    "price_lower": lower.map(|v| v.to_string()),
+                    "slippage_pct": slip.map(|v| v.to_string()),
+                },
+                "fill_quantity": fill_qty.map(|v| v.to_string()),
+                "fill_amount": fill_amt.map(|v| v.to_string()),
+            })
+        },
+    )
+    .collect();
 
     Json(serde_json::json!({
         "code": 0, "data": {
@@ -358,7 +501,8 @@ pub async fn account_detail(
             "positions": positions,
             "trades": trades,
         }
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ── 创建 ────────────────────────────────────────────────
@@ -380,11 +524,19 @@ pub async fn create_account(
     match sqlx::query(
         "INSERT INTO paper_account (paper_account_id, name, account_type, initial_capital, cash,
          leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status, user_id)
-         VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, 'active', $9)"
+         VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, 'active', $9)",
     )
-    .bind(&aid).bind(&req.name).bind(at).bind(cap)
-    .bind(le).bind(lm).bind(lmp).bind(ss).bind(&user.user_id)
-    .execute(&state.db).await
+    .bind(&aid)
+    .bind(&req.name)
+    .bind(at)
+    .bind(cap)
+    .bind(le)
+    .bind(lm)
+    .bind(lmp)
+    .bind(ss)
+    .bind(&user.user_id)
+    .execute(&state.db)
+    .await
     {
         Ok(_) => Json(serde_json::json!({"code": 0, "data": {"account_id": aid}})),
         Err(e) => Json(serde_json::json!({"code": 1, "message": format!("创建失败: {}", e)})),
@@ -404,8 +556,11 @@ pub async fn update_account(
     let is_admin = user.role == "admin";
     if !is_admin {
         let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1"
-        ).bind(&account_id).fetch_optional(&state.db).await;
+            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&account_id)
+        .fetch_optional(&state.db)
+        .await;
         match owner {
             Ok(Some((Some(oid),))) if oid == user.user_id => {}
             Ok(Some((None,))) => {} // 无主账号允许修改
@@ -427,16 +582,22 @@ pub async fn update_account(
          reserve_amount = COALESCE($10, reserve_amount),
          strategy_version_id = COALESCE($12, strategy_version_id),
          updated_at = NOW()
-         WHERE paper_account_id = $11"
+         WHERE paper_account_id = $11",
     )
-    .bind(&req.name).bind(req.leverage_enabled)
-    .bind(&req.leverage_mode).bind(req.leverage_multiplier)
-    .bind(&req.signal_source).bind(&req.status)
-    .bind(&req.dingtalk_webhook_url).bind(req.margin_amount)
-    .bind(req.cash).bind(req.reserve_amount)
+    .bind(&req.name)
+    .bind(req.leverage_enabled)
+    .bind(&req.leverage_mode)
+    .bind(req.leverage_multiplier)
+    .bind(&req.signal_source)
+    .bind(&req.status)
+    .bind(&req.dingtalk_webhook_url)
+    .bind(req.margin_amount)
+    .bind(req.cash)
+    .bind(req.reserve_amount)
     .bind(&account_id)
     .bind(&req.strategy_version_id)
-    .execute(&state.db).await;
+    .execute(&state.db)
+    .await;
 
     Json(serde_json::json!({"code": 0}))
 }
@@ -452,8 +613,11 @@ pub async fn delete_account(
     let is_admin = user.role == "admin";
     if !is_admin {
         let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1"
-        ).bind(&account_id).fetch_optional(&state.db).await;
+            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&account_id)
+        .fetch_optional(&state.db)
+        .await;
         match owner {
             Ok(Some((Some(oid),))) if oid == user.user_id => {}
             Ok(Some((None,))) => {}
@@ -488,22 +652,38 @@ pub async fn reset_account(
     let is_admin = user.role == "admin";
     if !is_admin {
         let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1"
-        ).bind(&account_id).fetch_optional(&state.db).await;
+            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&account_id)
+        .fetch_optional(&state.db)
+        .await;
         match owner {
             Ok(Some((Some(oid),))) if oid == user.user_id => {}
             Ok(Some((None,))) => {}
-            _ => return Json(serde_json::json!({"code": 403, "message": "只能重置自己的账号"})).into_response(),
+            _ => {
+                return Json(serde_json::json!({"code": 403, "message": "只能重置自己的账号"}))
+                    .into_response()
+            }
         }
     }
 
     let start_date = match chrono::NaiveDate::parse_from_str(&req.start_date, "%Y-%m-%d") {
         Ok(d) => d,
-        Err(_) => return Json(serde_json::json!({"code": 1, "message": "日期格式错误，需要 YYYY-MM-DD"})).into_response(),
+        Err(_) => {
+            return Json(serde_json::json!({"code": 1, "message": "日期格式错误，需要 YYYY-MM-DD"}))
+                .into_response()
+        }
     };
 
     // 清空关联数据
-    for table in &["paper_order", "paper_fill", "paper_position", "paper_nav_snapshot", "paper_replay", "paper_margin_trade"] {
+    for table in &[
+        "paper_order",
+        "paper_fill",
+        "paper_position",
+        "paper_nav_snapshot",
+        "paper_replay",
+        "paper_margin_trade",
+    ] {
         let sql = format!("DELETE FROM {} WHERE paper_account_id = $1", table);
         let _ = sqlx::query(&sql).bind(&account_id).execute(&state.db).await;
     }
@@ -515,14 +695,16 @@ pub async fn reset_account(
          initial_capital = $1, cash = $1, current_nav = $1, peak_nav = $1,
          margin_amount = 0, max_drawdown_pct = 0, total_trades = 0,
          created_at = $2, updated_at = NOW()
-         WHERE paper_account_id = $3"
+         WHERE paper_account_id = $3",
     )
-    .bind(cap).bind(start_date).bind(&account_id)
-    .execute(&state.db).await;
+    .bind(cap)
+    .bind(start_date)
+    .bind(&account_id)
+    .execute(&state.db)
+    .await;
 
     Json(serde_json::json!({"code": 0, "message": format!("账号已重置，起始资金¥{}，起始日期{}", cap as i64, req.start_date)})).into_response()
 }
-
 
 /// 根据持仓列表计算资产大类占比
 fn asset_allocation(positions: &[serde_json::Value]) -> Vec<serde_json::Value> {
@@ -530,20 +712,32 @@ fn asset_allocation(positions: &[serde_json::Value]) -> Vec<serde_json::Value> {
     let mut categories: HashMap<String, f64> = HashMap::new();
     for p in positions {
         let sym = p.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-        let mv_str = p.get("market_value").and_then(|v| v.as_str()).unwrap_or("0");
+        let mv_str = p
+            .get("market_value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0");
         let mv: f64 = mv_str.parse().unwrap_or(0.0);
         let cat = classify_asset(sym);
         *categories.entry(cat).or_default() += mv;
     }
     let total: f64 = categories.values().sum();
-    let mut result: Vec<serde_json::Value> = categories.into_iter()
+    let mut result: Vec<serde_json::Value> = categories
+        .into_iter()
         .filter(|(_, v)| *v > 0.0)
-        .map(|(name, value)| serde_json::json!({
-            "name": name, "market_value": (value * 100.0).round() / 100.0,
-            "pct": if total > 0.0 { (value / total * 10000.0).round() / 100.0 } else { 0.0 }
-        }))
+        .map(|(name, value)| {
+            serde_json::json!({
+                "name": name, "market_value": (value * 100.0).round() / 100.0,
+                "pct": if total > 0.0 { (value / total * 10000.0).round() / 100.0 } else { 0.0 }
+            })
+        })
         .collect();
-    result.sort_by(|a, b| b["pct"].as_f64().unwrap_or(0.0).partial_cmp(&a["pct"].as_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
+    result.sort_by(|a, b| {
+        b["pct"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&a["pct"].as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     result
 }
 
@@ -575,12 +769,18 @@ pub async fn push_account_dingtalk(
     let is_admin = user.role == "admin";
     if !is_admin {
         let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1"
-        ).bind(&account_id).fetch_optional(&state.db).await;
+            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&account_id)
+        .fetch_optional(&state.db)
+        .await;
         match owner {
             Ok(Some((Some(oid),))) if oid == user.user_id => {}
             Ok(Some((None,))) => {}
-            _ => return Json(serde_json::json!({"code": 403, "message": "无权操作"})).into_response(),
+            _ => {
+                return Json(serde_json::json!({"code": 403, "message": "无权操作"}))
+                    .into_response()
+            }
         }
     }
 
@@ -590,12 +790,19 @@ pub async fn push_account_dingtalk(
                 COALESCE(current_nav, initial_capital)::double precision,
                 COALESCE(cash, initial_capital)::double precision,
                 COALESCE(margin_amount, 0)::double precision
-         FROM paper_account WHERE paper_account_id = $1"
-    ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(&account_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     let (name, acc_type, webhook_url, nav, cash, margin) = match acc {
         Some(a) => a,
-        None => return Json(serde_json::json!({"code": 404, "message": "账号不存在"})).into_response(),
+        None => {
+            return Json(serde_json::json!({"code": 404, "message": "账号不存在"})).into_response()
+        }
     };
 
     // 解析 webhook URL：优先账号级，fallback 环境变量
@@ -614,13 +821,19 @@ pub async fn push_account_dingtalk(
         "SELECT snapshot_date FROM paper_nav_snapshot WHERE paper_account_id = $1 ORDER BY snapshot_date DESC LIMIT 1"
     ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
 
-    let trade_date = snap.map(|(d,)| d.format("%Y-%m-%d").to_string())
+    let trade_date = snap
+        .map(|(d,)| d.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
 
     // 累计收益 & 最大回撤
     let perf: Option<(Option<f64>,)> = sqlx::query_as(
-        "SELECT max_drawdown_pct::double precision FROM paper_account WHERE paper_account_id = $1"
-    ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
+        "SELECT max_drawdown_pct::double precision FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(&account_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     let mdd = perf.and_then(|(m,)| m).unwrap_or(0.0) / 100.0; // pct → decimal
     let cum_ret = if nav > 0.0 {
@@ -629,47 +842,88 @@ pub async fn push_account_dingtalk(
             "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1"
         ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
         let init = cap.map(|(c,)| c).unwrap_or(nav);
-        if init > 0.0 { nav / init - 1.0 } else { 0.0 }
-    } else { 0.0 };
+        if init > 0.0 {
+            nav / init - 1.0
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
 
     // 当前持仓（LEFT JOIN market_stock 取中文名）
-    let positions: Vec<serde_json::Value> = sqlx::query_as::<_, (String, Option<String>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
+    let positions: Vec<serde_json::Value> = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+        ),
+    >(
         "SELECT pp.symbol, ms.name, pp.quantity, pp.avg_cost, pp.market_price
          FROM paper_position pp
          LEFT JOIN market_stock ms ON ms.symbol = pp.symbol
-         WHERE pp.paper_account_id = $1 AND ABS(pp.quantity) > 0"
-    ).bind(&account_id).fetch_all(&state.db).await.unwrap_or_default()
-        .into_iter()
-        .map(|(sym, name, qty, _cost, price)| {
-            let q: f64 = qty.as_ref().and_then(|v| v.to_string().parse().ok()).unwrap_or(0.0);
-            let p: f64 = price.as_ref().and_then(|v| v.to_string().parse().ok()).unwrap_or(0.0);
-            let mv = (q * p).to_string();
-            serde_json::json!({
-                "symbol": sym,
-                "name": name.unwrap_or_default(),
-                "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
-                "current_price": price.map(|v| v.to_string()).unwrap_or_default(),
-                "market_value": mv,
-            })
+         WHERE pp.paper_account_id = $1 AND ABS(pp.quantity) > 0",
+    )
+    .bind(&account_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(sym, name, qty, _cost, price)| {
+        let q: f64 = qty
+            .as_ref()
+            .and_then(|v| v.to_string().parse().ok())
+            .unwrap_or(0.0);
+        let p: f64 = price
+            .as_ref()
+            .and_then(|v| v.to_string().parse().ok())
+            .unwrap_or(0.0);
+        let mv = (q * p).to_string();
+        serde_json::json!({
+            "symbol": sym,
+            "name": name.unwrap_or_default(),
+            "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
+            "current_price": price.map(|v| v.to_string()).unwrap_or_default(),
+            "market_value": mv,
         })
-        .collect();
+    })
+    .collect();
 
     // 资产大类分布
     let class_breakdown = asset_allocation(&positions);
 
-    let mv: f64 = positions.iter()
-        .filter_map(|p| p.get("market_value").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
+    let mv: f64 = positions
+        .iter()
+        .filter_map(|p| {
+            p.get("market_value")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+        })
         .sum();
     let net_worth = mv + cash - margin;
     let total_assets = mv + cash; // 总资产=持仓市值+现金(含融资买入部分)；净资产=总资产-融资额
 
     let text = dingtalk::build_position_summary_notification(
-        &name, &acc_type, &trade_date,
-        total_assets, cash, margin, mv, net_worth, &positions, cum_ret, mdd, &class_breakdown,
+        &name,
+        &acc_type,
+        &trade_date,
+        total_assets,
+        cash,
+        margin,
+        mv,
+        net_worth,
+        &positions,
+        cum_ret,
+        mdd,
+        &class_breakdown,
     );
 
     match dingtalk::send_dingtalk_markdown(&webhook, "持仓摘要", &text).await {
         Ok(()) => Json(serde_json::json!({"code": 0, "message": "推送成功"})).into_response(),
-        Err(e) => Json(serde_json::json!({"code": 1, "message": format!("推送失败: {}", e)})).into_response(),
+        Err(e) => Json(serde_json::json!({"code": 1, "message": format!("推送失败: {}", e)}))
+            .into_response(),
     }
 }

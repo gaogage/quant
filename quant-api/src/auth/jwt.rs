@@ -10,12 +10,12 @@ fn jwt_secret() -> String {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    pub sub: String,       // user_id
+    pub sub: String, // user_id
     pub username: String,
-    pub role: String,      // "admin" | "user"
+    pub role: String, // "admin" | "user"
     pub exp: usize,
     pub iat: usize,
-    pub jti: String,       // unique token id
+    pub jti: String, // unique token id
 }
 
 /// Create a JWT access token (24h expiry).

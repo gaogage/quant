@@ -34,8 +34,12 @@ pub async fn historical_replay_v19(
 
 fn parse_date(s: &str) -> Result<NaiveDate, String> {
     let s = s.trim();
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y%m%d") { return Ok(d); }
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") { return Ok(d); }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y%m%d") {
+        return Ok(d);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(d);
+    }
     Err(format!("日期格式错误: {} (需要 YYYYMMDD 或 YYYY-MM-DD)", s))
 }
 
@@ -60,16 +64,40 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     let sc = load_strategy_config(db, strategy_id.as_deref().unwrap_or("v19")).await;
 
     // 3. 清空账号旧数据
-    for table in &["paper_order", "paper_fill", "paper_position", "paper_nav_snapshot", "paper_replay", "paper_margin_trade"] {
-        sqlx::query(&format!("DELETE FROM {} WHERE paper_account_id = $1", table))
-            .bind(&account_id).execute(db).await.map_err(|e| format!("clean {}: {}", table, e))?;
+    for table in &[
+        "paper_order",
+        "paper_fill",
+        "paper_position",
+        "paper_nav_snapshot",
+        "paper_replay",
+        "paper_margin_trade",
+    ] {
+        sqlx::query(&format!(
+            "DELETE FROM {} WHERE paper_account_id = $1",
+            table
+        ))
+        .bind(&account_id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("clean {}: {}", table, e))?;
     }
     // 重置账号到初始状态（不改 status）
     sqlx::query("UPDATE paper_account SET current_nav=$1,peak_nav=$1,cash=$1,max_drawdown_pct=0,margin_amount=0,total_trades=0,created_at=$2,updated_at=NOW() WHERE paper_account_id=$3")
         .bind(init_cap).bind(start).bind(&account_id).execute(db).await.map_err(|e| format!("reset: {}", e))?;
 
     // 4. 共享核心：逐日 v19 收益（真 GA 权重 + 体制 + vol_target 杠杆）
-    let daily = simulate_v19_daily_returns(db, &sc, start, end, lev_enabled, lev_mult, &lev_mode, liq_thr, warn_thr).await?;
+    let daily = simulate_v19_daily_returns(
+        db,
+        &sc,
+        start,
+        end,
+        lev_enabled,
+        lev_mult,
+        &lev_mode,
+        liq_thr,
+        warn_thr,
+    )
+    .await?;
     if daily.is_empty() {
         return Err("v19 模拟无有效交易日".into());
     }
@@ -81,9 +109,13 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     let net_rets: Vec<f64> = daily.iter().map(|d| d.net_return).collect();
     for d in &daily {
         nav *= 1.0 + d.net_return;
-        if nav > peak { peak = nav; }
+        if nav > peak {
+            peak = nav;
+        }
         let dd = if peak > 0.0 { (peak - nav) / peak } else { 0.0 };
-        if dd > max_dd { max_dd = dd; }
+        if dd > max_dd {
+            max_dd = dd;
+        }
         let cum = nav / cap_f64 - 1.0;
         let nav_dec = Decimal::from_f64_retain(nav).unwrap_or(init_cap);
         let sid = format!("ns-{}", uuid::Uuid::new_v4());
@@ -105,7 +137,9 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     // 7. 末期持仓展示（通过 trading 模块落计划+实际交易，与实盘同路径）
     //    末日杠杆决定融资金额：持仓 = nav × lev，融资 margin = nav × (lev-1)
     let last_lev = daily.last().map(|d| d.leverage).unwrap_or(1.0);
-    let total_trades = build_final_positions(db, &account_id, &sc, end, final_nav, last_lev).await.unwrap_or(0);
+    let total_trades = build_final_positions(db, &account_id, &sc, end, final_nav, last_lev)
+        .await
+        .unwrap_or(0);
 
     // 8. 逐年收益
     let yearly = compute_yearly(&daily);
@@ -116,7 +150,10 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
         .bind(total_trades as i64).bind(max_dd * 100.0).bind(&account_id).execute(db).await.ok();
 
     // 10. 写 paper_replay
-    let rid = format!("rp-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+    let rid = format!(
+        "rp-{}",
+        uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
+    );
     sqlx::query(
         "INSERT INTO paper_replay (replay_id,paper_account_id,start_date,end_date,annual_return_pct,cumulative_return_pct,sharpe_ratio,sortino_ratio,calmar_ratio,max_drawdown_pct,volatility_pct,win_rate_pct,trading_days,yearly_returns)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
@@ -156,11 +193,13 @@ async fn build_final_positions(
     leverage: f64,
 ) -> Result<usize, String> {
     use crate::routes::scheduler::{compute_mvo_weights_for_date, detect_regime_exposure};
-    use crate::routes::trading::{execute_simulated_trade, PlannedTrade, update_current_nav};
+    use crate::routes::trading::{execute_simulated_trade, update_current_nav, PlannedTrade};
 
     let weights = compute_mvo_weights_for_date(db, date, sc).await;
     let regime = detect_regime_exposure(db, date).await;
-    if weights.is_empty() { return Ok(0); }
+    if weights.is_empty() {
+        return Ok(0);
+    }
 
     // 杠杆建模：总购买力 = 净值 × 末日杠杆；融资 margin = 净值 × (lev-1)
     let lev = leverage.max(1.0);
@@ -178,27 +217,40 @@ async fn build_final_positions(
          ORDER BY market_value DESC",
     ).bind(&sc.equity_curve_task_id).fetch_all(db).await.unwrap_or_default();
 
-    let total_a_mv: f64 = a_positions.iter().map(|(_, _, mv)| mv.to_string().parse::<f64>().unwrap_or(0.0)).sum();
+    let total_a_mv: f64 = a_positions
+        .iter()
+        .map(|(_, _, mv)| mv.to_string().parse::<f64>().unwrap_or(0.0))
+        .sum();
     let a_capital = invest_base * a_pct;
-    let a_scale = if total_a_mv > 0.0 { a_capital / total_a_mv } else { 0.0 };
+    let a_scale = if total_a_mv > 0.0 {
+        a_capital / total_a_mv
+    } else {
+        0.0
+    };
 
     let mut n = 0usize;
     let mut placed_mv = 0.0f64;
     for (sym, qty, mv) in &a_positions {
         let q = qty.to_string().parse::<f64>().unwrap_or(0.0);
         let m = mv.to_string().parse::<f64>().unwrap_or(0.0);
-        if q <= 0.0 || m <= 0.0 { continue; }
+        if q <= 0.0 || m <= 0.0 {
+            continue;
+        }
         let price = m / q;
         let sq = q * a_scale;
         let sm = m * a_scale;
-        if sm < 1.0 { continue; }
+        if sm < 1.0 {
+            continue;
+        }
         let trade = PlannedTrade {
             account_id: account_id.to_string(),
             symbol: sym.clone(),
             side: "buy".into(),
             target_quantity: Decimal::from_f64_retain(sq).unwrap_or(Decimal::ZERO),
             target_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
-            price_upper_limit: None, price_lower_limit: None, slippage_pct: 0.0,
+            price_upper_limit: None,
+            price_lower_limit: None,
+            slippage_pct: 0.0,
             target_value: Decimal::from_f64_retain(sm).unwrap_or(Decimal::ZERO),
             reason: Some(format!("v19回放末期持仓 A股 regime={:.0}%", regime * 100.0)),
             strategy_version_id: Some("phase7-professional-v1".to_string()),
@@ -214,18 +266,25 @@ async fn build_final_positions(
     for (i, etf) in sc.etf_symbols.iter().enumerate() {
         let w = weights.get(i + 1).copied().unwrap_or(0.0) * regime;
         let val = invest_base * w;
-        if val < 1.0 { continue; }
+        if val < 1.0 {
+            continue;
+        }
         let price: Option<f64> = sqlx::query_scalar::<_, f64>(
             "SELECT close::double precision FROM market_stock_daily_bar_adj WHERE symbol=$1 AND trade_date<=$2 ORDER BY trade_date DESC LIMIT 1",
         ).bind(etf).bind(date).fetch_optional(db).await.ok().flatten();
-        let Some(price) = price.filter(|p| *p > 0.0) else { continue };
+        let Some(price) = price.filter(|p| *p > 0.0) else {
+            continue;
+        };
         let qty = val / price;
         let trade = PlannedTrade {
             account_id: account_id.to_string(),
-            symbol: etf.clone(), side: "buy".into(),
+            symbol: etf.clone(),
+            side: "buy".into(),
             target_quantity: Decimal::from_f64_retain(qty).unwrap_or(Decimal::ZERO),
             target_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
-            price_upper_limit: None, price_lower_limit: None, slippage_pct: 0.0,
+            price_upper_limit: None,
+            price_lower_limit: None,
+            slippage_pct: 0.0,
             target_value: Decimal::from_f64_retain(val).unwrap_or(Decimal::ZERO),
             reason: Some(format!("v19回放末期持仓 ETF w={:.1}%", w * 100.0)),
             strategy_version_id: Some("phase7-professional-v1".to_string()),
@@ -243,11 +302,17 @@ async fn build_final_positions(
     sqlx::query("UPDATE paper_account SET cash=$1, margin_amount=$2 WHERE paper_account_id=$3")
         .bind(Decimal::from_f64_retain(cash).unwrap_or(Decimal::ZERO))
         .bind(Decimal::from_f64_retain(margin).unwrap_or(Decimal::ZERO))
-        .bind(account_id).execute(db).await.ok();
+        .bind(account_id)
+        .execute(db)
+        .await
+        .ok();
 
     // 融资流水追溯：margin>0 时补一条 borrow 流水（账户余额已上方直接设定，此处仅落流水不重复改账户）
     if margin > 0.0 {
-        let mt_id = format!("mt-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+        let mt_id = format!(
+            "mt-{}",
+            uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
+        );
         sqlx::query(
             "INSERT INTO paper_margin_trade (margin_trade_id, paper_account_id, side, amount, reason)
              VALUES ($1, $2, 'borrow', $3, 'v19回放杠杆建仓融资')",
@@ -261,8 +326,18 @@ async fn build_final_positions(
     Ok(n)
 }
 
-async fn upsert_position(db: &sqlx::PgPool, account_id: &str, sym: &str, qty: f64, price: f64, mv: f64) {
-    let pid = format!("pp-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+async fn upsert_position(
+    db: &sqlx::PgPool,
+    account_id: &str,
+    sym: &str,
+    qty: f64,
+    price: f64,
+    mv: f64,
+) {
+    let pid = format!(
+        "pp-{}",
+        uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
+    );
     let q = Decimal::from_f64_retain(qty).unwrap_or(Decimal::ZERO);
     let p = Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO);
     let m = Decimal::from_f64_retain(mv).unwrap_or(Decimal::ZERO);
@@ -284,7 +359,8 @@ fn compute_yearly(daily: &[crate::routes::mvo_engine::DailyReturn]) -> Value {
             if cur_year != 0 {
                 out.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
             }
-            cur_year = y; yr_nav = 1.0;
+            cur_year = y;
+            yr_nav = 1.0;
         }
         yr_nav *= 1.0 + d.net_return;
     }

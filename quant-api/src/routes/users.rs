@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::auth::jwt::{create_access_token, create_refresh_token, verify_token};
 use crate::auth::middleware::UserContext;
+use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -82,7 +82,9 @@ pub async fn login(
 
     // Update last login
     let _ = sqlx::query("UPDATE quant_user SET last_login_at = NOW() WHERE user_id = $1")
-        .bind(&uid).execute(&state.db).await;
+        .bind(&uid)
+        .execute(&state.db)
+        .await;
 
     Json(serde_json::json!({
         "code": 0,
@@ -112,10 +114,11 @@ pub async fn refresh(
 
     // Check session exists
     let exists = sqlx::query_as::<_, (bool,)>(
-        "SELECT EXISTS(SELECT 1 FROM user_session WHERE refresh_token = $1 AND expires_at > NOW())"
+        "SELECT EXISTS(SELECT 1 FROM user_session WHERE refresh_token = $1 AND expires_at > NOW())",
     )
     .bind(&req.refresh_token)
-    .fetch_optional(&state.db).await;
+    .fetch_optional(&state.db)
+    .await;
 
     match exists {
         Ok(Some((true,))) => {}
@@ -123,7 +126,8 @@ pub async fn refresh(
     }
 
     // Issue new access token
-    let access = create_access_token(&claims.sub, &claims.username, &claims.role).unwrap_or_default();
+    let access =
+        create_access_token(&claims.sub, &claims.username, &claims.role).unwrap_or_default();
 
     Json(serde_json::json!({"code": 0, "data": {"access_token": access}}))
 }
@@ -135,8 +139,10 @@ pub async fn logout(
     Json(req): Json<RefreshRequest>,
 ) -> impl IntoResponse {
     let _ = sqlx::query("DELETE FROM user_session WHERE refresh_token = $1 AND user_id = $2")
-        .bind(&req.refresh_token).bind(&user.user_id)
-        .execute(&state.db).await;
+        .bind(&req.refresh_token)
+        .bind(&user.user_id)
+        .execute(&state.db)
+        .await;
 
     Json(serde_json::json!({"code": 0, "message": "已登出"}))
 }
@@ -166,12 +172,15 @@ pub async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> impl IntoResponse {
     // Verify old password
-    let hash: (String,) = match sqlx::query_as("SELECT password_hash FROM quant_user WHERE user_id = $1")
-        .bind(&user.user_id).fetch_one(&state.db).await
-    {
-        Ok(row) => row,
-        Err(_) => return Json(serde_json::json!({"code": 500, "message": "查询用户失败"})),
-    };
+    let hash: (String,) =
+        match sqlx::query_as("SELECT password_hash FROM quant_user WHERE user_id = $1")
+            .bind(&user.user_id)
+            .fetch_one(&state.db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Json(serde_json::json!({"code": 500, "message": "查询用户失败"})),
+        };
 
     match bcrypt::verify(&req.old_password, &hash.0) {
         Ok(true) => {}
@@ -180,13 +189,19 @@ pub async fn change_password(
 
     // Hash and update new password
     let new_hash = bcrypt::hash(&req.new_password, 12).unwrap_or_default();
-    let _ = sqlx::query("UPDATE quant_user SET password_hash = $1, updated_at = NOW() WHERE user_id = $2")
-        .bind(&new_hash).bind(&user.user_id)
-        .execute(&state.db).await;
+    let _ = sqlx::query(
+        "UPDATE quant_user SET password_hash = $1, updated_at = NOW() WHERE user_id = $2",
+    )
+    .bind(&new_hash)
+    .bind(&user.user_id)
+    .execute(&state.db)
+    .await;
 
     // Invalidate all sessions
     let _ = sqlx::query("DELETE FROM user_session WHERE user_id = $1")
-        .bind(&user.user_id).execute(&state.db).await;
+        .bind(&user.user_id)
+        .execute(&state.db)
+        .await;
 
     Json(serde_json::json!({"code": 0, "message": "密码已修改，请重新登录"}))
 }

@@ -52,6 +52,7 @@ fn DataSyncItem(data: Value, on_repaired: Callback<()>) -> Element {
     let healthy = data.get("healthy").and_then(|v| v.as_bool()).unwrap_or(false);
     let gap = data.get("current_gap_days").and_then(|v| v.as_i64()).unwrap_or(0);
     let max_gap = data.get("max_gap_days").and_then(|v| v.as_i64()).unwrap_or(0);
+    let extra = data.get("extra").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     // ── 每个项独立的修复状态 ──────────────────────────
     let mut repairing = use_signal(|| false);
@@ -68,30 +69,31 @@ fn DataSyncItem(data: Value, on_repaired: Callback<()>) -> Element {
         logs.set(vec![format!("⏳ 开始修复「{}」…", name_for_repair)]);
 
         let n = name_for_repair.clone();
-        // 判断是否为异步修复（因子/ML 预测需要等待后台任务）
-        let is_async_repair = n == "因子(pv)" || n == "ML预测";
+        // 因子、ML、权益曲线会触发后台任务，需要更长轮询；其他同步项也会短轮询复查。
+        let is_async_repair = n.contains("因子") || n == "ML预测" || n == "权益曲线";
 
         spawn(async move {
             let outcome = match api::admin_repair_data(&n).await {
                 Ok(v) => {
                     if v["code"].as_i64().unwrap_or(-1) == 0 {
                         let msg = v["message"].as_str().unwrap_or("");
-                        if is_async_repair {
-                            // 异步修复：持续轮询状态直到变为正常或超时
+                        {
+                            // 修复后持续轮询状态，直到变为正常或超时。避免“HTTP成功但数据仍异常”。
                             logs.set(vec![
                                 format!("⏳ 修复「{}」…", n),
                                 format!("📡 {} — 自动检测中…", msg),
                             ]);
                             let mut poll_count = 0u32;
-                            let max_polls = 120u32; // 最多轮询 120 次（120×5=600秒=10分钟）
+                            let max_polls = if is_async_repair { 120u32 } else { 12u32 };
                             loop {
                                 gloo_timers::future::TimeoutFuture::new(5_000).await;
                                 poll_count += 1;
                                 // 检查当前项的状态
                                 if let Ok(status) = api::admin_sync_status().await {
                                     if let Some(arr) = status.get("data").and_then(|d| d.as_array()) {
-                                        let now_healthy = arr.iter()
-                                            .find(|item| item.get("name").and_then(|v| v.as_str()) == Some(n.as_str()))
+                                        let current = arr.iter()
+                                            .find(|item| item.get("name").and_then(|v| v.as_str()) == Some(n.as_str()));
+                                        let now_healthy = current
                                             .and_then(|item| item.get("healthy").and_then(|v| v.as_bool()))
                                             .unwrap_or(false);
                                         if now_healthy {
@@ -99,6 +101,19 @@ fn DataSyncItem(data: Value, on_repaired: Callback<()>) -> Element {
                                             logs.set(vec![
                                                 format!("⏳ 修复「{}」…", n),
                                                 format!("✅ 修复完成（耗时 {} 秒）", poll_count * 5),
+                                            ]);
+                                            repairing.set(false);
+                                            on_repaired(());
+                                            return;
+                                        }
+                                        if poll_count >= max_polls {
+                                            let detail = current
+                                                .and_then(|item| item.get("extra").and_then(|v| v.as_str()))
+                                                .unwrap_or("修复后状态仍未达标");
+                                            result_ok.set(Some(false));
+                                            logs.set(vec![
+                                                format!("⏳ 修复「{}」…", n),
+                                                format!("⚠️ 已触发但仍异常: {}", detail),
                                             ]);
                                             repairing.set(false);
                                             on_repaired(());
@@ -122,15 +137,6 @@ fn DataSyncItem(data: Value, on_repaired: Callback<()>) -> Element {
                                     format!("📡 检测中…（{}/{} 次，已等 {} 秒）", poll_count, max_polls, poll_count * 5),
                                 ]);
                             }
-                        } else {
-                            result_ok.set(Some(true));
-                            logs.set(vec![
-                                format!("⏳ 修复「{}」…", n),
-                                format!("✅ 修复完成: {}", msg),
-                            ]);
-                            repairing.set(false);
-                            on_repaired(());
-                            return;
                         }
                     }
                     // 失败处理
@@ -166,8 +172,13 @@ fn DataSyncItem(data: Value, on_repaired: Callback<()>) -> Element {
             // 行主体
             div { class: "p-4 flex items-center justify-between",
                 div {
-                    span { class: "text-gray-900 dark:text-white text-sm font-medium", "{name}" }
-                    span { class: "text-xs text-gray-500 dark:text-gray-400 ml-2", "（允许 ≤{max_gap}天）" }
+                    div {
+                        span { class: "text-gray-900 dark:text-white text-sm font-medium", "{name}" }
+                        span { class: "text-xs text-gray-500 dark:text-gray-400 ml-2", "（允许 ≤{max_gap}天）" }
+                    }
+                    if !extra.is_empty() {
+                        div { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "{extra}" }
+                    }
                 }
                 div { class: "flex items-center gap-3",
                     span { class: "text-sm text-gray-500 dark:text-gray-400", "间隔: {gap}天" }
@@ -245,7 +256,7 @@ pub fn AccountDataHealthSection() -> Element {
                     summary.set(format!(
                         "{} 账号 · {} · 红{} 黄{}",
                         d["accounts_checked"].as_i64().unwrap_or(0),
-                        if d["mode"]=="deep_yearly" {"逐年深度"} else {"新鲜度"},
+                        if d["mode"]=="range_coverage" {"区间覆盖"} else if d["mode"]=="deep_yearly" {"逐年深度"} else {"新鲜度"},
                         d["red"].as_i64().unwrap_or(0),
                         d["yellow"].as_i64().unwrap_or(0),
                     ));
@@ -307,6 +318,7 @@ fn AccountDataHealthItem(check: serde_json::Value) -> Element {
     let detail = check["detail"].as_str().unwrap_or("").to_string();
     let fix_ep = check["fix_endpoint"].as_str().map(|s| s.to_string());
     let fix_params = check.get("fix_params").cloned();
+    let fix_reason = check["fix_reason"].as_str().unwrap_or("").to_string();
 
     let (dot, badge) = match level.as_str() {
         "red" => ("bg-red-500", "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-400"),
@@ -322,7 +334,15 @@ fn AccountDataHealthItem(check: serde_json::Value) -> Element {
         fix_msg.set("修复触发中...".into());
         spawn(async move {
             match crate::api::admin_repair_by_endpoint(&ep, &params).await {
-                Ok(_) => fix_msg.set("✅ 已触发修复(后台运行,稍后重新检查)".into()),
+                Ok(v) => {
+                    if v["code"].as_i64().unwrap_or(-1) == 0 {
+                        let msg = v["message"].as_str().unwrap_or("已触发修复");
+                        fix_msg.set(format!("✅ {}", msg));
+                    } else {
+                        let msg = v["message"].as_str().unwrap_or("修复失败");
+                        fix_msg.set(format!("❌ {}", msg));
+                    }
+                }
                 Err(e) => fix_msg.set(format!("❌ {}", e)),
             }
             fixing.set(false);
@@ -340,6 +360,9 @@ fn AccountDataHealthItem(check: serde_json::Value) -> Element {
             div { class: "flex items-center gap-2 flex-shrink-0",
                 if !fix_msg.read().is_empty() {
                     span { class: "text-xs text-gray-500", "{fix_msg}" }
+                }
+                if !can_fix && level != "green" && !fix_reason.is_empty() {
+                    span { class: "text-xs text-gray-500 max-w-sm truncate", "{fix_reason}" }
                 }
                 span { class: "text-xs px-2 py-0.5 rounded-full {badge}", "{level}" }
                 if can_fix {

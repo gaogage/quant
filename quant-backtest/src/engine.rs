@@ -458,7 +458,9 @@ impl BacktestEngine {
         for (sym, close) in &market.close {
             if let Some((prev_date, prev_close)) = self.warm_prev_close.get(sym) {
                 if !prev_close.is_zero() {
-                    let was_suspended = self.symbol_suspended_until.get(sym)
+                    let was_suspended = self
+                        .symbol_suspended_until
+                        .get(sym)
                         .map(|until| *until >= *prev_date)
                         .unwrap_or(false);
                     if !was_suspended && !self.adj_blacklisted.contains(sym) {
@@ -466,18 +468,26 @@ impl BacktestEngine {
                         if ret.abs() > Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ONE) {
                             warn!(
                                 "adj_factor异常: {} {}→{} 复权价跳变{:.0}%({}→{}) 加入黑名单排除",
-                                sym, prev_date, market.date, ret * Decimal::from(100u32), prev_close, close
+                                sym,
+                                prev_date,
+                                market.date,
+                                ret * Decimal::from(100u32),
+                                prev_close,
+                                close
                             );
                             self.adj_blacklisted.insert(sym.clone());
                         }
                     }
                 }
             }
-            self.warm_prev_close.insert(sym.clone(), (market.date, *close));
+            self.warm_prev_close
+                .insert(sym.clone(), (market.date, *close));
         }
 
         // 过滤adj_factor黑名单股票(仅影响mark_to_market,持仓会在下个调仓日自然卖出)
-        let clean_close: HashMap<String, Decimal> = market.close.iter()
+        let clean_close: HashMap<String, Decimal> = market
+            .close
+            .iter()
             .filter(|(s, _)| !self.adj_blacklisted.contains(*s))
             .map(|(s, v)| (s.clone(), *v))
             .collect();

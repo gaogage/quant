@@ -20,7 +20,9 @@ pub async fn list_users(
     State(state): State<Arc<AppState>>,
     admin: UserContext,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
     let rows = sqlx::query(
         "SELECT user_id, username, display_name, email, role, status, last_login_at FROM quant_user ORDER BY created_at DESC"
     )
@@ -42,7 +44,6 @@ pub async fn list_users(
     Json(serde_json::json!({"code": 0, "data": list})).into_response()
 }
 
-
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
     pub username: String,
@@ -58,7 +59,9 @@ pub async fn create_user(
     admin: UserContext,
     Json(req): Json<CreateUserRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     let uid = Uuid::new_v4().simple().to_string(); // 32-char, fits VARCHAR(32)
     let hash = bcrypt::hash(&req.password, 12).unwrap_or_default();
@@ -92,17 +95,24 @@ pub async fn update_user(
     Path(user_id): Path<String>,
     Json(req): Json<UpdateUserRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     let _ = sqlx::query(
         "UPDATE quant_user SET display_name = COALESCE($1, display_name),
          email = COALESCE($2, email), role = COALESCE($3, role),
          status = COALESCE($4, status), updated_by = $5, updated_at = NOW()
-         WHERE user_id = $6"
+         WHERE user_id = $6",
     )
-    .bind(&req.display_name).bind(&req.email).bind(&req.role)
-    .bind(&req.status).bind(&admin.user_id).bind(&user_id)
-    .execute(&state.db).await;
+    .bind(&req.display_name)
+    .bind(&req.email)
+    .bind(&req.role)
+    .bind(&req.status)
+    .bind(&admin.user_id)
+    .bind(&user_id)
+    .execute(&state.db)
+    .await;
 
     Json(serde_json::json!({"code": 0})).into_response()
 }
@@ -119,7 +129,9 @@ pub async fn reset_user_password(
     Path(user_id): Path<String>,
     Json(req): Json<ResetPasswordRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
     if req.new_password.len() < 4 {
         return Json(serde_json::json!({"code": 1, "message": "密码至少4位"})).into_response();
     }
@@ -146,17 +158,26 @@ pub async fn delete_user(
     admin: UserContext,
     Path(user_id): Path<String>,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
     // 检查是否是超级管理员（通过 username 判断，user_id 是 UUID）
     let is_admin_user: Option<(bool,)> = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM quant_user WHERE user_id = $1 AND username = 'admin')"
+        "SELECT EXISTS(SELECT 1 FROM quant_user WHERE user_id = $1 AND username = 'admin')",
     )
     .bind(&user_id)
-    .fetch_optional(&state.db).await.ok().flatten();
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
     if is_admin_user.map(|(b,)| b).unwrap_or(false) {
-        return Json(serde_json::json!({"code": 1, "message": "不能删除超级管理员"})).into_response();
+        return Json(serde_json::json!({"code": 1, "message": "不能删除超级管理员"}))
+            .into_response();
     }
-    let _ = sqlx::query("DELETE FROM quant_user WHERE user_id = $1").bind(&user_id).execute(&state.db).await;
+    let _ = sqlx::query("DELETE FROM quant_user WHERE user_id = $1")
+        .bind(&user_id)
+        .execute(&state.db)
+        .await;
     Json(serde_json::json!({"code": 0})).into_response()
 }
 
@@ -167,22 +188,26 @@ pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     admin: UserContext,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     let tasks: Vec<(String, String, bool, String, serde_json::Value, Option<chrono::DateTime<chrono::Utc>>, i32)> =
         sqlx::query_as("SELECT task_name, task_type, enabled, schedule_cron, params, last_run_at, run_count FROM scheduled_task_config ORDER BY task_name")
         .fetch_all(&state.db).await.unwrap_or_default();
 
-    let list: Vec<serde_json::Value> = tasks.into_iter().map(|(n, tt, en, cron, p, lr, rc)| {
-        serde_json::json!({
-            "task_name": n, "task_type": tt, "enabled": en, "schedule_cron": cron,
-            "params": p, "last_run_at": lr.map(|t| t.to_string()), "run_count": rc
+    let list: Vec<serde_json::Value> = tasks
+        .into_iter()
+        .map(|(n, tt, en, cron, p, lr, rc)| {
+            serde_json::json!({
+                "task_name": n, "task_type": tt, "enabled": en, "schedule_cron": cron,
+                "params": p, "last_run_at": lr.map(|t| t.to_string()), "run_count": rc
+            })
         })
-    }).collect();
+        .collect();
 
     Json(serde_json::json!({"code": 0, "data": list})).into_response()
 }
-
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateTaskRequest {
@@ -198,17 +223,23 @@ pub async fn update_task(
     Path(name): Path<String>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     let _ = sqlx::query(
         "UPDATE scheduled_task_config SET enabled = COALESCE($1, enabled),
          schedule_cron = COALESCE($2, schedule_cron),
          params = COALESCE($3, params), updated_by = $4, updated_at = NOW()
-         WHERE task_name = $5"
+         WHERE task_name = $5",
     )
-    .bind(req.enabled).bind(&req.schedule_cron).bind(&req.params)
-    .bind(&admin.user_id).bind(&name)
-    .execute(&state.db).await;
+    .bind(req.enabled)
+    .bind(&req.schedule_cron)
+    .bind(&req.params)
+    .bind(&admin.user_id)
+    .bind(&name)
+    .execute(&state.db)
+    .await;
 
     Json(serde_json::json!({"code": 0})).into_response()
 }
@@ -219,7 +250,9 @@ pub async fn run_task(
     admin: UserContext,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     // Set next_run_at to NOW to trigger on next scheduler tick
     let _ = sqlx::query(
@@ -238,70 +271,252 @@ pub async fn sync_status(
     State(state): State<Arc<AppState>>,
     admin: UserContext,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     // T+1 数据在次日 9:00 自动同步（含周末），正常 gap ≤1 天。
-    // 复权因子仅公司事件时更新；因子依赖日线；ML 训练间隔 60 天；权益曲线按月计算。
-    // ML预测 统一检查：选取调度器实际使用的预测集，验证日期覆盖+个股数量
-    let checks = vec![
-        ("A股日线", "market_stock_daily_bar_adj", 2i64),
-        ("ETF日线(原油)", "market_stock_daily_bar_adj", 2i64),
-        ("停牌", "market_stock_suspension", 2i64),
-        ("复权因子", "market_adjustment_factor", 30i64),
-        ("因子(pv)", "multi_factor_value", 2i64),
-        ("CSI300", "market_index_daily_bar", 2i64),
-        ("涨跌停", "market_stock_limit", 2i64),
-        ("权益曲线", "backtest_equity_curve", 10i64),
-    ];
-
-    // 权益曲线的 task_id 从 strategy_config 读取
-    let eq_tid: String = sqlx::query_as::<_, (String,)>(
-        "SELECT equity_curve_task_id FROM strategy_config WHERE strategy_id = 'v19' AND status = 'active'"
-    ).fetch_optional(&state.db).await.ok().flatten()
-        .map(|(t,)| t)
-        .unwrap_or_else(|| "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".to_string());
-
-    let today = chrono::Utc::now().date_naive();
+    // 页面以正式 canonical=v19 full PIT 配置为准，不再用旧 phase7 单独口径。
+    let cfg = load_admin_strategy_config(&state.db, "v19").await;
+    let today = admin_latest_market_date(&state.db).await;
 
     let mut results = Vec::new();
-    for (name, table, max_gap) in &checks {
-        let extra: String = if *table == "market_stock_daily_bar_adj" && *name == "ETF日线(原油)" {
-            " WHERE symbol = '501018.SH'".to_string()
-        } else if *table == "multi_factor_value" {
-            " WHERE combo_name = 'phase7_price_volume_expanded_v1'".to_string()
-        } else if *table == "market_index_daily_bar" {
-            " WHERE symbol = '000300.SH'".to_string()
-        } else if *table == "backtest_equity_curve" {
-            format!(" WHERE task_id = '{}'", eq_tid)
-        } else { String::new() };
 
-        let sql_str = format!("SELECT MAX(trade_date)::text FROM {} {}", table, extra);
-        let max_date: Option<(String,)> = sqlx::query_as(&sql_str).fetch_optional(&state.db).await.ok().flatten();
-        let gap = max_date.and_then(|(d,)| {
-            chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok()
-                .map(|dt| (today - dt).num_days())
-        }).unwrap_or(999);
+    let a_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj
+         WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let a_gap = admin_gap(today, a_last);
+    results.push(admin_status_item(
+        "A股日线",
+        2,
+        a_gap,
+        a_gap <= 2,
+        a_last.map(|d| format!("最新 {}", d)),
+    ));
 
-        results.push(serde_json::json!({
-            "name": name, "max_gap_days": max_gap,
-            "current_gap_days": gap, "healthy": gap <= *max_gap
-        }));
-    }
+    let (etf_present, etf_last): (i64, Option<chrono::NaiveDate>) = sqlx::query_as(
+        "WITH symbols AS (SELECT unnest($1::text[]) AS symbol),
+         latest AS (
+           SELECT symbol, MAX(trade_date) AS max_date
+           FROM market_stock_daily_bar_adj
+           WHERE symbol = ANY($1::text[])
+           GROUP BY symbol
+         )
+         SELECT COUNT(latest.max_date)::int8, MIN(latest.max_date)
+         FROM symbols LEFT JOIN latest USING(symbol)",
+    )
+    .bind(&cfg.etf_symbols)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or((0, None));
+    let etf_gap = admin_gap(today, etf_last);
+    results.push(admin_status_item(
+        "ETF日线(MVO)",
+        2,
+        etf_gap,
+        etf_gap <= 2 && etf_present == cfg.etf_symbols.len() as i64,
+        Some(format!(
+            "{}只ETF，已覆盖{}只，全部最新最早{}",
+            cfg.etf_symbols.len(),
+            etf_present,
+            etf_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string())
+        )),
+    ));
+
+    let suspension_last =
+        admin_event_completion_last_date(&state.db, "market_stock_suspension", "suspension_daily")
+            .await;
+    let suspension_gap = admin_gap(today, suspension_last);
+    results.push(admin_status_item(
+        "停牌",
+        2,
+        suspension_gap,
+        suspension_gap <= 2,
+        suspension_last.map(|d| format!("最新完成/事件日期 {}", d)),
+    ));
+
+    let adj_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM market_adjustment_factor
+         WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let adj_gap = admin_gap(today, adj_last);
+    results.push(admin_status_item(
+        "A股复权因子",
+        30,
+        adj_gap,
+        adj_gap <= 30,
+        adj_last.map(|d| format!("最新 {}", d)),
+    ));
+
+    let (etf_adj_present, etf_adj_last): (i64, Option<chrono::NaiveDate>) = sqlx::query_as(
+        "WITH symbols AS (SELECT unnest($1::text[]) AS symbol),
+         latest AS (
+           SELECT symbol, MAX(trade_date) AS max_date
+           FROM market_adjustment_factor
+           WHERE symbol = ANY($1::text[])
+           GROUP BY symbol
+         )
+         SELECT COUNT(latest.max_date)::int8, MIN(latest.max_date)
+         FROM symbols LEFT JOIN latest USING(symbol)",
+    )
+    .bind(&cfg.etf_symbols)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or((0, None));
+    let etf_adj_gap = admin_gap(today, etf_adj_last);
+    results.push(admin_status_item(
+        "ETF复权因子(MVO)",
+        30,
+        etf_adj_gap,
+        etf_adj_gap <= 30 && etf_adj_present == cfg.etf_symbols.len() as i64,
+        Some(format!(
+            "{}只ETF，已覆盖{}只，全部最新最早{}",
+            cfg.etf_symbols.len(),
+            etf_adj_present,
+            etf_adj_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string())
+        )),
+    ));
+
+    let combo_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM multi_factor_value
+         WHERE combo_name = $1 AND version='1.0.0'
+           AND COALESCE(available_at, trade_date) <= trade_date",
+    )
+    .bind(&cfg.combo_name)
+    .fetch_one(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let combo_gap = admin_gap(today, combo_last);
+    results.push(admin_status_item(
+        "因子(full PIT)",
+        2,
+        combo_gap,
+        combo_gap <= 2,
+        combo_last.map(|d| format!("combo={}，最新 {}", cfg.combo_name, d)),
+    ));
+
+    let csi_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM market_index_daily_bar WHERE symbol='000300.SH'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let csi_gap = admin_gap(today, csi_last);
+    results.push(admin_status_item(
+        "CSI300",
+        2,
+        csi_gap,
+        csi_gap <= 2,
+        csi_last.map(|d| format!("最新 {}", d)),
+    ));
+
+    let limit_last =
+        admin_event_completion_last_date(&state.db, "market_stock_limit", "limit_daily").await;
+    let limit_gap = admin_gap(today, limit_last);
+    results.push(admin_status_item(
+        "涨跌停",
+        2,
+        limit_gap,
+        limit_gap <= 2,
+        Some(format!(
+            "最新完成/事件日期{}；2019-11-28前历史不可从Tushare修复",
+            limit_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string())
+        )),
+    ));
+
+    let curve_last: Option<chrono::NaiveDate> =
+        sqlx::query_scalar("SELECT MAX(trade_date) FROM backtest_equity_curve WHERE task_id=$1")
+            .bind(&cfg.equity_curve_task_id)
+            .fetch_one(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let curve_gap = admin_gap(today, curve_last);
+    results.push(admin_status_item(
+        "权益曲线",
+        10,
+        curve_gap,
+        curve_gap <= 10,
+        curve_last.map(|d| {
+            format!(
+                "strategy={}，task={}，最新 {}",
+                cfg.strategy_id, cfg.equity_curve_task_id, d
+            )
+        }),
+    ));
+
+    let active_stock_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::int8 FROM market_stock WHERE list_status='L' AND exchange IN ('SSE','SZSE')",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+    results.push(admin_status_item(
+        "股票基础信息",
+        7,
+        if active_stock_count >= 3000 { 0 } else { 999 },
+        active_stock_count >= 3000,
+        Some(format!("当前上市A股{}只", active_stock_count)),
+    ));
+
+    let st_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::int8 FROM market_stock_name_history")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+    results.push(admin_status_item(
+        "ST/名称历史",
+        30,
+        if st_count > 0 { 0 } else { 999 },
+        st_count > 0,
+        Some(format!("名称历史/ST记录{}条", st_count)),
+    ));
 
     // ── ML预测：检查调度器实际会选中的预测集（PIT 最新）──
     {
-        let pid: Option<String> = sqlx::query_scalar(
-            "SELECT ps.prediction_set_id FROM prediction_set ps
-             WHERE ps.status = 'ready'
-               AND ps.training_end_date IS NOT NULL AND ps.training_end_date < $1
-               AND ps.start_date <= $1 AND ps.end_date >= $1
-             ORDER BY ps.training_end_date DESC LIMIT 1"
-        ).bind(today).fetch_optional(&state.db).await.ok().flatten();
+        let pid: Option<String> = cfg.prediction_set_id.clone().or_else(|| None);
+        let pid = match pid {
+            Some(pid) => Some(pid),
+            None => sqlx::query_scalar(
+                "SELECT ps.prediction_set_id FROM prediction_set ps
+                     WHERE ps.status = 'ready'
+                       AND ps.training_end_date IS NOT NULL AND ps.training_end_date < $1
+                       AND ps.start_date <= $1 AND ps.end_date >= $1
+                     ORDER BY ps.training_end_date DESC LIMIT 1",
+            )
+            .bind(today)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten(),
+        };
 
         let (ml_gap, ml_healthy, ml_extra) = if let Some(ref pid) = pid {
             let latest: Option<(chrono::NaiveDate,)> = sqlx::query_as(
-                "SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id = $1"
-            ).bind(pid).fetch_optional(&state.db).await.ok().flatten();
+                "SELECT MAX(trade_date) FROM model_prediction
+                 WHERE prediction_set_id = $1 AND COALESCE(available_at, trade_date) <= trade_date",
+            )
+            .bind(pid)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
             let gap = latest.map(|(d,)| (today - d).num_days()).unwrap_or(999);
 
             let etf_count: (i64,) = sqlx::query_as(
@@ -311,11 +526,32 @@ pub async fn sync_status(
 
             let a_stock_count: (i64,) = sqlx::query_as(
                 "SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = $1
-                 AND symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'"
-            ).bind(pid).fetch_optional(&state.db).await.ok().flatten().unwrap_or((0,));
+                 AND symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'",
+            )
+            .bind(pid)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or((0,));
 
-            let healthy = gap <= 7 && etf_count.0 >= 7 && a_stock_count.0 >= 20;
-            let info = format!("{}, ETF{}/7, 个股{}条(需≥20)", pid, etf_count.0, a_stock_count.0);
+            let future_rows: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*)::int8 FROM model_prediction
+                 WHERE prediction_set_id = $1 AND COALESCE(available_at, trade_date) > trade_date",
+            )
+            .bind(pid)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or((0,));
+
+            let healthy =
+                gap <= 7 && etf_count.0 >= 7 && a_stock_count.0 >= 20 && future_rows.0 == 0;
+            let info = format!(
+                "{}, ETF{}/7, 个股{}条(需≥20), future_rows={}",
+                pid, etf_count.0, a_stock_count.0, future_rows.0
+            );
             (gap, healthy, info)
         } else {
             (999i64, false, "无可用预测集".to_string())
@@ -325,6 +561,7 @@ pub async fn sync_status(
             "name": "ML预测", "max_gap_days": 7i64,
             "current_gap_days": ml_gap, "healthy": ml_healthy,
             "extra": ml_extra,
+            "repairable": true,
         }));
     }
 
@@ -336,7 +573,9 @@ pub async fn check_task_deps(
     State(state): State<Arc<AppState>>,
     admin: UserContext,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
     let issues = crate::routes::scheduler::check_task_dependency_order(&state.db).await;
     Json(serde_json::json!({"code": 0, "data": issues})).into_response()
 }
@@ -346,6 +585,155 @@ pub async fn check_task_deps(
 #[derive(Debug, Deserialize)]
 pub struct RepairRequest {
     pub name: String,
+    pub strategy_id: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AdminSyncStrategyConfig {
+    strategy_id: String,
+    combo_name: String,
+    equity_curve_task_id: String,
+    prediction_set_id: Option<String>,
+    etf_symbols: Vec<String>,
+}
+
+const DEFAULT_MVO_ETFS: &[&str] = &[
+    "518880.SH",
+    "511010.SH",
+    "513500.SH",
+    "513100.SH",
+    "159980.SZ",
+    "159985.SZ",
+    "501018.SH",
+];
+
+fn admin_default_mvo_etfs() -> Vec<String> {
+    DEFAULT_MVO_ETFS
+        .iter()
+        .map(|symbol| (*symbol).to_string())
+        .collect()
+}
+
+fn admin_parse_etf_symbols(value: Option<serde_json::Value>) -> Vec<String> {
+    let symbols = value
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::trim).map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if symbols.is_empty() {
+        admin_default_mvo_etfs()
+    } else {
+        symbols
+    }
+}
+
+fn admin_parse_date(value: &str) -> Result<chrono::NaiveDate, String> {
+    let trimmed = value.trim();
+    chrono::NaiveDate::parse_from_str(trimmed, "%Y%m%d")
+        .or_else(|_| chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
+        .map_err(|_| format!("日期格式无效: {}，需要 YYYYMMDD 或 YYYY-MM-DD", value))
+}
+
+fn admin_yyyymmdd(date: chrono::NaiveDate) -> String {
+    date.format("%Y%m%d").to_string()
+}
+
+fn admin_gap(base: chrono::NaiveDate, date: Option<chrono::NaiveDate>) -> i64 {
+    date.map(|d| (base - d).num_days()).unwrap_or(999)
+}
+
+fn admin_status_item(
+    name: &str,
+    max_gap_days: i64,
+    current_gap_days: i64,
+    healthy: bool,
+    extra: Option<String>,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "name": name,
+        "max_gap_days": max_gap_days,
+        "current_gap_days": current_gap_days,
+        "healthy": healthy,
+        "repairable": true,
+    });
+    if let Some(extra) = extra {
+        value["extra"] = serde_json::json!(extra);
+    }
+    value
+}
+
+async fn admin_latest_market_date(db: &sqlx::PgPool) -> chrono::NaiveDate {
+    sqlx::query_scalar::<_, Option<chrono::NaiveDate>>(
+        "SELECT GREATEST(
+            (SELECT MAX(trade_date) FROM market_stock_daily_bar_adj),
+            (SELECT MAX(trade_date) FROM market_index_daily_bar WHERE symbol='000300.SH')
+        )",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .unwrap_or_else(|| chrono::Utc::now().date_naive())
+}
+
+async fn load_admin_strategy_config(
+    db: &sqlx::PgPool,
+    strategy_id: &str,
+) -> AdminSyncStrategyConfig {
+    let row: Option<(String, String, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT combo_name, equity_curve_task_id, prediction_set_id, etf_symbols
+         FROM strategy_config WHERE strategy_id=$1 AND status='active'",
+    )
+    .bind(strategy_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    match row {
+        Some((combo_name, equity_curve_task_id, prediction_set_id, etf_symbols)) => {
+            AdminSyncStrategyConfig {
+                strategy_id: strategy_id.to_string(),
+                combo_name,
+                equity_curve_task_id,
+                prediction_set_id,
+                etf_symbols: admin_parse_etf_symbols(etf_symbols),
+            }
+        }
+        None => AdminSyncStrategyConfig {
+            strategy_id: strategy_id.to_string(),
+            combo_name: "full_pit_icir_37f".to_string(),
+            equity_curve_task_id: "fbt-8dbae9c9-7081-4e3e-9da8-c19d6a76e77e".to_string(),
+            prediction_set_id: Some("pred-fullperiod-nlqr-20140101-20260630".to_string()),
+            etf_symbols: admin_default_mvo_etfs(),
+        },
+    }
+}
+
+async fn admin_event_completion_last_date(
+    db: &sqlx::PgPool,
+    table: &str,
+    task_type: &str,
+) -> Option<chrono::NaiveDate> {
+    let sql = format!(
+        "SELECT GREATEST(
+            (SELECT MAX(trade_date) FROM {}),
+            (SELECT MAX(end_date) FROM data_sync_task
+             WHERE task_type=$1 AND status='completed')
+        )",
+        table
+    );
+    sqlx::query_scalar::<_, Option<chrono::NaiveDate>>(&sql)
+        .bind(task_type)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
 }
 
 /// POST /api/v1/admin/sync/repair — repair a specific data source
@@ -354,66 +742,173 @@ pub async fn repair_sync(
     admin: UserContext,
     Json(req): Json<RepairRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     let dv_id = uuid::Uuid::new_v4().simple().to_string();
-    let today = chrono::Utc::now().format("%Y%m%d").to_string();
-    let recent_start = (chrono::Utc::now() - chrono::Duration::days(30)).format("%Y%m%d").to_string();
+    let strategy_id = req.strategy_id.as_deref().unwrap_or("v19");
+    let cfg = load_admin_strategy_config(&state.db, strategy_id).await;
+    let has_explicit_start_date = req.start_date.is_some();
+    let target_date = match req.end_date.as_deref() {
+        Some(value) => match admin_parse_date(value) {
+            Ok(date) => date,
+            Err(message) => {
+                return Json(serde_json::json!({"code": 1, "message": message})).into_response();
+            }
+        },
+        None => admin_latest_market_date(&state.db).await,
+    };
+    let start_date = match req.start_date.as_deref() {
+        Some(value) => match admin_parse_date(value) {
+            Ok(date) => date,
+            Err(message) => {
+                return Json(serde_json::json!({"code": 1, "message": message})).into_response();
+            }
+        },
+        None => target_date - chrono::Duration::days(30),
+    };
+    if start_date > target_date {
+        return Json(serde_json::json!({"code": 1, "message": "start_date 不能晚于 end_date"}))
+            .into_response();
+    }
+    let today = admin_yyyymmdd(target_date);
+    let recent_start = admin_yyyymmdd(start_date);
 
     let result: Json<serde_json::Value> = match req.name.as_str() {
         "A股日线" => {
             let symbols: Vec<String> = sqlx::query_scalar(
-                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
-            ).fetch_all(&state.db).await.unwrap_or_default();
-            match quant_data::sync::sync_daily_bars(&state.db, &state.tushare, &symbols, &recent_start, &today, &dv_id).await {
-                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
+            )
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+            match quant_data::sync::sync_daily_bars(
+                &state.db,
+                &state.tushare,
+                &symbols,
+                &recent_start,
+                &today,
+                &dv_id,
+            )
+            .await
+            {
+                Ok(n) => {
+                    Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)}))
+                }
                 Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
             }
         }
-        "ETF日线(原油)" => {
-            let symbols = vec!["501018.SH".to_string()];
-            match quant_data::sync::sync_fund_daily(&state.db, &state.tushare, &symbols, &recent_start, &today, &dv_id).await {
-                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+        "ETF日线(原油)" | "ETF日线(MVO)" => {
+            let symbols = cfg.etf_symbols.clone();
+            match quant_data::sync::sync_fund_daily(
+                &state.db,
+                &state.tushare,
+                &symbols,
+                &recent_start,
+                &today,
+                &dv_id,
+            )
+            .await
+            {
+                Ok(n) => {
+                    Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)}))
+                }
                 Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
             }
         }
         "停牌" => {
             match quant_data::sync::sync_suspension(&state.db, &state.tushare, &today).await {
-                Ok(count) => Json(serde_json::json!({"code": 0, "message": format!("同步 {} 条", count)})),
+                Ok(count) => Json(serde_json::json!({
+                    "code": 0,
+                    "message": format!("{} 停牌同步完成 {} 条；已记录完成标记，0条也代表该日已成功检查", today, count)
+                })),
                 Err(e) => Json(serde_json::json!({"code": 1, "message": e})),
             }
         }
         "复权因子" => {
             let symbols: Vec<String> = sqlx::query_scalar(
-                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol"
-            ).fetch_all(&state.db).await.unwrap_or_default();
-            match quant_data::sync::sync_adj_factor(&state.db, &state.tushare, &symbols, &recent_start, &today, &dv_id).await {
-                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
+            )
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+            match quant_data::sync::sync_adj_factor(
+                &state.db,
+                &state.tushare,
+                &symbols,
+                &recent_start,
+                &today,
+                &dv_id,
+            )
+            .await
+            {
+                Ok(n) => {
+                    Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)}))
+                }
                 Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
             }
         }
         "涨跌停" => {
+            let limit_earliest = chrono::NaiveDate::from_ymd_opt(2019, 11, 28).unwrap();
+            if target_date < limit_earliest {
+                return Json(serde_json::json!({
+                    "code": 1,
+                    "message": format!("{} 早于 Tushare limit_list_d 已验证最早可得日 2019-11-28，不能在正确性前提下修复", today)
+                })).into_response();
+            }
             match quant_data::sync::sync_limit_list(&state.db, &state.tushare, &today).await {
-                Ok(count) => Json(serde_json::json!({"code": 0, "message": format!("同步 {} 条", count)})),
+                Ok(count) => Json(serde_json::json!({
+                    "code": 0,
+                    "message": format!("{} 涨跌停同步完成 {} 条；已记录完成标记，0条也代表该日已成功检查", today, count)
+                })),
                 Err(e) => Json(serde_json::json!({"code": 1, "message": e})),
             }
         }
         "CSI300" => {
             let codes = vec!["000300.SH".to_string()];
-            match quant_data::sync::sync_index_daily(&state.db, &state.tushare, &codes, &recent_start, &today, &dv_id).await {
-                Ok(n) => Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)})),
+            match quant_data::sync::sync_index_daily(
+                &state.db,
+                &state.tushare,
+                &codes,
+                &recent_start,
+                &today,
+                &dv_id,
+            )
+            .await
+            {
+                Ok(n) => {
+                    Json(serde_json::json!({"code": 0, "message": format!("同步完成 {} 条", n)}))
+                }
                 Err(e) => Json(serde_json::json!({"code": 1, "message": e.to_string()})),
             }
         }
-        "因子(pv)" => {
-            // 直接调用因子回填端点（与 scheduler T+1 同步一致）
+        "因子(pv)" | "因子(full PIT)" => {
+            // 正式 canonical 为 full PIT combo，修复动作直接补 PIT 组合物化区间。
             let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
-            let url = format!("http://localhost:{}/api/v1/quant/factors/phase7-price-volume-backfill/background", port);
-            let backfill_start = (chrono::Utc::now() - chrono::Duration::days(7)).format("%Y%m%d").to_string();
-            let payload = serde_json::json!({"start_date": backfill_start, "end_date": today});
-            match reqwest::Client::new().post(&url).json(&payload).send().await {
-                Ok(_) => Json(serde_json::json!({"code": 0, "message": "因子回填任务已触发，请等待1-2分钟后刷新状态"})),
-                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)})),
+            let url = format!(
+                "http://localhost:{}/api/v1/quant/factors/materialize-pit-combo/background",
+                port
+            );
+            let payload = serde_json::json!({
+                "combo_name": cfg.combo_name,
+                "version": "1.0.0",
+                "horizon": 20,
+                "start_date": recent_start,
+                "end_date": today
+            });
+            match reqwest::Client::new()
+                .post(&url)
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(_) => Json(
+                    serde_json::json!({"code": 0, "message": format!("PIT combo物化任务已触发: {} {}~{}", cfg.combo_name, recent_start, today)}),
+                ),
+                Err(e) => {
+                    Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)}))
+                }
             }
         }
         "ML预测" | "ML预测(活跃策略)" => {
@@ -447,46 +942,114 @@ pub async fn repair_sync(
                         ]
                     });
                     let url = format!("http://localhost:{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", port);
-                    tokio::spawn(async move { let _ = reqwest::Client::new().post(&url).json(&payload).send().await; });
-                    Json(serde_json::json!({"code": 0, "message": format!("全市场预测集已重建: {}，请刷新页面", pid)}))
+                    tokio::spawn(async move {
+                        let _ = reqwest::Client::new()
+                            .post(&url)
+                            .json(&payload)
+                            .send()
+                            .await;
+                    });
+                    Json(
+                        serde_json::json!({"code": 0, "message": format!("全市场预测集已重建: {}，请刷新页面", pid)}),
+                    )
                 }
-                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("重建失败: {}", e)})),
+                Err(e) => {
+                    Json(serde_json::json!({"code": 1, "message": format!("重建失败: {}", e)}))
+                }
             }
         }
         "权益曲线" => {
-            // 触发因子回测任务（与 scheduler equity_curve_update 一致）
+            // 触发 canonical full PIT 因子回测任务，并只更新目标策略配置。
             let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
-            let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
+            let end_date = today.clone();
+            let curve_start_date = if has_explicit_start_date {
+                recent_start.clone()
+            } else {
+                "20170103".to_string()
+            };
+            let data_version_id: Option<String> = sqlx::query_scalar(
+                "SELECT data_version_id FROM data_version
+                 WHERE data_version_id LIKE 'dv-v19-audit-ready-%'
+                 ORDER BY COALESCE(end_date, DATE '1900-01-01') DESC, created_at DESC
+                 LIMIT 1",
+            )
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+            let data_version_id = match data_version_id {
+                Some(id) => Some(id),
+                None => sqlx::query_scalar(
+                    "SELECT data_version_id FROM backtest_task WHERE task_id=$1 LIMIT 1",
+                )
+                .bind(&cfg.equity_curve_task_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten(),
+            }
+            .unwrap_or_else(|| "dv-v19-audit-ready-20260615".to_string());
             let payload = serde_json::json!({
-                "combo_name": "phase7_price_volume_expanded_v1", "strategy_version_id": "factor-combo-v1",
-                "data_version_id": "dv-20260606-053217534", "top_n": 30,
-                "rebalance": "10", "start_date": "20060101", "end_date": end_date,
+                "combo_name": cfg.combo_name,
+                "strategy_version_id": "factor-combo-v1",
+                "data_version_id": data_version_id,
+                "prediction_set_id": cfg.prediction_set_id,
+                "prediction_blend_weight": 0.5,
+                "top_n": 30,
+                "rebalance": "10",
+                "start_date": curve_start_date,
+                "end_date": end_date,
+                "score_direction": "ascending",
+                "effective_coverage": {
+                    "enabled": true,
+                    "mode": "guard_only",
+                    "min_rows": 30,
+                    "include_rebalance_warmup": true
+                }
             });
             match reqwest::Client::new()
-                .post(format!("http://localhost:{}/api/v1/quant/backtests/run-factor", port))
-                .json(&payload).timeout(std::time::Duration::from_secs(600)).send().await
+                .post(format!(
+                    "http://localhost:{}/api/v1/quant/backtests/run-factor",
+                    port
+                ))
+                .json(&payload)
+                .timeout(std::time::Duration::from_secs(600))
+                .send()
+                .await
             {
                 Ok(resp) => {
                     if let Ok(result) = resp.json::<serde_json::Value>().await {
                         if let Some(tid) = result["data"]["task_id"].as_str() {
                             // 自动更新 strategy_config 中的 equity_curve_task_id
                             let _ = sqlx::query(
-                                "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() WHERE strategy_id = 'v19' AND status = 'active'"
-                            ).bind(tid).execute(&state.db).await;
-                            Json(serde_json::json!({"code": 0, "message": format!("权益曲线回测已触发: {}", tid)}))
+                                "UPDATE strategy_config SET equity_curve_task_id = $1, combo_name = $2,
+                                 prediction_set_id = $3, score_direction = 'ascending',
+                                 updated_at = NOW()
+                                 WHERE strategy_id = $4 AND status = 'active'"
+                            )
+                            .bind(tid)
+                            .bind(&cfg.combo_name)
+                            .bind(&cfg.prediction_set_id)
+                            .bind(&cfg.strategy_id)
+                            .execute(&state.db).await;
+                            Json(
+                                serde_json::json!({"code": 0, "message": format!("{} 权益曲线回测已触发: {}", cfg.strategy_id, tid)}),
+                            )
                         } else {
-                            Json(serde_json::json!({"code": 1, "message": "回测提交失败，未返回task_id"}))
+                            Json(
+                                serde_json::json!({"code": 1, "message": "回测提交失败，未返回task_id"}),
+                            )
                         }
                     } else {
                         Json(serde_json::json!({"code": 1, "message": "回测响应解析失败"}))
                     }
                 }
-                Err(e) => Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)})),
+                Err(e) => {
+                    Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)}))
+                }
             }
         }
-        _ => {
-            Json(serde_json::json!({"code": 1, "message": format!("未知数据项: {}", req.name)}))
-        }
+        _ => Json(serde_json::json!({"code": 1, "message": format!("未知数据项: {}", req.name)})),
     };
     result.into_response()
 }
@@ -513,7 +1076,9 @@ pub async fn rebuild_full_universe(
     admin: UserContext,
     Json(req): Json<RebuildFullUniverseRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_admin(&admin) { return e; }
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
 
     match crate::routes::scheduler::rebuild_full_universe_prediction_set(&state.db).await {
         Ok(pid) => {
@@ -525,12 +1090,21 @@ pub async fn rebuild_full_universe(
                        AND (SELECT COUNT(DISTINCT symbol) FROM model_prediction WHERE prediction_set_id = ps.prediction_set_id) < 20"
                 ).fetch_all(&state.db).await.unwrap_or_default();
                 for old_pid in &old_sets {
-                    let _ = sqlx::query("DELETE FROM model_prediction WHERE prediction_set_id = $1").bind(old_pid).execute(&state.db).await;
-                    let _ = sqlx::query("DELETE FROM prediction_set WHERE prediction_set_id = $1").bind(old_pid).execute(&state.db).await;
+                    let _ =
+                        sqlx::query("DELETE FROM model_prediction WHERE prediction_set_id = $1")
+                            .bind(old_pid)
+                            .execute(&state.db)
+                            .await;
+                    let _ = sqlx::query("DELETE FROM prediction_set WHERE prediction_set_id = $1")
+                        .bind(old_pid)
+                        .execute(&state.db)
+                        .await;
                 }
             }
-            Json(serde_json::json!({"code": 0, "message": format!("全市场预测集已重建: {}", pid)})).into_response()
+            Json(serde_json::json!({"code": 0, "message": format!("全市场预测集已重建: {}", pid)}))
+                .into_response()
         }
-        Err(e) => Json(serde_json::json!({"code": 1, "message": format!("重建失败: {}", e)})).into_response(),
+        Err(e) => Json(serde_json::json!({"code": 1, "message": format!("重建失败: {}", e)}))
+            .into_response(),
     }
 }

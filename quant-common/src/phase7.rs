@@ -18902,19 +18902,13 @@ impl LayeredSearchConfig {
     pub fn professional_simple_heuristic_discovery_default() -> Self {
         let mut config = Self::local_professional_default();
         // Single factor combo — the one verified in Layer 0 backtest
-        config.combo_versions = vec![
-            ComboVersion::new("phase7_financial_quality_v1", "1.0.0"),
-        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_financial_quality_v1", "1.0.0")];
         // Simple grid: small top_n, monthly rebalance, moderate position sizing
         config.top_n = vec![20, 30];
         config.rebalance_days = vec![20, 30];
         config.score_directions = vec![ScoreDirection::Ascending, ScoreDirection::Descending];
         config.skip_top_pct = vec![Decimal::ZERO, Decimal::new(10, 2)];
-        config.max_position_pct = vec![
-            Decimal::new(5, 2),
-            Decimal::new(8, 2),
-            Decimal::new(10, 2),
-        ];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(8, 2), Decimal::new(10, 2)];
         config.max_gross_exposure = vec![Decimal::new(95, 2), Decimal::ONE];
         // Heuristic only — NO stress_fill, NO risk_budget
         config.portfolio_methods = vec!["heuristic".to_string()];
@@ -19025,11 +19019,7 @@ impl LayeredSearchConfig {
         ];
         // Slightly wider grid: more position sizing + correlation options
         config.top_n = vec![20, 30, 40];
-        config.max_position_pct = vec![
-            Decimal::new(5, 2),
-            Decimal::new(7, 2),
-            Decimal::new(10, 2),
-        ];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(7, 2), Decimal::new(10, 2)];
         config.max_pairwise_correlation = vec![
             Decimal::new(65, 2),
             Decimal::new(75, 2),
@@ -19062,16 +19052,13 @@ impl LayeredSearchConfig {
     /// Momentum/reversal/volume patterns dominate quality factors in A-shares.
     pub fn professional_price_volume_heuristic_discovery_default() -> Self {
         let mut config = Self::professional_simple_heuristic_discovery_default();
-        config.combo_versions = vec![
-            ComboVersion::new("phase7_price_volume_expanded_v1", "1.0.0"),
-        ];
+        config.combo_versions = vec![ComboVersion::new(
+            "phase7_price_volume_expanded_v1",
+            "1.0.0",
+        )];
         config.top_n = vec![20, 30];
         config.rebalance_days = vec![20, 30];
-        config.max_position_pct = vec![
-            Decimal::new(5, 2),
-            Decimal::new(7, 2),
-            Decimal::new(10, 2),
-        ];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(7, 2), Decimal::new(10, 2)];
         config.seed_trials = vec![
             json!({"combo_name": "phase7_price_volume_expanded_v1", "top_n": 20, "rebalance": "30",
                    "score_direction": "descending", "skip_top_pct": "0.00", "max_position_pct": "0.10",
@@ -19090,15 +19077,9 @@ impl LayeredSearchConfig {
     /// Quality foundation provides bear-market defense; recovery tilt captures bull-market upside.
     pub fn professional_blend_factor_heuristic_discovery_default() -> Self {
         let mut config = Self::professional_simple_heuristic_discovery_default();
-        config.combo_versions = vec![
-            ComboVersion::new("phase7_blend_recovery_tilt_v1", "1.0.0"),
-        ];
+        config.combo_versions = vec![ComboVersion::new("phase7_blend_recovery_tilt_v1", "1.0.0")];
         config.top_n = vec![20, 30];
-        config.max_position_pct = vec![
-            Decimal::new(5, 2),
-            Decimal::new(7, 2),
-            Decimal::new(10, 2),
-        ];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(7, 2), Decimal::new(10, 2)];
         config.max_pairwise_correlation = vec![
             Decimal::new(65, 2),
             Decimal::new(75, 2),
@@ -19127,7 +19108,9 @@ impl LayeredSearchConfig {
         // 7.5% stop prevents single-stock blowups; 20-day cooldown prevents whipsaw
         config.position_risk_controls = vec![
             PositionRiskControlProfile::stop_loss_with_cooldown(
-                "stop_loss_075_cooldown_20", Decimal::new(75, 3), 20,
+                "stop_loss_075_cooldown_20",
+                Decimal::new(75, 3),
+                20,
             ),
             PositionRiskControlProfile::off(),
         ];
@@ -19136,13 +19119,13 @@ impl LayeredSearchConfig {
         config.portfolio_drawdown_controls = vec![
             PortfolioDrawdownControlProfile::recover(
                 "dd_recover_8_22_50_30_70",
-                Decimal::new(8, 2),   // reduce_start_pct
-                Decimal::new(22, 2),  // reduce_full_pct
-                Decimal::new(50, 2),  // min_exposure
-                Some(252),            // peak_lookback_days
-                Decimal::new(30, 2),  // recovery_start_pct
-                Decimal::new(70, 2),  // recovery_full_pct
-                Decimal::ONE,         // recovery_boost
+                Decimal::new(8, 2),  // reduce_start_pct
+                Decimal::new(22, 2), // reduce_full_pct
+                Decimal::new(50, 2), // min_exposure
+                Some(252),           // peak_lookback_days
+                Decimal::new(30, 2), // recovery_start_pct
+                Decimal::new(70, 2), // recovery_full_pct
+                Decimal::ONE,        // recovery_boost
             ),
             PortfolioDrawdownControlProfile::preserve(
                 "dd_preserve_10_25_50",
@@ -19157,22 +19140,24 @@ impl LayeredSearchConfig {
         // Target 18% annual vol with 120-day lookback; floor at 50% exposure
         config.portfolio_volatility_controls = vec![
             PortfolioVolatilityControlProfile::target(
-                "vol120_18_50_100", Decimal::new(18, 2), 120,
-                Decimal::new(50, 2), Decimal::ONE,
+                "vol120_18_50_100",
+                Decimal::new(18, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
             ),
             PortfolioVolatilityControlProfile::target(
-                "vol120_15_50_100", Decimal::new(15, 2), 120,
-                Decimal::new(50, 2), Decimal::ONE,
+                "vol120_15_50_100",
+                Decimal::new(15, 2),
+                120,
+                Decimal::new(50, 2),
+                Decimal::ONE,
             ),
             PortfolioVolatilityControlProfile::off(),
         ];
         // Concentrated portfolio: fewer stocks, higher conviction
         config.top_n = vec![15, 20];
-        config.max_position_pct = vec![
-            Decimal::new(5, 2),
-            Decimal::new(7, 2),
-            Decimal::new(10, 2),
-        ];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(7, 2), Decimal::new(10, 2)];
         config.max_pairwise_correlation = vec![
             Decimal::new(60, 2),
             Decimal::new(70, 2),
@@ -19206,11 +19191,7 @@ impl LayeredSearchConfig {
         // NLQR-specific: prediction_set driven, small rebalance
         config.top_n = vec![20];
         config.rebalance_days = vec![20];
-        config.max_position_pct = vec![
-            Decimal::new(5, 2),
-            Decimal::new(7, 2),
-            Decimal::new(10, 2),
-        ];
+        config.max_position_pct = vec![Decimal::new(5, 2), Decimal::new(7, 2), Decimal::new(10, 2)];
         config.max_gross_exposure = vec![Decimal::new(95, 2)];
         // Simple seed with ML ranking profile — triggers prediction_set_id injection
         config.seed_trials = vec![json!({
@@ -22202,28 +22183,21 @@ impl LayeredSearchConfig {
         config.score_directions = vec![ScoreDirection::Descending];
         config.top_n = vec![20];
         config.rebalance_days = vec![20];
-        config.max_position_pct = vec![
-            Decimal::new(4, 2), Decimal::new(7, 2), Decimal::new(10, 2),
-        ];
+        config.max_position_pct = vec![Decimal::new(4, 2), Decimal::new(7, 2), Decimal::new(10, 2)];
         config.max_gross_exposure = vec![Decimal::new(70, 2), Decimal::new(95, 2)];
         config.portfolio_methods = vec!["stress_fill_aware_risk_budget".to_string()];
         config.capacity_penalty_strength = vec![Decimal::new(200, 2)];
-        config.capacity_risk_budget_profiles = vec![
-            "capacity_stress_participation_alpha_headroom_floor_70_v1".to_string(),
-        ];
+        config.capacity_risk_budget_profiles =
+            vec!["capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()];
         config.candidate_ranking_profiles = vec!["nonlinear_regime_alpha_liquidity_v2".to_string()];
         config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
-        config.candidate_risk_filter_profiles = vec![
-            "soft_liquidity_low_volatility_low_correlation_v1".to_string(),
-        ];
-        config.risk_contribution_control_profiles = vec![
-            "soft_single_name_15pct_v1".to_string(),
-        ];
+        config.candidate_risk_filter_profiles =
+            vec!["soft_liquidity_low_volatility_low_correlation_v1".to_string()];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_15pct_v1".to_string()];
         config.stress_fill_confidence_exposure_profiles =
             vec!["prediction_confidence_ascending_capacity_headroom_v1".to_string()];
-        config.market_regime_policies = vec![
-            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
-        ];
+        config.market_regime_policies =
+            vec!["quality_nonlinear_alpha_risk_memory_router_v3".to_string()];
         config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
         config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
         config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];

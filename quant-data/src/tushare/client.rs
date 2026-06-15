@@ -197,7 +197,20 @@ impl TushareClient {
         if let Some(m) = market {
             params.push(("market", m));
         }
-        self.call_api::<Vec<serde_json::Value>>("fund_basic", params, &["ts_code", "name", "management", "found_date", "fund_type", "market", "status"]).await
+        self.call_api::<Vec<serde_json::Value>>(
+            "fund_basic",
+            params,
+            &[
+                "ts_code",
+                "name",
+                "management",
+                "found_date",
+                "fund_type",
+                "market",
+                "status",
+            ],
+        )
+        .await
     }
 
     pub async fn fund_daily(
@@ -220,7 +233,8 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("fund_daily", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("fund_daily", params, &[])
+            .await
     }
 
     /// Tushare realtime_quote — 盘中实时行情（需 PRO 积分>=2000）
@@ -233,7 +247,8 @@ impl TushareClient {
         if let Some(code) = ts_code {
             params.push(("ts_code", code));
         }
-        self.call_api::<Vec<serde_json::Value>>("realtime_quote", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("realtime_quote", params, &[])
+            .await
     }
 
     /// 获取每日基础/估值数据，支持按交易日或按单只股票区间分页拉取。
@@ -853,7 +868,8 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("moneyflow_hsgt", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("moneyflow_hsgt", params, &[])
+            .await
     }
 
     /// 融资融券交易汇总（市场整体，按日）
@@ -874,7 +890,8 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("margin", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("margin", params, &[])
+            .await
     }
 
     /// 股票曾用名 / 名称变更历史
@@ -895,7 +912,8 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("namechange", params, &[]).await
+        self.call_api::<Vec<serde_json::Value>>("namechange", params, &[])
+            .await
     }
 
     /// 股票停牌信息
@@ -908,11 +926,20 @@ impl TushareClient {
         end_date: Option<&str>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         let mut params: Vec<(&str, &str)> = Vec::new();
-        if let Some(d) = trade_date { params.push(("trade_date", d)); }
-        if let Some(c) = ts_code { params.push(("ts_code", c)); }
-        if let Some(d) = start_date { params.push(("start_date", d)); }
-        if let Some(d) = end_date { params.push(("end_date", d)); }
-        self.call_api::<Vec<serde_json::Value>>("suspend_d", params, &[]).await
+        if let Some(d) = trade_date {
+            params.push(("trade_date", d));
+        }
+        if let Some(c) = ts_code {
+            params.push(("ts_code", c));
+        }
+        if let Some(d) = start_date {
+            params.push(("start_date", d));
+        }
+        if let Some(d) = end_date {
+            params.push(("end_date", d));
+        }
+        self.call_api::<Vec<serde_json::Value>>("suspend_d", params, &[])
+            .await
     }
 
     /// 涨跌停列表
@@ -926,10 +953,19 @@ impl TushareClient {
         end_date: Option<&str>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         let mut params: Vec<(&str, &str)> = Vec::new();
-        if let Some(d) = trade_date { params.push(("trade_date", d)); }
-        if let Some(c) = ts_code { params.push(("ts_code", c)); }
-        if let Some(s) = start_date { params.push(("start_date", s)); }
-        if let Some(e) = end_date { params.push(("end_date", e)); }
-        self.call_api::<Vec<serde_json::Value>>("limit_list_d", params, &[]).await
+        if let Some(d) = trade_date {
+            params.push(("trade_date", d));
+        }
+        if let Some(c) = ts_code {
+            params.push(("ts_code", c));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        self.call_api::<Vec<serde_json::Value>>("limit_list_d", params, &[])
+            .await
     }
 }

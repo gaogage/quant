@@ -16,16 +16,18 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
-use crate::routes::scheduler::{compute_mvo_weights_for_date, detect_regime_exposure, StrategyConfig};
+use crate::routes::scheduler::{
+    compute_mvo_weights_for_date, detect_regime_exposure, StrategyConfig,
+};
 
 /// 逐日模拟结果：日期 + 杠杆后组合日收益。
 #[derive(Debug, Clone)]
 pub struct DailyReturn {
     pub date: NaiveDate,
-    pub gross_return: f64,   // 未加杠杆组合日收益
-    pub net_return: f64,     // 叠加 vol_target/fixed 杠杆后日收益
-    pub leverage: f64,       // 当日杠杆
-    pub regime: f64,         // 当日体制暴露 0-1
+    pub gross_return: f64, // 未加杠杆组合日收益
+    pub net_return: f64,   // 叠加 vol_target/fixed 杠杆后日收益
+    pub leverage: f64,     // 当日杠杆
+    pub regime: f64,       // 当日体制暴露 0-1
 }
 
 /// 加载某资产（A股 task / ETF symbol）的日收益序列 → HashMap<date, ret>。
@@ -150,8 +152,16 @@ pub async fn simulate_v19_daily_returns(
             weights = compute_mvo_weights_for_date(db, d, sc).await;
             last_quarter = quarter.clone();
             if std::env::var("MVO_DEBUG").is_ok() {
-                let ws: Vec<String> = weights.iter().map(|w| format!("{:.0}", w * 100.0)).collect();
-                eprintln!("[wt {}] sum={:.2} [{}]", quarter, weights.iter().sum::<f64>(), ws.join(","));
+                let ws: Vec<String> = weights
+                    .iter()
+                    .map(|w| format!("{:.0}", w * 100.0))
+                    .collect();
+                eprintln!(
+                    "[wt {}] sum={:.2} [{}]",
+                    quarter,
+                    weights.iter().sum::<f64>(),
+                    ws.join(",")
+                );
             }
         }
 
@@ -170,7 +180,11 @@ pub async fn simulate_v19_daily_returns(
                 let prices = etf_prices.get(sym);
                 let pp = prices.and_then(|p| p.get(&pd)).copied().unwrap_or(0.0);
                 let pc = prices.and_then(|p| p.get(&d)).copied().unwrap_or(0.0);
-                let r = if pp > 0.0 && pc > 0.0 { pc / pp - 1.0 } else { 0.0 };
+                let r = if pp > 0.0 && pc > 0.0 {
+                    pc / pp - 1.0
+                } else {
+                    0.0
+                };
                 asset_rets.push(if r.abs() <= 0.5 { r } else { 0.0 });
             }
         } else {
@@ -199,7 +213,8 @@ pub async fn simulate_v19_daily_returns(
                     let var = trail_60.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
                     let ann_vol = var.sqrt() * (252.0_f64).sqrt();
                     if ann_vol > 0.05 {
-                        (sc.vol_target / ann_vol).clamp(1.0 / sc.leverage_cap.max(1.0), sc.leverage_cap)
+                        (sc.vol_target / ann_vol)
+                            .clamp(1.0 / sc.leverage_cap.max(1.0), sc.leverage_cap)
                     } else {
                         1.0
                     }
@@ -219,7 +234,11 @@ pub async fn simulate_v19_daily_returns(
         // 口径=「去杠杆不清仓」：维保<平仓线→杠杆降至1.0(卖融资仓、还债，自有仓续持)；
         //   维保<警告线→杠杆≤1.0(禁新增)。均不锁死——维保回升后下一日可按 vol_target 重新加杠杆。
         let debt = (leverage - 1.0).max(0.0) * acct_nav;
-        let maint = if debt > 1e-9 { (acct_nav + debt) / debt } else { f64::INFINITY };
+        let maint = if debt > 1e-9 {
+            (acct_nav + debt) / debt
+        } else {
+            f64::INFINITY
+        };
         let leverage = if liq_threshold.is_some_and(|t| maint < t) {
             1.0 // 维保跌破平仓线：去杠杆至 1.0（不清仓自有仓位）
         } else if warn_threshold.is_some_and(|t| maint < t) {
@@ -255,7 +274,11 @@ pub fn compute_metrics(rets: &[f64]) -> Metrics {
     let std = var.sqrt();
     let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
     let ann_vol = std * (252.0_f64).sqrt();
-    let sharpe = if ann_vol > 0.0 { (ann_ret - 0.02) / ann_vol } else { 0.0 };
+    let sharpe = if ann_vol > 0.0 {
+        (ann_ret - 0.02) / ann_vol
+    } else {
+        0.0
+    };
 
     let mut nav = 1.0_f64;
     let mut peak = 1.0_f64;
@@ -271,9 +294,14 @@ pub fn compute_metrics(rets: &[f64]) -> Metrics {
     let downside: Vec<f64> = rets.iter().filter(|&&r| r < 0.0).copied().collect();
     let sortino = if downside.len() > 1 {
         let dm = downside.iter().sum::<f64>() / downside.len() as f64;
-        let dv = downside.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (downside.len() - 1) as f64;
+        let dv =
+            downside.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (downside.len() - 1) as f64;
         let ds = dv.sqrt() * (252.0_f64).sqrt();
-        if ds > 0.0 { (ann_ret - 0.02) / ds } else { 0.0 }
+        if ds > 0.0 {
+            (ann_ret - 0.02) / ds
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
@@ -342,41 +370,53 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
 
-        let unlev = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
-            .await
-            .expect("unlev sim");
+        let unlev =
+            simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
+                .await
+                .expect("unlev sim");
         let unlev_rets: Vec<f64> = unlev.iter().map(|d| d.net_return).collect();
         let m_unlev = compute_metrics(&unlev_rets);
         println!(
             "[v19 unlev] AR={:.1}% DD={:.1}% Sharpe={:.2} Sortino={:.2} cum={:.0}% days={}",
-            m_unlev.annual_return * 100.0, m_unlev.max_drawdown * 100.0,
-            m_unlev.sharpe, m_unlev.sortino, m_unlev.cumulative_return * 100.0, m_unlev.trading_days
+            m_unlev.annual_return * 100.0,
+            m_unlev.max_drawdown * 100.0,
+            m_unlev.sharpe,
+            m_unlev.sortino,
+            m_unlev.cumulative_return * 100.0,
+            m_unlev.trading_days
         );
 
-        let lev = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None)
-            .await
-            .expect("lev sim");
+        let lev =
+            simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None)
+                .await
+                .expect("lev sim");
         let lev_rets: Vec<f64> = lev.iter().map(|d| d.net_return).collect();
         let m_lev = compute_metrics(&lev_rets);
         println!(
             "[v19 lev]   AR={:.1}% DD={:.1}% Sharpe={:.2} Sortino={:.2} cum={:.0}%",
-            m_lev.annual_return * 100.0, m_lev.max_drawdown * 100.0,
-            m_lev.sharpe, m_lev.sortino, m_lev.cumulative_return * 100.0
+            m_lev.annual_return * 100.0,
+            m_lev.max_drawdown * 100.0,
+            m_lev.sharpe,
+            m_lev.sortino,
+            m_lev.cumulative_return * 100.0
         );
 
         // DD 是 MVO 分散化的核心目标，dynamic_target=0.06 后应 ≤15%（蓝图 13%）。
         assert!(
             m_unlev.max_drawdown <= 0.15,
-            "unlev DD out of blueprint: {:.1}% (期望≤15%)", m_unlev.max_drawdown * 100.0
+            "unlev DD out of blueprint: {:.1}% (期望≤15%)",
+            m_unlev.max_drawdown * 100.0
         );
         assert!(
             m_unlev.sharpe >= 0.7,
-            "unlev Sharpe too low: {:.2} (期望≥0.7)", m_unlev.sharpe
+            "unlev Sharpe too low: {:.2} (期望≥0.7)",
+            m_unlev.sharpe
         );
         // AR 软底线：完整达标(16%)依赖 A股选股 CAGR 提升（当前曲线~6%偏弱，独立排查中）。
         assert!(
             m_unlev.annual_return >= 0.07,
-            "unlev AR too low: {:.1}% (A股选股层待优化)", m_unlev.annual_return * 100.0
+            "unlev AR too low: {:.1}% (A股选股层待优化)",
+            m_unlev.annual_return * 100.0
         );
     }
 
@@ -392,17 +432,43 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
 
-        println!("\n{:>6} | {:>5} {:>5} {:>5} {:>5} {:>5} | {:>5} {:>5} {:>5}",
-                 "tgt", "AR", "DD", "Shrp", "Sort", "Clmr", "LvAR", "LvDD", "LvShrp");
+        println!(
+            "\n{:>6} | {:>5} {:>5} {:>5} {:>5} {:>5} | {:>5} {:>5} {:>5}",
+            "tgt", "AR", "DD", "Shrp", "Sort", "Clmr", "LvAR", "LvDD", "LvShrp"
+        );
         for cap in ["0.06", "0.08", "0.10", "0.12", "0.14", "0.16", "0.18"] {
             std::env::set_var("MVO_TARGET_CAP", cap);
-            let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None).await.expect("u");
+            let u =
+                simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
+                    .await
+                    .expect("u");
             let mu = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-            let l = simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None).await.expect("l");
+            let l = simulate_v19_daily_returns(
+                &db,
+                &sc,
+                start,
+                end,
+                true,
+                1.5,
+                "vol_target",
+                None,
+                None,
+            )
+            .await
+            .expect("l");
             let ml = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>());
-            println!("{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2} | {:>4.1}% {:>4.1}% {:>5.2}",
-                     cap, mu.annual_return*100.0, mu.max_drawdown*100.0, mu.sharpe, mu.sortino, mu.calmar,
-                     ml.annual_return*100.0, ml.max_drawdown*100.0, ml.sharpe);
+            println!(
+                "{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2} | {:>4.1}% {:>4.1}% {:>5.2}",
+                cap,
+                mu.annual_return * 100.0,
+                mu.max_drawdown * 100.0,
+                mu.sharpe,
+                mu.sortino,
+                mu.calmar,
+                ml.annual_return * 100.0,
+                ml.max_drawdown * 100.0,
+                ml.sharpe
+            );
         }
         std::env::remove_var("MVO_TARGET_CAP");
     }
@@ -428,14 +494,27 @@ mod tests {
             let mut sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
             sc.equity_curve_task_id = curve.to_string();
             println!("\n=== {} ({}) 同区间2017-2026 ===", label, curve);
-            println!("{:>6} | {:>5} {:>5} {:>5} {:>5} {:>5}",
-                     "tgt", "AR", "DD", "Shrp", "Sort", "Clmr");
+            println!(
+                "{:>6} | {:>5} {:>5} {:>5} {:>5} {:>5}",
+                "tgt", "AR", "DD", "Shrp", "Sort", "Clmr"
+            );
             for cap in ["0.06", "0.08", "0.10", "0.12"] {
                 std::env::set_var("MVO_TARGET_CAP", cap);
-                let u = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None).await.expect("u");
+                let u = simulate_v19_daily_returns(
+                    &db, &sc, start, end, false, 1.0, "fixed", None, None,
+                )
+                .await
+                .expect("u");
                 let m = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                println!("{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
-                         cap, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.sortino, m.calmar);
+                println!(
+                    "{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
+                    cap,
+                    m.annual_return * 100.0,
+                    m.max_drawdown * 100.0,
+                    m.sharpe,
+                    m.sortino,
+                    m.calmar
+                );
             }
             std::env::remove_var("MVO_TARGET_CAP");
         }
@@ -463,15 +542,37 @@ mod tests {
             let mut sc = crate::routes::scheduler::load_strategy_config(&db, "v19").await;
             sc.equity_curve_task_id = curve.to_string();
             println!("\n=== {} ({}) ===", label, curve);
-            println!("{:>4} | {:>14} | {:>14} | {:>14}",
-                     "tgt", "IS17-21 unlev", "OOS22-26 unlev", "OOS22-26 LEV");
+            println!(
+                "{:>4} | {:>14} | {:>14} | {:>14}",
+                "tgt", "IS17-21 unlev", "OOS22-26 unlev", "OOS22-26 LEV"
+            );
             for cap in ["0.06", "0.08", "0.10", "0.12"] {
                 std::env::set_var("MVO_TARGET_CAP", cap);
-                let is_u = simulate_v19_daily_returns(&db, &sc, is_start, is_end, false, 1.0, "fixed", None, None).await.expect("is");
+                let is_u = simulate_v19_daily_returns(
+                    &db, &sc, is_start, is_end, false, 1.0, "fixed", None, None,
+                )
+                .await
+                .expect("is");
                 let mis = compute_metrics(&is_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                let oos_u = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, false, 1.0, "fixed", None, None).await.expect("oos");
+                let oos_u = simulate_v19_daily_returns(
+                    &db, &sc, oos_start, oos_end, false, 1.0, "fixed", None, None,
+                )
+                .await
+                .expect("oos");
                 let moos = compute_metrics(&oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                let oos_l = simulate_v19_daily_returns(&db, &sc, oos_start, oos_end, true, 1.5, "vol_target", None, None).await.expect("oosl");
+                let oos_l = simulate_v19_daily_returns(
+                    &db,
+                    &sc,
+                    oos_start,
+                    oos_end,
+                    true,
+                    1.5,
+                    "vol_target",
+                    None,
+                    None,
+                )
+                .await
+                .expect("oosl");
                 let mlev = compute_metrics(&oos_l.iter().map(|d| d.net_return).collect::<Vec<_>>());
                 println!("{:>4} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2}",
                          cap,
@@ -503,10 +604,14 @@ mod tests {
 
         // base 逐日 (date, gross_return, regime)：杠杆无关，作保证金模拟输入。
         // regime 用于杠杆门控（与生产 simulate_v19_daily_returns 一致：regime≤0.9 不加杠杆）
-        let base = simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
-            .await.expect("base");
-        let gross: Vec<(NaiveDate, f64, f64)> =
-            base.iter().map(|d| (d.date, d.gross_return, d.regime)).collect();
+        let base =
+            simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
+                .await
+                .expect("base");
+        let gross: Vec<(NaiveDate, f64, f64)> = base
+            .iter()
+            .map(|d| (d.date, d.gross_return, d.regime))
+            .collect();
         std::env::remove_var("MVO_TARGET_CAP");
 
         // 强平/警告线：从生产杠杆账号读真实配置，不写死——保证扫描审计与生产一致。
@@ -516,29 +621,40 @@ mod tests {
              WHERE leverage_enabled = true AND status = 'active' \
              ORDER BY paper_account_id LIMIT 1",
         )
-        .fetch_optional(&db).await.ok().flatten()
+        .fetch_optional(&db)
+        .await
+        .ok()
+        .flatten()
         .map(|(l, w)| (l.unwrap_or(1.30), w.unwrap_or(1.50)))
         .unwrap_or((1.30, 1.50));
-        println!("[强平审计阈值] 平仓={:.0}% 警告={:.0}% (源自 active 杠杆账号配置)", liq * 100.0, warn * 100.0);
+        println!(
+            "[强平审计阈值] 平仓={:.0}% 警告={:.0}% (源自 active 杠杆账号配置)",
+            liq * 100.0,
+            warn * 100.0
+        );
 
         // 保证金账户强平审计模型（drift 口径，真实券商）：
         // 季度调仓 / regime 跨 0.9 阈值时，按 vol_target 设杠杆并锁定融资 debt=(L-1)×nav；
         // 期间债务不变、总资产随市值浮动；逐日维保=总资产/融资额，<liq 强平、<warn 警告。
         // regime≤0.9 段强制 lev=1.0（与生产 simulate 的杠杆门控一致）。
         // 返回 (最差维保, 警告天数, 强平次数, 首次强平日)。
-        let audit = |fixed_lev: Option<f64>, vol_target: f64, cap: f64|
-            -> (f64, usize, usize, Option<NaiveDate>) {
-            let mut ta = 1.0_f64;       // 总资产
-            let mut debt = 0.0_f64;     // 融资额
-            let mut in_cash = false;    // 季内已强平、持现金
+        let audit = |fixed_lev: Option<f64>,
+                     vol_target: f64,
+                     cap: f64|
+         -> (f64, usize, usize, Option<NaiveDate>) {
+            let mut ta = 1.0_f64; // 总资产
+            let mut debt = 0.0_f64; // 融资额
+            let mut in_cash = false; // 季内已强平、持现金
             let mut last_q = String::new();
-            let mut prev_hi = false;    // 上一日 regime 是否 >0.9
+            let mut prev_hi = false; // 上一日 regime 是否 >0.9
             let mut trail: Vec<f64> = Vec::new();
             let (mut min_maint, mut warn_days, mut liq_n, mut liq_date) =
                 (f64::INFINITY, 0usize, 0usize, None);
             for (d, g, rg) in &gross {
                 trail.push(*g);
-                if trail.len() > 60 { trail.remove(0); }
+                if trail.len() > 60 {
+                    trail.remove(0);
+                }
                 let hi = *rg > 0.9;
                 let q = format!("{}-Q{}", d.year(), (d.month() - 1) / 3 + 1);
                 // 调仓时机：季度边界 或 regime 跨越 0.9 门控（与生产逐日门控对齐）
@@ -546,23 +662,41 @@ mod tests {
                     last_q = q;
                     prev_hi = hi;
                     let cur_nav = ta - debt;
-                    let lev = if !hi { 1.0 }  // regime 降仓段不加杠杆
-                        else if let Some(fl) = fixed_lev { fl }
-                        else if trail.len() >= 20 {
-                            let n = trail.len() as f64;
-                            let mean = trail.iter().sum::<f64>() / n;
-                            let var = trail.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
-                            let av = var.sqrt() * (252.0_f64).sqrt();
-                            if av > 0.05 { (vol_target / av).clamp(1.0, cap) } else { 1.0 }
-                        } else { 1.0 };
+                    let lev = if !hi {
+                        1.0
+                    }
+                    // regime 降仓段不加杠杆
+                    else if let Some(fl) = fixed_lev {
+                        fl
+                    } else if trail.len() >= 20 {
+                        let n = trail.len() as f64;
+                        let mean = trail.iter().sum::<f64>() / n;
+                        let var = trail.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                        let av = var.sqrt() * (252.0_f64).sqrt();
+                        if av > 0.05 {
+                            (vol_target / av).clamp(1.0, cap)
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    };
                     ta = lev * cur_nav;
                     debt = (lev - 1.0) * cur_nav;
                     in_cash = false;
                 }
-                if in_cash { continue; }
+                if in_cash {
+                    continue;
+                }
                 ta *= 1.0 + g;
-                let maint = if debt > 1e-9 { ta / debt } else { f64::INFINITY };
-                if maint.is_finite() && maint < min_maint { min_maint = maint; }
+                let maint = if debt > 1e-9 {
+                    ta / debt
+                } else {
+                    f64::INFINITY
+                };
+                if maint.is_finite() && maint < min_maint {
+                    min_maint = maint;
+                }
                 if maint < liq {
                     liq_n += 1;
                     liq_date.get_or_insert(*d);
@@ -580,20 +714,38 @@ mod tests {
         // regime 门控，与实盘/历史验证完全同路径）。绝不另造绩效模型，避免口径分歧。
         let perf = |label: String, rets: Vec<f64>, a: (f64, usize, usize, Option<NaiveDate>)| {
             let m = compute_metrics(&rets);
-            let mm = if a.0.is_finite() { format!("{:>5.0}%", a.0 * 100.0) } else { "  inf".into() };
+            let mm = if a.0.is_finite() {
+                format!("{:>5.0}%", a.0 * 100.0)
+            } else {
+                "  inf".into()
+            };
             let ld = a.3.map(|d| d.to_string()).unwrap_or_else(|| "-".into());
-            println!("{:<16} | {:>5.1}% {:>5.1}% {:>5.2} {:>5.2} {:>5.2} | {} {:>4} {:>3} {}",
-                     label, m.annual_return * 100.0, m.max_drawdown * 100.0,
-                     m.sharpe, m.sortino, m.calmar, mm, a.1, a.2, ld);
+            println!(
+                "{:<16} | {:>5.1}% {:>5.1}% {:>5.2} {:>5.2} {:>5.2} | {} {:>4} {:>3} {}",
+                label,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.sortino,
+                m.calmar,
+                mm,
+                a.1,
+                a.2,
+                ld
+            );
         };
 
         println!("\n[target={}] 绩效=生产函数 simulate_v19_daily_returns | 强平=维保审计模型(regime门控)", target);
-        println!("{:<16} | {:>6} {:>6} {:>5} {:>5} {:>5} | {:>5} {:>4} {:>3} {}",
-                 "config", "AR", "DD", "Shrp", "Sort", "Clmr", "minMt", "warn", "liq", "first");
+        println!(
+            "{:<16} | {:>6} {:>6} {:>5} {:>5} {:>5} | {:>5} {:>4} {:>3} {}",
+            "config", "AR", "DD", "Shrp", "Sort", "Clmr", "minMt", "warn", "liq", "first"
+        );
         std::env::set_var("MVO_TARGET_CAP", format!("{}", target));
         for fl in [1.0, 1.5, 2.0, 2.5, 3.0] {
-            let r = simulate_v19_daily_returns(&db, &sc, start, end, fl > 1.0, fl, "fixed", None, None)
-                .await.expect("fixed");
+            let r =
+                simulate_v19_daily_returns(&db, &sc, start, end, fl > 1.0, fl, "fixed", None, None)
+                    .await
+                    .expect("fixed");
             let rets: Vec<f64> = r.iter().map(|d| d.net_return).collect();
             perf(format!("fixed {:.1}x", fl), rets, audit(Some(fl), 0.0, 0.0));
         }
@@ -602,10 +754,25 @@ mod tests {
                 let mut scv = sc.clone();
                 scv.vol_target = vt;
                 scv.leverage_cap = cap;
-                let r = simulate_v19_daily_returns(&db, &scv, start, end, true, 1.5, "vol_target", None, None)
-                    .await.expect("vt");
+                let r = simulate_v19_daily_returns(
+                    &db,
+                    &scv,
+                    start,
+                    end,
+                    true,
+                    1.5,
+                    "vol_target",
+                    None,
+                    None,
+                )
+                .await
+                .expect("vt");
                 let rets: Vec<f64> = r.iter().map(|d| d.net_return).collect();
-                perf(format!("vt{:.2} cap{:.1}", vt, cap), rets, audit(None, vt, cap));
+                perf(
+                    format!("vt{:.2} cap{:.1}", vt, cap),
+                    rets,
+                    audit(None, vt, cap),
+                );
             }
         }
         std::env::remove_var("MVO_TARGET_CAP");

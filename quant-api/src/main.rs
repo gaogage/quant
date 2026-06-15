@@ -525,34 +525,91 @@ async fn main() {
         .route("/api/v1/auth/refresh", post(routes::users::refresh))
         .route("/api/v1/auth/logout", post(routes::users::logout))
         .route("/api/v1/users/me", get(routes::users::get_me))
-        .route("/api/v1/users/me/password", axum::routing::put(routes::users::change_password))
+        .route(
+            "/api/v1/users/me/password",
+            axum::routing::put(routes::users::change_password),
+        )
         // ── 管理 ──
         .route("/api/v1/admin/users", get(routes::admin::list_users))
         .route("/api/v1/admin/users", post(routes::admin::create_user))
-        .route("/api/v1/admin/users/{id}", axum::routing::put(routes::admin::update_user))
-        .route("/api/v1/admin/users/{id}", axum::routing::delete(routes::admin::delete_user))
-        .route("/api/v1/admin/users/{id}/password", axum::routing::put(routes::admin::reset_user_password))
+        .route(
+            "/api/v1/admin/users/{id}",
+            axum::routing::put(routes::admin::update_user),
+        )
+        .route(
+            "/api/v1/admin/users/{id}",
+            axum::routing::delete(routes::admin::delete_user),
+        )
+        .route(
+            "/api/v1/admin/users/{id}/password",
+            axum::routing::put(routes::admin::reset_user_password),
+        )
         .route("/api/v1/admin/tasks", get(routes::admin::list_tasks))
-        .route("/api/v1/admin/tasks/{name}", axum::routing::put(routes::admin::update_task))
-        .route("/api/v1/admin/tasks/{name}/run", post(routes::admin::run_task))
-        .route("/api/v1/admin/tasks/check-deps", get(routes::admin::check_task_deps))
-        .route("/api/v1/admin/ml/rebuild-full-universe", post(routes::admin::rebuild_full_universe))
+        .route(
+            "/api/v1/admin/tasks/{name}",
+            axum::routing::put(routes::admin::update_task),
+        )
+        .route(
+            "/api/v1/admin/tasks/{name}/run",
+            post(routes::admin::run_task),
+        )
+        .route(
+            "/api/v1/admin/tasks/check-deps",
+            get(routes::admin::check_task_deps),
+        )
+        .route(
+            "/api/v1/admin/ml/rebuild-full-universe",
+            post(routes::admin::rebuild_full_universe),
+        )
         .route("/api/v1/admin/sync/status", get(routes::admin::sync_status))
-        .route("/api/v1/admin/sync/repair", post(routes::admin::repair_sync))
+        .route(
+            "/api/v1/admin/sync/repair",
+            post(routes::admin::repair_sync),
+        )
         // ── 策略 ──
-        .route("/api/v1/strategies", get(routes::strategies::list_strategies))
-        .route("/api/v1/strategies", post(routes::strategies::create_strategy))
-        .route("/api/v1/strategies/{id}", get(routes::strategies::get_strategy))
-        .route("/api/v1/strategies/{id}", axum::routing::put(routes::strategies::update_strategy))
-        .route("/api/v1/strategies/{id}", axum::routing::delete(routes::strategies::delete_strategy))
+        .route(
+            "/api/v1/strategies",
+            get(routes::strategies::list_strategies),
+        )
+        .route(
+            "/api/v1/strategies",
+            post(routes::strategies::create_strategy),
+        )
+        .route(
+            "/api/v1/strategies/{id}",
+            get(routes::strategies::get_strategy),
+        )
+        .route(
+            "/api/v1/strategies/{id}",
+            axum::routing::put(routes::strategies::update_strategy),
+        )
+        .route(
+            "/api/v1/strategies/{id}",
+            axum::routing::delete(routes::strategies::delete_strategy),
+        )
         // ── 账号 ──
         .route("/api/v1/accounts", get(routes::accounts::list_accounts))
         .route("/api/v1/accounts", post(routes::accounts::create_account))
-        .route("/api/v1/accounts/{id}", get(routes::accounts::account_detail))
-        .route("/api/v1/accounts/{id}", axum::routing::put(routes::accounts::update_account))
-        .route("/api/v1/accounts/{id}", axum::routing::delete(routes::accounts::delete_account))
-        .route("/api/v1/accounts/{id}/reset", post(routes::accounts::reset_account))
-        .route("/api/v1/accounts/{id}/push-dingtalk", post(routes::accounts::push_account_dingtalk))
+        .route(
+            "/api/v1/accounts/{id}",
+            get(routes::accounts::account_detail),
+        )
+        .route(
+            "/api/v1/accounts/{id}",
+            axum::routing::put(routes::accounts::update_account),
+        )
+        .route(
+            "/api/v1/accounts/{id}",
+            axum::routing::delete(routes::accounts::delete_account),
+        )
+        .route(
+            "/api/v1/accounts/{id}/reset",
+            post(routes::accounts::reset_account),
+        )
+        .route(
+            "/api/v1/accounts/{id}/push-dingtalk",
+            post(routes::accounts::push_account_dingtalk),
+        )
         .layer(CorsLayer::permissive())
         .layer(trace_layer);
 
@@ -565,8 +622,7 @@ async fn main() {
     //   - 命中静态文件(wasm/js/css) → ServeDir 返回
     //   - 其余(SPA 前端路由) → 回退 index.html
     // dist 路径：env QUANT_UI_DIST(生产) 优先，否则相对 quant-ui/dist(本地开发)
-    let ui_dist = std::env::var("QUANT_UI_DIST")
-        .unwrap_or_else(|_| "quant-ui/dist".to_string());
+    let ui_dist = std::env::var("QUANT_UI_DIST").unwrap_or_else(|_| "quant-ui/dist".to_string());
     // 静态服务：未命中文件回退 index.html(SPA)。
     // 配套 no-cache 中间件(下方)强制浏览器每次 revalidate —— 防止部署新版后
     // 浏览器用旧缓存的 index.html(引用已删除的旧 hash WASM)导致白屏/点击无反应。
@@ -578,7 +634,8 @@ async fn main() {
     let app = app.layer(axum::middleware::from_fn(
         |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| async move {
             let mut resp = next.run(req).await;
-            resp.headers_mut().entry(axum::http::header::CACHE_CONTROL)
+            resp.headers_mut()
+                .entry(axum::http::header::CACHE_CONTROL)
                 .or_insert(axum::http::HeaderValue::from_static("no-cache"));
             resp
         },

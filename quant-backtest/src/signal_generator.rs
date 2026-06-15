@@ -3398,15 +3398,17 @@ impl CapacityRiskBudgetProfile {
                 floor_refill_cap_multiplier: 1.25,
                 floor_refill_mode: CapacityFloorRefillMode::AlphaHeadroom,
             }),
-            Self::StressParticipationBlendedAlphaHeadroomFloor85V1 => Some(CapacityRiskBudgetParams {
-                low_capacity_quantile: 0.35,
-                low_capacity_max_weight_pct: 0.14,
-                refill_gross_exposure: false,
-                participation_cap_multiplier: 0.50,
-                min_target_gross_exposure_pct: Some(0.85),
-                floor_refill_cap_multiplier: 1.25,
-                floor_refill_mode: CapacityFloorRefillMode::BlendedAlphaHeadroom,
-            }),
+            Self::StressParticipationBlendedAlphaHeadroomFloor85V1 => {
+                Some(CapacityRiskBudgetParams {
+                    low_capacity_quantile: 0.35,
+                    low_capacity_max_weight_pct: 0.14,
+                    refill_gross_exposure: false,
+                    participation_cap_multiplier: 0.50,
+                    min_target_gross_exposure_pct: Some(0.85),
+                    floor_refill_cap_multiplier: 1.25,
+                    floor_refill_mode: CapacityFloorRefillMode::BlendedAlphaHeadroom,
+                })
+            }
         }
     }
 
@@ -7980,6 +7982,7 @@ fn tradable_universe_filter_sql(profile: TradableUniverseProfile) -> Option<&'st
             "ms.list_status = 'L'
            AND COALESCE(ms.is_st, false) = false
            AND ms.exchange IN ('SSE', 'SZSE')
+           AND ms.market = '主板'
            AND COALESCE(ms.market, '') NOT ILIKE '%创业%'
            AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
            AND COALESCE(ms.market, '') NOT ILIKE '%北交%'",
@@ -21214,6 +21217,21 @@ mod tests {
         assert!(sql.contains("COALESCE(ms.is_st, false) = false"));
         assert!(sql.contains("ROW_NUMBER() OVER"));
         assert!(sql.contains("score_rank <= $5"));
+    }
+
+    #[test]
+    fn combo_score_query_filters_main_board_universe_to_main_board_stocks() {
+        let sql = combo_score_load_sql(
+            ScoreDirection::Descending,
+            Some(200),
+            TradableUniverseProfile::MainBoardNonSt,
+        );
+
+        assert!(sql.contains("JOIN market_stock ms ON ms.symbol = mfv.symbol"));
+        assert!(sql.contains("ms.list_status = 'L'"));
+        assert!(sql.contains("COALESCE(ms.is_st, false) = false"));
+        assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
+        assert!(sql.contains("ms.market = '主板'"));
     }
 
     #[test]

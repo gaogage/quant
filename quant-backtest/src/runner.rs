@@ -1278,11 +1278,13 @@ impl BacktestRunner {
             let mut query_builder = String::from(
                 "INSERT INTO backtest_position (task_id, symbol, position_date,
                  quantity, available_quantity, avg_cost, close_price,
-                 market_value, weight, unrealized_pnl, target_weight) VALUES "
+                 market_value, weight, unrealized_pnl, target_weight) VALUES ",
             );
             let mut params: Vec<String> = Vec::new();
             for (i, pos) in chunk.iter().enumerate() {
-                if i > 0 { query_builder.push_str(", "); }
+                if i > 0 {
+                    query_builder.push_str(", ");
+                }
                 let base = i * 11;
                 query_builder.push_str(&format!(
                     "(${}, ${}, ${}::date, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric, ${}::numeric)",
@@ -1299,11 +1301,17 @@ impl BacktestRunner {
                 params.push(pos.market_value.to_string());
                 params.push(pos.weight.to_string());
                 params.push(pos.unrealized_pnl.to_string());
-                params.push(pos.target_weight.map(|w| w.to_string()).unwrap_or_else(|| "0".to_string()));
+                params.push(
+                    pos.target_weight
+                        .map(|w| w.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                );
             }
             query_builder.push_str(" ON CONFLICT (task_id, symbol, position_date) DO NOTHING");
             let mut q = sqlx::query(&query_builder);
-            for p in &params { q = q.bind(p); }
+            for p in &params {
+                q = q.bind(p);
+            }
             q.execute(&self.pool).await?;
         }
 
@@ -1371,7 +1379,8 @@ impl BacktestRunner {
     }
 
     fn should_persist_detail_tables(config: &BacktestConfig) -> bool {
-        config.mode != BacktestMode::Fast && matches!(config.persistence_mode, BacktestPersistenceMode::Full)
+        config.mode != BacktestMode::Fast
+            && matches!(config.persistence_mode, BacktestPersistenceMode::Full)
     }
 
     async fn mark_task_completed(

@@ -11,14 +11,21 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-fn short_id() -> String { Uuid::new_v4().to_string().split('-').next().unwrap().to_string() }
+fn short_id() -> String {
+    Uuid::new_v4()
+        .to_string()
+        .split('-')
+        .next()
+        .unwrap()
+        .to_string()
+}
 
 // ── 计划交易 ──────────────────────────────────────────
 
 pub struct PlannedTrade {
     pub account_id: String,
     pub symbol: String,
-    pub side: String,            // buy / sell
+    pub side: String, // buy / sell
     pub target_quantity: Decimal,
     pub target_price: Decimal,
     pub price_upper_limit: Option<Decimal>,
@@ -44,10 +51,7 @@ pub struct ActualTrade {
 
 // ── 创建计划交易 ──────────────────────────────────────
 
-pub async fn create_planned_trade(
-    db: &PgPool,
-    trade: &PlannedTrade,
-) -> Result<String, String> {
+pub async fn create_planned_trade(db: &PgPool, trade: &PlannedTrade) -> Result<String, String> {
     let order_id = format!("po-{}", short_id());
     sqlx::query(
         "INSERT INTO paper_order (order_id, paper_account_id, strategy_version_id,
@@ -154,8 +158,13 @@ pub async fn execute_margin_borrow(
         "INSERT INTO paper_margin_trade (margin_trade_id, paper_account_id, side, amount, reason)
          VALUES ($1, $2, 'borrow', $3, $4)",
     )
-    .bind(&trade_id).bind(account_id).bind(amount).bind(reason)
-    .execute(db).await.map_err(|e| format!("margin_borrow: {}", e))?;
+    .bind(&trade_id)
+    .bind(account_id)
+    .bind(amount)
+    .bind(reason)
+    .execute(db)
+    .await
+    .map_err(|e| format!("margin_borrow: {}", e))?;
 
     // 更新账户：现金增加，融资金额增加
     sqlx::query(
@@ -180,12 +189,19 @@ pub async fn execute_margin_repay(
     }
     // 检查当前 margin_amount 是否足够
     let row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
-        "SELECT COALESCE(margin_amount,0) FROM paper_account WHERE paper_account_id = $1"
-    ).bind(account_id).fetch_optional(db).await.map_err(|e| format!("query: {}", e))?;
+        "SELECT COALESCE(margin_amount,0) FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("query: {}", e))?;
 
     let current_margin = row.and_then(|(m,)| m).unwrap_or(Decimal::ZERO);
     if amount > current_margin {
-        return Err(format!("融资归还金额({})超过当前融资金额({})", amount, current_margin));
+        return Err(format!(
+            "融资归还金额({})超过当前融资金额({})",
+            amount, current_margin
+        ));
     }
 
     let trade_id = format!("mt-{}", short_id());
@@ -193,8 +209,13 @@ pub async fn execute_margin_repay(
         "INSERT INTO paper_margin_trade (margin_trade_id, paper_account_id, side, amount, reason)
          VALUES ($1, $2, 'repay', $3, $4)",
     )
-    .bind(&trade_id).bind(account_id).bind(amount).bind(reason)
-    .execute(db).await.map_err(|e| format!("margin_repay: {}", e))?;
+    .bind(&trade_id)
+    .bind(account_id)
+    .bind(amount)
+    .bind(reason)
+    .execute(db)
+    .await
+    .map_err(|e| format!("margin_repay: {}", e))?;
 
     // 更新账户：现金减少，融资金额减少
     sqlx::query(
@@ -210,10 +231,19 @@ pub async fn execute_margin_repay(
 
 /// 如果 cash > reserve_amount，归还超出部分（不超过 margin_amount）
 pub async fn try_auto_repay(db: &PgPool, account_id: &str) -> Result<Option<String>, String> {
-    let row: Option<(Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)> = sqlx::query_as(
+    let row: Option<(
+        Option<rust_decimal::Decimal>,
+        Option<rust_decimal::Decimal>,
+        Option<rust_decimal::Decimal>,
+    )> = sqlx::query_as(
         "SELECT COALESCE(cash,0), COALESCE(margin_amount,0), COALESCE(reserve_amount,0)
-         FROM paper_account WHERE paper_account_id = $1"
-    ).bind(account_id).fetch_optional(db).await.ok().flatten();
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
 
     let (cash, margin, reserve) = match row {
         Some((c, m, r)) => (
@@ -230,7 +260,9 @@ pub async fn try_auto_repay(db: &PgPool, account_id: &str) -> Result<Option<Stri
     }
 
     let repay_amount = if excess < margin { excess } else { margin };
-    execute_margin_repay(db, account_id, repay_amount, "自动归还多余融资").await.map(Some)
+    execute_margin_repay(db, account_id, repay_amount, "自动归还多余融资")
+        .await
+        .map(Some)
 }
 
 // ── 更新净资产 ────────────────────────────────────────

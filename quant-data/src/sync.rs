@@ -414,8 +414,7 @@ fn years_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate
         let actual_end = year_end.min(end);
         result.push((cursor, actual_end));
         // Move to first day of next year
-        cursor = NaiveDate::from_ymd_opt(year + 1, 1, 1)
-            .unwrap_or(end + chrono::Duration::days(1));
+        cursor = NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap_or(end + chrono::Duration::days(1));
     }
     result
 }
@@ -697,10 +696,7 @@ pub async fn sync_daily_basic(
 
 /// 同步基金/ETF 基本信息到 market_stock 表。
 /// 从 Tushare fund_basic 接口拉取名称、类型、管理人。
-pub async fn sync_fund_basic(
-    pool: &PgPool,
-    client: &TushareClient,
-) -> Result<usize, String> {
+pub async fn sync_fund_basic(pool: &PgPool, client: &TushareClient) -> Result<usize, String> {
     // E: 交易所 ETF, L: LOF
     let markets = ["E", "L"];
     let mut total = 0usize;
@@ -718,7 +714,9 @@ pub async fn sync_fund_basic(
             let fund_type = item["fund_type"].as_str().unwrap_or("");
             let status = item["status"].as_str().unwrap_or("");
 
-            if ts_code.is_empty() || status == "D" { continue; } // skip delisted
+            if ts_code.is_empty() || status == "D" {
+                continue;
+            } // skip delisted
 
             sqlx::query(
                 "INSERT INTO market_stock (symbol, name, exchange, list_status, is_st)
@@ -751,21 +749,39 @@ pub async fn sync_fund_daily(
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
     let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
     repository::create_sync_task_with_context(
-        pool, &task_id, "fund_daily", "tushare",
-        Some(symbols), Some(s), Some(e), "running", None,
+        pool,
+        &task_id,
+        "fund_daily",
+        "tushare",
+        Some(symbols),
+        Some(s),
+        Some(e),
+        "running",
+        None,
     )
     .await?;
 
     repository::create_data_version(
-        pool, dv_id, "fund daily bars sync", "tushare",
-        &["market_stock_daily_bar"], s, e,
+        pool,
+        dv_id,
+        "fund daily bars sync",
+        "tushare",
+        &["market_stock_daily_bar"],
+        s,
+        e,
     )
     .await?;
 
     let mut total_rows = 0usize;
     // Use yearly chunks instead of monthly — reduces API calls ~12× (240→20 for 2006-2026)
     let years = years_in_range(s, e);
-    info!("Syncing {} fund symbols across {} yearly chunks ({} to {})", symbols.len(), years.len(), start, end);
+    info!(
+        "Syncing {} fund symbols across {} yearly chunks ({} to {})",
+        symbols.len(),
+        years.len(),
+        start,
+        end
+    );
 
     // Rate-limit tracking: max 4000 calls/hr, target ~3000 calls/hr = 50 calls/min
     let mut calls_this_minute = 0u32;
@@ -807,9 +823,8 @@ pub async fn sync_fund_daily(
                                     close: to_decimal(get_f64(item, "close")),
                                     pre_close: get_f64(item, "pre_close")
                                         .and_then(|v| Decimal::from_f64_retain(v)),
-                                    change_pct: get_f64(item, "pct_chg").and_then(
-                                        |v| Decimal::from_f64_retain(v / 100.0),
-                                    ),
+                                    change_pct: get_f64(item, "pct_chg")
+                                        .and_then(|v| Decimal::from_f64_retain(v / 100.0)),
                                     volume: to_decimal(get_f64(item, "vol")),
                                     amount: to_decimal(get_f64(item, "amount")),
                                 })
@@ -818,10 +833,8 @@ pub async fn sync_fund_daily(
 
                         if !bars.is_empty() {
                             total_rows += bars.len();
-                            repository::upsert_daily_bars_batch(
-                                pool, &bars, dv_id, "tushare",
-                            )
-                            .await?;
+                            repository::upsert_daily_bars_batch(pool, &bars, dv_id, "tushare")
+                                .await?;
                         }
                     }
                 }
@@ -829,7 +842,10 @@ pub async fn sync_fund_daily(
                     let err_str = e.to_string();
                     // Rate-limit hit: wait and retry once
                     if err_str.contains("40203") || err_str.contains("4000") {
-                        warn!("fund_daily rate-limit, waiting 5s for {}: {}", symbol, err_str);
+                        warn!(
+                            "fund_daily rate-limit, waiting 5s for {}: {}",
+                            symbol, err_str
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         calls_this_minute = 0;
                         // Retry once
@@ -841,7 +857,9 @@ pub async fn sync_fund_daily(
                                 calls_this_minute += 1;
                                 if let Some(data) = resp.data {
                                     let maps = data.to_maps();
-                                    if maps.is_empty() { continue; }
+                                    if maps.is_empty() {
+                                        continue;
+                                    }
                                     let bars: Vec<MarketStockDailyBar> = maps
                                         .iter()
                                         .filter_map(|item| {
@@ -865,12 +883,18 @@ pub async fn sync_fund_daily(
                                         .collect();
                                     if !bars.is_empty() {
                                         total_rows += bars.len();
-                                        repository::upsert_daily_bars_batch(pool, &bars, dv_id, "tushare").await?;
+                                        repository::upsert_daily_bars_batch(
+                                            pool, &bars, dv_id, "tushare",
+                                        )
+                                        .await?;
                                     }
                                 }
                             }
                             Err(e2) => {
-                                warn!("fund_daily retry also failed for {} in {}-{}: {}", symbol, sd, ed, e2);
+                                warn!(
+                                    "fund_daily retry also failed for {} in {}-{}: {}",
+                                    symbol, sd, ed, e2
+                                );
                             }
                         }
                     } else {
@@ -882,11 +906,20 @@ pub async fn sync_fund_daily(
     }
 
     repository::update_sync_task(
-        pool, &task_id, "completed",
-        total_rows as i32, total_rows as i32, 0,
+        pool,
+        &task_id,
+        "completed",
+        total_rows as i32,
+        total_rows as i32,
+        0,
     )
     .await?;
-    info!("fund_daily 同步完成: {} symbols, {} rows, {} yearly chunks", symbols.len(), total_rows, years.len());
+    info!(
+        "fund_daily 同步完成: {} symbols, {} rows, {} yearly chunks",
+        symbols.len(),
+        total_rows,
+        years.len()
+    );
     Ok(total_rows)
 }
 
@@ -1179,17 +1212,35 @@ pub async fn sync_moneyflow_hsgt(
         let start_str = batch_start.format("%Y%m%d").to_string();
         let end_str = batch_end.format("%Y%m%d").to_string();
 
-        let resp = client.moneyflow_hsgt(None, Some(&start_str), Some(&end_str)).await?;
+        let resp = client
+            .moneyflow_hsgt(None, Some(&start_str), Some(&end_str))
+            .await?;
         if let Some(data) = resp.data {
             for item in data.items {
                 let date = item.first().and_then(|v| v.as_str()).unwrap_or("");
                 if date.is_empty() {
                     continue;
                 }
-                let nf = item.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let sf = item.get(2).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let nb = item.get(3).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let sb = item.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let nf = item
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let sf = item
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let nb = item
+                    .get(3)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let sb = item
+                    .get(4)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let d = NaiveDate::parse_from_str(date, "%Y%m%d")?;
                 sqlx::query(
                     "INSERT INTO market_moneyflow_hsgt (trade_date, north_flow, south_flow, north_balance, south_balance)
@@ -1201,7 +1252,12 @@ pub async fn sync_moneyflow_hsgt(
                 total += 1;
             }
         }
-        info!(?batch_start, ?batch_end, batch_rows = total, "HSGT 同步进度");
+        info!(
+            ?batch_start,
+            ?batch_end,
+            batch_rows = total,
+            "HSGT 同步进度"
+        );
         batch_start = batch_end + chrono::Duration::days(1);
     }
     Ok(total)
@@ -1226,7 +1282,9 @@ pub async fn sync_margin(
         let start_str = batch_start.format("%Y%m%d").to_string();
         let end_str = batch_end.format("%Y%m%d").to_string();
 
-        let resp = client.margin(None, Some(&start_str), Some(&end_str)).await?;
+        let resp = client
+            .margin(None, Some(&start_str), Some(&end_str))
+            .await?;
         if let Some(data) = resp.data {
             for item in data.items {
                 let date = item.first().and_then(|v| v.as_str()).unwrap_or("");
@@ -1234,9 +1292,27 @@ pub async fn sync_margin(
                     continue;
                 }
                 let exchange = item.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                let rzye = item.get(2).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))).unwrap_or(0.0);
-                let rqye = item.get(3).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))).unwrap_or(0.0);
-                let rzrqye = item.get(4).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))).unwrap_or(0.0);
+                let rzye = item
+                    .get(2)
+                    .and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                    })
+                    .unwrap_or(0.0);
+                let rqye = item
+                    .get(3)
+                    .and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                    })
+                    .unwrap_or(0.0);
+                let rzrqye = item
+                    .get(4)
+                    .and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                    })
+                    .unwrap_or(0.0);
                 let d = NaiveDate::parse_from_str(date, "%Y%m%d")?;
                 sqlx::query(
                     "INSERT INTO market_margin (trade_date, exchange, rzye, rqye, rzrqye)
@@ -1248,7 +1324,12 @@ pub async fn sync_margin(
                 total += 1;
             }
         }
-        info!(?batch_start, ?batch_end, batch_rows = total, "Margin 同步进度");
+        info!(
+            ?batch_start,
+            ?batch_end,
+            batch_rows = total,
+            "Margin 同步进度"
+        );
         batch_start = batch_end + chrono::Duration::days(1);
     }
     Ok(total)
@@ -1415,13 +1496,25 @@ pub async fn sync_fund_adj(
     let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
     let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
     repository::create_sync_task_with_context(
-        pool, &task_id, "fund_adj", "tushare",
-        Some(symbols), Some(s), Some(e), "running", None,
+        pool,
+        &task_id,
+        "fund_adj",
+        "tushare",
+        Some(symbols),
+        Some(s),
+        Some(e),
+        "running",
+        None,
     )
     .await?;
     repository::create_data_version(
-        pool, dv_id, "fund adj sync", "tushare",
-        &["market_adjustment_factor"], s, e,
+        pool,
+        dv_id,
+        "fund adj sync",
+        "tushare",
+        &["market_adjustment_factor"],
+        s,
+        e,
     )
     .await?;
 
@@ -1459,9 +1552,12 @@ pub async fn sync_fund_adj(
     }
 
     repository::update_sync_task(
-        pool, &task_id,
+        pool,
+        &task_id,
         if fail > 0 { "partial" } else { "completed" },
-        total as i32, ok as i32, fail as i32,
+        total as i32,
+        ok as i32,
+        fail as i32,
     )
     .await?;
     info!("基金复权因子同步完成: ok={}/{}, fail={}", ok, total, fail);
@@ -2813,10 +2909,7 @@ pub async fn sync_repurchase(
 
 /// 同步股票名称变更历史，构建 PIT 合规的 ST 判断数据。
 /// 从 Tushare namechange API 获取所有名称变更记录，提取 ST 期间。
-pub async fn sync_namechange(
-    pool: &PgPool,
-    client: &TushareClient,
-) -> Result<usize, String> {
+pub async fn sync_namechange(pool: &PgPool, client: &TushareClient) -> Result<usize, String> {
     // 获取 1990 年至今的所有名称变更
     let resp = client
         .namechange(None, Some("19900101"), None)
@@ -2886,12 +2979,52 @@ pub async fn sync_namechange(
     .await
     .map_err(|e| format!("更新当前ST标记失败: {}", e))?;
 
-    info!(updated = updated.rows_affected(), "已更新 market_stock.is_st 当前状态");
+    info!(
+        updated = updated.rows_affected(),
+        "已更新 market_stock.is_st 当前状态"
+    );
 
     Ok(total)
 }
 
 // ─── sync_suspension (停牌数据同步) ──────────────────────────
+
+async fn record_event_sync_completion(
+    pool: &PgPool,
+    task_type: &str,
+    source: &str,
+    trade_date: NaiveDate,
+    row_count: usize,
+) -> Result<(), String> {
+    let task_id = format!("{}-{}", task_type, trade_date.format("%Y%m%d"));
+    sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status,
+            total_count, success_count, failed_count, progress,
+            last_heartbeat_at, started_at, completed_at)
+         VALUES ($1, $2, $3, $4, $4, 'completed', $5, $5, 0, 100, now(), now(), now())
+         ON CONFLICT (task_id) DO UPDATE SET
+            status='completed',
+            source=EXCLUDED.source,
+            start_date=EXCLUDED.start_date,
+            end_date=EXCLUDED.end_date,
+            total_count=EXCLUDED.total_count,
+            success_count=EXCLUDED.success_count,
+            failed_count=0,
+            progress=100,
+            last_heartbeat_at=now(),
+            completed_at=now()",
+    )
+    .bind(task_id)
+    .bind(task_type)
+    .bind(source)
+    .bind(trade_date)
+    .bind(row_count as i32)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("记录{}完成标记失败: {}", task_type, e))?;
+    Ok(())
+}
 
 /// 同步股票停牌/复牌信息。
 /// 从 Tushare suspend_d API 获取当日停牌股票列表。
@@ -2909,8 +3042,8 @@ pub async fn sync_suspension(
     let mut total = 0usize;
 
     // 先清除当日旧数据
-    let d = NaiveDate::parse_from_str(trade_date, "%Y%m%d")
-        .map_err(|e| format!("日期解析: {}", e))?;
+    let d =
+        NaiveDate::parse_from_str(trade_date, "%Y%m%d").map_err(|e| format!("日期解析: {}", e))?;
     sqlx::query("DELETE FROM market_stock_suspension WHERE trade_date = $1")
         .bind(d)
         .execute(pool)
@@ -2921,7 +3054,9 @@ pub async fn sync_suspension(
         let ts_code = item["ts_code"].as_str().unwrap_or("");
         let s_type = item["suspend_type"].as_str().unwrap_or("");
 
-        if ts_code.is_empty() { continue; }
+        if ts_code.is_empty() {
+            continue;
+        }
 
         sqlx::query(
             "INSERT INTO market_stock_suspension (symbol, trade_date, suspend_type)
@@ -2946,7 +3081,13 @@ pub async fn sync_suspension(
     .await
     .map_err(|e| format!("更新停牌标记: {}", e))?;
 
-    info!(total, updated = updated.rows_affected(), date = trade_date, "停牌数据同步完成");
+    info!(
+        total,
+        updated = updated.rows_affected(),
+        date = trade_date,
+        "停牌数据同步完成"
+    );
+    record_event_sync_completion(pool, "suspension_daily", "tushare:suspend_d", d, total).await?;
     Ok(total)
 }
 
@@ -2980,16 +3121,21 @@ pub async fn sync_limit_list(
     let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
     let mut total = 0usize;
 
-    let d = NaiveDate::parse_from_str(trade_date, "%Y%m%d")
-        .map_err(|e| format!("日期解析: {}", e))?;
+    let d =
+        NaiveDate::parse_from_str(trade_date, "%Y%m%d").map_err(|e| format!("日期解析: {}", e))?;
 
     // 清除当日旧数据
     sqlx::query("DELETE FROM market_stock_limit WHERE trade_date = $1")
-        .bind(d).execute(pool).await.map_err(|e| format!("清除: {}", e))?;
+        .bind(d)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("清除: {}", e))?;
 
     for item in &maps {
         let ts_code = item["ts_code"].as_str().unwrap_or("");
-        if ts_code.is_empty() { continue; }
+        if ts_code.is_empty() {
+            continue;
+        }
 
         sqlx::query(
             "INSERT INTO market_stock_limit (symbol, trade_date) VALUES ($1, $2) ON CONFLICT (symbol, trade_date) DO NOTHING",
@@ -2999,6 +3145,7 @@ pub async fn sync_limit_list(
     }
 
     info!(total, date = trade_date, "涨跌停数据同步完成");
+    record_event_sync_completion(pool, "limit_daily", "tushare:limit_list_d", d, total).await?;
     Ok(total)
 }
 
@@ -3020,7 +3167,9 @@ pub async fn sync_limit_list_range(
     for item in &maps {
         let ts_code = item["ts_code"].as_str().unwrap_or("");
         let trade_date_str = item["trade_date"].as_str().unwrap_or("");
-        if ts_code.is_empty() || trade_date_str.is_empty() { continue; }
+        if ts_code.is_empty() || trade_date_str.is_empty() {
+            continue;
+        }
 
         let d = NaiveDate::parse_from_str(trade_date_str, "%Y%m%d")
             .map_err(|_| "日期解析".to_string())?;
@@ -3032,7 +3181,12 @@ pub async fn sync_limit_list_range(
         total += 1;
     }
 
-    info!(total, start = start_date, end = end_date, "涨跌停范围同步完成");
+    info!(
+        total,
+        start = start_date,
+        end = end_date,
+        "涨跌停范围同步完成"
+    );
     Ok(total)
 }
 

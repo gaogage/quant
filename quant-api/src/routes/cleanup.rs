@@ -83,7 +83,10 @@ struct TableSize {
 // ── 数据统计 ────────────────────────────────────────────
 
 /// GET /api/v1/quant/data/cleanup/stats
-pub async fn cleanup_stats(State(state): State<Arc<AppState>>, _user: UserContext) -> impl IntoResponse {
+pub async fn cleanup_stats(
+    State(state): State<Arc<AppState>>,
+    _user: UserContext,
+) -> impl IntoResponse {
     match get_cleanup_stats(&state.db).await {
         Ok(stats) => Json(json!({"code": 0, "data": stats})),
         Err(e) => Json(json!({"code": 1, "message": e})),
@@ -408,7 +411,8 @@ async fn run_cleanup(db: &sqlx::PgPool, req: &CleanupRequest) -> Result<Value, S
             }
             Err(e) => {
                 warn!("清理缓存失败: {e}");
-                results.push(json!({"action": "TRUNCATE_ALL_CACHE", "status": "error", "error": e}));
+                results
+                    .push(json!({"action": "TRUNCATE_ALL_CACHE", "status": "error", "error": e}));
             }
         }
     }
@@ -446,7 +450,11 @@ async fn run_cleanup(db: &sqlx::PgPool, req: &CleanupRequest) -> Result<Value, S
                     "freed_bytes": freed,
                     "freed_size": format_bytes(freed),
                 }));
-                info!(deleted_tasks = count, freed = format_bytes(freed), "已自动清理过期回测");
+                info!(
+                    deleted_tasks = count,
+                    freed = format_bytes(freed),
+                    "已自动清理过期回测"
+                );
             }
             Err(e) => {
                 results.push(json!({
@@ -640,10 +648,7 @@ async fn count_backtest_rows(db: &sqlx::PgPool, task_id: &str) -> Result<Value, 
 
     let mut counts = serde_json::Map::new();
     for tbl in &tables {
-        let sql = format!(
-            "SELECT COUNT(*)::bigint FROM {} WHERE task_id = $1",
-            tbl
-        );
+        let sql = format!("SELECT COUNT(*)::bigint FROM {} WHERE task_id = $1", tbl);
         let row = sqlx::query_scalar::<_, Option<i64>>(&sql)
             .bind(task_id)
             .fetch_one(db)
@@ -655,13 +660,12 @@ async fn count_backtest_rows(db: &sqlx::PgPool, task_id: &str) -> Result<Value, 
 }
 
 async fn estimate_backtest_size(db: &sqlx::PgPool, task_id: &str) -> Result<i64, String> {
-    let row = sqlx::query(
-        "SELECT COUNT(*)::bigint AS cnt FROM backtest_position WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("查询回测行数失败: {e}"))?;
+    let row =
+        sqlx::query("SELECT COUNT(*)::bigint AS cnt FROM backtest_position WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(db)
+            .await
+            .map_err(|e| format!("查询回测行数失败: {e}"))?;
     let cnt: i64 = row.get(0);
     Ok(cnt * 500) // position 每行约 300 bytes, 加上其他表约 200 bytes overhead
 }
@@ -746,7 +750,12 @@ async fn clean_model_predictions(
         .bind(prediction_set_id)
         .execute(db)
         .await
-        .map_err(|e| format!("删除 model_prediction prediction_set_id={}: {}", prediction_set_id, e))?;
+        .map_err(|e| {
+            format!(
+                "删除 model_prediction prediction_set_id={}: {}",
+                prediction_set_id, e
+            )
+        })?;
 
     Ok(count)
 }
@@ -754,13 +763,12 @@ async fn clean_model_predictions(
 // ── 因子组合操作 ────────────────────────────────────────
 
 async fn count_combo_rows(db: &sqlx::PgPool, combo_name: &str) -> Result<i64, String> {
-    let row = sqlx::query(
-        "SELECT COUNT(*)::bigint AS cnt FROM multi_factor_value WHERE combo_name = $1",
-    )
-    .bind(combo_name)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("查询组合行数失败: {e}"))?;
+    let row =
+        sqlx::query("SELECT COUNT(*)::bigint AS cnt FROM multi_factor_value WHERE combo_name = $1")
+            .bind(combo_name)
+            .fetch_one(db)
+            .await
+            .map_err(|e| format!("查询组合行数失败: {e}"))?;
     Ok(row.get::<i64, _>(0))
 }
 
@@ -840,7 +848,11 @@ pub async fn clean_expired_backtests(db: &sqlx::PgPool) -> Result<(i64, i64), St
     // 估算释放空间（粗略）
     let est_freed = count * 500_000;
 
-    info!(count, freed = format_bytes(est_freed), "过期回测批量清理完成");
+    info!(
+        count,
+        freed = format_bytes(est_freed),
+        "过期回测批量清理完成"
+    );
 
     Ok((count, est_freed))
 }
@@ -861,7 +873,11 @@ pub async fn mark_backtest_kept(
         .await
     {
         Ok(result) if result.rows_affected() > 0 => {
-            let action = if req.is_kept { "标记保留" } else { "取消保留" };
+            let action = if req.is_kept {
+                "标记保留"
+            } else {
+                "取消保留"
+            };
             info!(task_id = %task_id, is_kept = req.is_kept, "{}", action);
             Json(json!({
                 "code": 0,
@@ -879,7 +895,10 @@ pub async fn mark_backtest_kept(
 
 /// GET /api/v1/quant/data/cleanup/expired-stats
 /// 查看有多少过期回测任务可被清理
-pub async fn expired_stats(State(state): State<Arc<AppState>>, _user: UserContext) -> impl IntoResponse {
+pub async fn expired_stats(
+    State(state): State<Arc<AppState>>,
+    _user: UserContext,
+) -> impl IntoResponse {
     match get_expired_stats(&state.db).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(e) => Json(json!({"code": 1, "message": e})),
@@ -903,12 +922,11 @@ async fn get_expired_stats(db: &sqlx::PgPool) -> Result<Value, String> {
     let expired_count: i64 = row.get(0);
 
     // 保留的
-    let row2 = sqlx::query(
-        "SELECT COUNT(*)::bigint AS cnt FROM backtest_task WHERE is_kept = true",
-    )
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("查询保留任务失败: {e}"))?;
+    let row2 =
+        sqlx::query("SELECT COUNT(*)::bigint AS cnt FROM backtest_task WHERE is_kept = true")
+            .fetch_one(db)
+            .await
+            .map_err(|e| format!("查询保留任务失败: {e}"))?;
     let kept_count: i64 = row2.get(0);
 
     // 未过期

@@ -2251,17 +2251,14 @@ fn is_train_window_ml_stress_fill_profile(search_profile: Option<&str>) -> bool 
 fn is_ensemble_profile(search_profile: Option<&str>) -> bool {
     matches!(
         search_profile.map(str::trim).unwrap_or_default(),
-        "professional_ensemble_discovery"
-            | "phase7_ensemble_v1"
+        "professional_ensemble_discovery" | "phase7_ensemble_v1"
     )
 }
 
 fn is_simple_nlqr_profile(search_profile: Option<&str>) -> bool {
     matches!(
         search_profile.map(str::trim).unwrap_or_default(),
-        "professional_simple_nlqr_discovery"
-            | "phase7_simple_nlqr"
-            | "phase7_s1"
+        "professional_simple_nlqr_discovery" | "phase7_simple_nlqr" | "phase7_s1"
     )
 }
 
@@ -3394,9 +3391,10 @@ async fn execute_oos_discovery_window(
 
     if fixed_params_enabled && train_window_ml_prediction_sets.is_none() {
         // Resolve the search config to get the first seed trial's parameters
-        let (_profile_name, search_config) =
-            phase7_search_config(req.search_profile.as_deref());
-        let seed_params = search_config.seed_trials.first()
+        let (_profile_name, search_config) = phase7_search_config(req.search_profile.as_deref());
+        let seed_params = search_config
+            .seed_trials
+            .first()
             .cloned()
             .unwrap_or_else(|| {
                 // Fallback: use the proven price_volume fixed params
@@ -3419,14 +3417,18 @@ async fn execute_oos_discovery_window(
             "summary_only",
         )?;
         let oos_backtest_task_id = format!("oosbt-{}", Uuid::new_v4());
-        let oos_parameters = train_window_ml_oos_parameters(
-            &seed_params,
-            train_window_ml_prediction_sets.as_ref(),
-        )?;
+        let oos_parameters =
+            train_window_ml_oos_parameters(&seed_params, train_window_ml_prediction_sets.as_ref())?;
         let oos_output = execute_oos_candidate_backtest(
-            db, req, test_template.clone(), &oos_parameters,
-            &oos_backtest_task_id, oos_signal_cache, oos_backtest_cache,
-        ).await?;
+            db,
+            req,
+            test_template.clone(),
+            &oos_parameters,
+            &oos_backtest_task_id,
+            oos_signal_cache,
+            oos_backtest_cache,
+        )
+        .await?;
         let oos_points = load_oos_equity_points(db, &oos_backtest_task_id).await?;
 
         return Ok(OosWindowExecution {
@@ -3648,9 +3650,7 @@ async fn ensemble_model_params_for_window(
     .await
     .map_err(|e| format!("benchmark query failed: {}", e))?;
 
-    let bench_returns: Vec<f64> = bench_rows.iter()
-        .filter_map(|(_, r)| *r)
-        .collect();
+    let bench_returns: Vec<f64> = bench_rows.iter().filter_map(|(_, r)| *r).collect();
 
     if bench_returns.len() < 42 {
         // Not enough data — default to EW3 (asymmetric bull)
@@ -3658,13 +3658,22 @@ async fn ensemble_model_params_for_window(
     }
 
     // Compute 42-day trailing return
-    let tr_42d = bench_returns.iter().rev().take(42).fold(1.0, |acc, &r| acc * (1.0 + r)) - 1.0;
+    let tr_42d = bench_returns
+        .iter()
+        .rev()
+        .take(42)
+        .fold(1.0, |acc, &r| acc * (1.0 + r))
+        - 1.0;
 
     // Compute previous year volatility
     let prev_year_rets: Vec<f64> = bench_returns.iter().rev().take(252).copied().collect();
     let prev_vol = if prev_year_rets.len() >= 100 {
         let mean = prev_year_rets.iter().sum::<f64>() / prev_year_rets.len() as f64;
-        let var = prev_year_rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (prev_year_rets.len() - 1) as f64;
+        let var = prev_year_rets
+            .iter()
+            .map(|r| (r - mean).powi(2))
+            .sum::<f64>()
+            / (prev_year_rets.len() - 1) as f64;
         var.sqrt() * (252.0_f64).sqrt()
     } else {
         0.15 // default moderate vol
@@ -3732,22 +3741,28 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     };
     let train_prediction_set_id = format!("{}-w{}-{}-tr", prefix, window.window_index, short_id);
     let test_prediction_set_id = format!("{}-w{}-{}-te", prefix, window.window_index, short_id);
-    let train_training_task_id = format!("train-{}-w{}-{}-tr", prefix, window.window_index, short_id);
-    let test_training_task_id = format!("train-{}-w{}-{}-te", prefix, window.window_index, short_id);
+    let train_training_task_id =
+        format!("train-{}-w{}-{}-tr", prefix, window.window_index, short_id);
+    let test_training_task_id =
+        format!("train-{}-w{}-{}-te", prefix, window.window_index, short_id);
     let training_task_id = format!("{}-w{}-{}", prefix, window.window_index, short_id);
 
     // Label/horizon/bucket selection
-    let (label_objective, label_horizon_days, bucket_count, min_samples) =
-        if is_ensemble {
-            ensemble_model_params_for_window(db, window).await?
-        } else if is_simple_nlqr {
-            // Simplified NLQR: stable label, fewer buckets for better generalization
-            let h = train_window_ml_label_horizon_days(window) as usize;
-            ("future_excess_return".to_string(), h, 5usize, 50usize)
-        } else {
-            let h = train_window_ml_label_horizon_days(window) as usize;
-            ("risk_adjusted_excess_return".to_string(), h, 7usize, 250usize)
-        };
+    let (label_objective, label_horizon_days, bucket_count, min_samples) = if is_ensemble {
+        ensemble_model_params_for_window(db, window).await?
+    } else if is_simple_nlqr {
+        // Simplified NLQR: stable label, fewer buckets for better generalization
+        let h = train_window_ml_label_horizon_days(window) as usize;
+        ("future_excess_return".to_string(), h, 5usize, 50usize)
+    } else {
+        let h = train_window_ml_label_horizon_days(window) as usize;
+        (
+            "risk_adjusted_excess_return".to_string(),
+            h,
+            7usize,
+            250usize,
+        )
+    };
 
     let train_lookback_days = train_window_ml_lookback_days(window, label_horizon_days as i64);
     let train_prediction_start =
@@ -3759,7 +3774,8 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
         ));
     }
 
-    let feature_profile = phase7_train_window_ml_feature_profile_for_search(req.search_profile.as_deref());
+    let feature_profile =
+        phase7_train_window_ml_feature_profile_for_search(req.search_profile.as_deref());
     let factors = if is_simple_nlqr {
         phase7_train_window_ml_factor_refs_for_profile("phase7_simple_nlqr_core_15f_v1")
     } else {
@@ -3774,7 +3790,10 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
         WalkForwardNonlinearQuantileRankerRequest {
             model_code: format!("{}_nlq_ranker", prefix),
             model_version: format!("w{}-{}-train", window.window_index, short_id),
-            model_version_id: Some(format!("{}-nlq-w{}-{}-tr", prefix, window.window_index, short_id)),
+            model_version_id: Some(format!(
+                "{}-nlq-w{}-{}-tr",
+                prefix, window.window_index, short_id
+            )),
             training_task_id: Some(train_training_task_id),
             prediction_set_id: Some(train_prediction_set_id.clone()),
             data_version_id: req.data_version_id.clone(),
@@ -3800,7 +3819,10 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
         TrainNonlinearQuantileRankerRequest {
             model_code: format!("{}_nlq_ranker", prefix),
             model_version: format!("w{}-{}-test", window.window_index, short_id),
-            model_version_id: Some(format!("{}-nlq-w{}-{}-te", prefix, window.window_index, short_id)),
+            model_version_id: Some(format!(
+                "{}-nlq-w{}-{}-te",
+                prefix, window.window_index, short_id
+            )),
             training_task_id: Some(test_training_task_id),
             prediction_set_id: Some(test_prediction_set_id.clone()),
             data_version_id: req.data_version_id.clone(),
@@ -4040,16 +4062,24 @@ fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFa
         "phase7_simple_nlqr_core_15f_v1" => &[
             // 15 core factors — simplified for WFA robustness
             // Quality (4): fundamental profitability
-            "fin_roe_daily_std", "fin_roa_daily_std",
-            "fin_netprofit_margin_daily_std", "fin_gross_margin_daily_std",
+            "fin_roe_daily_std",
+            "fin_roa_daily_std",
+            "fin_netprofit_margin_daily_std",
+            "fin_gross_margin_daily_std",
             // Value (3): cheapness
-            "val_pb_low_std", "val_pe_ttm_low_std", "val_dividend_yield_ttm_std",
+            "val_pb_low_std",
+            "val_pe_ttm_low_std",
+            "val_dividend_yield_ttm_std",
             // Cashflow (2): earnings quality
-            "cf_ocf_to_profit_latest_std", "cf_ocf_positive_latest_std",
+            "cf_ocf_to_profit_latest_std",
+            "cf_ocf_positive_latest_std",
             // Momentum (3): price trend
-            "mom_20d_std", "mom_60d_std", "mkt_rel_mom_20d_std",
+            "mom_20d_std",
+            "mom_60d_std",
+            "mkt_rel_mom_20d_std",
             // Low risk (2): drawdown protection
-            "vol_20d_std", "maxdd_60d_std",
+            "vol_20d_std",
+            "maxdd_60d_std",
             // Sentiment (1): northbound flow
             "north_flow_std_20d",
         ],
@@ -4109,23 +4139,56 @@ fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFa
         ],
         "phase7_gb_quality_value_recovery_low_impact_v6" => &[
             // v5 + P2 margin sentiment factor (52 factors)
-            "fin_roe_daily_std","fin_roe_indrel_daily_std","fin_roa_daily_std","fin_roa_indrel_daily_std",
-            "fin_current_ratio_daily_std","fin_current_ratio_indrel_daily_std",
-            "fin_debt_to_assets_daily_std","fin_debt_to_assets_indrel_daily_std",
-            "fin_netprofit_margin_daily_std","fin_netprofit_margin_indrel_daily_std",
-            "fin_gross_margin_daily_std","fin_gross_margin_indrel_daily_std",
-            "fin_netprofit_margin_yoy_delta_std","fin_gross_margin_yoy_delta_std",
-            "fin_debt_to_assets_yoy_improve_std","fin_eps_yoy_recovery_std",
-            "fin_roe_yoy_delta_std","fin_current_ratio_yoy_delta_std",
-            "val_pb_low_std","val_pe_ttm_low_std","val_ps_ttm_low_std","val_dividend_yield_ttm_std",
-            "cf_ocf_to_profit_latest_std","cf_ocf_positive_latest_std","cf_ocf_profit_gap_latest_std","cf_cash_buffer_latest_std",
-            "div_recent_positive_std","div_paid_years_4y_std","div_stability_4y_std","div_cash_sum_4y_std",
-            "mom_5d_std","mom_20d_std","mom_60d_std","mkt_rel_mom_20d_std","mkt_rel_mom_60d_std",
-            "ind_rel_mom_20d_std","ind_rel_mom_60d_std","rev_5d_std","rev_20d_std",
-            "amihud_20d_std","amt_intensity_20d_std","turn_20d_std",
-            "vol_20d_std","downvol_20d_std","maxdd_60d_std",
-            "mf_net_amount_5d_std","mf_elg_net_amount_5d_std","mf_net_amount_20d_std",
-            "mf_lg_elg_net_amount_20d_std","mf_small_sell_pressure_20d_std",
+            "fin_roe_daily_std",
+            "fin_roe_indrel_daily_std",
+            "fin_roa_daily_std",
+            "fin_roa_indrel_daily_std",
+            "fin_current_ratio_daily_std",
+            "fin_current_ratio_indrel_daily_std",
+            "fin_debt_to_assets_daily_std",
+            "fin_debt_to_assets_indrel_daily_std",
+            "fin_netprofit_margin_daily_std",
+            "fin_netprofit_margin_indrel_daily_std",
+            "fin_gross_margin_daily_std",
+            "fin_gross_margin_indrel_daily_std",
+            "fin_netprofit_margin_yoy_delta_std",
+            "fin_gross_margin_yoy_delta_std",
+            "fin_debt_to_assets_yoy_improve_std",
+            "fin_eps_yoy_recovery_std",
+            "fin_roe_yoy_delta_std",
+            "fin_current_ratio_yoy_delta_std",
+            "val_pb_low_std",
+            "val_pe_ttm_low_std",
+            "val_ps_ttm_low_std",
+            "val_dividend_yield_ttm_std",
+            "cf_ocf_to_profit_latest_std",
+            "cf_ocf_positive_latest_std",
+            "cf_ocf_profit_gap_latest_std",
+            "cf_cash_buffer_latest_std",
+            "div_recent_positive_std",
+            "div_paid_years_4y_std",
+            "div_stability_4y_std",
+            "div_cash_sum_4y_std",
+            "mom_5d_std",
+            "mom_20d_std",
+            "mom_60d_std",
+            "mkt_rel_mom_20d_std",
+            "mkt_rel_mom_60d_std",
+            "ind_rel_mom_20d_std",
+            "ind_rel_mom_60d_std",
+            "rev_5d_std",
+            "rev_20d_std",
+            "amihud_20d_std",
+            "amt_intensity_20d_std",
+            "turn_20d_std",
+            "vol_20d_std",
+            "downvol_20d_std",
+            "maxdd_60d_std",
+            "mf_net_amount_5d_std",
+            "mf_elg_net_amount_5d_std",
+            "mf_net_amount_20d_std",
+            "mf_lg_elg_net_amount_20d_std",
+            "mf_small_sell_pressure_20d_std",
             "north_flow_std_20d",
             "margin_rz_std_20d",
         ],
@@ -6459,8 +6522,16 @@ fn build_oos_gate_report(
         .as_f64()
         .or_else(|| stitched_summary["excess_return_pct"].as_f64())
         .unwrap_or(0.0);
-    let min_stitched_annual = constraint_f64(Some(final_promotion_gate_policy), "min_stitched_annual_return").unwrap_or(0.15);
-    let min_stitched_excess = constraint_f64(Some(final_promotion_gate_policy), "min_stitched_excess_return").unwrap_or(0.0);
+    let min_stitched_annual = constraint_f64(
+        Some(final_promotion_gate_policy),
+        "min_stitched_annual_return",
+    )
+    .unwrap_or(0.15);
+    let min_stitched_excess = constraint_f64(
+        Some(final_promotion_gate_policy),
+        "min_stitched_excess_return",
+    )
+    .unwrap_or(0.0);
     let no_overlap = plan
         .windows
         .iter()

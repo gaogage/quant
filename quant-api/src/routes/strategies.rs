@@ -48,7 +48,7 @@ pub async fn list_strategies(
                 etf_symbols, default_weights, vol_target, leverage_cap, leverage_floor,
                 min_stock, max_single, max_single_bull, momentum_blend_ratio,
                 rebalance_freq, ga_population, ga_generations, risk_free_rate
-         FROM strategy_config ORDER BY strategy_id"
+         FROM strategy_config ORDER BY strategy_id",
     )
     .fetch_all(&state.db)
     .await
@@ -137,7 +137,11 @@ pub async fn get_strategy(
 
     match my {
         Ok(Some((name, desc, params, status, owner_id))) => {
-            let owner = if owner_id == user.user_id { "me" } else { &owner_id };
+            let owner = if owner_id == user.user_id {
+                "me"
+            } else {
+                &owner_id
+            };
             Json(serde_json::json!({
                 "code": 0, "data": {
                     "strategy_id": strategy_id, "name": name, "description": desc,
@@ -182,16 +186,17 @@ pub async fn update_strategy(
     Json(req): Json<UpdateStrategyRequest>,
 ) -> impl IntoResponse {
     // 校验所有权
-    let owner = sqlx::query_as::<_, (String,)>(
-        "SELECT user_id FROM user_strategy WHERE strategy_id = $1"
-    )
-    .bind(&strategy_id)
-    .fetch_optional(&state.db)
-    .await;
+    let owner =
+        sqlx::query_as::<_, (String,)>("SELECT user_id FROM user_strategy WHERE strategy_id = $1")
+            .bind(&strategy_id)
+            .fetch_optional(&state.db)
+            .await;
 
     match owner {
         Ok(Some((oid,))) if oid == user.user_id => {}
-        Ok(Some(_)) => return Json(serde_json::json!({"code": 403, "message": "只能修改自己的策略"})),
+        Ok(Some(_)) => {
+            return Json(serde_json::json!({"code": 403, "message": "只能修改自己的策略"}))
+        }
         _ => return Json(serde_json::json!({"code": 404, "message": "策略不存在"})),
     }
 
@@ -200,11 +205,15 @@ pub async fn update_strategy(
          description = COALESCE($2, description),
          params = COALESCE($3, params),
          updated_by = $4, updated_at = NOW()
-         WHERE strategy_id = $5"
+         WHERE strategy_id = $5",
     )
-    .bind(&req.name).bind(&req.description).bind(&req.params)
-    .bind(&user.user_id).bind(&strategy_id)
-    .execute(&state.db).await;
+    .bind(&req.name)
+    .bind(&req.description)
+    .bind(&req.params)
+    .bind(&user.user_id)
+    .bind(&strategy_id)
+    .execute(&state.db)
+    .await;
 
     Json(serde_json::json!({"code": 0}))
 }
@@ -218,22 +227,24 @@ pub async fn delete_strategy(
     Path(strategy_id): Path<String>,
 ) -> impl IntoResponse {
     // 校验所有权
-    let owner = sqlx::query_as::<_, (String,)>(
-        "SELECT user_id FROM user_strategy WHERE strategy_id = $1"
-    )
-    .bind(&strategy_id)
-    .fetch_optional(&state.db)
-    .await;
+    let owner =
+        sqlx::query_as::<_, (String,)>("SELECT user_id FROM user_strategy WHERE strategy_id = $1")
+            .bind(&strategy_id)
+            .fetch_optional(&state.db)
+            .await;
 
     match owner {
         Ok(Some((oid,))) if oid == user.user_id => {}
-        Ok(Some(_)) => return Json(serde_json::json!({"code": 403, "message": "只能删除自己的策略"})),
+        Ok(Some(_)) => {
+            return Json(serde_json::json!({"code": 403, "message": "只能删除自己的策略"}))
+        }
         _ => return Json(serde_json::json!({"code": 404, "message": "策略不存在"})),
     }
 
     let _ = sqlx::query("DELETE FROM user_strategy WHERE strategy_id = $1")
         .bind(&strategy_id)
-        .execute(&state.db).await;
+        .execute(&state.db)
+        .await;
 
     Json(serde_json::json!({"code": 0, "message": "已删除"}))
 }

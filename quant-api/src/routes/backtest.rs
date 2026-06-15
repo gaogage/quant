@@ -286,16 +286,14 @@ fn build_universe_filter(profile: TradableUniverseProfile) -> (&'static str, Str
         TradableUniverseProfile::All => ("", String::new()),
         TradableUniverseProfile::ListedNonSt => (
             "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
-            format!(
-                "\n           AND ms.list_status = 'L'{}",
-                pit_st_not_in
-            ),
+            format!("\n           AND ms.list_status = 'L'{}", pit_st_not_in),
         ),
         TradableUniverseProfile::MainBoardNonSt => (
             "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
             format!(
                 "\n           AND ms.list_status = 'L'
            AND ms.exchange IN ('SSE', 'SZSE')
+           AND ms.market = '主板'
            AND ms.symbol NOT LIKE '300%SZ'
            AND ms.symbol NOT LIKE '301%SZ'
            AND ms.symbol NOT LIKE '688%SH'
@@ -2526,10 +2524,16 @@ pub(crate) async fn execute_prediction_backtest(
         persistence_mode,
         risk_control: RiskControlConfig {
             trailing_stop_pct: req.trailing_stop_pct.and_then(|v| Decimal::from_f64(v)),
-            portfolio_volatility_target_pct: req.portfolio_volatility_target_pct.and_then(|v| Decimal::from_f64(v)),
+            portfolio_volatility_target_pct: req
+                .portfolio_volatility_target_pct
+                .and_then(|v| Decimal::from_f64(v)),
             portfolio_volatility_lookback_days: req.portfolio_volatility_lookback_days,
-            portfolio_volatility_min_exposure: req.portfolio_volatility_min_exposure.and_then(|v| Decimal::from_f64(v)),
-            portfolio_volatility_max_exposure: req.portfolio_volatility_max_exposure.and_then(|v| Decimal::from_f64(v)),
+            portfolio_volatility_min_exposure: req
+                .portfolio_volatility_min_exposure
+                .and_then(|v| Decimal::from_f64(v)),
+            portfolio_volatility_max_exposure: req
+                .portfolio_volatility_max_exposure
+                .and_then(|v| Decimal::from_f64(v)),
             ..RiskControlConfig::default()
         },
     };
@@ -2558,6 +2562,16 @@ mod tests {
     fn parse_yyyymmdd_rejects_invalid_date() {
         let err = parse_yyyymmdd("2024-01-01", "start_date").unwrap_err();
         assert!(err.contains("start_date"));
+    }
+
+    #[test]
+    fn effective_coverage_main_board_filter_excludes_non_stock_blank_market() {
+        let sql = effective_factor_coverage_sql(TradableUniverseProfile::MainBoardNonSt);
+
+        assert!(sql.contains("JOIN market_stock ms ON ms.symbol = mfv.symbol"));
+        assert!(sql.contains("ms.list_status = 'L'"));
+        assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
+        assert!(sql.contains("ms.market = '主板'"));
     }
 
     #[test]

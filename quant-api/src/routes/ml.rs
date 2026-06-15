@@ -290,17 +290,42 @@ impl LabelObjective {
     }
 
     fn requires_benchmark(self) -> bool {
-        matches!(self, Self::FutureExcessReturn | Self::RiskAdjustedExcessReturn
-            | Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn
-            | Self::FundamentalQualityAdjustedExcessReturn | Self::RegimeConditionalExcessReturn
-            | Self::GradientBoostingExcessReturn | Self::MlpExcessReturn | Self::AsymmetricExcessReturn)
+        matches!(
+            self,
+            Self::FutureExcessReturn
+                | Self::RiskAdjustedExcessReturn
+                | Self::QualityAdjustedExcessReturn
+                | Self::QualityAdjustedRiskAdjustedExcessReturn
+                | Self::FundamentalQualityAdjustedExcessReturn
+                | Self::RegimeConditionalExcessReturn
+                | Self::GradientBoostingExcessReturn
+                | Self::MlpExcessReturn
+                | Self::AsymmetricExcessReturn
+        )
     }
 
-    fn is_quality_adjusted(self) -> bool { matches!(self, Self::QualityAdjustedExcessReturn | Self::QualityAdjustedRiskAdjustedExcessReturn | Self::FundamentalQualityAdjustedExcessReturn | Self::RegimeConditionalExcessReturn | Self::GradientBoostingExcessReturn) }
-    fn uses_fundamental_quality(self) -> bool { matches!(self, Self::FundamentalQualityAdjustedExcessReturn) }
-    fn uses_regime_conditioning(self) -> bool { matches!(self, Self::RegimeConditionalExcessReturn) }
-    fn uses_gradient_boosting(self) -> bool { matches!(self, Self::GradientBoostingExcessReturn) }
-    fn uses_mlp(self) -> bool { matches!(self, Self::MlpExcessReturn) }
+    fn is_quality_adjusted(self) -> bool {
+        matches!(
+            self,
+            Self::QualityAdjustedExcessReturn
+                | Self::QualityAdjustedRiskAdjustedExcessReturn
+                | Self::FundamentalQualityAdjustedExcessReturn
+                | Self::RegimeConditionalExcessReturn
+                | Self::GradientBoostingExcessReturn
+        )
+    }
+    fn uses_fundamental_quality(self) -> bool {
+        matches!(self, Self::FundamentalQualityAdjustedExcessReturn)
+    }
+    fn uses_regime_conditioning(self) -> bool {
+        matches!(self, Self::RegimeConditionalExcessReturn)
+    }
+    fn uses_gradient_boosting(self) -> bool {
+        matches!(self, Self::GradientBoostingExcessReturn)
+    }
+    fn uses_mlp(self) -> bool {
+        matches!(self, Self::MlpExcessReturn)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -439,7 +464,11 @@ fn benchmark_trailing_regime_feature(
 
 fn split_samples_by_regime(
     samples: &[TrainingSample],
-) -> (Vec<TrainingSample>, Vec<TrainingSample>, Vec<TrainingSample>) {
+) -> (
+    Vec<TrainingSample>,
+    Vec<TrainingSample>,
+    Vec<TrainingSample>,
+) {
     let mut bull = Vec::new();
     let mut bear = Vec::new();
     let mut sideways = Vec::new();
@@ -500,7 +529,11 @@ impl RegimeSplitModel {
                 score += pscore;
             }
         }
-        if score.is_finite() { Some(score) } else { None }
+        if score.is_finite() {
+            Some(score)
+        } else {
+            None
+        }
     }
 
     fn any_model(&self) -> bool {
@@ -1689,10 +1722,25 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
     let mut gb_model: Option<GradientBoostingModel> = None;
     let mut mlp_model: Option<MlpModel> = None;
     if use_gb {
-        gb_model = Some(fit_gradient_boosting(&samples, req.factors.len(), 100, 4, 0.05)?);
+        gb_model = Some(fit_gradient_boosting(
+            &samples,
+            req.factors.len(),
+            100,
+            4,
+            0.05,
+        )?);
     }
     if req.label_objective.uses_mlp() {
-        mlp_model = Some(fit_mlp(&samples, req.factors.len(), 128, 64, 100, 256, 0.001, 0.0001)?);
+        mlp_model = Some(fit_mlp(
+            &samples,
+            req.factors.len(),
+            128,
+            64,
+            100,
+            256,
+            0.001,
+            0.0001,
+        )?);
     }
     let model = fit_nonlinear_quantile_ranker(
         &samples,
@@ -3468,16 +3516,15 @@ fn training_samples_from_feature_matrix_rows(
             continue;
         };
         if label.is_finite() {
-            let regime_tag = if label_objective.uses_regime_conditioning()
-                && !benchmark_closes.is_empty()
-            {
-                Some(MarketRegimeTag::from_benchmark_trailing(
-                    benchmark_closes,
-                    row.trade_date,
-                ))
-            } else {
-                None
-            };
+            let regime_tag =
+                if label_objective.uses_regime_conditioning() && !benchmark_closes.is_empty() {
+                    Some(MarketRegimeTag::from_benchmark_trailing(
+                        benchmark_closes,
+                        row.trade_date,
+                    ))
+                } else {
+                    None
+                };
             samples.push(TrainingSample {
                 features: row.features,
                 label,
@@ -3585,11 +3632,21 @@ fn label_for_objective(
             Some(stock_return - benchmark_return)
         }
         LabelObjective::GradientBoostingExcessReturn | LabelObjective::MlpExcessReturn => {
-            let benchmark_return = future_return_label_until(benchmark_closes, trade_date, max_label_date, horizon_days)?;
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
             Some(stock_return - benchmark_return)
         }
         LabelObjective::AsymmetricExcessReturn => {
-            let benchmark_return = future_return_label_until(benchmark_closes, trade_date, max_label_date, horizon_days)?;
+            let benchmark_return = future_return_label_until(
+                benchmark_closes,
+                trade_date,
+                max_label_date,
+                horizon_days,
+            )?;
             let excess = stock_return - benchmark_return;
             // Asymmetric penalty: negative returns penalized 2x, positive returns unchanged
             if excess > 0.0 {
@@ -4072,9 +4129,7 @@ struct GradientBoostingModel {
 
 impl GradientBoostingModel {
     fn predict(&self, features: &[f64]) -> f64 {
-        if features.len() != self.factor_count
-            || features.iter().any(|v| !v.is_finite())
-        {
+        if features.len() != self.factor_count || features.iter().any(|v| !v.is_finite()) {
             return self.init_value;
         }
         let mut score = self.init_value;
@@ -4093,7 +4148,7 @@ struct MlpModel {
     b1: Vec<f64>,
     w2: Vec<Vec<f64>>, // hidden1 × hidden2
     b2: Vec<f64>,
-    w3: Vec<f64>,      // hidden2 → 1
+    w3: Vec<f64>, // hidden2 → 1
     b3: f64,
     factor_count: usize,
     hidden1: usize,
@@ -4145,8 +4200,13 @@ fn fit_mlp(
     if factor_count == 0 || samples.len() < 100 {
         return Err("MLP: need factor_count>0 and >=100 samples".into());
     }
-    let valid: Vec<&TrainingSample> = samples.iter()
-        .filter(|s| s.features.len() == factor_count && s.label.is_finite() && s.features.iter().all(|v| v.is_finite()))
+    let valid: Vec<&TrainingSample> = samples
+        .iter()
+        .filter(|s| {
+            s.features.len() == factor_count
+                && s.label.is_finite()
+                && s.features.iter().all(|v| v.is_finite())
+        })
         .collect();
     let n = valid.len();
     let val_n = (n as f64 * 0.15).ceil() as usize;
@@ -4154,22 +4214,30 @@ fn fit_mlp(
 
     // Xavier init
     let rng = || {
-        let x = (train_n as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let x = (train_n as u64)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (x as f64 / u64::MAX as f64) * 2.0 - 1.0
     };
     let scale1 = (2.0 / factor_count as f64).sqrt();
     let scale2 = (2.0 / hidden1 as f64).sqrt();
     let scale3 = (2.0 / hidden2 as f64).sqrt();
 
-    let mut w1: Vec<Vec<f64>> = (0..hidden1).map(|_| (0..factor_count).map(|_| rng() * scale1).collect()).collect();
+    let mut w1: Vec<Vec<f64>> = (0..hidden1)
+        .map(|_| (0..factor_count).map(|_| rng() * scale1).collect())
+        .collect();
     let mut b1 = vec![0.0; hidden1];
-    let mut w2: Vec<Vec<f64>> = (0..hidden2).map(|_| (0..hidden1).map(|_| rng() * scale2).collect()).collect();
+    let mut w2: Vec<Vec<f64>> = (0..hidden2)
+        .map(|_| (0..hidden1).map(|_| rng() * scale2).collect())
+        .collect();
     let mut b2 = vec![0.0; hidden2];
     let mut w3: Vec<f64> = (0..hidden2).map(|_| rng() * scale3).collect();
     let mut b3 = 0.0;
 
     // Adam state
-    let beta1 = 0.9; let beta2 = 0.999; let eps = 1e-8;
+    let beta1 = 0.9;
+    let beta2 = 0.999;
+    let eps = 1e-8;
     let adam_m = |grad: &mut [f64], m: &mut [f64], v: &mut [f64], t: f64| {
         for i in 0..grad.len() {
             m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
@@ -4181,24 +4249,40 @@ fn fit_mlp(
     };
     let mut m_w1: Vec<Vec<f64>> = w1.iter().map(|r| vec![0.0; r.len()]).collect();
     let mut v_w1: Vec<Vec<f64>> = w1.iter().map(|r| vec![0.0; r.len()]).collect();
-    let _m_b1 = vec![0.0; hidden1]; let _v_b1 = vec![0.0; hidden1];
+    let _m_b1 = vec![0.0; hidden1];
+    let _v_b1 = vec![0.0; hidden1];
     let mut m_w2: Vec<Vec<f64>> = w2.iter().map(|r| vec![0.0; r.len()]).collect();
     let mut v_w2: Vec<Vec<f64>> = w2.iter().map(|r| vec![0.0; r.len()]).collect();
-    let _m_b2 = vec![0.0; hidden2]; let _v_b2 = vec![0.0; hidden2];
-    let mut m_w3 = vec![0.0; hidden2]; let mut v_w3 = vec![0.0; hidden2];
-    let _m_b3 = 0.0; let _v_b3 = 0.0;
+    let _m_b2 = vec![0.0; hidden2];
+    let _v_b2 = vec![0.0; hidden2];
+    let mut m_w3 = vec![0.0; hidden2];
+    let mut v_w3 = vec![0.0; hidden2];
+    let _m_b3 = 0.0;
+    let _v_b3 = 0.0;
     let mut t = 0.0;
 
     let mut best_val_loss = f64::MAX;
-    let mut best_weights: Option<(Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>, Vec<f64>, Vec<f64>, f64)> = None;
+    let mut best_weights: Option<(
+        Vec<Vec<f64>>,
+        Vec<f64>,
+        Vec<Vec<f64>>,
+        Vec<f64>,
+        Vec<f64>,
+        f64,
+    )> = None;
     let mut patience_left = 10i32;
 
     for _epoch in 0..epochs {
-        if patience_left <= 0 { break; }
+        if patience_left <= 0 {
+            break;
+        }
         t += 1.0;
         // Shuffle train indices
         let mut indices: Vec<usize> = (0..train_n).collect();
-        for i in (1..train_n).rev() { let j = (i * 2654435761 + _epoch) % (i + 1); indices.swap(i, j); }
+        for i in (1..train_n).rev() {
+            let j = (i * 2654435761 + _epoch) % (i + 1);
+            indices.swap(i, j);
+        }
 
         for batch_start in (0..train_n).step_by(batch_size) {
             let batch_end = (batch_start + batch_size).min(train_n);
@@ -4215,63 +4299,149 @@ fn fit_mlp(
                 let s = valid[idx];
                 // Forward
                 let mut h1 = vec![0.0; hidden1];
-                for i in 0..hidden1 { let mut sum = b1[i]; for j in 0..factor_count { sum += w1[i][j] * s.features[j]; } h1[i] = sum.max(0.0); }
+                for i in 0..hidden1 {
+                    let mut sum = b1[i];
+                    for j in 0..factor_count {
+                        sum += w1[i][j] * s.features[j];
+                    }
+                    h1[i] = sum.max(0.0);
+                }
                 let mut h2 = vec![0.0; hidden2];
-                for i in 0..hidden2 { let mut sum = b2[i]; for j in 0..hidden1 { sum += w2[i][j] * h1[j]; } h2[i] = sum.max(0.0); }
+                for i in 0..hidden2 {
+                    let mut sum = b2[i];
+                    for j in 0..hidden1 {
+                        sum += w2[i][j] * h1[j];
+                    }
+                    h2[i] = sum.max(0.0);
+                }
                 let mut pred = b3;
-                for i in 0..hidden2 { pred += w3[i] * h2[i]; }
+                for i in 0..hidden2 {
+                    pred += w3[i] * h2[i];
+                }
                 let error = pred - s.label;
                 // Backward
                 let dout = error;
                 db3_grad += dout;
-                for i in 0..hidden2 { dw3[i] += dout * h2[i]; }
+                for i in 0..hidden2 {
+                    dw3[i] += dout * h2[i];
+                }
                 let mut dh2 = vec![0.0; hidden2];
-                for i in 0..hidden2 { dh2[i] = if h2[i] > 0.0 { dout * w3[i] } else { 0.0 }; }
-                for i in 0..hidden2 { db2[i] += dh2[i]; for j in 0..hidden1 { dw2[i][j] += dh2[i] * h1[j]; } }
+                for i in 0..hidden2 {
+                    dh2[i] = if h2[i] > 0.0 { dout * w3[i] } else { 0.0 };
+                }
+                for i in 0..hidden2 {
+                    db2[i] += dh2[i];
+                    for j in 0..hidden1 {
+                        dw2[i][j] += dh2[i] * h1[j];
+                    }
+                }
                 let mut dh1 = vec![0.0; hidden1];
-                for i in 0..hidden1 { let mut s = 0.0; for j in 0..hidden2 { s += dh2[j] * w2[j][i]; } dh1[i] = if h1[i] > 0.0 { s } else { 0.0 }; }
-                for i in 0..hidden1 { db1[i] += dh1[i]; for j in 0..factor_count { dw1[i][j] += dh1[i] * s.features[j]; } }
+                for i in 0..hidden1 {
+                    let mut s = 0.0;
+                    for j in 0..hidden2 {
+                        s += dh2[j] * w2[j][i];
+                    }
+                    dh1[i] = if h1[i] > 0.0 { s } else { 0.0 };
+                }
+                for i in 0..hidden1 {
+                    db1[i] += dh1[i];
+                    for j in 0..factor_count {
+                        dw1[i][j] += dh1[i] * s.features[j];
+                    }
+                }
             }
             // Apply gradients with Adam + L2 reg
             for i in 0..hidden1 {
-                for j in 0..factor_count { dw1[i][j] = dw1[i][j] / batch_sz + l2_reg * w1[i][j]; }
+                for j in 0..factor_count {
+                    dw1[i][j] = dw1[i][j] / batch_sz + l2_reg * w1[i][j];
+                }
                 adam_m(&mut dw1[i], &mut m_w1[i], &mut v_w1[i], t);
-                for j in 0..factor_count { w1[i][j] -= dw1[i][j]; }
-                db1[i] /= batch_sz; b1[i] -= learning_rate * db1[i];
+                for j in 0..factor_count {
+                    w1[i][j] -= dw1[i][j];
+                }
+                db1[i] /= batch_sz;
+                b1[i] -= learning_rate * db1[i];
             }
             for i in 0..hidden2 {
-                for j in 0..hidden1 { dw2[i][j] = dw2[i][j] / batch_sz + l2_reg * w2[i][j]; }
+                for j in 0..hidden1 {
+                    dw2[i][j] = dw2[i][j] / batch_sz + l2_reg * w2[i][j];
+                }
                 adam_m(&mut dw2[i], &mut m_w2[i], &mut v_w2[i], t);
-                for j in 0..hidden1 { w2[i][j] -= dw2[i][j]; }
-                db2[i] /= batch_sz; b2[i] -= learning_rate * db2[i];
+                for j in 0..hidden1 {
+                    w2[i][j] -= dw2[i][j];
+                }
+                db2[i] /= batch_sz;
+                b2[i] -= learning_rate * db2[i];
             }
-            for i in 0..hidden2 { dw3[i] = dw3[i] / batch_sz + l2_reg * w3[i]; }
+            for i in 0..hidden2 {
+                dw3[i] = dw3[i] / batch_sz + l2_reg * w3[i];
+            }
             adam_m(&mut dw3, &mut m_w3, &mut v_w3, t);
-            for i in 0..hidden2 { w3[i] -= dw3[i]; }
+            for i in 0..hidden2 {
+                w3[i] -= dw3[i];
+            }
             b3 -= learning_rate * db3_grad / batch_sz;
         }
 
         // Validation
         if val_n >= 20 {
-            let val_loss: f64 = (train_n..n).map(|i| {
-                let s = valid[i];
-                let mut h1 = vec![0.0; hidden1];
-                for k in 0..hidden1 { let mut sum = b1[k]; for j in 0..factor_count { sum += w1[k][j] * s.features[j]; } h1[k] = sum.max(0.0); }
-                let mut h2 = vec![0.0; hidden2];
-                for k in 0..hidden2 { let mut sum = b2[k]; for j in 0..hidden1 { sum += w2[k][j] * h1[j]; } h2[k] = sum.max(0.0); }
-                let mut pred = b3; for k in 0..hidden2 { pred += w3[k] * h2[k]; }
-                let e = pred - s.label; e * e
-            }).sum::<f64>() / val_n as f64;
+            let val_loss: f64 = (train_n..n)
+                .map(|i| {
+                    let s = valid[i];
+                    let mut h1 = vec![0.0; hidden1];
+                    for k in 0..hidden1 {
+                        let mut sum = b1[k];
+                        for j in 0..factor_count {
+                            sum += w1[k][j] * s.features[j];
+                        }
+                        h1[k] = sum.max(0.0);
+                    }
+                    let mut h2 = vec![0.0; hidden2];
+                    for k in 0..hidden2 {
+                        let mut sum = b2[k];
+                        for j in 0..hidden1 {
+                            sum += w2[k][j] * h1[j];
+                        }
+                        h2[k] = sum.max(0.0);
+                    }
+                    let mut pred = b3;
+                    for k in 0..hidden2 {
+                        pred += w3[k] * h2[k];
+                    }
+                    let e = pred - s.label;
+                    e * e
+                })
+                .sum::<f64>()
+                / val_n as f64;
             if val_loss < best_val_loss {
                 best_val_loss = val_loss;
-                best_weights = Some((w1.clone(), b1.clone(), w2.clone(), b2.clone(), w3.clone(), b3));
+                best_weights = Some((
+                    w1.clone(),
+                    b1.clone(),
+                    w2.clone(),
+                    b2.clone(),
+                    w3.clone(),
+                    b3,
+                ));
                 patience_left = 10;
-            } else { patience_left -= 1; }
+            } else {
+                patience_left -= 1;
+            }
         }
     }
 
     let (w1, b1, w2, b2, w3, b3) = best_weights.unwrap_or((w1, b1, w2, b2, w3, b3));
-    Ok(MlpModel { w1, b1, w2, b2, w3, b3, factor_count, hidden1, hidden2 })
+    Ok(MlpModel {
+        w1,
+        b1,
+        w2,
+        b2,
+        w3,
+        b3,
+        factor_count,
+        hidden1,
+        hidden2,
+    })
 }
 
 fn fit_gradient_boosting(
@@ -4337,7 +4507,8 @@ fn fit_gradient_boosting(
             // MSE gain via sufficient statistics
             let total_sq = total_mean * total_mean * indices.len() as f64;
             // Rayon-parallel split search across features
-            let feature_results: Vec<(f64, usize, f64, f64, f64)> = (0..n_features_sample.min(factor_count))
+            let feature_results: Vec<(f64, usize, f64, f64, f64)> = (0..n_features_sample
+                .min(factor_count))
                 .into_par_iter()
                 .filter_map(|_| {
                     let fi = ((tree_nodes.len() + ni * 7 + _tree_idx * 13) % factor_count) as usize;
@@ -4379,7 +4550,9 @@ fn fit_gradient_boosting(
                             best_left_mean = left_mean;
                             best_right_mean = right_mean;
                         }
-                        if pos % 5 != 0 { continue; }
+                        if pos % 5 != 0 {
+                            continue;
+                        }
                     }
                     if best_gain > 0.0 {
                         Some((best_gain, fi, best_split, best_left_mean, best_right_mean))
@@ -4391,11 +4564,10 @@ fn fit_gradient_boosting(
             let best = feature_results
                 .iter()
                 .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let (_best_gain, best_fi, best_split, best_left_mean, best_right_mean) =
-                match best {
-                    Some(b) => (b.0, b.1, b.2, b.3, b.4),
-                    None => continue,
-                };
+            let (_best_gain, best_fi, best_split, best_left_mean, best_right_mean) = match best {
+                Some(b) => (b.0, b.1, b.2, b.3, b.4),
+                None => continue,
+            };
             tree_nodes[ni] = Some(GbTreeNode {
                 feature_idx: best_fi,
                 split_value: best_split,
@@ -4550,7 +4722,10 @@ fn nonlinear_prediction_rows_with_regime_split(
     let mut predictions = Vec::new();
     for (trade_date, mut rows) in by_date {
         rows.sort_by(|left, right| {
-            right.1.total_cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
         });
         for (idx, (symbol, score)) in rows.into_iter().enumerate() {
             predictions.push(build_prediction_row(
@@ -4573,14 +4748,25 @@ fn nonlinear_prediction_rows_with_mlp(
     let mut by_date: BTreeMap<NaiveDate, Vec<(String, f64)>> = BTreeMap::new();
     for row in feature_rows {
         let score = mlp.predict(&row.features);
-        if !score.is_finite() { continue; }
-        by_date.entry(row.trade_date).or_default().push((row.symbol, score));
+        if !score.is_finite() {
+            continue;
+        }
+        by_date
+            .entry(row.trade_date)
+            .or_default()
+            .push((row.symbol, score));
     }
     let mut predictions = Vec::new();
     for (trade_date, mut rows) in by_date {
         rows.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         for (idx, (symbol, score)) in rows.into_iter().enumerate() {
-            predictions.push(build_prediction_row(prediction_set_id, &symbol, &trade_date.to_string(), score, (idx+1) as i32)?);
+            predictions.push(build_prediction_row(
+                prediction_set_id,
+                &symbol,
+                &trade_date.to_string(),
+                score,
+                (idx + 1) as i32,
+            )?);
         }
     }
     Ok(predictions)
@@ -4608,7 +4794,10 @@ fn nonlinear_prediction_rows_with_gb(
     let mut predictions = Vec::new();
     for (trade_date, mut rows) in by_date {
         rows.sort_by(|left, right| {
-            right.1.total_cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
         });
         for (idx, (symbol, score)) in rows.into_iter().enumerate() {
             predictions.push(build_prediction_row(
@@ -5116,11 +5305,13 @@ mod tests {
     #[test]
     fn fit_linear_weights_normalizes_covariance_scores() {
         let samples = vec![
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![1.0, 0.0],
                 label: 0.10,
             },
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![0.0, 1.0],
                 label: -0.05,
             },
@@ -6011,27 +6202,33 @@ mod tests {
     #[test]
     fn nonlinear_quantile_ranker_learns_bucket_payoffs_and_scores_prediction_rows() {
         let train_rows = vec![
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![-1.0, 0.2],
                 label: -0.02,
             },
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![-0.8, 0.1],
                 label: -0.01,
             },
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![0.1, 0.5],
                 label: 0.01,
             },
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![0.2, 0.4],
                 label: 0.02,
             },
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![0.8, -0.3],
                 label: 0.08,
             },
-            TrainingSample { regime_tag: None,
+            TrainingSample {
+                regime_tag: None,
                 features: vec![1.0, -0.2],
                 label: 0.10,
             },

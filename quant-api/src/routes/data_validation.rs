@@ -15,7 +15,10 @@ pub fn validate_equity_curve(
     eval_start: NaiveDate,
 ) -> Result<(), String> {
     if a_nav.len() < 252 {
-        return Err(format!("权益曲线仅{}个数据点, 需要至少1年(252个交易日)", a_nav.len()));
+        return Err(format!(
+            "权益曲线仅{}个数据点, 需要至少1年(252个交易日)",
+            a_nav.len()
+        ));
     }
 
     let mut prev_v: Option<(NaiveDate, f64)> = None;
@@ -30,7 +33,9 @@ pub fn validate_equity_curve(
             if daily_ret.abs() > 0.5 {
                 return Err(format!(
                     "数据异常: 权益曲线 {} → {} 单日收益 {:.1}% 超过50%阈值, 数据有拼接错误",
-                    pd.format("%Y-%m-%d"), d.format("%Y-%m-%d"), daily_ret * 100.0
+                    pd.format("%Y-%m-%d"),
+                    d.format("%Y-%m-%d"),
+                    daily_ret * 100.0
                 ));
             }
             // 平坦段检测
@@ -50,16 +55,22 @@ pub fn validate_equity_curve(
 
     if max_eval_flat > 5 {
         return Err(format!(
-            "数据异常: 评估期内权益曲线存在连续{}个交易日净值不变, 请先修复数据源", max_eval_flat
+            "数据异常: 评估期内权益曲线存在连续{}个交易日净值不变, 请先修复数据源",
+            max_eval_flat
         ));
     }
     if max_train_flat > 100 {
-        warn!("训练窗口存在较长平坦期(最大{}天), 可能是策略未运行的空白期", max_train_flat);
+        warn!(
+            "训练窗口存在较长平坦期(最大{}天), 可能是策略未运行的空白期",
+            max_train_flat
+        );
     }
 
     info!(
         "权益曲线验证通过: {}点, 评估期最大平坦={}, 训练期最大平坦={}",
-        a_nav.len(), max_eval_flat, max_train_flat
+        a_nav.len(),
+        max_eval_flat,
+        max_train_flat
     );
     Ok(())
 }
@@ -72,47 +83,69 @@ pub fn validate_data_coverage(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<(), String> {
-    let a_start = a_nav.first().map(|(d, _)| *d)
+    let a_start = a_nav
+        .first()
+        .map(|(d, _)| *d)
         .unwrap_or(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
-    let a_end = a_nav.last().map(|(d, _)| *d)
+    let a_end = a_nav
+        .last()
+        .map(|(d, _)| *d)
         .unwrap_or(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
 
     if a_start > start_date + chrono::Duration::days(30) {
         return Err(format!(
             "数据覆盖不足: 权益曲线始于 {}, 无法覆盖评估期起始 {}",
-            a_start.format("%Y-%m-%d"), start_date.format("%Y-%m-%d")
+            a_start.format("%Y-%m-%d"),
+            start_date.format("%Y-%m-%d")
         ));
     }
     if a_end < end_date - chrono::Duration::days(30) {
         return Err(format!(
             "数据覆盖不足: 权益曲线止于 {}, 但评估要求到 {}",
-            a_end.format("%Y-%m-%d"), end_date.format("%Y-%m-%d")
+            a_end.format("%Y-%m-%d"),
+            end_date.format("%Y-%m-%d")
         ));
     }
 
     for sym in etf_symbols {
         match etf_prices.get(sym.as_str()) {
             Some(prices) => {
-                let max_d = prices.keys().max().copied()
+                let max_d = prices
+                    .keys()
+                    .max()
+                    .copied()
                     .unwrap_or(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
                 if max_d < end_date - chrono::Duration::days(30) {
                     return Err(format!(
                         "数据覆盖不足: ETF {} 数据止于 {}, 但评估要求到 {}",
-                        sym, max_d.format("%Y-%m-%d"), end_date.format("%Y-%m-%d")
+                        sym,
+                        max_d.format("%Y-%m-%d"),
+                        end_date.format("%Y-%m-%d")
                     ));
                 }
-                let min_d = prices.keys().min().copied()
+                let min_d = prices
+                    .keys()
+                    .min()
+                    .copied()
                     .unwrap_or(NaiveDate::from_ymd_opt(2099, 1, 1).unwrap());
                 if min_d > start_date {
-                    warn!("ETF {} 数据从 {} 开始, 训练窗口无此资产", sym, min_d.format("%Y-%m-%d"));
+                    warn!(
+                        "ETF {} 数据从 {} 开始, 训练窗口无此资产",
+                        sym,
+                        min_d.format("%Y-%m-%d")
+                    );
                 }
             }
             None => return Err(format!("数据缺失: ETF {} 无价格数据", sym)),
         }
     }
 
-    info!("数据覆盖检查通过: 权益曲线{}-{}, {}个ETF",
-        a_start.format("%Y-%m-%d"), a_end.format("%Y-%m-%d"), etf_symbols.len());
+    info!(
+        "数据覆盖检查通过: 权益曲线{}-{}, {}个ETF",
+        a_start.format("%Y-%m-%d"),
+        a_end.format("%Y-%m-%d"),
+        etf_symbols.len()
+    );
     Ok(())
 }
 
@@ -124,7 +157,8 @@ pub fn validate_training_data(
 ) -> Result<(), String> {
     if monthly_rets.len() < 12 {
         return Err(format!(
-            "训练数据不足: 仅有{}个月度收益, 需要至少12个月", monthly_rets.len()
+            "训练数据不足: 仅有{}个月度收益, 需要至少12个月",
+            monthly_rets.len()
         ));
     }
 
@@ -138,18 +172,26 @@ pub fn validate_training_data(
 
     match first_valid_q {
         Some(idx) if idx < lookback => {
-            warn!("第一个可用季度月({})仅有{}个月前置数据, MVO将在之后启动",
-                monthly_rets[idx].0, idx);
+            warn!(
+                "第一个可用季度月({})仅有{}个月前置数据, MVO将在之后启动",
+                monthly_rets[idx].0, idx
+            );
         }
         Some(idx) => {
-            info!("训练数据充足: 第一个可用季度月={} ({}个月前置)",
-                monthly_rets[idx].0, idx);
+            info!(
+                "训练数据充足: 第一个可用季度月={} ({}个月前置)",
+                monthly_rets[idx].0, idx
+            );
         }
         None => {
             warn!("未找到有效季度调仓月, 检查ETF数据是否充足");
         }
     }
 
-    info!("训练数据校验: {}个月度收益, {}个ETF", monthly_rets.len(), etf_count);
+    info!(
+        "训练数据校验: {}个月度收益, {}个ETF",
+        monthly_rets.len(),
+        etf_count
+    );
     Ok(())
 }

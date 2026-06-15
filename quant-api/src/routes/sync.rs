@@ -1290,10 +1290,17 @@ pub async fn sync_fund_adj(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncAdjFactorReq>,
 ) -> impl IntoResponse {
-    let dv_id = req.data_version_id.unwrap_or_else(generated_data_version_id);
+    let dv_id = req
+        .data_version_id
+        .unwrap_or_else(generated_data_version_id);
     info!(data_version_id = %dv_id, symbols = req.symbols.len(), "同步基金复权因子");
     match quant_data::sync::sync_fund_adj(
-        &state.db, &state.tushare, &req.symbols, &req.start_date, &req.end_date, &dv_id,
+        &state.db,
+        &state.tushare,
+        &req.symbols,
+        &req.start_date,
+        &req.end_date,
+        &dv_id,
     )
     .await
     {
@@ -1376,9 +1383,11 @@ pub async fn sync_moneyflow_hsgt(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncHsgtRequest>,
 ) -> impl IntoResponse {
-    let client = quant_data::tushare::client::TushareClient::from_env()
-        .expect("Tushare client init failed");
-    match quant_data::sync::sync_moneyflow_hsgt(&state.db, &client, &req.start_date, &req.end_date).await {
+    let client =
+        quant_data::tushare::client::TushareClient::from_env().expect("Tushare client init failed");
+    match quant_data::sync::sync_moneyflow_hsgt(&state.db, &client, &req.start_date, &req.end_date)
+        .await
+    {
         Ok(rows) => Json(json!({"code": 0, "data": {"rows_synced": rows}})),
         Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
     }
@@ -1394,8 +1403,8 @@ pub async fn sync_margin(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncMarginRequest>,
 ) -> impl IntoResponse {
-    let client = quant_data::tushare::client::TushareClient::from_env()
-        .expect("Tushare client init failed");
+    let client =
+        quant_data::tushare::client::TushareClient::from_env().expect("Tushare client init failed");
     match quant_data::sync::sync_margin(&state.db, &client, &req.start_date, &req.end_date).await {
         Ok(rows) => Json(json!({"code": 0, "data": {"rows_synced": rows}})),
         Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
@@ -3252,6 +3261,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_health_date_accepts_html_and_compact_dates() {
+        assert_eq!(
+            parse_health_date("2026-05-31").expect("html date"),
+            NaiveDate::from_ymd_opt(2026, 5, 31).unwrap()
+        );
+        assert_eq!(
+            parse_health_date("20260531").expect("compact date"),
+            NaiveDate::from_ymd_opt(2026, 5, 31).unwrap()
+        );
+        assert!(parse_health_date("2026/05/31").is_err());
+    }
+
+    #[test]
+    fn coverage_level_requires_full_range_coverage() {
+        assert_eq!(coverage_level(0, 0), "green");
+        assert_eq!(coverage_level(10, 10), "green");
+        assert_eq!(coverage_level(10, 9), "red");
+    }
+
+    #[test]
+    fn parse_etf_symbols_defaults_when_strategy_field_is_empty() {
+        assert_eq!(parse_etf_symbols(None), default_mvo_etfs());
+        assert_eq!(
+            parse_etf_symbols(Some(json!(["518880.SH", "", " 511010.SH "]))),
+            vec!["518880.SH".to_string(), "511010.SH".to_string()]
+        );
+    }
+
+    #[test]
     fn phase7_coverage_grade_classifies_symbol_breadth() {
         assert_eq!(phase7_coverage_grade(0, 5_000), "missing");
         assert_eq!(phase7_coverage_grade(400, 5_000), "undercovered");
@@ -3632,9 +3670,7 @@ mod tests {
 /// POST /api/v1/quant/data/sync/fund-basic
 ///
 /// 同步 ETF/LOF 基金基本信息（名称、类型、管理人）到 market_stock 表。
-pub async fn sync_fund_basic(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn sync_fund_basic(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match quant_data::sync::sync_fund_basic(&state.db, &state.tushare).await {
         Ok(count) => Json(json!({"code": 0, "data": {"count": count}})),
         Err(e) => Json(json!({"code": 1, "message": e})),
@@ -3644,9 +3680,7 @@ pub async fn sync_fund_basic(
 /// POST /api/v1/quant/data/sync/namechange
 ///
 /// 同步股票名称变更历史（ST 状态 PIT 合规数据）
-pub async fn sync_namechange(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn sync_namechange(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match quant_data::sync::sync_namechange(&state.db, &state.tushare).await {
         Ok(count) => Json(json!({"code": 0, "data": {"count": count}})),
         Err(e) => Json(json!({"code": 1, "message": e})),
@@ -3701,9 +3735,9 @@ pub async fn sync_suspension_backfill(
     Json(req): Json<BackfillRequest>,
 ) -> impl IntoResponse {
     let trade_dates: Vec<String> = match sqlx::query_as::<_, (String,)>(
-        "SELECT to_char(trade_date, 'YYYYMMDD') FROM market_trade_calendar
+        "SELECT DISTINCT to_char(trade_date, 'YYYYMMDD') FROM market_trade_calendar
          WHERE trade_date >= $1::date AND trade_date <= $2::date AND is_open = true
-         ORDER BY trade_date",
+         ORDER BY 1",
     )
     .bind(&req.start_date)
     .bind(&req.end_date)
@@ -3748,9 +3782,9 @@ pub async fn sync_limit_backfill(
     Json(req): Json<BackfillRequest>,
 ) -> impl IntoResponse {
     let trade_dates: Vec<String> = match sqlx::query_as::<_, (String,)>(
-        "SELECT to_char(trade_date, 'YYYYMMDD') FROM market_trade_calendar
+        "SELECT DISTINCT to_char(trade_date, 'YYYYMMDD') FROM market_trade_calendar
          WHERE trade_date >= $1::date AND trade_date <= $2::date AND is_open = true
-         ORDER BY trade_date",
+         ORDER BY 1",
     )
     .bind(&req.start_date)
     .bind(&req.end_date)
@@ -3812,22 +3846,52 @@ pub async fn sync_historical(
     let mut results = Vec::new();
 
     // 1. 日线行情
-    info!("[sync-hist] 同步日线行情 {} → {}", req.start_date, req.end_date);
-    match quant_data::sync::sync_daily_bars(db, client, &empty_symbols, &req.start_date, &req.end_date, "daily-hist").await {
+    info!(
+        "[sync-hist] 同步日线行情 {} → {}",
+        req.start_date, req.end_date
+    );
+    match quant_data::sync::sync_daily_bars(
+        db,
+        client,
+        &empty_symbols,
+        &req.start_date,
+        &req.end_date,
+        "daily-hist",
+    )
+    .await
+    {
         Ok(n) => results.push(format!("daily_bar: {} 条", n)),
         Err(e) => results.push(format!("daily_bar 失败: {}", e)),
     }
 
     // 2. 复权因子
     info!("[sync-hist] 同步复权因子");
-    match quant_data::sync::sync_adj_factor(db, client, &empty_symbols, &req.start_date, &req.end_date, "adj-hist").await {
+    match quant_data::sync::sync_adj_factor(
+        db,
+        client,
+        &empty_symbols,
+        &req.start_date,
+        &req.end_date,
+        "adj-hist",
+    )
+    .await
+    {
         Ok(n) => results.push(format!("adj_factor: {} 条", n)),
         Err(e) => results.push(format!("adj_factor 失败: {}", e)),
     }
 
     // 3. 日线基础
     info!("[sync-hist] 同步日线基础指标");
-    match quant_data::sync::sync_daily_basic(db, client, &empty_symbols, &req.start_date, &req.end_date, "basic-hist").await {
+    match quant_data::sync::sync_daily_basic(
+        db,
+        client,
+        &empty_symbols,
+        &req.start_date,
+        &req.end_date,
+        "basic-hist",
+    )
+    .await
+    {
         Ok(n) => results.push(format!("daily_basic: {} 条", n)),
         Err(e) => results.push(format!("daily_basic 失败: {}", e)),
     }
@@ -3844,6 +3908,109 @@ pub struct AccountDataHealthReq {
     pub end_date: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct StrategyHealthConfig {
+    combo_name: String,
+    equity_curve_task_id: String,
+    prediction_set_id: Option<String>,
+    etf_symbols: Vec<String>,
+}
+
+const DEFAULT_MVO_ETFS: &[&str] = &[
+    "518880.SH",
+    "511010.SH",
+    "513500.SH",
+    "513100.SH",
+    "159980.SZ",
+    "159985.SZ",
+    "501018.SH",
+];
+
+fn proven_limit_list_earliest_date() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2019, 11, 28).expect("valid limit_list_d earliest date")
+}
+
+fn parse_health_date(value: &str) -> Result<NaiveDate, String> {
+    let trimmed = value.trim();
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y%m%d"))
+        .map_err(|_| format!("日期格式无效: {}，需要 YYYY-MM-DD 或 YYYYMMDD", value))
+}
+
+fn yyyymmdd(date: NaiveDate) -> String {
+    date.format("%Y%m%d").to_string()
+}
+
+fn default_mvo_etfs() -> Vec<String> {
+    DEFAULT_MVO_ETFS
+        .iter()
+        .map(|symbol| (*symbol).to_string())
+        .collect()
+}
+
+fn parse_etf_symbols(value: Option<Value>) -> Vec<String> {
+    let parsed = value
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::trim).map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if parsed.is_empty() {
+        default_mvo_etfs()
+    } else {
+        parsed
+    }
+}
+
+fn coverage_level(expected: i64, actual: i64) -> &'static str {
+    if expected <= 0 || actual >= expected {
+        "green"
+    } else {
+        "red"
+    }
+}
+
+fn lag_level(lag_days: i64, yellow_after_days: i64, red_after_days: i64) -> &'static str {
+    if lag_days > red_after_days {
+        "red"
+    } else if lag_days > yellow_after_days {
+        "yellow"
+    } else {
+        "green"
+    }
+}
+
+fn check_item(
+    account: &str,
+    strategy: &str,
+    item: impl Into<String>,
+    level: &'static str,
+    detail: impl Into<String>,
+    fix_endpoint: Option<&str>,
+    fix_params: Option<Value>,
+    fix_reason: Option<String>,
+) -> Value {
+    let mut value = json!({
+        "account": account,
+        "strategy": strategy,
+        "item": item.into(),
+        "level": level,
+        "detail": detail.into(),
+        "repairable": fix_endpoint.is_some(),
+    });
+    if let Some(endpoint) = fix_endpoint {
+        value["fix_endpoint"] = json!(endpoint);
+    }
+    if let Some(params) = fix_params {
+        value["fix_params"] = params;
+    }
+    if let Some(reason) = fix_reason {
+        value["fix_reason"] = json!(reason);
+    }
+    value
+}
+
 /// POST /api/v1/quant/data/account-data-health
 /// 遍历激活账号(模拟+实盘) → 其策略依赖的加工数据(combo因子/PIT combo/权益曲线/滚动IC) → 红黄绿。
 pub async fn account_data_health(
@@ -3851,7 +4018,19 @@ pub async fn account_data_health(
     Json(req): Json<AccountDataHealthReq>,
 ) -> impl IntoResponse {
     let db = &state.db;
-    let deep = req.start_date.is_some() && req.end_date.is_some();
+    let range = match (req.start_date.as_deref(), req.end_date.as_deref()) {
+        (Some(start), Some(end)) => match (parse_health_date(start), parse_health_date(end)) {
+            (Ok(start), Ok(end)) if start <= end => Some((start, end)),
+            (Ok(_), Ok(_)) => {
+                return Json(json!({"code": 1, "message": "start_date 不能晚于 end_date"}));
+            }
+            (Err(message), _) | (_, Err(message)) => {
+                return Json(json!({"code": 1, "message": message}));
+            }
+        },
+        _ => None,
+    };
+    let deep = range.is_some();
     let mut checks: Vec<serde_json::Value> = Vec::new();
 
     // 活跃账号(可选按 user 过滤)
@@ -3866,37 +4045,119 @@ pub async fn account_data_health(
     .await
     .unwrap_or_default();
 
-    for (acct_id, acct_name, strat_id, _lev) in &accounts {
+    let mut cfg_cache: BTreeMap<String, Option<StrategyHealthConfig>> = BTreeMap::new();
+    let mut deps_cache: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut common_deps_cache: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+
+    for (_acct_id, acct_name, strat_id, _lev) in &accounts {
         let sid = strat_id.as_deref().unwrap_or("v19");
-        // 取该账号策略的依赖配置
-        let cfg: Option<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT combo_name, equity_curve_task_id, prediction_set_id
-             FROM strategy_config WHERE strategy_id=$1 AND status='active'",
-        )
-        .bind(sid)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
-        let (combo, curve, pred_set) = match cfg {
-            Some(c) => c,
-            None => {
-                checks.push(serde_json::json!({
-                    "account": acct_name, "strategy": sid, "item": "策略配置",
-                    "level": "red", "detail": "strategy_config 未找到激活配置"
-                }));
-                continue;
-            }
+        if !cfg_cache.contains_key(sid) {
+            let cfg: Option<(String, String, Option<String>, Option<Value>)> = sqlx::query_as(
+                "SELECT combo_name, equity_curve_task_id, prediction_set_id, etf_symbols
+                 FROM strategy_config WHERE strategy_id=$1 AND status='active'",
+            )
+            .bind(sid)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+            cfg_cache.insert(
+                sid.to_string(),
+                cfg.map(
+                    |(combo_name, equity_curve_task_id, prediction_set_id, etf_symbols)| {
+                        StrategyHealthConfig {
+                            combo_name,
+                            equity_curve_task_id,
+                            prediction_set_id,
+                            etf_symbols: parse_etf_symbols(etf_symbols),
+                        }
+                    },
+                ),
+            );
+        }
+
+        let Some(Some(cfg)) = cfg_cache.get(sid) else {
+            checks.push(check_item(
+                acct_name,
+                sid,
+                "策略配置",
+                "red",
+                "strategy_config 未找到激活配置",
+                None,
+                None,
+                Some("缺少策略配置，无法自动判断应修复哪些数据".to_string()),
+            ));
+            continue;
         };
-        checks.extend(check_account_deps(db, acct_name, sid, &combo, &curve, pred_set.as_deref(), deep, req.start_date.as_deref(), req.end_date.as_deref()).await);
+
+        let mut cached_checks = Vec::new();
+        if let Some((start, end)) = range {
+            let common_key = format!("{}|{}|{}", start, end, cfg.etf_symbols.join(","));
+            if !common_deps_cache.contains_key(&common_key) {
+                common_deps_cache.insert(
+                    common_key.clone(),
+                    check_account_deps(db, "__ACCOUNT__", "__STRATEGY__", cfg, range, true, false)
+                        .await,
+                );
+            }
+            if let Some(common_checks) = common_deps_cache.get(&common_key) {
+                cached_checks.extend(common_checks.iter().cloned());
+            }
+
+            let deps_key = format!(
+                "{}|{}|{}",
+                cfg.combo_name,
+                cfg.equity_curve_task_id,
+                cfg.prediction_set_id.as_deref().unwrap_or("")
+            );
+            if !deps_cache.contains_key(&deps_key) {
+                deps_cache.insert(
+                    deps_key.clone(),
+                    check_account_deps(db, "__ACCOUNT__", "__STRATEGY__", cfg, range, false, true)
+                        .await,
+                );
+            }
+            if let Some(strategy_checks) = deps_cache.get(&deps_key) {
+                cached_checks.extend(strategy_checks.iter().cloned());
+            }
+        } else {
+            let deps_key = format!(
+                "{}|{}|{}|{}",
+                cfg.combo_name,
+                cfg.equity_curve_task_id,
+                cfg.prediction_set_id.as_deref().unwrap_or(""),
+                cfg.etf_symbols.join(",")
+            );
+            if !deps_cache.contains_key(&deps_key) {
+                deps_cache.insert(
+                    deps_key.clone(),
+                    check_account_deps(db, "__ACCOUNT__", "__STRATEGY__", cfg, range, true, true)
+                        .await,
+                );
+            }
+            if let Some(strategy_checks) = deps_cache.get(&deps_key) {
+                cached_checks.extend(strategy_checks.iter().cloned());
+            }
+        }
+
+        checks.extend(cached_checks.into_iter().map(|mut check| {
+            check["account"] = json!(acct_name);
+            check["strategy"] = json!(sid);
+            if let Some(params) = check.get_mut("fix_params") {
+                if params.get("strategy_id").and_then(|v| v.as_str()).is_some() {
+                    params["strategy_id"] = json!(sid);
+                }
+            }
+            check
+        }));
     }
 
-    let red = checks.iter().filter(|c| c["level"]=="red").count();
-    let yellow = checks.iter().filter(|c| c["level"]=="yellow").count();
+    let red = checks.iter().filter(|c| c["level"] == "red").count();
+    let yellow = checks.iter().filter(|c| c["level"] == "yellow").count();
     Json(serde_json::json!({
         "code": 0,
         "data": {
-            "mode": if deep {"deep_yearly"} else {"freshness"},
+            "mode": if deep {"range_coverage"} else {"freshness"},
             "accounts_checked": accounts.len(),
             "red": red, "yellow": yellow,
             "checks": checks
@@ -3904,107 +4165,1050 @@ pub async fn account_data_health(
     }))
 }
 
-/// 检查单个账号策略依赖的加工数据。deep=true 逐年扫描，否则只查最新鲜度。
-#[allow(clippy::too_many_arguments)]
+async fn latest_market_date(db: &sqlx::PgPool) -> NaiveDate {
+    sqlx::query_scalar::<_, Option<NaiveDate>>(
+        "SELECT GREATEST(
+            (SELECT MAX(trade_date) FROM market_stock_daily_bar_adj),
+            (SELECT MAX(trade_date) FROM market_index_daily_bar WHERE symbol='000300.SH')
+        )",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .unwrap_or_else(|| chrono::Utc::now().date_naive())
+}
+
+async fn expected_open_day_count(db: &sqlx::PgPool, start: NaiveDate, end: NaiveDate) -> i64 {
+    let calendar_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT trade_date)::int8 FROM market_trade_calendar
+         WHERE trade_date >= $1 AND trade_date <= $2 AND is_open = true",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+    if calendar_count > 0 {
+        calendar_count
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(DISTINCT trade_date)::int8 FROM market_index_daily_bar
+             WHERE symbol='000300.SH' AND trade_date >= $1 AND trade_date <= $2",
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
+    }
+}
+
+async fn event_completion_last_date(
+    db: &sqlx::PgPool,
+    table: &str,
+    task_type: &str,
+) -> Option<NaiveDate> {
+    let sql = format!(
+        "SELECT GREATEST(
+            (SELECT MAX(trade_date) FROM {}),
+            (SELECT MAX(end_date) FROM data_sync_task
+             WHERE task_type = $1 AND status = 'completed')
+        )",
+        table
+    );
+    sqlx::query_scalar::<_, Option<NaiveDate>>(&sql)
+        .bind(task_type)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+}
+
+async fn event_completed_day_count(
+    db: &sqlx::PgPool,
+    task_type: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT end_date)::int8 FROM data_sync_task
+         WHERE task_type = $1 AND status = 'completed'
+           AND end_date >= $2 AND end_date <= $3",
+    )
+    .bind(task_type)
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0)
+}
+
+/// 检查单个账号策略依赖的数据。range=None 查新鲜度；range=Some 查区间覆盖率。
 async fn check_account_deps(
-    db: &sqlx::PgPool, acct: &str, sid: &str, combo: &str, curve: &str,
-    pred_set: Option<&str>, deep: bool, start: Option<&str>, end: Option<&str>,
+    db: &sqlx::PgPool,
+    acct: &str,
+    sid: &str,
+    cfg: &StrategyHealthConfig,
+    range: Option<(NaiveDate, NaiveDate)>,
+    include_common: bool,
+    include_strategy: bool,
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    let today = chrono::Utc::now().date_naive();
-    // 最新交易日(行情)
-    let last_mkt: Option<chrono::NaiveDate> = sqlx::query_scalar(
-        "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj"
-    ).fetch_one(db).await.ok().flatten();
-    let last_mkt = last_mkt.unwrap_or(today);
+    let last_mkt = latest_market_date(db).await;
+    let repair_start = yyyymmdd(last_mkt - Duration::days(30));
+    let repair_end = yyyymmdd(last_mkt);
 
-    // ① PIT combo 物化新鲜度
+    if include_strategy {
+        out.push(check_item(
+            acct,
+            sid,
+            "策略配置",
+            "green",
+            format!(
+                "combo={}, curve={}, prediction_set={}, ETF{}只",
+                cfg.combo_name,
+                cfg.equity_curve_task_id,
+                cfg.prediction_set_id.as_deref().unwrap_or("自动选择"),
+                cfg.etf_symbols.len()
+            ),
+            None,
+            None,
+            None,
+        ));
+    }
+
+    if let Some((start, end)) = range {
+        let expected_days = expected_open_day_count(db, start, end).await;
+
+        if include_common {
+            let (a_expected_days, a_days, a_min_expected, a_min_symbols, a_weak_days): (
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+            ) = sqlx::query_as(
+                "WITH calendar AS (
+               SELECT DISTINCT trade_date
+               FROM market_trade_calendar
+               WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+             ),
+             expected AS (
+               SELECT c.trade_date, COUNT(*)::int8 AS expected_symbols
+               FROM calendar c
+               JOIN market_stock s
+                 ON s.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+                AND COALESCE(s.list_date, DATE '1900-01-01') <= c.trade_date
+                AND (s.delist_date IS NULL OR s.delist_date >= c.trade_date)
+               GROUP BY c.trade_date
+             ),
+             actual AS (
+               SELECT trade_date, COUNT(DISTINCT symbol)::int8 AS actual_symbols
+               FROM market_stock_daily_bar_adj
+               WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+                 AND trade_date >= $1 AND trade_date <= $2
+               GROUP BY trade_date
+             )
+             SELECT COUNT(e.trade_date)::int8,
+                    COUNT(a.trade_date)::int8,
+                    COALESCE(MIN(e.expected_symbols), 0)::int8,
+                    COALESCE(MIN(a.actual_symbols), 0)::int8,
+                    COUNT(*) FILTER (
+                      WHERE COALESCE(a.actual_symbols, 0) * 100 < e.expected_symbols * 90
+                    )::int8
+             FROM expected e
+             LEFT JOIN actual a USING(trade_date)",
+            )
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or((0, 0, 0, 0, 0));
+            let a_level = if a_days < a_expected_days || a_expected_days < expected_days {
+                "red"
+            } else if a_weak_days > 0 {
+                "yellow"
+            } else {
+                "green"
+            };
+            out.push(check_item(
+                acct,
+                sid,
+                "A股日线区间覆盖",
+                a_level,
+                format!(
+                    "{}~{} 期望{}个交易日，覆盖{}天；按上市/退市口径单日最少{}/{}只，低于90%天数{}",
+                    start, end, expected_days, a_days, a_min_symbols, a_min_expected, a_weak_days
+                ),
+                Some("/api/v1/quant/data/sync/daily/background"),
+                Some(json!({
+                    "symbols": [],
+                    "start_date": yyyymmdd(start),
+                    "end_date": yyyymmdd(end),
+                    "data_version_id": format!("health-repair-daily-{}", yyyymmdd(end))
+                })),
+                None,
+            ));
+
+            let (
+                a_adj_expected_days,
+                a_adj_days,
+                a_adj_min_expected,
+                a_adj_min_symbols,
+                a_adj_weak_days,
+            ): (i64, i64, i64, i64, i64) = sqlx::query_as(
+                "WITH calendar AS (
+               SELECT DISTINCT trade_date
+               FROM market_trade_calendar
+               WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+             ),
+             expected AS (
+               SELECT c.trade_date, COUNT(*)::int8 AS expected_symbols
+               FROM calendar c
+               JOIN market_stock s
+                 ON s.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+                AND COALESCE(s.list_date, DATE '1900-01-01') <= c.trade_date
+                AND (s.delist_date IS NULL OR s.delist_date >= c.trade_date)
+               GROUP BY c.trade_date
+             ),
+             actual AS (
+               SELECT trade_date, COUNT(DISTINCT symbol)::int8 AS actual_symbols
+               FROM market_adjustment_factor
+               WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+                 AND trade_date >= $1 AND trade_date <= $2
+               GROUP BY trade_date
+             )
+             SELECT COUNT(e.trade_date)::int8,
+                    COUNT(a.trade_date)::int8,
+                    COALESCE(MIN(e.expected_symbols), 0)::int8,
+                    COALESCE(MIN(a.actual_symbols), 0)::int8,
+                    COUNT(*) FILTER (
+                      WHERE COALESCE(a.actual_symbols, 0) * 100 < e.expected_symbols * 90
+                    )::int8
+             FROM expected e
+             LEFT JOIN actual a USING(trade_date)",
+            )
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or((0, 0, 0, 0, 0));
+            let a_adj_level =
+                if a_adj_days < a_adj_expected_days || a_adj_expected_days < expected_days {
+                    "red"
+                } else if a_adj_weak_days > 0 {
+                    "yellow"
+                } else {
+                    "green"
+                };
+            out.push(check_item(
+                acct,
+                sid,
+                "A股复权因子区间覆盖",
+                a_adj_level,
+                format!(
+                    "{}~{} 期望{}个交易日，覆盖{}天；按上市/退市口径单日最少{}/{}只，低于90%天数{}",
+                    start,
+                    end,
+                    expected_days,
+                    a_adj_days,
+                    a_adj_min_symbols,
+                    a_adj_min_expected,
+                    a_adj_weak_days
+                ),
+                Some("/api/v1/quant/data/sync/adj-factor/background"),
+                Some(json!({
+                    "symbols": [],
+                    "start_date": yyyymmdd(start),
+                    "end_date": yyyymmdd(end),
+                    "data_version_id": format!("health-repair-adj-{}", yyyymmdd(end))
+                })),
+                None,
+            ));
+
+            let (etf_expected, etf_actual, etf_bad): (i64, i64, i64) = sqlx::query_as(
+                "WITH symbols AS (SELECT unnest($1::text[]) AS symbol),
+             firsts AS (
+               SELECT symbol, MIN(trade_date) AS first_date
+               FROM market_stock_daily_bar_adj
+               WHERE symbol = ANY($1::text[])
+               GROUP BY symbol
+             ),
+             expected AS (
+               SELECT s.symbol, COUNT(DISTINCT c.trade_date)::int8 AS expected_days
+               FROM symbols s
+               LEFT JOIN firsts f ON f.symbol = s.symbol
+               LEFT JOIN market_trade_calendar c
+                 ON c.is_open = true
+                AND c.trade_date >= GREATEST($2::date, COALESCE(f.first_date, $2::date))
+                AND c.trade_date <= $3::date
+               GROUP BY s.symbol
+             ),
+             actual AS (
+               SELECT symbol, COUNT(DISTINCT trade_date)::int8 AS actual_days
+               FROM market_stock_daily_bar_adj
+               WHERE symbol = ANY($1::text[])
+                 AND trade_date >= $2 AND trade_date <= $3
+               GROUP BY symbol
+             )
+             SELECT COALESCE(SUM(e.expected_days), 0)::int8,
+                    COALESCE(SUM(COALESCE(a.actual_days, 0)), 0)::int8,
+                    COUNT(*) FILTER (WHERE COALESCE(a.actual_days, 0) < e.expected_days)::int8
+             FROM expected e
+             LEFT JOIN actual a ON a.symbol = e.symbol",
+            )
+            .bind(&cfg.etf_symbols)
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or((0, 0, 0));
+            out.push(check_item(
+                acct,
+                sid,
+                "ETF日线区间覆盖(MVO)",
+                if etf_bad == 0 { "green" } else { "red" },
+                format!(
+                    "{}只ETF，期望{}个 symbol-day，覆盖{}，缺口ETF数{}",
+                    cfg.etf_symbols.len(),
+                    etf_expected,
+                    etf_actual,
+                    etf_bad
+                ),
+                Some("/api/v1/quant/data/sync/fund-daily"),
+                Some(json!({
+                    "symbols": cfg.etf_symbols,
+                    "start_date": yyyymmdd(start),
+                    "end_date": yyyymmdd(end),
+                    "data_version_id": format!("health-repair-etf-daily-{}", yyyymmdd(end))
+                })),
+                None,
+            ));
+
+            let (etf_adj_expected, etf_adj_actual, etf_adj_bad): (i64, i64, i64) = sqlx::query_as(
+                "WITH symbols AS (SELECT unnest($1::text[]) AS symbol),
+             firsts AS (
+               SELECT symbol, MIN(trade_date) AS first_date
+               FROM market_adjustment_factor
+               WHERE symbol = ANY($1::text[])
+               GROUP BY symbol
+             ),
+             expected AS (
+               SELECT s.symbol, COUNT(DISTINCT c.trade_date)::int8 AS expected_days
+               FROM symbols s
+               LEFT JOIN firsts f ON f.symbol = s.symbol
+               LEFT JOIN market_trade_calendar c
+                 ON c.is_open = true
+                AND c.trade_date >= GREATEST($2::date, COALESCE(f.first_date, $2::date))
+                AND c.trade_date <= $3::date
+               GROUP BY s.symbol
+             ),
+             actual AS (
+               SELECT symbol, COUNT(DISTINCT trade_date)::int8 AS actual_days
+               FROM market_adjustment_factor
+               WHERE symbol = ANY($1::text[])
+                 AND trade_date >= $2 AND trade_date <= $3
+               GROUP BY symbol
+             )
+             SELECT COALESCE(SUM(e.expected_days), 0)::int8,
+                    COALESCE(SUM(COALESCE(a.actual_days, 0)), 0)::int8,
+                    COUNT(*) FILTER (WHERE COALESCE(a.actual_days, 0) < e.expected_days)::int8
+             FROM expected e
+             LEFT JOIN actual a ON a.symbol = e.symbol",
+            )
+            .bind(&cfg.etf_symbols)
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or((0, 0, 0));
+            out.push(check_item(
+                acct,
+                sid,
+                "ETF复权因子区间覆盖(MVO)",
+                if etf_adj_bad == 0 { "green" } else { "red" },
+                format!(
+                    "{}只ETF，期望{}个 symbol-day，覆盖{}，缺口ETF数{}",
+                    cfg.etf_symbols.len(),
+                    etf_adj_expected,
+                    etf_adj_actual,
+                    etf_adj_bad
+                ),
+                Some("/api/v1/quant/data/sync/fund-adj"),
+                Some(json!({
+                    "symbols": cfg.etf_symbols,
+                    "start_date": yyyymmdd(start),
+                    "end_date": yyyymmdd(end),
+                    "data_version_id": format!("health-repair-etf-adj-{}", yyyymmdd(end))
+                })),
+                None,
+            ));
+
+            let stock_basic_days: i64 = sqlx::query_scalar(
+                "WITH calendar AS (
+               SELECT DISTINCT trade_date
+               FROM market_trade_calendar
+               WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+             ),
+             expected AS (
+               SELECT c.trade_date, COUNT(*)::int8 AS expected_symbols
+               FROM calendar c
+               JOIN market_stock s
+                 ON s.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+                AND COALESCE(s.list_date, DATE '1900-01-01') <= c.trade_date
+                AND (s.delist_date IS NULL OR s.delist_date >= c.trade_date)
+               GROUP BY c.trade_date
+             )
+             SELECT COUNT(*)::int8 FROM expected WHERE expected_symbols > 0",
+            )
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+            out.push(check_item(
+            acct,
+            sid,
+            "股票基础信息区间覆盖",
+            coverage_level(expected_days, stock_basic_days),
+            format!(
+                "market_stock 按 list_date/delist_date 可覆盖{}个交易日，期望{}天",
+                stock_basic_days, expected_days
+            ),
+            Some("/api/v1/quant/data/sync/stock-basic"),
+            Some(
+                json!({"data_version_id": format!("health-repair-stock-basic-{}", yyyymmdd(end))}),
+            ),
+            None,
+        ));
+
+            let csi_days: i64 = sqlx::query_scalar(
+                "SELECT COUNT(DISTINCT trade_date)::int8 FROM market_index_daily_bar
+             WHERE symbol='000300.SH' AND trade_date >= $1 AND trade_date <= $2",
+            )
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+            out.push(check_item(
+                acct,
+                sid,
+                "CSI300区间覆盖",
+                coverage_level(expected_days, csi_days),
+                format!("期望{}个交易日，覆盖{}天", expected_days, csi_days),
+                Some("/api/v1/quant/data/sync/index-daily"),
+                Some(json!({
+                    "index_codes": ["000300.SH"],
+                    "start_date": yyyymmdd(start),
+                    "end_date": yyyymmdd(end),
+                    "data_version_id": format!("health-repair-csi300-{}", yyyymmdd(end))
+                })),
+                None,
+            ));
+        }
+
+        if include_strategy {
+            let combo_days: i64 = sqlx::query_scalar(
+                "SELECT COUNT(DISTINCT trade_date)::int8 FROM multi_factor_value
+             WHERE combo_name=$1 AND version='1.0.0'
+               AND trade_date >= $2 AND trade_date <= $3",
+            )
+            .bind(&cfg.combo_name)
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+            let combo_future_leak: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+               SELECT 1 FROM multi_factor_value
+               WHERE combo_name=$1 AND version='1.0.0'
+                 AND trade_date >= $2 AND trade_date <= $3
+                 AND available_at > trade_date
+               LIMIT 1
+             )",
+            )
+            .bind(&cfg.combo_name)
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or(false);
+            let combo_level = if combo_future_leak {
+                "red"
+            } else {
+                coverage_level(expected_days, combo_days)
+            };
+            out.push(check_item(
+                acct,
+                sid,
+                format!("PIT combo区间覆盖({})", cfg.combo_name),
+                combo_level,
+                format!(
+                    "期望{}个交易日，PIT覆盖{}天，future available_at={}",
+                    expected_days, combo_days, combo_future_leak
+                ),
+                Some("/api/v1/quant/factors/materialize-pit-combo/background"),
+                Some(json!({
+                    "combo_name": cfg.combo_name,
+                    "version": "1.0.0",
+                    "horizon": 20,
+                    "start_date": yyyymmdd(start),
+                    "end_date": yyyymmdd(end)
+                })),
+                None,
+            ));
+
+            let curve_days: i64 = sqlx::query_scalar(
+                "SELECT COUNT(DISTINCT trade_date)::int8 FROM backtest_equity_curve
+             WHERE task_id=$1 AND trade_date >= $2 AND trade_date <= $3",
+            )
+            .bind(&cfg.equity_curve_task_id)
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+            out.push(check_item(
+                acct,
+                sid,
+                "A股权益曲线区间覆盖",
+                coverage_level(expected_days, curve_days),
+                format!(
+                    "期望{}个交易日，覆盖{}天，task={}",
+                    expected_days, curve_days, cfg.equity_curve_task_id
+                ),
+                Some("/api/v1/admin/sync/repair"),
+                Some(json!({
+                    "name": "权益曲线",
+                    "strategy_id": sid,
+                    "start_date": "20170103",
+                    "end_date": yyyymmdd(end)
+                })),
+                None,
+            ));
+
+            if let Some(pred_set) = cfg.prediction_set_id.as_deref() {
+                let ml_days: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(DISTINCT trade_date)::int8 FROM model_prediction
+                 WHERE prediction_set_id=$1 AND trade_date >= $2 AND trade_date <= $3
+                   AND COALESCE(available_at, trade_date) <= trade_date",
+                )
+                .bind(pred_set)
+                .bind(start)
+                .bind(end)
+                .fetch_one(db)
+                .await
+                .unwrap_or(0);
+                let ml_future_leak: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                   SELECT 1 FROM model_prediction
+                 WHERE prediction_set_id=$1 AND trade_date >= $2 AND trade_date <= $3
+                   AND available_at > trade_date
+                 LIMIT 1
+                )",
+                )
+                .bind(pred_set)
+                .bind(start)
+                .bind(end)
+                .fetch_one(db)
+                .await
+                .unwrap_or(false);
+                out.push(check_item(
+                    acct,
+                    sid,
+                    "ML预测集区间覆盖",
+                    if ml_future_leak {
+                        "red"
+                    } else {
+                        coverage_level(expected_days, ml_days)
+                    },
+                    format!(
+                        "期望{}个交易日，覆盖{}天，future available_at={}，set={}",
+                        expected_days, ml_days, ml_future_leak, pred_set
+                    ),
+                    None,
+                    None,
+                    Some(
+                        "预测集由训练/预测流水线生成，不能用单点补数安全修复；需重建 PIT 预测集"
+                            .to_string(),
+                    ),
+                ));
+            }
+        }
+
+        if include_common {
+            let suspension_completed =
+                event_completed_day_count(db, "suspension_daily", start, end).await;
+            out.push(check_item(
+                acct,
+                sid,
+                "停牌同步完成标记",
+                coverage_level(expected_days, suspension_completed),
+                format!(
+                    "期望{}个交易日完成标记，已有{}天；事件表空行不能证明零停牌",
+                    expected_days, suspension_completed
+                ),
+                Some("/api/v1/quant/data/sync/suspension/backfill"),
+                Some(json!({"start_date": yyyymmdd(start), "end_date": yyyymmdd(end)})),
+                None,
+            ));
+
+            let limit_earliest = proven_limit_list_earliest_date();
+            if start < limit_earliest {
+                out.push(check_item(
+                    acct,
+                    sid,
+                    "涨跌停区间覆盖",
+                    "red",
+                    format!(
+                        "{}~{} 含 {} 之前区间；Tushare limit_list_d 已验证仅提供 {} 起数据",
+                        start, end, limit_earliest, limit_earliest
+                    ),
+                    None,
+                    None,
+                    Some(
+                        "上游数据源不提供 2019-11-28 之前涨跌停历史，不能在正确性前提下自动修复"
+                            .to_string(),
+                    ),
+                ));
+            } else {
+                let limit_completed =
+                    event_completed_day_count(db, "limit_daily", start, end).await;
+                out.push(check_item(
+                    acct,
+                    sid,
+                    "涨跌停同步完成标记",
+                    coverage_level(expected_days, limit_completed),
+                    format!(
+                        "期望{}个交易日完成标记，已有{}天；事件表空行不能证明零涨跌停",
+                        expected_days, limit_completed
+                    ),
+                    Some("/api/v1/quant/data/sync/limit/backfill"),
+                    Some(json!({"start_date": yyyymmdd(start), "end_date": yyyymmdd(end)})),
+                    None,
+                ));
+            }
+
+            let st_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*)::int8 FROM market_stock_name_history
+             WHERE start_date <= $1 AND (end_date IS NULL OR end_date >= $2)",
+            )
+            .bind(end)
+            .bind(start)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+            out.push(check_item(
+                acct,
+                sid,
+                "ST/名称历史",
+                if st_count > 0 { "green" } else { "red" },
+                format!("区间相交名称历史/ST记录{}条", st_count),
+                Some("/api/v1/quant/data/sync/namechange"),
+                Some(json!({})),
+                None,
+            ));
+        }
+
+        return out;
+    }
+
+    let active_stock_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::int8 FROM market_stock WHERE list_status='L' AND exchange IN ('SSE','SZSE')",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+
+    let (a_last, a_symbols): (Option<NaiveDate>, i64) = sqlx::query_as(
+        "WITH latest AS (
+           SELECT MAX(trade_date) AS trade_date FROM market_stock_daily_bar_adj
+           WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+         )
+         SELECT latest.trade_date,
+                COUNT(DISTINCT b.symbol)::int8
+         FROM latest
+         LEFT JOIN market_stock_daily_bar_adj b
+           ON b.trade_date = latest.trade_date
+          AND b.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+         GROUP BY latest.trade_date",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or((None, 0));
+    let a_lag = a_last.map(|d| (last_mkt - d).num_days()).unwrap_or(999);
+    let a_partial = active_stock_count > 0 && a_symbols * 100 < active_stock_count * 80;
+    out.push(check_item(
+        acct,
+        sid,
+        "A股日线",
+        if a_partial {
+            "red"
+        } else {
+            lag_level(a_lag, 2, 7)
+        },
+        format!(
+            "最新{}，落后{}天，最新日{}只/当前活跃{}只",
+            a_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            a_lag,
+            a_symbols,
+            active_stock_count
+        ),
+        Some("/api/v1/quant/data/sync/daily/background"),
+        Some(json!({
+            "symbols": [],
+            "start_date": repair_start,
+            "end_date": repair_end,
+            "data_version_id": format!("health-repair-daily-{}", repair_end)
+        })),
+        None,
+    ));
+
+    let (etf_present, etf_last): (i64, Option<NaiveDate>) = sqlx::query_as(
+        "WITH symbols AS (SELECT unnest($1::text[]) AS symbol),
+         latest AS (
+           SELECT symbol, MAX(trade_date) AS max_date
+           FROM market_stock_daily_bar_adj
+           WHERE symbol = ANY($1::text[])
+           GROUP BY symbol
+         )
+         SELECT COUNT(latest.max_date)::int8, MIN(latest.max_date)
+         FROM symbols LEFT JOIN latest USING(symbol)",
+    )
+    .bind(&cfg.etf_symbols)
+    .fetch_one(db)
+    .await
+    .unwrap_or((0, None));
+    let etf_lag = etf_last.map(|d| (last_mkt - d).num_days()).unwrap_or(999);
+    out.push(check_item(
+        acct,
+        sid,
+        "ETF日线(MVO)",
+        if etf_present < cfg.etf_symbols.len() as i64 {
+            "red"
+        } else {
+            lag_level(etf_lag, 2, 7)
+        },
+        format!(
+            "{}只ETF，全部最新最早{}，落后{}天",
+            cfg.etf_symbols.len(),
+            etf_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            etf_lag
+        ),
+        Some("/api/v1/quant/data/sync/fund-daily"),
+        Some(json!({
+            "symbols": cfg.etf_symbols,
+            "start_date": repair_start,
+            "end_date": repair_end,
+            "data_version_id": format!("health-repair-etf-daily-{}", repair_end)
+        })),
+        None,
+    ));
+
+    let adj_last: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM market_adjustment_factor
+         WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'",
+    )
+    .fetch_one(db)
+    .await
+    .ok()
+    .flatten();
+    let adj_lag = adj_last.map(|d| (last_mkt - d).num_days()).unwrap_or(999);
+    out.push(check_item(
+        acct,
+        sid,
+        "A股复权因子",
+        lag_level(adj_lag, 30, 90),
+        format!(
+            "最新{}，落后{}天",
+            adj_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            adj_lag
+        ),
+        Some("/api/v1/quant/data/sync/adj-factor/background"),
+        Some(json!({
+            "symbols": [],
+            "start_date": repair_start,
+            "end_date": repair_end,
+            "data_version_id": format!("health-repair-adj-{}", repair_end)
+        })),
+        None,
+    ));
+
+    let (etf_adj_present, etf_adj_last): (i64, Option<NaiveDate>) = sqlx::query_as(
+        "WITH symbols AS (SELECT unnest($1::text[]) AS symbol),
+         latest AS (
+           SELECT symbol, MAX(trade_date) AS max_date
+           FROM market_adjustment_factor
+           WHERE symbol = ANY($1::text[])
+           GROUP BY symbol
+         )
+         SELECT COUNT(latest.max_date)::int8, MIN(latest.max_date)
+         FROM symbols LEFT JOIN latest USING(symbol)",
+    )
+    .bind(&cfg.etf_symbols)
+    .fetch_one(db)
+    .await
+    .unwrap_or((0, None));
+    let etf_adj_lag = etf_adj_last
+        .map(|d| (last_mkt - d).num_days())
+        .unwrap_or(999);
+    out.push(check_item(
+        acct,
+        sid,
+        "ETF复权因子(MVO)",
+        if etf_adj_present < cfg.etf_symbols.len() as i64 {
+            "red"
+        } else {
+            lag_level(etf_adj_lag, 30, 90)
+        },
+        format!(
+            "{}只ETF，全部最新最早{}，落后{}天",
+            cfg.etf_symbols.len(),
+            etf_adj_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            etf_adj_lag
+        ),
+        Some("/api/v1/quant/data/sync/fund-adj"),
+        Some(json!({
+            "symbols": cfg.etf_symbols,
+            "start_date": repair_start,
+            "end_date": repair_end,
+            "data_version_id": format!("health-repair-etf-adj-{}", repair_end)
+        })),
+        None,
+    ));
+
+    let csi_last: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT MAX(trade_date) FROM market_index_daily_bar WHERE symbol='000300.SH'",
+    )
+    .fetch_one(db)
+    .await
+    .ok()
+    .flatten();
+    let csi_lag = csi_last.map(|d| (last_mkt - d).num_days()).unwrap_or(999);
+    out.push(check_item(
+        acct,
+        sid,
+        "CSI300",
+        lag_level(csi_lag, 2, 7),
+        format!(
+            "最新{}，落后{}天",
+            csi_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            csi_lag
+        ),
+        Some("/api/v1/quant/data/sync/index-daily"),
+        Some(json!({
+            "index_codes": ["000300.SH"],
+            "start_date": repair_start,
+            "end_date": repair_end,
+            "data_version_id": format!("health-repair-csi300-{}", repair_end)
+        })),
+        None,
+    ));
+
+    let stock_basic_level = if active_stock_count >= 3000 {
+        "green"
+    } else {
+        "red"
+    };
+    out.push(check_item(
+        acct,
+        sid,
+        "股票基础信息",
+        stock_basic_level,
+        format!("当前上市A股{}只", active_stock_count),
+        Some("/api/v1/quant/data/sync/stock-basic"),
+        Some(json!({"data_version_id": format!("health-repair-stock-basic-{}", repair_end)})),
+        None,
+    ));
+
+    let st_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::int8 FROM market_stock_name_history")
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+    out.push(check_item(
+        acct,
+        sid,
+        "ST/名称历史",
+        if st_count > 0 { "green" } else { "red" },
+        format!("名称历史/ST记录{}条", st_count),
+        Some("/api/v1/quant/data/sync/namechange"),
+        Some(json!({})),
+        None,
+    ));
+
+    let suspension_last =
+        event_completion_last_date(db, "market_stock_suspension", "suspension_daily").await;
+    let suspension_lag = suspension_last
+        .map(|d| (last_mkt - d).num_days())
+        .unwrap_or(999);
+    out.push(check_item(
+        acct,
+        sid,
+        "停牌",
+        lag_level(suspension_lag, 2, 7),
+        format!(
+            "最新完成/事件日期{}，落后{}天",
+            suspension_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            suspension_lag
+        ),
+        Some("/api/v1/quant/data/sync/suspension"),
+        Some(json!({"trade_date": repair_end})),
+        None,
+    ));
+
+    let limit_last = event_completion_last_date(db, "market_stock_limit", "limit_daily").await;
+    let limit_lag = limit_last.map(|d| (last_mkt - d).num_days()).unwrap_or(999);
+    out.push(check_item(
+        acct,
+        sid,
+        "涨跌停",
+        lag_level(limit_lag, 2, 7),
+        format!(
+            "最新完成/事件日期{}，落后{}天；2019-11-28前历史不可从Tushare修复",
+            limit_last
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "无".to_string()),
+            limit_lag
+        ),
+        Some("/api/v1/quant/data/sync/limit"),
+        Some(json!({"trade_date": repair_end})),
+        None,
+    ));
+
+    // PIT combo 物化新鲜度
     let combo_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
-        "SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name=$1"
-    ).bind(combo).fetch_one(db).await.ok().flatten();
+        "SELECT MAX(trade_date) FROM multi_factor_value
+         WHERE combo_name=$1 AND version='1.0.0'
+           AND COALESCE(available_at, trade_date) <= trade_date",
+    )
+    .bind(&cfg.combo_name)
+    .fetch_one(db)
+    .await
+    .ok()
+    .flatten();
     match combo_last {
         Some(d) => {
             let lag = (last_mkt - d).num_days();
-            out.push(serde_json::json!({
-                "account": acct, "strategy": sid, "item": format!("combo物化({})", combo),
-                "level": if lag > 7 {"red"} else if lag > 2 {"yellow"} else {"green"},
-                "detail": format!("最新 {} (落后行情 {} 天)", d, lag),
-                "fix_endpoint": "/api/v1/quant/factors/materialize-pit-combo/background",
-                "fix_params": {"combo_name": combo, "version":"1.0.0", "horizon":20}
-            }));
+            out.push(check_item(
+                acct,
+                sid,
+                format!("PIT combo物化({})", cfg.combo_name),
+                lag_level(lag, 2, 7),
+                format!("最新 {} (落后行情 {} 天)", d, lag),
+                Some("/api/v1/quant/factors/materialize-pit-combo/background"),
+                Some(json!({"combo_name": cfg.combo_name, "version":"1.0.0", "horizon":20, "start_date": repair_start, "end_date": repair_end})),
+                None,
+            ));
         }
-        None => out.push(serde_json::json!({
-            "account": acct, "strategy": sid, "item": format!("combo物化({})", combo),
-            "level": "red", "detail": "combo 无任何物化数据",
-            "fix_endpoint": "/api/v1/quant/factors/materialize-pit-combo/background",
-            "fix_params": {"combo_name": combo, "version":"1.0.0", "horizon":20}
-        })),
+        None => out.push(check_item(
+            acct,
+            sid,
+            format!("PIT combo物化({})", cfg.combo_name),
+            "red",
+            "combo 无任何 PIT 合规物化数据",
+            Some("/api/v1/quant/factors/materialize-pit-combo/background"),
+            Some(json!({"combo_name": cfg.combo_name, "version":"1.0.0", "horizon":20, "start_date": repair_start, "end_date": repair_end})),
+            None,
+        )),
     }
 
-    // ② 权益曲线新鲜度
-    let curve_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
-        "SELECT MAX(trade_date) FROM backtest_equity_curve WHERE task_id=$1"
-    ).bind(curve).fetch_one(db).await.ok().flatten();
+    // 权益曲线新鲜度
+    let curve_last: Option<chrono::NaiveDate> =
+        sqlx::query_scalar("SELECT MAX(trade_date) FROM backtest_equity_curve WHERE task_id=$1")
+            .bind(&cfg.equity_curve_task_id)
+            .fetch_one(db)
+            .await
+            .ok()
+            .flatten();
     match curve_last {
         Some(d) => {
             let lag = (last_mkt - d).num_days();
-            out.push(serde_json::json!({
-                "account": acct, "strategy": sid, "item": "A股权益曲线",
-                "level": if lag > 10 {"red"} else if lag > 4 {"yellow"} else {"green"},
-                "detail": format!("最新 {} (落后 {} 天, task={})", d, lag, curve),
-            }));
+            out.push(check_item(
+                acct,
+                sid,
+                "A股权益曲线",
+                lag_level(lag, 4, 10),
+                format!("最新 {} (落后 {} 天, task={})", d, lag, cfg.equity_curve_task_id),
+                Some("/api/v1/admin/sync/repair"),
+                Some(json!({"name": "权益曲线", "strategy_id": sid, "start_date": "20170103", "end_date": repair_end})),
+                None,
+            ));
         }
-        None => out.push(serde_json::json!({
-            "account": acct, "strategy": sid, "item": "A股权益曲线",
-            "level": "red", "detail": format!("曲线 {} 无数据", curve),
-        })),
+        None => out.push(check_item(
+            acct,
+            sid,
+            "A股权益曲线",
+            "red",
+            format!("曲线 {} 无数据", cfg.equity_curve_task_id),
+            Some("/api/v1/admin/sync/repair"),
+            Some(json!({"name": "权益曲线", "strategy_id": sid, "start_date": "20170103", "end_date": repair_end})),
+            None,
+        )),
     }
 
-    // ③ 滚动 IC 新鲜度
-    let ic_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
-        "SELECT MAX(end_date) FROM factor_evaluation WHERE horizon=20"
-    ).fetch_one(db).await.ok().flatten();
+    // 滚动 IC 新鲜度
+    let ic_last: Option<chrono::NaiveDate> =
+        sqlx::query_scalar("SELECT MAX(end_date) FROM factor_evaluation WHERE horizon=20")
+            .fetch_one(db)
+            .await
+            .ok()
+            .flatten();
     if let Some(d) = ic_last {
         let lag = (last_mkt - d).num_days();
-        out.push(serde_json::json!({
-            "account": acct, "strategy": sid, "item": "滚动IC窗口",
-            "level": if lag > 100 {"yellow"} else {"green"},
-            "detail": format!("最新IC窗口 {} (距今 {} 天)", d, lag),
-            "fix_endpoint": "/api/v1/quant/factors/evaluate-all/background",
-        }));
+        out.push(check_item(
+            acct,
+            sid,
+            "滚动IC窗口",
+            if lag > 100 { "yellow" } else { "green" },
+            format!("最新IC窗口 {} (距今 {} 天)", d, lag),
+            Some("/api/v1/quant/factors/evaluate-all/background"),
+            Some(json!({})),
+            None,
+        ));
     }
 
-    // ④ ML 预测集新鲜度(若策略用 blend)
-    if let Some(ps) = pred_set {
+    // ML 预测集新鲜度(若策略用 blend)
+    if let Some(ps) = cfg.prediction_set_id.as_deref() {
         let ml_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
-            "SELECT MAX(trade_date) FROM model_prediction WHERE prediction_set_id=$1"
-        ).bind(ps).fetch_one(db).await.ok().flatten();
+            "SELECT MAX(trade_date) FROM model_prediction
+             WHERE prediction_set_id=$1 AND COALESCE(available_at, trade_date) <= trade_date",
+        )
+        .bind(ps)
+        .fetch_one(db)
+        .await
+        .ok()
+        .flatten();
         if let Some(d) = ml_last {
             let lag = (last_mkt - d).num_days();
-            out.push(serde_json::json!({
-                "account": acct, "strategy": sid, "item": "ML预测集",
-                "level": if lag > 30 {"yellow"} else {"green"},
-                "detail": format!("最新 {} (落后 {} 天)", d, lag),
-            }));
-        }
-    }
-
-    // 深度模式: 逐年扫描权益曲线缺口
-    if deep {
-        if let (Some(s), Some(e)) = (start, end) {
-            let yearly: Vec<(f64, i64)> = sqlx::query_as(
-                "SELECT EXTRACT(YEAR FROM trade_date)::float8, COUNT(*)::int8
-                 FROM backtest_equity_curve WHERE task_id=$1
-                   AND trade_date >= $2::date AND trade_date <= $3::date
-                 GROUP BY 1 ORDER BY 1"
-            ).bind(curve).bind(s).bind(e).fetch_all(db).await.unwrap_or_default();
-            for (yr, days) in yearly {
-                out.push(serde_json::json!({
-                    "account": acct, "strategy": sid, "item": format!("曲线{}年", yr as i32),
-                    "level": if days < 200 {"yellow"} else {"green"},
-                    "detail": format!("{} 交易日", days),
-                }));
-            }
+            out.push(check_item(
+                acct,
+                sid,
+                "ML预测集",
+                if lag > 30 { "yellow" } else { "green" },
+                format!("最新 {} (落后 {} 天, set={})", d, lag, ps),
+                None,
+                None,
+                Some(
+                    "预测集由 PIT 训练/预测流水线生成；单点页面修复不能保证模型正确性".to_string(),
+                ),
+            ));
         }
     }
     out

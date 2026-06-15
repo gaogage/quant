@@ -91,12 +91,12 @@ fn sym_eigen_decomp(matrix: &Array2<f64>) -> EigenDecomp {
                 new_vals[(q, i)] = new_vals[(i, q)];
             }
         }
-        new_vals[(p, p)] = c * c * eigvals[(p, p)] + s * s * eigvals[(q, q)]
-            - 2.0 * s * c * eigvals[(p, q)];
-        new_vals[(q, q)] = s * s * eigvals[(p, p)] + c * c * eigvals[(q, q)]
-            + 2.0 * s * c * eigvals[(p, q)];
-        new_vals[(p, q)] = (c * c - s * s) * eigvals[(p, q)]
-            + s * c * (eigvals[(p, p)] - eigvals[(q, q)]);
+        new_vals[(p, p)] =
+            c * c * eigvals[(p, p)] + s * s * eigvals[(q, q)] - 2.0 * s * c * eigvals[(p, q)];
+        new_vals[(q, q)] =
+            s * s * eigvals[(p, p)] + c * c * eigvals[(q, q)] + 2.0 * s * c * eigvals[(p, q)];
+        new_vals[(p, q)] =
+            (c * c - s * s) * eigvals[(p, q)] + s * c * (eigvals[(p, p)] - eigvals[(q, q)]);
         new_vals[(q, p)] = new_vals[(p, q)];
 
         eigvals = new_vals;
@@ -239,8 +239,8 @@ pub fn nonlinear_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
         h_hat /= n;
 
         // 5. Analytical nonlinear shrinkage formula
-        let denom = (1.0 - c - c * lk * h_hat).powi(2)
-            + (std::f64::consts::PI * c * lk * f_hat).powi(2);
+        let denom =
+            (1.0 - c - c * lk * h_hat).powi(2) + (std::f64::consts::PI * c * lk * f_hat).powi(2);
 
         if denom > 1e-15 {
             shrunk_lambda[k] = lk / denom;
@@ -308,9 +308,9 @@ pub fn nonlinear_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
 //   - Elitism (top 2 individuals survive)
 //   - Dirichlet initialization for uniform simplex coverage
 
+use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 
 /// GA optimization parameters
 struct GaParams {
@@ -345,7 +345,12 @@ fn random_simplex(n: usize, rng: &mut impl Rng) -> Vec<f64> {
 }
 
 /// Generate a random weight vector respecting min/max constraints.
-fn random_feasible_weights(n: usize, min_stock: f64, max_single: f64, rng: &mut impl Rng) -> Vec<f64> {
+fn random_feasible_weights(
+    n: usize,
+    min_stock: f64,
+    max_single: f64,
+    rng: &mut impl Rng,
+) -> Vec<f64> {
     loop {
         let mut w = random_simplex(n, rng);
         // Enforce min_stock on first asset (A股)
@@ -449,13 +454,19 @@ fn enforce_constraints(weights: &mut [f64], min_stock: f64, max_single: f64) {
     let n = weights.len();
     // No-shorting + initial normalize
     for w in weights.iter_mut() {
-        if *w < 0.0 { *w = 0.0; }
+        if *w < 0.0 {
+            *w = 0.0;
+        }
     }
     let s: f64 = weights.iter().sum();
     if s > 0.0 {
-        for w in weights.iter_mut() { *w /= s; }
+        for w in weights.iter_mut() {
+            *w /= s;
+        }
     } else {
-        for w in weights.iter_mut() { *w = 1.0 / n as f64; }
+        for w in weights.iter_mut() {
+            *w = 1.0 / n as f64;
+        }
     }
 
     // Iteratively cap at max_single, redistributing excess to uncapped assets.
@@ -470,7 +481,9 @@ fn enforce_constraints(weights: &mut [f64], min_stock: f64, max_single: f64) {
                 uncapped_sum += *w;
             }
         }
-        if excess <= 1e-9 { break; }
+        if excess <= 1e-9 {
+            break;
+        }
         for w in weights.iter_mut() {
             if *w > max_single + 1e-9 {
                 *w = max_single;
@@ -488,7 +501,9 @@ fn enforce_constraints(weights: &mut [f64], min_stock: f64, max_single: f64) {
         if others > 0.0 {
             for w in weights[1..].iter_mut() {
                 *w -= deficit * (*w / others);
-                if *w < 0.0 { *w = 0.0; }
+                if *w < 0.0 {
+                    *w = 0.0;
+                }
             }
         }
     }
@@ -513,7 +528,14 @@ pub fn ga_optimize(
     min_stock: f64,
     max_single: f64,
 ) -> Option<MvoWeights> {
-    ga_optimize_with_params(mu_annual, cov, min_stock, max_single, &GaParams::default(), None)
+    ga_optimize_with_params(
+        mu_annual,
+        cov,
+        min_stock,
+        max_single,
+        &GaParams::default(),
+        None,
+    )
 }
 
 /// GA optimization with MinVariance objective (minimize variance subject to return ≥ target).
@@ -525,7 +547,14 @@ pub fn ga_optimize_min_variance(
     max_single: f64,
     return_target: f64,
 ) -> Option<MvoWeights> {
-    ga_optimize_with_params(mu_annual, cov, min_stock, max_single, &GaParams::default(), Some(return_target))
+    ga_optimize_with_params(
+        mu_annual,
+        cov,
+        min_stock,
+        max_single,
+        &GaParams::default(),
+        Some(return_target),
+    )
 }
 
 fn ga_optimize_with_params(
@@ -545,16 +574,24 @@ fn ga_optimize_with_params(
     // 不同调仓窗口因数据不同而独立。500×200 种群代数保证收敛到全局最优附近。
     let mut seed: u64 = 0x9E3779B97F4A7C15;
     for v in mu_annual.iter() {
-        seed = seed.wrapping_mul(31).wrapping_add(((v * 1e6) as i64) as u64);
+        seed = seed
+            .wrapping_mul(31)
+            .wrapping_add(((v * 1e6) as i64) as u64);
     }
     for i in 0..n_assets {
-        seed = seed.wrapping_mul(31).wrapping_add(((cov[(i, i)] * 1e6) as i64) as u64);
+        seed = seed
+            .wrapping_mul(31)
+            .wrapping_add(((cov[(i, i)] * 1e6) as i64) as u64);
     }
     let mut rng = StdRng::seed_from_u64(seed);
 
     // Fitness function: MinVariance or MaxSharpe depending on target
     let fitness = |w: &[f64]| -> f64 {
-        let port_mu: f64 = w.iter().zip(mu_annual.iter()).map(|(wi, mui)| wi * mui).sum();
+        let port_mu: f64 = w
+            .iter()
+            .zip(mu_annual.iter())
+            .map(|(wi, mui)| wi * mui)
+            .sum();
         let mut port_var = 0.0f64;
         for i in 0..n_assets {
             for j in 0..n_assets {
@@ -606,9 +643,8 @@ fn ga_optimize_with_params(
 
     for gen in 0..params.generations {
         // Evaluate fitness
-        let mut fitness: Vec<(Vec<f64>, f64)> = population.iter()
-            .map(|w| (w.clone(), fitness(w)))
-            .collect();
+        let mut fitness: Vec<(Vec<f64>, f64)> =
+            population.iter().map(|w| (w.clone(), fitness(w))).collect();
 
         // Sort by fitness descending
         fitness.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -621,16 +657,20 @@ fn ga_optimize_with_params(
 
         // Check convergence: if top 10% have nearly identical fitness, stop early
         let top_n = (params.population_size / 10).max(2);
-        let top_std = fitness[..top_n].iter()
+        let top_std = fitness[..top_n]
+            .iter()
             .map(|(_, f)| (f - best_sharpe).powi(2))
-            .sum::<f64>() / top_n as f64;
+            .sum::<f64>()
+            / top_n as f64;
         if gen > 30 && top_std.sqrt() < 1e-6 {
             break;
         }
 
         // Elitism: keep best individuals
         let mut new_population: Vec<Vec<f64>> = fitness[..params.elite_count]
-            .iter().map(|(w, _)| w.clone()).collect();
+            .iter()
+            .map(|(w, _)| w.clone())
+            .collect();
 
         // Fill rest with selection + crossover + mutation
         while new_population.len() < params.population_size {
@@ -698,13 +738,12 @@ pub fn rmt_filtered_covariance(returns: &Array2<f64>) -> Array2<f64> {
     let mp_upper = sigma_sq * (1.0 + c.sqrt()).powi(2);
 
     // Separate signal (λ > MP upper) and noise (λ ≤ MP upper)
-    let noise_avg: f64 = lambda.iter()
-        .filter(|&&lv| lv <= mp_upper)
-        .sum::<f64>()
+    let noise_avg: f64 = lambda.iter().filter(|&&lv| lv <= mp_upper).sum::<f64>()
         / lambda.iter().filter(|&&lv| lv <= mp_upper).count().max(1) as f64;
 
     // Replace noise eigenvalues with their average, keep signal
-    let shrunk_lambda: Vec<f64> = lambda.iter()
+    let shrunk_lambda: Vec<f64> = lambda
+        .iter()
         .map(|&lv| if lv > mp_upper { lv } else { noise_avg })
         .collect();
 
@@ -752,7 +791,9 @@ pub fn ewma_covariance(returns: &Array2<f64>, lambda: f64) -> Array2<f64> {
     let n_assets = returns.ncols();
     let n_periods = returns.nrows();
     let mut cov = Array2::zeros((n_assets, n_assets));
-    if n_periods < 2 { return cov; }
+    if n_periods < 2 {
+        return cov;
+    }
     let means = returns.mean_axis(Axis(0)).unwrap();
     let centered = returns - &means;
     // Compute weights: normalized exponential decay
@@ -788,8 +829,21 @@ pub fn mvo_allocate_with_custom_mu(
     let cov = ledoit_wolf_shrinkage(monthly_returns);
     let n_assets = monthly_returns.ncols();
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
-    let result = grid_search_n_asset(custom_mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target }, grid_step);
-    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+    let result = grid_search_n_asset(
+        custom_mu,
+        &cov,
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MinVariance {
+            target: return_target,
+        },
+        grid_step,
+    );
+    result.weights.map(|w| MvoWeights {
+        weights: w,
+        sharpe: result.best_sharpe,
+        rho,
+    })
 }
 
 /// MVO with custom mu + NONLINEAR shrinkage covariance (Ledoit-Wolf 2017).
@@ -805,11 +859,20 @@ pub fn mvo_allocate_with_custom_mu_nl(
     let n_assets = monthly_returns.ncols();
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
     let result = grid_search_n_asset(
-        custom_mu, &cov, min_stock, MAX_SINGLE,
-        GridObjective::MinVariance { target: return_target },
+        custom_mu,
+        &cov,
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MinVariance {
+            target: return_target,
+        },
         grid_step,
     );
-    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+    result.weights.map(|w| MvoWeights {
+        weights: w,
+        sharpe: result.best_sharpe,
+        rho,
+    })
 }
 
 /// MVO with custom mu + RMT eigenvalue filtering covariance.
@@ -825,11 +888,20 @@ pub fn mvo_allocate_with_custom_mu_rmt(
     let n_assets = monthly_returns.ncols();
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
     let result = grid_search_n_asset(
-        custom_mu, &cov, min_stock, MAX_SINGLE,
-        GridObjective::MinVariance { target: return_target },
+        custom_mu,
+        &cov,
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MinVariance {
+            target: return_target,
+        },
         grid_step,
     );
-    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+    result.weights.map(|w| MvoWeights {
+        weights: w,
+        sharpe: result.best_sharpe,
+        rho,
+    })
 }
 
 /// MVO allocation using Genetic Algorithm + custom mu + LW covariance.
@@ -844,7 +916,14 @@ pub fn mvo_allocate_ga(
     return_target: f64,
     _grid_step: f64,
 ) -> Option<MvoWeights> {
-    mvo_allocate_ga_with_max_single(monthly_returns, custom_mu, min_stock, return_target, _grid_step, MAX_SINGLE)
+    mvo_allocate_ga_with_max_single(
+        monthly_returns,
+        custom_mu,
+        min_stock,
+        return_target,
+        _grid_step,
+        MAX_SINGLE,
+    )
 }
 
 /// GA MVO with configurable max_single constraint.
@@ -903,7 +982,10 @@ impl std::str::FromStr for CovMethod {
             "linear" | "lw" | "ledoit_wolf" => Ok(CovMethod::LinearLW),
             "nonlinear" | "nl" | "nl_shrink" => Ok(CovMethod::Nonlinear),
             "rmt" | "rmt_filter" => Ok(CovMethod::RMT),
-            _ => Err(format!("Unknown cov method: {} (use linear/nonlinear/rmt)", s)),
+            _ => Err(format!(
+                "Unknown cov method: {} (use linear/nonlinear/rmt)",
+                s
+            )),
         }
     }
 }
@@ -919,9 +1001,27 @@ pub fn mvo_allocate_with_cov_method(
     cov_method: CovMethod,
 ) -> Option<MvoWeights> {
     match cov_method {
-        CovMethod::LinearLW => mvo_allocate_with_custom_mu(monthly_returns, custom_mu, min_stock, return_target, grid_step),
-        CovMethod::Nonlinear => mvo_allocate_with_custom_mu_nl(monthly_returns, custom_mu, min_stock, return_target, grid_step),
-        CovMethod::RMT => mvo_allocate_with_custom_mu_rmt(monthly_returns, custom_mu, min_stock, return_target, grid_step),
+        CovMethod::LinearLW => mvo_allocate_with_custom_mu(
+            monthly_returns,
+            custom_mu,
+            min_stock,
+            return_target,
+            grid_step,
+        ),
+        CovMethod::Nonlinear => mvo_allocate_with_custom_mu_nl(
+            monthly_returns,
+            custom_mu,
+            min_stock,
+            return_target,
+            grid_step,
+        ),
+        CovMethod::RMT => mvo_allocate_with_custom_mu_rmt(
+            monthly_returns,
+            custom_mu,
+            min_stock,
+            return_target,
+            grid_step,
+        ),
     }
 }
 
@@ -942,8 +1042,21 @@ pub fn mvo_allocate_ewma_n(
     let mu = annualized_returns(monthly_returns);
     let n_assets = monthly_returns.ncols();
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
-    let result = grid_search_n_asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target }, grid_step);
-    result.weights.map(|w| MvoWeights { weights: w, sharpe: result.best_sharpe, rho })
+    let result = grid_search_n_asset(
+        &mu,
+        &cov,
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MinVariance {
+            target: return_target,
+        },
+        grid_step,
+    );
+    result.weights.map(|w| MvoWeights {
+        weights: w,
+        sharpe: result.best_sharpe,
+        rho,
+    })
 }
 
 /// Compute downside semi-covariance matrix (only negative returns contribute).
@@ -1039,7 +1152,9 @@ fn grid_search_n_asset(
     objective: GridObjective,
     grid_step: f64,
 ) -> GridSearchResult {
-    grid_search_n_asset_ext(mu_annual, cov, None, min_stock, max_single, objective, grid_step)
+    grid_search_n_asset_ext(
+        mu_annual, cov, None, min_stock, max_single, objective, grid_step,
+    )
 }
 
 /// Extended grid search with optional downside semi-covariance for Sortino-max.
@@ -1054,7 +1169,10 @@ fn grid_search_n_asset_ext(
 ) -> GridSearchResult {
     let n_assets = mu_annual.len();
     if n_assets < 2 {
-        return GridSearchResult { weights: None, best_sharpe: f64::NEG_INFINITY };
+        return GridSearchResult {
+            weights: None,
+            best_sharpe: f64::NEG_INFINITY,
+        };
     }
 
     let steps = ((1.0 / grid_step) as i32) + 1;
@@ -1088,17 +1206,23 @@ fn grid_search_n_asset_ext(
     ) {
         if level == n_assets - 1 {
             let w_last = remaining.max(0.0);
-            if w_last > max_single + 0.001 { return; }
+            if w_last > max_single + 0.001 {
+                return;
+            }
             current[level] = w_last;
 
             let weights = Array1::from_vec(current.to_vec());
             let w_sum = weights.sum();
-            if w_sum <= 0.0 { return; }
+            if w_sum <= 0.0 {
+                return;
+            }
             let w = &weights / w_sum;
 
             let port_mu = w.dot(mu_annual) - RISK_FREE;
             let port_var = w.dot(&cov.dot(&w));
-            if port_var <= 0.0 { return; }
+            if port_var <= 0.0 {
+                return;
+            }
             let sharpe = port_mu / port_var.sqrt();
 
             if sharpe > *best_sharpe {
@@ -1139,26 +1263,56 @@ fn grid_search_n_asset_ext(
             return;
         }
 
-        let min_val = if level == 0 { min_stock.min(max_single) } else { 0.0 };
+        let min_val = if level == 0 {
+            min_stock.min(max_single)
+        } else {
+            0.0
+        };
         let max_val = remaining.min(max_single);
 
         for &sv in step_values {
-            if sv < min_val - 0.001 || sv > max_val + 0.001 { continue; }
+            if sv < min_val - 0.001 || sv > max_val + 0.001 {
+                continue;
+            }
             current[level] = sv;
             search_level(
-                level + 1, n_assets, remaining - sv,
-                min_stock, max_single, step_values, current,
-                mu_annual, cov, semi_cov, best_sharpe, best_sortino,
-                fallback_weights, best_var, target_weights, objective,
+                level + 1,
+                n_assets,
+                remaining - sv,
+                min_stock,
+                max_single,
+                step_values,
+                current,
+                mu_annual,
+                cov,
+                semi_cov,
+                best_sharpe,
+                best_sortino,
+                fallback_weights,
+                best_var,
+                target_weights,
+                objective,
             );
         }
     }
 
     search_level(
-        0, n_assets, 1.0,
-        min_stock, max_single, &step_values, &mut current,
-        mu_annual, cov, semi_cov, &mut best_sharpe, &mut best_sortino,
-        &mut fallback_weights, &mut best_var, &mut target_weights, &objective,
+        0,
+        n_assets,
+        1.0,
+        min_stock,
+        max_single,
+        &step_values,
+        &mut current,
+        mu_annual,
+        cov,
+        semi_cov,
+        &mut best_sharpe,
+        &mut best_sortino,
+        &mut fallback_weights,
+        &mut best_var,
+        &mut target_weights,
+        &objective,
     );
 
     GridSearchResult {
@@ -1185,7 +1339,13 @@ pub fn optimize_mvo(
         return None;
     }
 
-    let result = grid_search_5asset(mu_annual, cov, min_stock, MAX_SINGLE, GridObjective::MaxSharpe);
+    let result = grid_search_5asset(
+        mu_annual,
+        cov,
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MaxSharpe,
+    );
     result.weights.map(|w| MvoWeights {
         weights: w,
         sharpe: result.best_sharpe,
@@ -1194,10 +1354,7 @@ pub fn optimize_mvo(
 }
 
 /// Full MVO pipeline: given monthly returns, compute optimal weights.
-pub fn mvo_allocate(
-    monthly_returns: &Array2<f64>,
-    min_stock: f64,
-) -> Option<MvoWeights> {
+pub fn mvo_allocate(monthly_returns: &Array2<f64>, min_stock: f64) -> Option<MvoWeights> {
     let cov = ledoit_wolf_shrinkage(monthly_returns);
     let mu = annualized_returns(monthly_returns);
     let n_assets = monthly_returns.ncols();
@@ -1221,7 +1378,15 @@ pub fn mvo_allocate_with_target(
     let n_assets = monthly_returns.ncols();
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
 
-    let result = grid_search_5asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target });
+    let result = grid_search_5asset(
+        &mu,
+        &cov,
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MinVariance {
+            target: return_target,
+        },
+    );
     result.weights.map(|w| MvoWeights {
         weights: w,
         sharpe: result.best_sharpe,
@@ -1245,9 +1410,14 @@ pub fn mvo_allocate_sortino_n(
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
 
     let result = grid_search_n_asset_ext(
-        &mu, &cov, Some(&semi_cov),
-        min_stock, MAX_SINGLE,
-        GridObjective::MaxSortino { target: sortino_target },
+        &mu,
+        &cov,
+        Some(&semi_cov),
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MaxSortino {
+            target: sortino_target,
+        },
         grid_step,
     );
     result.weights.map(|w| MvoWeights {
@@ -1270,7 +1440,16 @@ pub fn mvo_allocate_with_target_n(
     let n_assets = monthly_returns.ncols();
     let rho = (n_assets as f64 / monthly_returns.nrows() as f64).clamp(0.0, 1.0);
 
-    let result = grid_search_n_asset(&mu, &cov, min_stock, MAX_SINGLE, GridObjective::MinVariance { target: return_target }, grid_step);
+    let result = grid_search_n_asset(
+        &mu,
+        &cov,
+        min_stock,
+        MAX_SINGLE,
+        GridObjective::MinVariance {
+            target: return_target,
+        },
+        grid_step,
+    );
     result.weights.map(|w| MvoWeights {
         weights: w,
         sharpe: result.best_sharpe,
@@ -1282,9 +1461,7 @@ pub fn mvo_allocate_with_target_n(
 ///
 /// `daily_prices`: Vec of (date_string, Vec<f64> prices for each asset)
 /// Returns a T×N matrix of monthly returns.
-pub fn monthly_returns_from_daily(
-    daily_prices: &[(String, Vec<f64>)],
-) -> Array2<f64> {
+pub fn monthly_returns_from_daily(daily_prices: &[(String, Vec<f64>)]) -> Array2<f64> {
     let n_assets = daily_prices.first().map(|(_, p)| p.len()).unwrap_or(0);
     if n_assets == 0 || daily_prices.len() < 2 {
         return Array2::zeros((0, n_assets));
@@ -1343,11 +1520,7 @@ mod tests {
     #[test]
     fn test_sample_covariance() {
         // 2 assets, 3 periods
-        let returns = arr2(&[
-            [0.01, 0.02],
-            [-0.01, 0.01],
-            [0.02, -0.01],
-        ]);
+        let returns = arr2(&[[0.01, 0.02], [-0.01, 0.01], [0.02, -0.01]]);
         let cov = sample_covariance(&returns);
         assert_eq!(cov.ncols(), 2);
         assert_eq!(cov.nrows(), 2);
@@ -1404,6 +1577,10 @@ mod tests {
         assert!(result.is_some());
         let w = result.unwrap().weights;
         assert!(w[0] >= 0.49, "stock weight too low: {}", w[0]);
-        assert!((w.sum() - 1.0).abs() < 0.02, "weights don't sum to 1: {}", w.sum());
+        assert!(
+            (w.sum() - 1.0).abs() < 0.02,
+            "weights don't sum to 1: {}",
+            w.sum()
+        );
     }
 }

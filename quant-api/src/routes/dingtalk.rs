@@ -11,7 +11,8 @@
 //! Webhook URL 格式：https://oapi.dingtalk.com/robot/send?access_token={TOKEN}
 
 use serde::Serialize;
-#[cfg(test)] use serde_json::json;
+#[cfg(test)]
+use serde_json::json;
 use serde_json::Value;
 
 /// 钉钉 Webhook 消息体。
@@ -29,13 +30,17 @@ struct DingTalkMarkdown {
 
 /// 从环境变量获取钉钉 Client ID（Webhook access_token）。
 pub fn dingtalk_client_id() -> Option<String> {
-    std::env::var("DINGTALK_CLIENT_ID").ok().filter(|v| !v.is_empty())
+    std::env::var("DINGTALK_CLIENT_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 /// 从环境变量获取钉钉 Client Secret（预留，用于 HMAC-SHA256 签名）。
 #[allow(dead_code)]
 pub fn dingtalk_client_secret() -> Option<String> {
-    std::env::var("DINGTALK_CLIENT_SECRET").ok().filter(|v| !v.is_empty())
+    std::env::var("DINGTALK_CLIENT_SECRET")
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 /// 构建钉钉 Webhook URL（从 .env 配置自动拼接）。
@@ -50,12 +55,9 @@ pub fn build_dingtalk_webhook_url() -> Option<String> {
 
 /// 钉钉应用消息发送（需 DINGTALK_CLIENT_ID + DINGTALK_CLIENT_SECRET）。
 /// 流程：获取 access_token → 通过工作通知发送消息。
-pub async fn send_dingtalk_app_message(
-    title: &str,
-    text: &str,
-) -> Result<(), String> {
-    let client_id = dingtalk_client_id()
-        .ok_or_else(|| "DINGTALK_CLIENT_ID not configured".to_string())?;
+pub async fn send_dingtalk_app_message(title: &str, text: &str) -> Result<(), String> {
+    let client_id =
+        dingtalk_client_id().ok_or_else(|| "DINGTALK_CLIENT_ID not configured".to_string())?;
     let client_secret = dingtalk_client_secret()
         .ok_or_else(|| "DINGTALK_CLIENT_SECRET not configured".to_string())?;
 
@@ -75,9 +77,15 @@ pub async fn send_dingtalk_app_message(
         .await
         .map_err(|e| format!("DingTalk gettoken parse failed: {}", e))?;
 
-    let errcode = token_resp.get("errcode").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let errcode = token_resp
+        .get("errcode")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
     if errcode != 0 {
-        let errmsg = token_resp.get("errmsg").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let errmsg = token_resp
+            .get("errmsg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         return Err(format!("DingTalk gettoken error {}: {}", errcode, errmsg));
     }
 
@@ -114,8 +122,14 @@ pub async fn send_dingtalk_app_message(
 
     let send_errcode = body.get("errcode").and_then(|v| v.as_i64()).unwrap_or(-1);
     if send_errcode != 0 {
-        let send_errmsg = body.get("errmsg").and_then(|v| v.as_str()).unwrap_or("unknown");
-        return Err(format!("DingTalk send error {}: {}", send_errcode, send_errmsg));
+        let send_errmsg = body
+            .get("errmsg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(format!(
+            "DingTalk send error {}: {}",
+            send_errcode, send_errmsg
+        ));
     }
 
     Ok(())
@@ -165,17 +179,17 @@ pub fn build_trade_signal_notification(
     strategy_version: &str,
     signals: &[Value],
 ) -> String {
-    let type_label = if account_type == "real" { "🔴 实盘" } else { "🟡 模拟" };
+    let type_label = if account_type == "real" {
+        "🔴 实盘"
+    } else {
+        "🟡 模拟"
+    };
     let mut text = format!(
         "## {} 交易信号 — {}  \n\n\
          **账号**: {} | **日期**: {} | **策略**: {}  \n\n\
          | 标的 | 操作 | 价格 | 数量 | 仓位占比 |  \n\
          |:-----|:----:|:----:|:----:|:-------:|  \n",
-        type_label,
-        account_name,
-        account_name,
-        signal_date,
-        strategy_version,
+        type_label, account_name, account_name, signal_date, strategy_version,
     );
 
     for sig in signals {
@@ -183,7 +197,10 @@ pub fn build_trade_signal_notification(
         let action = sig.get("action").and_then(|v| v.as_str()).unwrap_or("?");
         let price = sig.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let quantity = sig.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let weight = sig.get("target_weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let weight = sig
+            .get("target_weight")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
 
         let action_icon = match action {
             "buy" | "BUY" => "🟢 买入",
@@ -225,10 +242,26 @@ pub fn build_position_summary_notification(
     max_drawdown: f64,
     class_breakdown: &[Value],
 ) -> String {
-    let type_label = if account_type == "real" { "🔴 实盘" } else { "🟡 模拟" };
-    let position_pct = if net_worth > 0.0 { market_value / net_worth * 100.0 } else { 0.0 };
-    let cash_pct = if net_worth > 0.0 { cash / net_worth * 100.0 } else { 0.0 };
-    let margin_pct = if net_worth > 0.0 { margin_amount / net_worth * 100.0 } else { 0.0 };
+    let type_label = if account_type == "real" {
+        "🔴 实盘"
+    } else {
+        "🟡 模拟"
+    };
+    let position_pct = if net_worth > 0.0 {
+        market_value / net_worth * 100.0
+    } else {
+        0.0
+    };
+    let cash_pct = if net_worth > 0.0 {
+        cash / net_worth * 100.0
+    } else {
+        0.0
+    };
+    let margin_pct = if net_worth > 0.0 {
+        margin_amount / net_worth * 100.0
+    } else {
+        0.0
+    };
 
     let mut text = format!(
         "## {} 持仓摘要 — {}  \n\n\
@@ -239,12 +272,20 @@ pub fn build_position_summary_notification(
          **累计收益**: {:.2}% | **最大回撤**: {:.2}%  \n\n\
          | 标的 | 名称 | 持仓量 | 现价 | 市值 | 占比 |  \n\
          |:-----|:-----|:------:|:----:|:----:|:----:|  \n",
-        type_label, account_name,
-        account_name, trade_date,
+        type_label,
+        account_name,
+        account_name,
+        trade_date,
         net_worth,
-        total_nav, market_value, position_pct,
-        cash, cash_pct, margin_amount, margin_pct,
-        cumulative_return * 100.0, max_drawdown * 100.0,
+        total_nav,
+        market_value,
+        position_pct,
+        cash,
+        cash_pct,
+        margin_amount,
+        margin_pct,
+        cumulative_return * 100.0,
+        max_drawdown * 100.0,
     );
 
     for pos in positions {
@@ -253,17 +294,29 @@ pub fn build_position_summary_notification(
         // Truncate long names to max 6 chars
         let short = if name.chars().count() > 6 {
             format!("{}…", name.chars().take(5).collect::<String>())
-        } else { name.to_string() };
+        } else {
+            name.to_string()
+        };
         // 字段可能是数值或字符串(不同调用方构建方式不同)，两种都兼容
         let num = |v: Option<&Value>| -> f64 {
-            v.and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0.0)
+            v.and_then(|x| {
+                x.as_f64()
+                    .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+            })
+            .unwrap_or(0.0)
         };
         let qty = num(pos.get("quantity"));
         let price = num(pos.get("current_price"));
         let mval = num(pos.get("market_value"));
-        let w = if net_worth > 0.0 { mval / net_worth * 100.0 } else { 0.0 };
-        text.push_str(&format!("| {} | {} | {:.0} | {:.2} | ¥{:.0} | {:.1}% |  \n",
-            symbol, short, qty, price, mval, w));
+        let w = if net_worth > 0.0 {
+            mval / net_worth * 100.0
+        } else {
+            0.0
+        };
+        text.push_str(&format!(
+            "| {} | {} | {:.0} | {:.2} | ¥{:.0} | {:.1}% |  \n",
+            symbol, short, qty, price, mval, w
+        ));
     }
 
     // MVO 资产大类分布
@@ -278,7 +331,8 @@ pub fn build_position_summary_notification(
 
     text.push_str(&format!(
         "\n\n> 📊 共 {} 个持仓 | 仓位 {:.1}% | 更新于 {}",
-        positions.len(), position_pct,
+        positions.len(),
+        position_pct,
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
     ));
     text
@@ -296,7 +350,11 @@ mod tests {
         ];
 
         let text = build_trade_signal_notification(
-            "TestAccount", "simulated", "2026-06-02", "phase7_s4", &signals,
+            "TestAccount",
+            "simulated",
+            "2026-06-02",
+            "phase7_s4",
+            &signals,
         );
 
         assert!(text.contains("🟡 模拟"));
@@ -316,24 +374,32 @@ mod tests {
         ];
 
         let text = build_position_summary_notification(
-            "TestAccount", "simulated", "2026-06-02",
-            1_000_000.0, 567_500.0, 0.0, 432_500.0, 1_000_000.0,
-            &positions, 0.125, -0.08, &vec![],
+            "TestAccount",
+            "simulated",
+            "2026-06-02",
+            1_000_000.0,
+            567_500.0,
+            0.0,
+            432_500.0,
+            1_000_000.0,
+            &positions,
+            0.125,
+            -0.08,
+            &vec![],
         );
 
         assert!(text.contains("🟡 模拟"));
         assert!(text.contains("¥1000000.00")); // total NAV
-        assert!(text.contains("¥567500.00"));  // cash
-        assert!(text.contains("12.50%"));      // cumulative return
-        assert!(text.contains("8.00%"));       // max drawdown
+        assert!(text.contains("¥567500.00")); // cash
+        assert!(text.contains("12.50%")); // cumulative return
+        assert!(text.contains("8.00%")); // max drawdown
         assert!(text.contains("2 个持仓"));
     }
 
     #[test]
     fn test_real_account_shows_red_icon() {
-        let text = build_trade_signal_notification(
-            "RealAccount", "real", "2026-06-02", "phase7_s4", &[],
-        );
+        let text =
+            build_trade_signal_notification("RealAccount", "real", "2026-06-02", "phase7_s4", &[]);
         assert!(text.contains("🔴 实盘"));
         assert!(!text.contains("🟡 模拟"));
     }
