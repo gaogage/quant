@@ -48,7 +48,11 @@ pub async fn list_strategies(
                 etf_symbols, default_weights, vol_target, leverage_cap, leverage_floor,
                 min_stock, max_single, max_single_bull, momentum_blend_ratio,
                 rebalance_freq, ga_population, ga_generations, risk_free_rate
-         FROM strategy_config ORDER BY strategy_id",
+         FROM strategy_config
+         WHERE status = 'active'
+         ORDER BY
+             CASE WHEN strategy_id = 'v19' THEN 0 ELSE 1 END,
+             strategy_id",
     )
     .fetch_all(&state.db)
     .await

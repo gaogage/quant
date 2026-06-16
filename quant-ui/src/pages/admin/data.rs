@@ -239,7 +239,7 @@ pub fn AccountDataHealthSection() -> Element {
     let mut start_date = use_signal(String::new);
     let mut end_date = use_signal(String::new);
 
-    let mut run = move || {
+    let refresh = Callback::new(move |_| {
         loading.set(true);
         let s = start_date.read().clone();
         let e = end_date.read().clone();
@@ -266,7 +266,7 @@ pub fn AccountDataHealthSection() -> Element {
             }
             loading.set(false);
         });
-    };
+    });
 
     rsx! {
         div { class: "mt-6 border-t border-gray-200 dark:border-gray-700 pt-4",
@@ -289,7 +289,7 @@ pub fn AccountDataHealthSection() -> Element {
                     button {
                         class: "px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50",
                         disabled: loading(),
-                        onclick: move |_| run(),
+                        onclick: move |_| refresh(()),
                         if loading() { "检查中..." } else { "检查" }
                     }
                 }
@@ -299,7 +299,10 @@ pub fn AccountDataHealthSection() -> Element {
             }
             div { class: "space-y-1",
                 for c in checks.read().iter() {
-                    AccountDataHealthItem { check: c.clone() }
+                    AccountDataHealthItem {
+                        check: c.clone(),
+                        on_repaired: refresh,
+                    }
                 }
             }
         }
@@ -308,7 +311,7 @@ pub fn AccountDataHealthSection() -> Element {
 
 /// 组件4: 单个账号数据检查项（红黄绿 + 异常可点击修复）。
 #[component]
-fn AccountDataHealthItem(check: serde_json::Value) -> Element {
+fn AccountDataHealthItem(check: serde_json::Value, on_repaired: Callback<()>) -> Element {
     let mut fixing = use_signal(|| false);
     let mut fix_msg = use_signal(String::new);
 
@@ -337,7 +340,8 @@ fn AccountDataHealthItem(check: serde_json::Value) -> Element {
                 Ok(v) => {
                     if v["code"].as_i64().unwrap_or(-1) == 0 {
                         let msg = v["message"].as_str().unwrap_or("已触发修复");
-                        fix_msg.set(format!("✅ {}", msg));
+                        fix_msg.set(format!("✅ {}，正在复查…", msg));
+                        on_repaired(());
                     } else {
                         let msg = v["message"].as_str().unwrap_or("修复失败");
                         fix_msg.set(format!("❌ {}", msg));

@@ -52,6 +52,7 @@ pub fn evaluate(
             mean_rank_ic: 0.0,
             rank_ic_ir: 0.0,
             ic_series: vec![],
+            rank_ic_series: vec![],
             quantile_spread: 0.0,
             quantile_returns: vec![0.0; n_quantiles],
             period_count: 0,
@@ -134,6 +135,7 @@ pub fn evaluate(
             0.0
         },
         ic_series,
+        rank_ic_series,
         quantile_spread,
         quantile_returns,
         period_count: by_date.len(),

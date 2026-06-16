@@ -253,6 +253,9 @@ pub async fn sync_daily_bars(
     // Iterate by month — Tushare batch returns one day when ts_codes are specified.
     // Monthly chunks avoid the single-day limitation while staying within API limits.
     let months = months_in_range(s, e);
+    let chunk_count = if total == 0 { 0 } else { (total + 499) / 500 };
+    let total_work = months.len().saturating_mul(chunk_count).max(1);
+    let mut processed_work = 0usize;
     info!("Syncing {} symbols across {} months", total, months.len());
 
     for (m_start, m_end) in &months {
@@ -309,13 +312,15 @@ pub async fn sync_daily_bars(
                                         .collect();
 
                                     if !bars.is_empty() {
+                                        let returned_symbols: std::collections::HashSet<String> =
+                                            bars.iter().map(|bar| bar.symbol.clone()).collect();
                                         total_rows += bars.len();
                                         repository::upsert_daily_bars_batch(
                                             pool, &bars, dv_id, "tushare",
                                         )
                                         .await?;
-                                        for s in chunk {
-                                            synced.insert(s.clone());
+                                        for symbol in returned_symbols {
+                                            synced.insert(symbol);
                                         }
                                     }
                                 }
@@ -349,6 +354,17 @@ pub async fn sync_daily_bars(
                 offset += page_limit;
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             }
+            processed_work += 1;
+            let progress = ((processed_work * 100) / total_work).min(99) as i32;
+            repository::heartbeat_sync_task(
+                pool,
+                &task_id,
+                total as i32,
+                synced.len() as i32,
+                failed.len() as i32,
+                progress,
+            )
+            .await?;
         }
         if total_rows % 50000 == 0 {
             info!("Daily sync: {} rows", total_rows);
@@ -415,6 +431,22 @@ fn years_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate
         result.push((cursor, actual_end));
         // Move to first day of next year
         cursor = NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap_or(end + chrono::Duration::days(1));
+    }
+    result
+}
+
+fn date_chunks_by_days(
+    start: NaiveDate,
+    end: NaiveDate,
+    chunk_days: i64,
+) -> Vec<(NaiveDate, NaiveDate)> {
+    let chunk_days = chunk_days.max(1);
+    let mut result = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        let chunk_end = (cursor + chrono::Duration::days(chunk_days - 1)).min(end);
+        result.push((cursor, chunk_end));
+        cursor = chunk_end + chrono::Duration::days(1);
     }
     result
 }
@@ -737,6 +769,89 @@ pub async fn sync_fund_basic(pool: &PgPool, client: &TushareClient) -> Result<us
 
 // ─── sync_fund_daily (ETF/LOF 基金日线) ──────────────────────────
 
+fn fund_daily_bars_from_maps(maps: &[Map<String, Value>]) -> Vec<MarketStockDailyBar> {
+    maps.iter()
+        .filter_map(|item| {
+            let ts_code = get_str(item, "ts_code");
+            Some(MarketStockDailyBar {
+                symbol: ts_code.to_string(),
+                trade_date: to_date(&get_str(item, "trade_date"))?,
+                open: to_decimal(get_f64(item, "open")),
+                high: to_decimal(get_f64(item, "high")),
+                low: to_decimal(get_f64(item, "low")),
+                close: to_decimal(get_f64(item, "close")),
+                pre_close: get_f64(item, "pre_close").and_then(|v| Decimal::from_f64_retain(v)),
+                change_pct: get_f64(item, "pct_chg")
+                    .and_then(|v| Decimal::from_f64_retain(v / 100.0)),
+                volume: to_decimal(get_f64(item, "vol")),
+                amount: to_decimal(get_f64(item, "amount")),
+            })
+        })
+        .collect()
+}
+
+async fn record_fund_daily_completed_attempt(
+    pool: &PgPool,
+    symbol: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    task_id: &str,
+    bars: &[MarketStockDailyBar],
+    record_exact_zero_days: bool,
+) -> Result<(), sqlx::Error> {
+    repository::upsert_sync_attempt(
+        pool,
+        "fund_daily",
+        symbol,
+        start,
+        end,
+        task_id,
+        "completed",
+        bars.len() as i64,
+        None,
+    )
+    .await?;
+
+    if !record_exact_zero_days {
+        return Ok(());
+    }
+
+    let present_dates = bars
+        .iter()
+        .map(|bar| bar.trade_date)
+        .collect::<std::collections::HashSet<_>>();
+    let open_dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT DISTINCT trade_date
+         FROM market_trade_calendar
+         WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+         ORDER BY trade_date",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
+
+    for date in open_dates {
+        if present_dates.contains(&date) {
+            continue;
+        }
+        repository::upsert_sync_attempt(
+            pool,
+            "fund_daily",
+            symbol,
+            date,
+            date,
+            task_id,
+            "completed",
+            0,
+            Some("upstream fund_daily returned no row for this open date"),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 pub async fn sync_fund_daily(
     pool: &PgPool,
     client: &TushareClient,
@@ -786,6 +901,7 @@ pub async fn sync_fund_daily(
     // Rate-limit tracking: max 4000 calls/hr, target ~3000 calls/hr = 50 calls/min
     let mut calls_this_minute = 0u32;
     let max_calls_per_minute = 45u32; // conservative: 45 × 60 = 2700/hr, well under 4000 limit
+    let record_exact_zero_days = symbols.len() <= 32;
 
     for (y_start, y_end) in &years {
         let sd = y_start.format("%Y%m%d").to_string();
@@ -804,39 +920,22 @@ pub async fn sync_fund_daily(
             {
                 Ok(resp) => {
                     calls_this_minute += 1;
-                    if let Some(data) = resp.data {
-                        let maps = data.to_maps();
-                        if maps.is_empty() {
-                            continue;
-                        }
-
-                        let bars: Vec<MarketStockDailyBar> = maps
-                            .iter()
-                            .filter_map(|item| {
-                                let ts_code = get_str(item, "ts_code");
-                                Some(MarketStockDailyBar {
-                                    symbol: ts_code.to_string(),
-                                    trade_date: to_date(&get_str(item, "trade_date"))?,
-                                    open: to_decimal(get_f64(item, "open")),
-                                    high: to_decimal(get_f64(item, "high")),
-                                    low: to_decimal(get_f64(item, "low")),
-                                    close: to_decimal(get_f64(item, "close")),
-                                    pre_close: get_f64(item, "pre_close")
-                                        .and_then(|v| Decimal::from_f64_retain(v)),
-                                    change_pct: get_f64(item, "pct_chg")
-                                        .and_then(|v| Decimal::from_f64_retain(v / 100.0)),
-                                    volume: to_decimal(get_f64(item, "vol")),
-                                    amount: to_decimal(get_f64(item, "amount")),
-                                })
-                            })
-                            .collect();
-
-                        if !bars.is_empty() {
-                            total_rows += bars.len();
-                            repository::upsert_daily_bars_batch(pool, &bars, dv_id, "tushare")
-                                .await?;
-                        }
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    let bars = fund_daily_bars_from_maps(&maps);
+                    if !bars.is_empty() {
+                        total_rows += bars.len();
+                        repository::upsert_daily_bars_batch(pool, &bars, dv_id, "tushare").await?;
                     }
+                    record_fund_daily_completed_attempt(
+                        pool,
+                        symbol,
+                        *y_start,
+                        *y_end,
+                        &task_id,
+                        &bars,
+                        record_exact_zero_days,
+                    )
+                    .await?;
                 }
                 Err(e) => {
                     let err_str = e.to_string();
@@ -855,50 +954,60 @@ pub async fn sync_fund_daily(
                         {
                             Ok(resp) => {
                                 calls_this_minute += 1;
-                                if let Some(data) = resp.data {
-                                    let maps = data.to_maps();
-                                    if maps.is_empty() {
-                                        continue;
-                                    }
-                                    let bars: Vec<MarketStockDailyBar> = maps
-                                        .iter()
-                                        .filter_map(|item| {
-                                            let ts_code = get_str(item, "ts_code");
-                                            Some(MarketStockDailyBar {
-                                                symbol: ts_code.to_string(),
-                                                trade_date: to_date(&get_str(item, "trade_date"))?,
-                                                open: to_decimal(get_f64(item, "open")),
-                                                high: to_decimal(get_f64(item, "high")),
-                                                low: to_decimal(get_f64(item, "low")),
-                                                close: to_decimal(get_f64(item, "close")),
-                                                pre_close: get_f64(item, "pre_close")
-                                                    .and_then(|v| Decimal::from_f64_retain(v)),
-                                                change_pct: get_f64(item, "pct_chg").and_then(
-                                                    |v| Decimal::from_f64_retain(v / 100.0),
-                                                ),
-                                                volume: to_decimal(get_f64(item, "vol")),
-                                                amount: to_decimal(get_f64(item, "amount")),
-                                            })
-                                        })
-                                        .collect();
-                                    if !bars.is_empty() {
-                                        total_rows += bars.len();
-                                        repository::upsert_daily_bars_batch(
-                                            pool, &bars, dv_id, "tushare",
-                                        )
-                                        .await?;
-                                    }
+                                let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                                let bars = fund_daily_bars_from_maps(&maps);
+                                if !bars.is_empty() {
+                                    total_rows += bars.len();
+                                    repository::upsert_daily_bars_batch(
+                                        pool, &bars, dv_id, "tushare",
+                                    )
+                                    .await?;
                                 }
+                                record_fund_daily_completed_attempt(
+                                    pool,
+                                    symbol,
+                                    *y_start,
+                                    *y_end,
+                                    &task_id,
+                                    &bars,
+                                    record_exact_zero_days,
+                                )
+                                .await?;
                             }
                             Err(e2) => {
                                 warn!(
                                     "fund_daily retry also failed for {} in {}-{}: {}",
                                     symbol, sd, ed, e2
                                 );
+                                let error_message = e2.to_string();
+                                repository::upsert_sync_attempt(
+                                    pool,
+                                    "fund_daily",
+                                    symbol,
+                                    *y_start,
+                                    *y_end,
+                                    &task_id,
+                                    "failed",
+                                    0,
+                                    Some(&error_message),
+                                )
+                                .await?;
                             }
                         }
                     } else {
                         warn!("fund_daily failed for {} in {}-{}: {}", symbol, sd, ed, e);
+                        repository::upsert_sync_attempt(
+                            pool,
+                            "fund_daily",
+                            symbol,
+                            *y_start,
+                            *y_end,
+                            &task_id,
+                            "failed",
+                            0,
+                            Some(&err_str),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -3026,6 +3135,85 @@ async fn record_event_sync_completion(
     Ok(())
 }
 
+async fn backfill_event_sync_completion_markers(
+    pool: &PgPool,
+    task_type: &str,
+    source: &str,
+    event_table: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<u64, String> {
+    let sql = format!(
+        "WITH calendar AS (
+           SELECT DISTINCT trade_date
+           FROM market_trade_calendar
+           WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+         ),
+         counts AS (
+           SELECT trade_date, COUNT(*)::int4 AS row_count
+           FROM {event_table}
+           WHERE trade_date >= $1 AND trade_date <= $2
+           GROUP BY trade_date
+         )
+         INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status,
+            total_count, success_count, failed_count, progress,
+            last_heartbeat_at, started_at, completed_at)
+         SELECT $3 || '-' || to_char(c.trade_date, 'YYYYMMDD'),
+                $3, $4, c.trade_date, c.trade_date, 'completed',
+                COALESCE(counts.row_count, 0), COALESCE(counts.row_count, 0), 0, 100,
+                now(), now(), now()
+         FROM calendar c
+         LEFT JOIN counts USING (trade_date)
+         ON CONFLICT (task_id) DO UPDATE SET
+            status='completed',
+            source=CASE
+                WHEN data_sync_task.source LIKE 'tushare:%' THEN data_sync_task.source
+                ELSE EXCLUDED.source
+            END,
+            start_date=EXCLUDED.start_date,
+            end_date=EXCLUDED.end_date,
+            total_count=EXCLUDED.total_count,
+            success_count=EXCLUDED.success_count,
+            failed_count=0,
+            progress=100,
+            last_heartbeat_at=now(),
+            completed_at=now()"
+    );
+    sqlx::query(&sql)
+        .bind(start)
+        .bind(end)
+        .bind(task_type)
+        .bind(source)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected())
+        .map_err(|e| format!("补齐{}完成标记失败: {}", task_type, e))
+}
+
+pub async fn backfill_suspension_completion_markers(
+    pool: &PgPool,
+    start_date: &str,
+    end_date: &str,
+) -> Result<u64, String> {
+    let start = NaiveDate::parse_from_str(start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date解析: {}", e))?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date解析: {}", e))?;
+    if start > end {
+        return Err("start_date 不能晚于 end_date".to_string());
+    }
+    backfill_event_sync_completion_markers(
+        pool,
+        "suspension_daily",
+        "derived:susp_existing",
+        "market_stock_suspension",
+        start,
+        end,
+    )
+    .await
+}
+
 /// 同步股票停牌/复牌信息。
 /// 从 Tushare suspend_d API 获取当日停牌股票列表。
 pub async fn sync_suspension(
@@ -3089,6 +3277,169 @@ pub async fn sync_suspension(
     );
     record_event_sync_completion(pool, "suspension_daily", "tushare:suspend_d", d, total).await?;
     Ok(total)
+}
+
+/// 同步停牌/复牌信息（日期范围），并为零停牌交易日写入官方完成标记。
+///
+/// suspend_d 的 range 参数在当前代理路径上会长时间无响应；这里显式按
+/// 交易日调用单日官方接口，优先保证可审计完整性。
+pub async fn sync_suspension_range(
+    pool: &PgPool,
+    client: &TushareClient,
+    start_date: &str,
+    end_date: &str,
+) -> Result<usize, String> {
+    let start = NaiveDate::parse_from_str(start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date解析: {}", e))?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date解析: {}", e))?;
+    if start > end {
+        return Err("start_date 不能晚于 end_date".to_string());
+    }
+
+    let trade_dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT DISTINCT trade_date
+         FROM market_trade_calendar
+         WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+         ORDER BY trade_date",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("查询交易日历失败: {}", e))?;
+
+    let mut total = 0usize;
+    for trade_date in trade_dates {
+        let trade_date_s = trade_date.format("%Y%m%d").to_string();
+        let day_count = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            sync_suspension(pool, client, &trade_date_s).await
+        })
+        .await
+        .map_err(|_| format!("suspend_d API 超时: {}", trade_date_s))??;
+        total += day_count;
+    }
+
+    info!(
+        total,
+        start = start_date,
+        end = end_date,
+        "停牌范围数据同步完成"
+    );
+    Ok(total)
+}
+
+/// 从已同步的官方日线缺失中派生历史停牌。
+///
+/// Tushare `suspend_d` 在部分早期历史日期可能返回 0 行，但同日全量 daily
+/// 同步不会返回停牌股票行情。对已上市、未退市且缺少同日 daily bar 的 A 股，
+/// 记录为派生停牌事实；不补价格，不跨日推断。
+pub async fn derive_suspension_from_daily_absence(
+    pool: &PgPool,
+    start_date: &str,
+    end_date: &str,
+) -> Result<u64, String> {
+    let start = NaiveDate::parse_from_str(start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date解析: {}", e))?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date解析: {}", e))?;
+    if start > end {
+        return Err("start_date 不能晚于 end_date".to_string());
+    }
+
+    let inserted = sqlx::query(
+        "WITH calendar AS (
+           SELECT DISTINCT trade_date
+           FROM market_trade_calendar
+           WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+         ),
+         expected AS (
+           SELECT DISTINCT s.symbol, c.trade_date
+           FROM calendar c
+           JOIN market_stock s
+             ON s.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+            AND s.list_date IS NOT NULL
+            AND s.list_date <= c.trade_date
+            AND (s.delist_date IS NULL OR s.delist_date >= c.trade_date)
+         ),
+         missing AS (
+           SELECT e.symbol, e.trade_date
+           FROM expected e
+           LEFT JOIN market_stock_daily_bar_adj bar
+             ON bar.symbol = e.symbol AND bar.trade_date = e.trade_date
+           LEFT JOIN market_stock_suspension susp
+             ON susp.symbol = e.symbol AND susp.trade_date = e.trade_date
+           WHERE bar.symbol IS NULL
+             AND susp.symbol IS NULL
+         )
+         INSERT INTO market_stock_suspension (symbol, trade_date, suspend_type)
+         SELECT symbol, trade_date, 'S'
+         FROM missing
+         ON CONFLICT (symbol, trade_date) DO NOTHING",
+    )
+    .bind(start)
+    .bind(end)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("派生停牌缺失失败: {}", e))?
+    .rows_affected();
+
+    sqlx::query(
+        "WITH calendar AS (
+           SELECT DISTINCT trade_date
+           FROM market_trade_calendar
+           WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+         ),
+         counts AS (
+           SELECT trade_date, COUNT(*)::int4 AS row_count
+           FROM market_stock_suspension
+           WHERE trade_date >= $1 AND trade_date <= $2
+           GROUP BY trade_date
+         )
+         INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status,
+            total_count, success_count, failed_count, progress,
+            last_heartbeat_at, started_at, completed_at)
+         SELECT 'suspension_daily-' || to_char(c.trade_date, 'YYYYMMDD'),
+                'suspension_daily',
+                CASE
+                  WHEN COALESCE(counts.row_count, 0) > 0
+                  THEN 'derived:daily_absence_suspension'
+                  ELSE 'tushare:suspend_d'
+                END,
+                c.trade_date, c.trade_date, 'completed',
+                COALESCE(counts.row_count, 0), COALESCE(counts.row_count, 0), 0, 100,
+                now(), now(), now()
+         FROM calendar c
+         LEFT JOIN counts USING (trade_date)
+         ON CONFLICT (task_id) DO UPDATE SET
+            status='completed',
+            source=CASE
+              WHEN COALESCE(EXCLUDED.total_count, 0) > 0
+               AND NOT (data_sync_task.source LIKE 'tushare:%' AND data_sync_task.total_count > 0)
+              THEN 'derived:daily_absence_suspension'
+              ELSE data_sync_task.source
+            END,
+            total_count=EXCLUDED.total_count,
+            success_count=EXCLUDED.success_count,
+            failed_count=0,
+            progress=100,
+            last_heartbeat_at=now(),
+            completed_at=now()",
+    )
+    .bind(start)
+    .bind(end)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("记录派生停牌完成标记失败: {}", e))?;
+
+    info!(
+        inserted,
+        start = start_date,
+        end = end_date,
+        "从日线缺失派生历史停牌完成"
+    );
+    Ok(inserted)
 }
 
 /// 获取指定日期停牌的股票列表 (用于选股过滤)
@@ -3156,29 +3507,64 @@ pub async fn sync_limit_list_range(
     start_date: &str,
     end_date: &str,
 ) -> Result<usize, String> {
-    let resp = client
-        .limit_list_d(None, None, Some(start_date), Some(end_date))
-        .await
-        .map_err(|e| format!("limit_list_d range API: {}", e))?;
-
-    let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
     let mut total = 0usize;
+    let start = NaiveDate::parse_from_str(start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date解析: {}", e))?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date解析: {}", e))?;
+    if start > end {
+        return Err("start_date 不能晚于 end_date".to_string());
+    }
 
-    for item in &maps {
-        let ts_code = item["ts_code"].as_str().unwrap_or("");
-        let trade_date_str = item["trade_date"].as_str().unwrap_or("");
-        if ts_code.is_empty() || trade_date_str.is_empty() {
-            continue;
-        }
-
-        let d = NaiveDate::parse_from_str(trade_date_str, "%Y%m%d")
-            .map_err(|_| "日期解析".to_string())?;
-
-        sqlx::query(
-            "INSERT INTO market_stock_limit (symbol, trade_date) VALUES ($1, $2) ON CONFLICT (symbol, trade_date) DO NOTHING",
+    for (chunk_start, chunk_end) in date_chunks_by_days(start, end, 3) {
+        let chunk_start_s = chunk_start.format("%Y%m%d").to_string();
+        let chunk_end_s = chunk_end.format("%Y%m%d").to_string();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            client.limit_list_d(None, None, Some(&chunk_start_s), Some(&chunk_end_s)),
         )
-        .bind(ts_code).bind(d).execute(pool).await.map_err(|e| format!("insert: {}", e))?;
-        total += 1;
+        .await
+        .map_err(|_| {
+            format!(
+                "limit_list_d range API 超时: {}~{}",
+                chunk_start_s, chunk_end_s
+            )
+        })?
+        .map_err(|e| {
+            format!(
+                "limit_list_d range API {}~{}: {}",
+                chunk_start_s, chunk_end_s, e
+            )
+        })?;
+
+        sqlx::query("DELETE FROM market_stock_limit WHERE trade_date >= $1 AND trade_date <= $2")
+            .bind(chunk_start)
+            .bind(chunk_end)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("清除涨跌停范围数据 {}~{}: {}", chunk_start, chunk_end, e))?;
+
+        let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
+        for item in &maps {
+            let ts_code = item["ts_code"].as_str().unwrap_or("");
+            let trade_date_str = item["trade_date"].as_str().unwrap_or("");
+            if ts_code.is_empty() || trade_date_str.is_empty() {
+                continue;
+            }
+
+            let d = NaiveDate::parse_from_str(trade_date_str, "%Y%m%d")
+                .map_err(|_| "日期解析".to_string())?;
+
+            sqlx::query(
+                "INSERT INTO market_stock_limit (symbol, trade_date) VALUES ($1, $2) ON CONFLICT (symbol, trade_date) DO NOTHING",
+            )
+            .bind(ts_code)
+            .bind(d)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("insert: {}", e))?;
+            total += 1;
+        }
     }
 
     info!(
@@ -3188,6 +3574,182 @@ pub async fn sync_limit_list_range(
         "涨跌停范围同步完成"
     );
     Ok(total)
+}
+
+pub async fn derive_limit_list_from_daily_bars(
+    pool: &PgPool,
+    start_date: &str,
+    end_date: &str,
+) -> Result<u64, String> {
+    let start = NaiveDate::parse_from_str(start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date解析: {}", e))?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date解析: {}", e))?;
+    if start > end {
+        return Err("start_date 不能晚于 end_date".to_string());
+    }
+
+    let mut inserted = 0u64;
+    for (chunk_start, chunk_end) in years_in_range(start, end) {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| format!("启动派生涨跌停事务失败: {}", e))?;
+
+        sqlx::query("DELETE FROM market_stock_limit WHERE trade_date >= $1 AND trade_date <= $2")
+            .bind(chunk_start)
+            .bind(chunk_end)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                format!(
+                    "清除派生涨跌停旧数据({}~{})失败: {}",
+                    chunk_start, chunk_end, e
+                )
+            })?;
+
+        let chunk_inserted = sqlx::query(
+            "WITH open_calendar AS MATERIALIZED (
+               SELECT trade_date, row_number() OVER (ORDER BY trade_date) AS seq
+               FROM (
+                 SELECT DISTINCT trade_date
+                 FROM market_trade_calendar
+                 WHERE is_open = true
+               ) c
+             ),
+             stock_profile AS MATERIALIZED (
+               SELECT ms.symbol, ms.exchange, ms.market, ms.list_date, ms.delist_date,
+                      CASE
+                        WHEN ms.list_date IS NULL OR ms.list_date < ($1::date - 45) THEN 0::bigint
+                        ELSE (
+                          SELECT MIN(oc.seq)
+                          FROM open_calendar oc
+                          WHERE oc.trade_date >= ms.list_date
+                        )
+                      END AS list_seq
+               FROM market_stock ms
+               WHERE ms.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+             ),
+             st_ranges AS MATERIALIZED (
+               SELECT symbol, start_date, COALESCE(end_date, DATE '9999-12-31') AS end_date
+               FROM market_stock_name_history
+               WHERE is_st = true
+                 AND start_date <= $2
+                 AND COALESCE(end_date, DATE '9999-12-31') >= $1
+             ),
+             bars AS (
+               SELECT b.symbol, b.trade_date, b.close, b.pre_close,
+                      sp.exchange, sp.market, oc.seq AS trade_seq, sp.list_seq,
+                      BOOL_OR(sr.symbol IS NOT NULL) AS is_st_at_trade
+               FROM market_stock_daily_bar b
+               JOIN stock_profile sp ON sp.symbol = b.symbol
+               JOIN open_calendar oc ON oc.trade_date = b.trade_date
+               LEFT JOIN st_ranges sr
+                 ON sr.symbol = b.symbol
+                AND sr.start_date <= b.trade_date
+                AND sr.end_date >= b.trade_date
+               WHERE b.trade_date >= $1
+                 AND b.trade_date <= $2
+                 AND b.close IS NOT NULL
+                 AND b.pre_close IS NOT NULL
+                 AND b.pre_close > 0
+                 AND COALESCE(sp.list_date, DATE '1900-01-01') <= b.trade_date
+                 AND (sp.delist_date IS NULL OR sp.delist_date >= b.trade_date)
+               GROUP BY b.symbol, b.trade_date, b.close, b.pre_close,
+                        sp.exchange, sp.market, oc.seq, sp.list_seq
+             ),
+             classified AS (
+               SELECT symbol, trade_date,
+                      CASE
+                        WHEN is_st_at_trade THEN 0.05::numeric
+                        WHEN symbol LIKE '688%.SH' THEN 0.20::numeric
+                        WHEN (symbol LIKE '300%.SZ' OR symbol LIKE '301%.SZ')
+                             AND trade_date >= DATE '2020-08-24' THEN 0.20::numeric
+                        ELSE 0.10::numeric
+                      END AS limit_rate,
+                      close,
+                      pre_close
+               FROM bars
+               WHERE list_seq = 0 OR list_seq IS NULL OR trade_seq - list_seq + 1 > 5
+             ),
+             limit_rows AS (
+               SELECT symbol,
+                      trade_date,
+                      CASE
+                        WHEN close >= ROUND(pre_close * (1 + limit_rate), 2) - 0.001::numeric
+                          THEN 'U'
+                        WHEN close <= ROUND(pre_close * (1 - limit_rate), 2) + 0.001::numeric
+                          THEN 'D'
+                        ELSE NULL
+                      END AS limit_type
+               FROM classified
+             )
+             INSERT INTO market_stock_limit (symbol, trade_date, limit_type)
+             SELECT symbol, trade_date, limit_type
+             FROM limit_rows
+             WHERE limit_type IS NOT NULL
+             ON CONFLICT (symbol, trade_date) DO UPDATE SET limit_type = EXCLUDED.limit_type",
+        )
+        .bind(chunk_start)
+        .bind(chunk_end)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("派生涨跌停历史({}~{})失败: {}", chunk_start, chunk_end, e))?
+        .rows_affected();
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("提交派生涨跌停事务失败: {}", e))?;
+        inserted += chunk_inserted;
+        info!(
+            inserted = chunk_inserted,
+            start = %chunk_start,
+            end = %chunk_end,
+            "涨跌停历史分片已由日线派生"
+        );
+    }
+
+    let _ = backfill_event_sync_completion_markers(
+        pool,
+        "limit_daily",
+        "derived:daily_limit",
+        "market_stock_limit",
+        start,
+        end,
+    )
+    .await?;
+
+    info!(
+        inserted,
+        start = start_date,
+        end = end_date,
+        "涨跌停历史已由日线派生"
+    );
+    Ok(inserted)
+}
+
+pub async fn backfill_limit_completion_markers(
+    pool: &PgPool,
+    start_date: &str,
+    end_date: &str,
+    source: &str,
+) -> Result<u64, String> {
+    let start = NaiveDate::parse_from_str(start_date, "%Y%m%d")
+        .map_err(|e| format!("start_date解析: {}", e))?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y%m%d")
+        .map_err(|e| format!("end_date解析: {}", e))?;
+    if start > end {
+        return Err("start_date 不能晚于 end_date".to_string());
+    }
+    backfill_event_sync_completion_markers(
+        pool,
+        "limit_daily",
+        source,
+        "market_stock_limit",
+        start,
+        end,
+    )
+    .await
 }
 
 /// 获取 PIT 合规的 ST 股票列表（用于回测过滤条件）。
@@ -3270,6 +3832,32 @@ mod tests {
                 (
                     NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
                     NaiveDate::from_ymd_opt(2026, 3, 2).unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn date_chunks_by_days_splits_without_crossing_end_date() {
+        let start = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 8).unwrap();
+
+        let chunks = date_chunks_by_days(start, end, 3);
+
+        assert_eq!(
+            chunks,
+            vec![
+                (
+                    NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 6, 3).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2026, 6, 4).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 6, 6).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2026, 6, 7).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 6, 8).unwrap()
                 ),
             ]
         );

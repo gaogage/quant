@@ -434,7 +434,7 @@ pub async fn sync_status(
         limit_gap,
         limit_gap <= 2,
         Some(format!(
-            "最新完成/事件日期{}；2019-11-28前历史不可从Tushare修复",
+            "最新完成/事件日期{}；2019-11-28前历史需由日线按交易规则派生",
             limit_last
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| "无".to_string())
@@ -681,6 +681,29 @@ async fn admin_latest_market_date(db: &sqlx::PgPool) -> chrono::NaiveDate {
     .unwrap_or_else(|| chrono::Utc::now().date_naive())
 }
 
+async fn admin_first_open_trade_date(
+    db: &sqlx::PgPool,
+    start_date: chrono::NaiveDate,
+    end_date: chrono::NaiveDate,
+) -> Option<chrono::NaiveDate> {
+    sqlx::query_scalar::<_, chrono::NaiveDate>(
+        "SELECT trade_date
+         FROM market_trade_calendar
+         WHERE exchange = 'SSE'
+           AND is_open = true
+           AND trade_date >= $1
+           AND trade_date <= $2
+         ORDER BY trade_date ASC
+         LIMIT 1",
+    )
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+}
+
 async fn load_admin_strategy_config(
     db: &sqlx::PgPool,
     strategy_id: &str,
@@ -778,8 +801,15 @@ pub async fn repair_sync(
     let result: Json<serde_json::Value> = match req.name.as_str() {
         "A股日线" => {
             let symbols: Vec<String> = sqlx::query_scalar(
-                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
+                "SELECT symbol FROM market_stock
+                 WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+                   AND list_date IS NOT NULL
+                   AND list_date <= $1::date
+                   AND (delist_date IS NULL OR delist_date >= $2::date)
+                 ORDER BY symbol",
             )
+            .bind(target_date)
+            .bind(start_date)
             .fetch_all(&state.db)
             .await
             .unwrap_or_default();
@@ -828,8 +858,15 @@ pub async fn repair_sync(
         }
         "复权因子" => {
             let symbols: Vec<String> = sqlx::query_scalar(
-                "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
+                "SELECT symbol FROM market_stock
+                 WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
+                   AND list_date IS NOT NULL
+                   AND list_date <= $1::date
+                   AND (delist_date IS NULL OR delist_date >= $2::date)
+                 ORDER BY symbol",
             )
+            .bind(target_date)
+            .bind(start_date)
             .fetch_all(&state.db)
             .await
             .unwrap_or_default();
@@ -851,11 +888,35 @@ pub async fn repair_sync(
         }
         "涨跌停" => {
             let limit_earliest = chrono::NaiveDate::from_ymd_opt(2019, 11, 28).unwrap();
-            if target_date < limit_earliest {
-                return Json(serde_json::json!({
-                    "code": 1,
-                    "message": format!("{} 早于 Tushare limit_list_d 已验证最早可得日 2019-11-28，不能在正确性前提下修复", today)
-                })).into_response();
+            if start_date < limit_earliest {
+                let derive_end = target_date.min(limit_earliest - chrono::Duration::days(1));
+                if derive_end >= start_date {
+                    match quant_data::sync::derive_limit_list_from_daily_bars(
+                        &state.db,
+                        &admin_yyyymmdd(start_date),
+                        &admin_yyyymmdd(derive_end),
+                    )
+                    .await
+                    {
+                        Ok(count) if target_date < limit_earliest => {
+                            return Json(serde_json::json!({
+                                "code": 0,
+                                "message": format!(
+                                    "{}~{} 涨跌停已由日线派生 {} 条，并写入完成标记",
+                                    admin_yyyymmdd(start_date),
+                                    admin_yyyymmdd(derive_end),
+                                    count
+                                )
+                            }))
+                            .into_response();
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Json(serde_json::json!({"code": 1, "message": e}))
+                                .into_response()
+                        }
+                    }
+                }
             }
             match quant_data::sync::sync_limit_list(&state.db, &state.tushare, &today).await {
                 Ok(count) => Json(serde_json::json!({
@@ -962,11 +1023,16 @@ pub async fn repair_sync(
             // 触发 canonical full PIT 因子回测任务，并只更新目标策略配置。
             let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
             let end_date = today.clone();
-            let curve_start_date = if has_explicit_start_date {
-                recent_start.clone()
+            let requested_curve_start_date = if has_explicit_start_date {
+                start_date
             } else {
-                "20170103".to_string()
+                chrono::NaiveDate::from_ymd_opt(2017, 1, 3).unwrap()
             };
+            let curve_start_date =
+                admin_first_open_trade_date(&state.db, requested_curve_start_date, target_date)
+                    .await
+                    .unwrap_or(requested_curve_start_date);
+            let curve_start_date = admin_yyyymmdd(curve_start_date);
             let data_version_id: Option<String> = sqlx::query_scalar(
                 "SELECT data_version_id FROM data_version
                  WHERE data_version_id LIKE 'dv-v19-audit-ready-%'
@@ -1004,7 +1070,7 @@ pub async fn repair_sync(
                     "enabled": true,
                     "mode": "guard_only",
                     "min_rows": 30,
-                    "include_rebalance_warmup": true
+                    "include_rebalance_warmup": false
                 }
             });
             match reqwest::Client::new()

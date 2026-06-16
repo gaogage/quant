@@ -111,6 +111,8 @@ pub struct FactorEvaluation {
     pub rank_ic_ir: f64,
     /// IC time series (date -> IC)
     pub ic_series: Vec<(NaiveDate, f64)>,
+    /// Rank IC time series (date -> Rank IC)
+    pub rank_ic_series: Vec<(NaiveDate, f64)>,
     /// Quantile return spread (top group - bottom group)
     pub quantile_spread: f64,
     /// Per-quantile average forward returns

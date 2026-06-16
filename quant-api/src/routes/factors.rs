@@ -7326,6 +7326,59 @@ pub struct MaterializePitComboRequest {
     pub end_date: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EvaluateRollingPitRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    #[serde(default = "default_pit_combo_version")]
+    pub version: String,
+    #[serde(default = "default_pit_horizon")]
+    pub horizon: i16,
+    pub train_lookback_days: Option<i64>,
+    pub max_windows: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluateRollingPitPlan {
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    version: String,
+    horizon: i16,
+    train_lookback_days: i64,
+    max_windows: Option<usize>,
+}
+
+impl EvaluateRollingPitRequest {
+    fn into_plan(self) -> Result<EvaluateRollingPitPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2014, 1, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+        if self.horizon <= 0 {
+            return Err("horizon must be positive".to_string());
+        }
+        let train_lookback_days = self.train_lookback_days.unwrap_or(756);
+        if train_lookback_days < self.horizon as i64 + 30 {
+            return Err("train_lookback_days is too short for PIT IC evaluation".to_string());
+        }
+        let version = trim_or_default(Some(self.version), "1.0.0", "version")?;
+        Ok(EvaluateRollingPitPlan {
+            start_date,
+            end_date,
+            version,
+            horizon: self.horizon,
+            train_lookback_days,
+            max_windows: self.max_windows,
+        })
+    }
+}
+
 fn default_pit_combo_version() -> String {
     "1.0.0".to_string()
 }
@@ -7334,10 +7387,378 @@ fn default_pit_horizon() -> i16 {
     20
 }
 
+async fn load_rolling_pit_quarter_as_of_dates(
+    db: &sqlx::PgPool,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    max_windows: Option<usize>,
+) -> Result<Vec<NaiveDate>, String> {
+    let mut dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT MIN(trade_date) AS as_of
+         FROM (SELECT DISTINCT trade_date FROM market_stock_daily_bar_adj
+               WHERE trade_date >= $1 AND trade_date <= $2) d
+         GROUP BY date_trunc('quarter', trade_date)
+         ORDER BY 1",
+    )
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("load rolling PIT quarters: {}", error))?;
+    if let Some(max_windows) = max_windows {
+        dates.truncate(max_windows);
+    }
+    Ok(dates)
+}
+
+async fn load_candidate_technical_factors(
+    db: &sqlx::PgPool,
+    version: &str,
+    horizon: i16,
+) -> Result<Vec<(String, String)>, String> {
+    sqlx::query_as::<_, (String, String)>(
+        "WITH candidates AS (
+           SELECT factor_code, factor_version
+           FROM factor_evaluation
+           WHERE factor_version=$1
+             AND horizon=$2
+             AND factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)'
+           UNION
+           SELECT factor_code, version AS factor_version
+           FROM factor_definition
+           WHERE version=$1
+             AND status='active'
+             AND factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)'
+         )
+         SELECT DISTINCT factor_code, factor_version
+         FROM candidates
+         ORDER BY factor_code",
+    )
+    .bind(version)
+    .bind(horizon as i32)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("load candidate technical factors: {}", error))
+}
+
+async fn previous_open_trade_date(
+    db: &sqlx::PgPool,
+    as_of: NaiveDate,
+) -> Result<NaiveDate, String> {
+    sqlx::query_scalar(
+        "SELECT MAX(trade_date)
+         FROM market_trade_calendar
+         WHERE is_open = true AND trade_date < $1",
+    )
+    .bind(as_of)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("load previous trade date: {}", error))?
+    .flatten()
+    .ok_or_else(|| format!("no open trade date before {}", as_of))
+}
+
+async fn evaluate_factor_ic_window(
+    db: &sqlx::PgPool,
+    factors: &[(String, String)],
+    horizon: i16,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<usize, String> {
+    let horizon_usize = horizon as usize;
+    let fwd_rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
+        "SELECT symbol, trade_date, close
+         FROM market_stock_daily_bar_adj
+         WHERE trade_date >= $1 AND trade_date <= $2
+           AND close > 0
+         ORDER BY symbol, trade_date",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("load PIT IC close prices: {}", error))?;
+
+    let mut close_by_sym: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+    for (sym, date, close) in &fwd_rows {
+        if let Some(close) = close {
+            let close_f: f64 = (*close).try_into().unwrap_or(0.0);
+            if close_f > 0.0 {
+                close_by_sym
+                    .entry(sym.clone())
+                    .or_default()
+                    .push((*date, close_f));
+            }
+        }
+    }
+
+    let mut forward_returns: HashMap<(String, NaiveDate), f64> = HashMap::new();
+    for (sym, prices) in &close_by_sym {
+        for i in 0..prices.len().saturating_sub(horizon_usize) {
+            let (date, close_t) = prices[i];
+            let (_target_date, close_n) = prices[i + horizon_usize];
+            if close_t > 0.0 {
+                forward_returns.insert((sym.clone(), date), (close_n - close_t) / close_t);
+            }
+        }
+    }
+
+    let mut count = 0usize;
+    for (code, ver) in factors {
+        let fv_rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                NaiveDate,
+                Option<rust_decimal::Decimal>,
+                Option<NaiveDate>,
+            ),
+        >(
+            "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value), available_at
+             FROM factor_value
+             WHERE factor_code=$1 AND factor_version=$2
+               AND trade_date >= $3 AND trade_date <= $4
+               AND (available_at IS NULL OR available_at <= trade_date)
+             ORDER BY symbol, trade_date",
+        )
+        .bind(code)
+        .bind(ver)
+        .bind(start)
+        .bind(end)
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("load factor values {}@{}: {}", code, ver, error))?;
+
+        if fv_rows.len() < 100 {
+            continue;
+        }
+
+        let values = fv_rows
+            .into_iter()
+            .filter_map(|(sym, date, value, available_at)| {
+                value.map(|value| FactorValue {
+                    symbol: sym,
+                    date,
+                    value: value.try_into().unwrap_or(f64::NAN),
+                    available_at,
+                })
+            })
+            .filter(|value| value.value.is_finite())
+            .collect::<Vec<_>>();
+
+        if values.len() < 100 {
+            continue;
+        }
+
+        let output = FactorOutput {
+            name: code.clone(),
+            values,
+            metadata: FactorMetadata {
+                factor_name: code.clone(),
+                category: FactorCategory::PriceVolume,
+                version: ver.clone(),
+                params: json!({"rolling_pit_eval": true}),
+                computed_at: chrono::Utc::now(),
+                symbol_count: 0,
+                date_count: 0,
+                coverage_ratio: 0.0,
+                mean: 0.0,
+                std: 0.0,
+                min: 0.0,
+                max: 0.0,
+            },
+        };
+
+        let evaluation = evaluate(&output, &forward_returns, 5);
+        if evaluation.period_count == 0 {
+            continue;
+        }
+        let ic_json = serde_json::to_value(&evaluation.ic_series).unwrap_or(json!([]));
+        let rank_ic_json = serde_json::to_value(&evaluation.rank_ic_series).unwrap_or(json!([]));
+        let qr_json = serde_json::to_value(&evaluation.quantile_returns).unwrap_or(json!([]));
+        sqlx::query(
+            "INSERT INTO factor_evaluation (factor_code, factor_version, horizon, start_date, end_date,
+             mean_ic, ic_ir, mean_rank_ic, rank_ic_ir, ic_series, rank_ic_series,
+             quantile_spread, quantile_returns, period_count, symbol_count, total_pairs)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,0,0)
+             ON CONFLICT (factor_code, factor_version, horizon, start_date, end_date) DO UPDATE SET
+             mean_ic=EXCLUDED.mean_ic, ic_ir=EXCLUDED.ic_ir,
+             mean_rank_ic=EXCLUDED.mean_rank_ic, rank_ic_ir=EXCLUDED.rank_ic_ir,
+             ic_series=EXCLUDED.ic_series, rank_ic_series=EXCLUDED.rank_ic_series,
+             quantile_spread=EXCLUDED.quantile_spread, quantile_returns=EXCLUDED.quantile_returns,
+             period_count=EXCLUDED.period_count",
+        )
+        .bind(code)
+        .bind(ver)
+        .bind(horizon as i32)
+        .bind(evaluation.date_range.0)
+        .bind(evaluation.date_range.1)
+        .bind(evaluation.mean_ic)
+        .bind(evaluation.ic_ir)
+        .bind(evaluation.mean_rank_ic)
+        .bind(evaluation.rank_ic_ir)
+        .bind(&ic_json)
+        .bind(&rank_ic_json)
+        .bind(evaluation.quantile_spread)
+        .bind(&qr_json)
+        .bind(evaluation.period_count as i32)
+        .execute(db)
+        .await
+        .map_err(|error| format!("insert rolling PIT evaluation {}@{}: {}", code, ver, error))?;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+async fn run_rolling_pit_evaluation_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &EvaluateRollingPitPlan,
+) -> Result<serde_json::Value, String> {
+    let as_of_dates =
+        load_rolling_pit_quarter_as_of_dates(db, plan.start_date, plan.end_date, plan.max_windows)
+            .await?;
+    if as_of_dates.is_empty() {
+        return Err("no market quarters found for requested range".to_string());
+    }
+    let factors = load_candidate_technical_factors(db, &plan.version, plan.horizon).await?;
+    if factors.is_empty() {
+        return Err(format!(
+            "no technical factor_value found for version {}",
+            plan.version
+        ));
+    }
+
+    let total_windows = as_of_dates.len();
+    let mut evaluated_windows = 0usize;
+    let mut inserted_evaluations = 0usize;
+    for (index, as_of) in as_of_dates.iter().enumerate() {
+        let eval_end = previous_open_trade_date(db, *as_of).await?;
+        let eval_start = eval_end - chrono::Duration::days(plan.train_lookback_days);
+        let inserted =
+            evaluate_factor_ic_window(db, &factors, plan.horizon, eval_start, eval_end).await?;
+        inserted_evaluations = inserted_evaluations.saturating_add(inserted);
+        evaluated_windows += 1;
+        let progress = (((index + 1) as f64 / total_windows as f64) * 100.0).round() as i32;
+        let _ = sqlx::query(
+            "UPDATE data_sync_task
+             SET success_count=$2, total_count=$3, progress=$4, last_heartbeat_at=now()
+             WHERE task_id=$1",
+        )
+        .bind(task_id)
+        .bind(usize_to_i32(inserted_evaluations))
+        .bind(usize_to_i32(total_windows))
+        .bind(progress)
+        .execute(db)
+        .await;
+        info!(
+            task_id = %task_id,
+            as_of = %as_of,
+            eval_start = %eval_start,
+            eval_end = %eval_end,
+            inserted,
+            "rolling PIT IC window evaluated"
+        );
+    }
+
+    Ok(json!({
+        "windows": evaluated_windows,
+        "candidate_factors": factors.len(),
+        "inserted_evaluations": inserted_evaluations,
+    }))
+}
+
+/// POST /api/v1/quant/factors/evaluate-rolling-pit/background
+///
+/// Backfill PIT-safe rolling IC/ICIR evaluations by quarter. For each quarter
+/// as-of date in the requested range, labels are computed only from close
+/// prices available before that as-of date.
+pub async fn evaluate_rolling_pit_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EvaluateRollingPitRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => return Json(json!({"code": 1, "message": error})),
+    };
+    let task_id = background_factor_task_id();
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, 'evaluate_rolling_pit', 'factor', $2, $3, 'running', 0, 0, 0, 0, now(), 3600, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create rolling PIT evaluation task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+    tokio::spawn(async move {
+        let result = run_rolling_pit_evaluation_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(report) => {
+                let success_count = report["inserted_evaluations"].as_i64().unwrap_or(0) as i32;
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='completed', success_count=$2, total_count=$3, failed_count=0,
+                         progress=100, error_message=NULL, last_heartbeat_at=now(), completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(success_count)
+                .bind(report["windows"].as_i64().unwrap_or(0) as i32)
+                .execute(&state.db)
+                .await;
+                info!(task_id = %tid, ?report, "rolling PIT IC backfill completed");
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "rolling PIT IC backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed', failed_count=1, error_message=$2,
+                         last_heartbeat_at=now(), completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": "evaluate_rolling_pit",
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+            "horizon": plan.horizon,
+            "train_lookback_days": plan.train_lookback_days,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/materialize-pit-combo/background
 ///
 /// 后台物化 PIT 滚动 ICIR combo（供未来实盘调度器增量触发保鲜）。
-/// 默认区间 2017-01-01 ~ 今（滚动 IC 从 2016 起、2017 才有完整历史窗口）。
+/// 默认区间 2014-01-01 ~ 今。若早期季度缺少 PIT IC/ICIR，应先运行
+/// `/api/v1/quant/factors/evaluate-rolling-pit/background`。
 pub async fn materialize_pit_combo_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MaterializePitComboRequest>,
@@ -7346,7 +7767,7 @@ pub async fn materialize_pit_combo_background(
         .start_date
         .as_deref()
         .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok())
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2017, 1, 1).unwrap());
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2014, 1, 1).unwrap());
     let end = req
         .end_date
         .as_deref()
@@ -7916,6 +8337,8 @@ pub async fn evaluate_all_factors_background(
 
                 let evaluation = evaluate(&output, &forward_returns, 5);
                 let ic_json = serde_json::to_value(&evaluation.ic_series).unwrap_or(json!([]));
+                let rank_ic_json =
+                    serde_json::to_value(&evaluation.rank_ic_series).unwrap_or(json!([]));
                 let qr_json = serde_json::to_value(&evaluation.quantile_returns).unwrap_or(json!([]));
                 let insert_result = sqlx::query(
                     "INSERT INTO factor_evaluation (factor_code, factor_version, horizon, start_date, end_date,
@@ -7934,7 +8357,7 @@ pub async fn evaluate_all_factors_background(
                 .bind(evaluation.date_range.0).bind(evaluation.date_range.1)
                 .bind(evaluation.mean_ic).bind(evaluation.ic_ir)
                 .bind(evaluation.mean_rank_ic).bind(evaluation.rank_ic_ir)
-                .bind(&ic_json).bind(&ic_json)
+                .bind(&ic_json).bind(&rank_ic_json)
                 .bind(evaluation.quantile_spread).bind(&qr_json)
                 .bind(evaluation.period_count as i32)
                 .execute(&state.db).await;
@@ -8444,6 +8867,44 @@ mod tests {
         assert_eq!(plan.experiment_type, "phase7_factor_backfill_profile");
         assert_eq!(plan.dependencies, &["market_stock_daily_bar"]);
         assert_eq!(plan.statement_timeout_ms, 120_000);
+    }
+
+    #[test]
+    fn rolling_pit_evaluation_request_defaults_to_full_canonical_start() {
+        let req = EvaluateRollingPitRequest {
+            start_date: None,
+            end_date: Some("2026-06-15".to_string()),
+            version: "1.0.0".to_string(),
+            horizon: 20,
+            train_lookback_days: None,
+            max_windows: None,
+        };
+
+        let plan = req.into_plan().expect("valid rolling PIT plan");
+
+        assert_eq!(
+            plan.start_date,
+            NaiveDate::from_ymd_opt(2014, 1, 1).unwrap()
+        );
+        assert_eq!(plan.end_date, NaiveDate::from_ymd_opt(2026, 6, 15).unwrap());
+        assert_eq!(plan.horizon, 20);
+        assert_eq!(plan.train_lookback_days, 756);
+    }
+
+    #[test]
+    fn rolling_pit_evaluation_request_rejects_short_lookback() {
+        let req = EvaluateRollingPitRequest {
+            start_date: Some("20140101".to_string()),
+            end_date: Some("20141231".to_string()),
+            version: "1.0.0".to_string(),
+            horizon: 20,
+            train_lookback_days: Some(25),
+            max_windows: None,
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("train_lookback_days"));
     }
 
     #[test]

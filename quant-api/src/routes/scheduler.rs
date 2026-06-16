@@ -8,6 +8,7 @@
 //! 杠杆: 波动率目标 (vol_target, 20%年化波动率目标)
 //! 启动时通过 tokio::spawn 在后台运行，每 60 秒检查一次。
 
+use super::sync::{check_paper_account_data_readiness, DataReadinessGate};
 use super::trading;
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use ndarray::Array2;
@@ -32,6 +33,36 @@ async fn get_latest_data_version(db: &PgPool) -> String {
     .flatten();
     row.map(|(d,)| d)
         .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string())
+}
+
+fn parse_scheduler_date(value: &str) -> Option<NaiveDate> {
+    let trimmed = value.trim();
+    NaiveDate::parse_from_str(trimmed, "%Y%m%d")
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
+        .ok()
+}
+
+async fn first_open_trade_date_on_or_after(
+    db: &PgPool,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Option<NaiveDate> {
+    sqlx::query_scalar::<_, NaiveDate>(
+        "SELECT trade_date
+         FROM market_trade_calendar
+         WHERE exchange = 'SSE'
+           AND is_open = true
+           AND trade_date >= $1
+           AND trade_date <= $2
+         ORDER BY trade_date ASC
+         LIMIT 1",
+    )
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
 }
 
 /// 盘中调仓时获取 ETF 当日实时价格（通过 Tushare fund_daily API）
@@ -185,7 +216,7 @@ fn default_blend_weight() -> f64 {
     0.5
 }
 fn default_combo_name() -> String {
-    "phase7_price_volume_expanded_v1".into()
+    "full_pit_icir_37f".into()
 }
 fn default_top_n() -> i64 {
     30
@@ -223,12 +254,102 @@ impl Default for StrategyConfig {
             default_weights: vec![0.12, 0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
             signal_source: "prediction_blend".into(),
             prediction_blend_weight: 0.5,
-            combo_name: "phase7_price_volume_expanded_v1".into(),
+            combo_name: "full_pit_icir_37f".into(),
             top_n: 30,
             prediction_set_id: None,
             dynamic_target_cap: 0.06,
             score_direction: "descending".into(),
         }
+    }
+}
+
+fn normalize_cron_expr(expr: &str) -> String {
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    if parts.len() == 5 {
+        format!("0 {}", parts.join(" "))
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn scheduled_task_time_minutes(expr: &str) -> Result<u32, String> {
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    let (minute_idx, hour_idx) = match parts.len() {
+        5 => (0, 1),
+        6 | 7 => (1, 2),
+        _ => return Err(format!("CRON 表达式 '{}' 字段数不是 5/6/7", expr)),
+    };
+    let minute = parts[minute_idx]
+        .parse::<u32>()
+        .map_err(|_| format!("CRON 表达式 '{}' 分字段不是固定数字", expr))?;
+    let hour = parts[hour_idx]
+        .parse::<u32>()
+        .map_err(|_| format!("CRON 表达式 '{}' 时字段不是固定数字", expr))?;
+    if minute > 59 || hour > 23 {
+        return Err(format!("CRON 表达式 '{}' 时/分超出范围", expr));
+    }
+    Ok(hour * 60 + minute)
+}
+
+fn pre_trade_factor_combo(sc: &StrategyConfig) -> &str {
+    let combo = sc.combo_name.trim();
+    if combo.is_empty() {
+        "full_pit_icir_37f"
+    } else {
+        combo
+    }
+}
+
+fn is_a_share_symbol(symbol: &str) -> bool {
+    let Some((code, suffix)) = symbol.split_once('.') else {
+        return false;
+    };
+    if !matches!(suffix, "SH" | "SZ") || code.len() != 6 {
+        return false;
+    }
+    matches!(code.as_bytes().first(), Some(b'0' | b'3' | b'6'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_cron_expr_accepts_existing_five_field_task_crons() {
+        assert_eq!(normalize_cron_expr("0 9 * * 1-5"), "0 0 9 * * 1-5");
+        assert_eq!(normalize_cron_expr("30 16 * * 1-5"), "0 30 16 * * 1-5");
+        assert_eq!(normalize_cron_expr("0 30 16 * * 1-5"), "0 30 16 * * 1-5");
+    }
+
+    #[test]
+    fn scheduled_task_time_supports_five_and_six_field_crons() {
+        assert_eq!(
+            scheduled_task_time_minutes("30 16 * * 1-5").expect("five field cron"),
+            16 * 60 + 30
+        );
+        assert_eq!(
+            scheduled_task_time_minutes("0 30 10 * * 1-5").expect("six field cron"),
+            10 * 60 + 30
+        );
+        assert!(scheduled_task_time_minutes("not a cron").is_err());
+    }
+
+    #[test]
+    fn pre_trade_factor_combo_uses_active_strategy_combo_not_price_volume_fallback() {
+        let mut strategy = StrategyConfig::default();
+        strategy.combo_name = "full_pit_icir_37f".to_string();
+
+        assert_eq!(pre_trade_factor_combo(&strategy), "full_pit_icir_37f");
+    }
+
+    #[test]
+    fn a_share_event_gate_only_targets_main_a_share_symbols() {
+        assert!(is_a_share_symbol("000001.SZ"));
+        assert!(is_a_share_symbol("600000.SH"));
+        assert!(is_a_share_symbol("300750.SZ"));
+        assert!(!is_a_share_symbol("518880.SH"));
+        assert!(!is_a_share_symbol("513500.SH"));
+        assert!(!is_a_share_symbol("AAPL.US"));
     }
 }
 
@@ -316,14 +437,33 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 );
                 let client = reqwest::Client::new();
                 let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
+                let end_date_naive = chrono::Utc::now().date_naive();
+                let requested_start_date = params
+                    .get("start_date")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_scheduler_date)
+                    .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2014, 1, 2).unwrap());
+                let start_date =
+                    first_open_trade_date_on_or_after(db, requested_start_date, end_date_naive)
+                        .await
+                        .unwrap_or(requested_start_date)
+                        .format("%Y%m%d")
+                        .to_string();
                 let dv = get_latest_data_version(db).await;
                 let mut payload = serde_json::json!({
                     "combo_name": combo, "strategy_version_id": "factor-combo-v1",
                     "data_version_id": dv, "top_n": top_n,
-                    "rebalance": "10", "start_date": "20060101", "end_date": end_date,
+                    "rebalance": params.get("rebalance").and_then(|v| v.as_str()).unwrap_or("10"),
+                    "start_date": start_date, "end_date": end_date,
                     "max_position_pct": 0.10, "max_gross_exposure": 0.95,
                     "benchmark": "000300.SH", "universe_profile": "main_board_non_st",
                     "score_direction": sc.score_direction,
+                    "effective_coverage": {
+                        "enabled": true,
+                        "mode": "guard_only",
+                        "min_rows": top_n.max(30),
+                        "include_rebalance_warmup": false
+                    }
                 });
                 // 因子+ML混合：带上策略指定的全周期预测集（无则选最新覆盖区间的 PIT 集）
                 if sc.signal_source == "prediction_blend" || sc.signal_source == "prediction" {
@@ -415,12 +555,13 @@ async fn run_scheduled_tasks(db: &PgPool) {
         }
 
         // 根据 CRON 表达式计算下次运行时间
-        let next = match cron::Schedule::from_str(cron_expr) {
+        let normalized_cron = normalize_cron_expr(cron_expr);
+        let next = match cron::Schedule::from_str(&normalized_cron) {
             Ok(schedule) => schedule.upcoming(chrono::Local).next(),
             Err(e) => {
                 warn!(
-                    "[scheduler] 任务 {} 的 CRON 表达式 '{}' 无效: {}，默认 1 天后",
-                    name, cron_expr, e
+                    "[scheduler] 任务 {} 的 CRON 表达式 '{}' 规范化为 '{}' 后仍无效: {}，默认 1 天后",
+                    name, cron_expr, normalized_cron, e
                 );
                 None
             }
@@ -609,7 +750,15 @@ async fn run_tick(
                 sync_date_str
             );
 
-            // Step 1: 同步最近交易日日线 + ETF日线 (T+1数据已就绪)
+            // Step 1: 先同步事件数据，避免停牌/涨跌停门禁被“完成标记”误放行。
+            if let Err(e) = quant_data::sync::sync_suspension(db, tushare, &sync_date_str).await {
+                warn!("[scheduler] T+1 停牌同步失败: {}", e);
+            }
+            if !sync_limit_with_retry(db, tushare, &sync_date_str).await {
+                warn!("[scheduler] T+1 涨跌停同步失败 (已重试)");
+            }
+
+            // Step 2: 同步最近交易日日线 + ETF日线 (T+1数据已就绪)
             let bar_dv = format!("dv-t1-{}", sync_date_str);
             let all_stocks: Vec<String> = sqlx::query_scalar(
                 "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
@@ -640,8 +789,18 @@ async fn run_tick(
                 &format!("etf-t1-{}", sync_date_str),
             )
             .await;
+            let index_codes = vec!["000300.SH".to_string()];
+            let _ = quant_data::sync::sync_index_daily(
+                db,
+                tushare,
+                &index_codes,
+                &sync_date_str,
+                &sync_date_str,
+                &format!("idx-t1-{}", sync_date_str),
+            )
+            .await;
 
-            // Step 2: 验证日线数据已就绪 (实际查询DB确认, 非盲等)
+            // Step 3: 验证日线数据已就绪 (实际查询DB确认, 非盲等)
             let mut retries = 0;
             let max_retries = 30; // 最多等5分钟 (30×10s)
             loop {
@@ -672,7 +831,7 @@ async fn run_tick(
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
 
-            // Step 3: 日线就绪后才触发因子回填
+            // Step 4: 日线就绪后才触发因子回填
             if retries < max_retries {
                 info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
                 let client = reqwest::Client::new();
@@ -684,6 +843,21 @@ async fn run_tick(
                     .json(&serde_json::json!({"start_date": backfill_start, "end_date": sync_date_str}))
                     .timeout(std::time::Duration::from_secs(10))
                     .send().await;
+                if sc.combo_name != "phase7_price_volume_expanded_v1" {
+                    match crate::routes::factors::materialize_pit_combo(
+                        db,
+                        pre_trade_factor_combo(sc),
+                        "1.0.0",
+                        20,
+                        sync_date - chrono::Duration::days(7),
+                        sync_date,
+                    )
+                    .await
+                    {
+                        Ok(rows) => info!("[scheduler] T+1 PIT combo 增量物化完成: {} 行", rows),
+                        Err(e) => warn!("[scheduler] T+1 PIT combo 增量物化失败: {}", e),
+                    }
+                }
             }
 
             info!("[scheduler] T+1 补同步完成 ({})", sync_date_str);
@@ -1042,33 +1216,59 @@ async fn validate_pre_trade_data(
         }
     }
 
-    // 3. 因子数据 — 缺了自动触发回填计算
-    let factor_combo = "phase7_price_volume_expanded_v1";
+    // 3. 策略声明的 PIT combo — 缺了自动触发对应物化，不能用旧 PV combo 代替 full PIT。
+    let factor_combo = pre_trade_factor_combo(sc);
     if let Some(gap_td) = check_factor_freshness(db, factor_combo, today, 2).await {
         info!(
             "[pre-trade] 因子({})落后{}交易日, 自动触发回填...",
             factor_combo, gap_td
         );
-        let client = reqwest::Client::new();
-        let backfill_start = (today - chrono::Duration::days(30))
-            .format("%Y%m%d")
-            .to_string();
-        let today_str_clone = today_str.clone();
-        let api_base = format!(
-            "http://localhost:{}",
-            std::env::var("PORT").unwrap_or_else(|_| "8080".into())
-        );
-        let trigger_ok = client
-            .post(format!(
-                "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
-                api_base
-            ))
-            .json(&serde_json::json!({"start_date": backfill_start, "end_date": today_str_clone}))
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
+        let materialize_start = today - chrono::Duration::days(30);
+        let trigger_ok = if factor_combo == "phase7_price_volume_expanded_v1" {
+            let client = reqwest::Client::new();
+            let backfill_start = materialize_start.format("%Y%m%d").to_string();
+            let today_str_clone = today_str.clone();
+            let api_base = format!(
+                "http://localhost:{}",
+                std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+            );
+            client
+                .post(format!(
+                    "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
+                    api_base
+                ))
+                .json(
+                    &serde_json::json!({"start_date": backfill_start, "end_date": today_str_clone}),
+                )
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+        } else {
+            match crate::routes::factors::materialize_pit_combo(
+                db,
+                factor_combo,
+                "1.0.0",
+                20,
+                materialize_start,
+                today,
+            )
             .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false);
+            {
+                Ok(rows) => {
+                    info!(
+                        "[pre-trade] PIT combo {} 物化完成: {} 行",
+                        factor_combo, rows
+                    );
+                    true
+                }
+                Err(e) => {
+                    warn!("[pre-trade] PIT combo {} 物化失败: {}", factor_combo, e);
+                    false
+                }
+            }
+        };
         if trigger_ok {
             // 轮询等待因子计算完成
             for retry in 0..20 {
@@ -1131,13 +1331,16 @@ async fn check_factor_freshness(
     today: NaiveDate,
     max_gap: i64,
 ) -> Option<i64> {
-    let max_row: Option<(chrono::NaiveDate,)> =
-        sqlx::query_as("SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name = $1")
-            .bind(combo)
-            .fetch_optional(db)
-            .await
-            .ok()
-            .flatten();
+    let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT MAX(trade_date) FROM multi_factor_value
+             WHERE combo_name = $1
+               AND COALESCE(available_at, trade_date) <= trade_date",
+    )
+    .bind(combo)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
     if let Some((max_dt,)) = max_row {
         let gap: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
@@ -1148,7 +1351,7 @@ async fn check_factor_freshness(
             None
         }
     } else {
-        None // 因子表为空不阻止调仓（可能是首次运行）
+        Some(999)
     }
 }
 
@@ -1163,6 +1366,48 @@ async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
     Ok(row.and_then(|(v,)| v).unwrap_or(false))
 }
 
+async fn a_share_trade_block_reason(
+    db: &PgPool,
+    symbol: &str,
+    trade_date: NaiveDate,
+) -> Result<Option<String>, String> {
+    if !is_a_share_symbol(symbol) {
+        return Ok(None);
+    }
+
+    let suspended: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM market_stock_suspension
+            WHERE symbol=$1 AND trade_date=$2 AND COALESCE(suspend_type, 'S') = 'S'
+         )",
+    )
+    .bind(symbol)
+    .bind(trade_date)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("停牌检查失败 {} {}: {}", symbol, trade_date, e))?;
+    if suspended {
+        return Ok(Some(format!("{} {} 停牌", symbol, trade_date)));
+    }
+
+    let limited: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM market_stock_limit
+            WHERE symbol=$1 AND trade_date=$2
+         )",
+    )
+    .bind(symbol)
+    .bind(trade_date)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("涨跌停检查失败 {} {}: {}", symbol, trade_date, e))?;
+    if limited {
+        return Ok(Some(format!("{} {} 涨跌停", symbol, trade_date)));
+    }
+
+    Ok(None)
+}
+
 /// 14:45 调仓前获取当日行情 + 停牌/涨跌停数据
 async fn sync_daily_data_for_today(
     db: &PgPool,
@@ -1173,8 +1418,9 @@ async fn sync_daily_data_for_today(
     let date_str = date.format("%Y%m%d").to_string();
     let empty: Vec<String> = vec![];
 
-    // 停牌数据 (直接调用)
+    // 事件数据先同步，交易门禁依赖它们。
     let _ = quant_data::sync::sync_suspension(db, tushare, &date_str).await;
+    let _ = sync_limit_with_retry(db, tushare, &date_str).await;
 
     // A股日线 (直接调用, symbols空→函数内自动获取全量)
     let dv_id = format!("dv-{}", date_str);
@@ -1204,7 +1450,7 @@ async fn sync_daily_data_for_today(
     )
     .await;
 
-    info!("[scheduler] 当日行情+停牌同步完成 ({})", date_str);
+    info!("[scheduler] 当日行情+停牌/涨跌停同步完成 ({})", date_str);
     Ok(())
 }
 
@@ -1223,6 +1469,15 @@ async fn sync_eod_data(
     .await
     .unwrap_or_default();
 
+    // ── 事件数据优先同步：即使后续 heavy EOD 任务失败，也不能让交易门禁缺停牌/涨跌停。──
+    if let Err(e) = quant_data::sync::sync_suspension(db, tushare, &date_str).await {
+        warn!("[scheduler] EOD 停牌数据同步失败: {}", e);
+    }
+    let limit_ok = sync_limit_with_retry(db, tushare, &date_str).await;
+    if !limit_ok {
+        warn!("[scheduler] ⚠ 涨跌停数据同步失败 (已重试)");
+    }
+
     // ── 当日日线 + ETF日线（收盘后通常已可获取）──
     let _ = quant_data::sync::sync_daily_bars(
         db,
@@ -1240,6 +1495,16 @@ async fn sync_eod_data(
         &date_str,
         &date_str,
         &format!("etf-eod-{}", date_str),
+    )
+    .await;
+    let index_codes = vec!["000300.SH".to_string()];
+    let _ = quant_data::sync::sync_index_daily(
+        db,
+        tushare,
+        &index_codes,
+        &date_str,
+        &date_str,
+        &format!("idx-eod-{}", date_str),
     )
     .await;
 
@@ -1266,20 +1531,13 @@ async fn sync_eod_data(
     .await;
 
     info!(
-        "[scheduler] 16:00 EOD 同步 (当日日线+ETF+基础指标+复权) ({})",
+        "[scheduler] 16:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权) ({})",
         date_str
     );
 
-    // ── 涨跌停数据同步 ──
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-    let limit_ok = sync_limit_with_retry(db, tushare, &date_str).await;
-    if !limit_ok {
-        warn!("[scheduler] ⚠ 涨跌停数据同步失败 (已重试)");
-    }
-
     // ── ML预测数据检查+补齐 ──
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    let pred_ok = ensure_prediction_coverage(db, tushare, date).await;
+    let pred_ok = ensure_prediction_coverage(db, tushare, date, &sc).await;
     if !pred_ok {
         warn!("[scheduler] ⚠ ML预测数据补齐失败, v16将降级为纯因子选股");
     }
@@ -1451,18 +1709,16 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
     .await
     .unwrap_or_default();
 
-    // 简单解析 CRON 的时和分字段
+    // 简单解析 CRON 的时和分字段，兼容 DB 里常见的 5 字段 cron 与 cron crate 需要的 6 字段 cron。
     let mut task_times: Vec<(String, u32, u32)> = Vec::new(); // (name, hour, minute)
     for (name, cron_str) in &tasks {
-        let parts: Vec<&str> = cron_str.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let (Ok(min), Ok(hour)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                task_times.push((name.clone(), hour, min));
-            } else {
-                issues.push(format!("{}: CRON 表达式 '{}' 无法解析", name, cron_str));
+        match scheduled_task_time_minutes(cron_str) {
+            Ok(time_minutes) => {
+                task_times.push((name.clone(), time_minutes / 60, time_minutes % 60))
             }
-        } else {
-            issues.push(format!("{}: CRON 表达式 '{}' 格式错误", name, cron_str));
+            Err(message) => {
+                issues.push(format!("{}: {}", name, message));
+            }
         }
     }
 
@@ -1544,6 +1800,7 @@ async fn ensure_prediction_coverage(
     db: &PgPool,
     _tushare: &TushareClient,
     date: chrono::NaiveDate,
+    sc: &StrategyConfig,
 ) -> bool {
     let latest_training: Option<(chrono::NaiveDate,)> = sqlx::query_as(
         "SELECT MAX(training_end_date) FROM prediction_set WHERE status = 'ready' AND training_end_date IS NOT NULL"
@@ -1567,7 +1824,7 @@ async fn ensure_prediction_coverage(
     }
 
     // 验证依赖
-    if !verify_training_dependencies(db, date).await {
+    if !verify_training_dependencies(db, date, pre_trade_factor_combo(sc)).await {
         warn!("[scheduler] ⚠ ML训练依赖数据不全, 跳过");
         return check_prediction_available(db, date).await;
     }
@@ -1715,7 +1972,11 @@ pub async fn rebuild_full_universe_prediction_set(db: &PgPool) -> Result<String,
 }
 
 /// 验证ML训练依赖的所有数据是否就绪
-async fn verify_training_dependencies(db: &PgPool, date: chrono::NaiveDate) -> bool {
+async fn verify_training_dependencies(
+    db: &PgPool,
+    date: chrono::NaiveDate,
+    combo_name: &str,
+) -> bool {
     let today = date;
     let threshold = today - chrono::Duration::days(2); // 2天内都算就绪
 
@@ -1742,16 +2003,28 @@ async fn verify_training_dependencies(db: &PgPool, date: chrono::NaiveDate) -> b
     .map(|(d,)| (today - d).num_days() < 60)
     .unwrap_or(false);
 
-    // 因子值 (pv combo)
+    // 因子值 (策略声明 combo，PIT available_at 不晚于 trade_date)
     let factor_ok: bool = sqlx::query_as::<_, (chrono::NaiveDate,)>(
-        "SELECT MAX(trade_date) FROM multi_factor_value WHERE combo_name = 'phase7_price_volume_expanded_v1' AND trade_date >= $1"
-    ).bind(threshold).fetch_optional(db).await.ok().flatten().map(|(d,)| d >= threshold).unwrap_or(false);
+        "SELECT MAX(trade_date) FROM multi_factor_value
+         WHERE combo_name = $1
+           AND trade_date >= $2
+           AND COALESCE(available_at, trade_date) <= trade_date",
+    )
+    .bind(combo_name)
+    .bind(threshold)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .map(|(d,)| d >= threshold)
+    .unwrap_or(false);
 
     let all_ok = daily_ok && adj_ok && factor_ok;
     info!(
-        "[scheduler] ML训练依赖检查: daily={} adj={} factor={} → {}",
+        "[scheduler] ML训练依赖检查: daily={} adj={} factor({})={} → {}",
         daily_ok,
         adj_ok,
+        combo_name,
         factor_ok,
         if all_ok { "OK" } else { "MISSING" }
     );
@@ -1859,6 +2132,20 @@ async fn generate_paper_signals_for_all(
         .map_err(|e| format!("count: {}", e))?;
 
         if done.0 > 0 {
+            continue;
+        }
+
+        if let Err(e) = check_paper_account_data_readiness(
+            db,
+            account_id,
+            None,
+            DataReadinessGate::BlockRequiredYellow,
+            "paper_intraday_trading",
+        )
+        .await
+        {
+            warn!("[paper] {} 数据门禁失败，跳过本次交易: {}", name, e);
+            send_quality_alert(db, &[format!("{}: {}", name, e)]).await;
             continue;
         }
 
@@ -2328,6 +2615,15 @@ async fn sync_positions_from_backtest(
         };
         if price <= rust_decimal::Decimal::ZERO {
             continue;
+        }
+        match a_share_trade_block_reason(db, symbol, date).await {
+            Ok(Some(reason)) => {
+                warn!("[paper] 跳过 A股计划交易: {}", reason);
+                send_quality_alert(db, &[format!("{}: {}", account_id, reason)]).await;
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => return Err(e),
         }
         let scaled_q = q * scale;
         let scaled_m = m * scale;

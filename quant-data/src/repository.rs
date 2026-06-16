@@ -1162,6 +1162,36 @@ pub async fn update_sync_task(
     Ok(())
 }
 
+pub async fn heartbeat_sync_task(
+    pool: &PgPool,
+    task_id: &str,
+    total: i32,
+    success: i32,
+    failed: i32,
+    progress: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"UPDATE data_sync_task
+           SET status = 'running',
+               total_count = $2,
+               success_count = $3,
+               failed_count = $4,
+               progress = LEAST(GREATEST($5, 0), 99),
+               last_heartbeat_at = now(),
+               started_at = COALESCE(started_at, now())
+           WHERE task_id = $1
+             AND status = 'running'"#,
+    )
+    .bind(task_id)
+    .bind(total)
+    .bind(success)
+    .bind(failed)
+    .bind(progress)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn fail_sync_task(
     pool: &PgPool,
     task_id: &str,

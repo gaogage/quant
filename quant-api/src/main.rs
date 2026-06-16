@@ -160,6 +160,10 @@ async fn main() {
             post(routes::sync::sync_suspension_backfill),
         )
         .route(
+            "/api/v1/quant/data/sync/suspension/derive-from-daily",
+            post(routes::sync::derive_suspension_from_daily),
+        )
+        .route(
             "/api/v1/quant/data/sync/limit",
             post(routes::sync::sync_limit_list),
         )
@@ -286,6 +290,10 @@ async fn main() {
         .route(
             "/api/v1/quant/factors/materialize-pit-combo/background",
             post(routes::factors::materialize_pit_combo_background),
+        )
+        .route(
+            "/api/v1/quant/factors/evaluate-rolling-pit/background",
+            post(routes::factors::evaluate_rolling_pit_background),
         )
         .route(
             "/api/v1/quant/factors/phase7-financial-quality-backfill/background",
@@ -649,8 +657,12 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", port);
     info!(%addr, "Quant API 启动");
 
-    // 启动后台调度器（数据同步 + 模拟交易）
-    routes::scheduler::start_scheduler(db_for_scheduler, tushare_for_scheduler, port);
+    // 启动后台调度器（数据同步 + 模拟交易）。本地接口验证可显式关闭，避免误触发 EOD 同步。
+    if std::env::var("QUANT_DISABLE_SCHEDULER").ok().as_deref() == Some("1") {
+        info!("后台调度器已通过 QUANT_DISABLE_SCHEDULER=1 跳过");
+    } else {
+        routes::scheduler::start_scheduler(db_for_scheduler, tushare_for_scheduler, port);
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

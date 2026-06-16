@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::routes::mvo_engine::{compute_metrics, simulate_v19_daily_returns};
 use crate::routes::scheduler::load_strategy_config;
+use crate::routes::sync::{check_paper_account_data_readiness, DataReadinessGate};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +63,15 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
 
     // 2. 加载策略配置（A股选股方式 + ETF + 杠杆参数都在策略里）
     let sc = load_strategy_config(db, strategy_id.as_deref().unwrap_or("v19")).await;
+
+    let readiness_report = check_paper_account_data_readiness(
+        db,
+        &account_id,
+        Some((start, end)),
+        DataReadinessGate::BlockRequiredRed,
+        "paper_replay_v19",
+    )
+    .await?;
 
     // 3. 清空账号旧数据
     for table in &[
@@ -179,6 +189,7 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
         "win_rate_pct": (m.win_rate * 1000.0).round() / 10.0,
         "trading_days": m.trading_days, "total_trades": total_trades,
         "leverage": if lev_enabled { lev_mult } else { 1.0 },
+        "data_readiness": readiness_report,
     }))
 }
 
