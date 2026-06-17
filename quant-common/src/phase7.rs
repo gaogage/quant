@@ -94,6 +94,7 @@ pub struct Phase7AlphaSourceAdmission {
 pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmission {
     let (role, reason) = match combo_name {
         "phase7_financial_quality_v1"
+        | "phase7_financial_quality_change_v1"
         | "phase7_industry_residual_quality_v1"
         | "phase7_growth_recovery_v1"
         | "phase7_quality_relative_strength_v1"
@@ -144,6 +145,7 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
     Phase7AlphaSourceAdmission {
         combo_name: match combo_name {
             "phase7_financial_quality_v1" => "phase7_financial_quality_v1",
+            "phase7_financial_quality_change_v1" => "phase7_financial_quality_change_v1",
             "phase7_industry_residual_quality_v1" => "phase7_industry_residual_quality_v1",
             "phase7_growth_recovery_v1" => "phase7_growth_recovery_v1",
             "phase7_quality_relative_strength_v1" => "phase7_quality_relative_strength_v1",
@@ -14010,6 +14012,15 @@ fn professional_trainable_alpha_admission_discovery_seed_trials() -> Vec<Value> 
             "alpha_first_low_impact_v1",
         ),
         (
+            "financial_quality_change_acceleration",
+            "phase7_financial_quality_change_v1",
+            ScoreDirection::Descending,
+            100usize,
+            "financial_quality_change",
+            "quality_mixed_state_risk_memory_router_v14",
+            "alpha_first_low_impact_v1",
+        ),
+        (
             "residual_confirm_5pct_ascending_top120",
             "phase7_quality_residual_confirm_5pct_v1",
             ScoreDirection::Ascending,
@@ -25762,6 +25773,7 @@ impl LayeredSearchConfig {
             Self::professional_execution_broad_financial_feature_stratified_discovery_default();
         config.combo_versions = phase7_base_trainable_combo_versions(&[
             "phase7_financial_quality_v1",
+            "phase7_financial_quality_change_v1",
             "phase7_industry_residual_quality_v1",
             "phase7_growth_recovery_v1",
             "phase7_quality_relative_strength_v1",
@@ -28953,6 +28965,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn phase7_financial_quality_change_is_p37_base_trainable_alpha_source() {
+        let admission = phase7_alpha_source_admission("phase7_financial_quality_change_v1");
+
+        assert_eq!(
+            admission.role,
+            Phase7AlphaSourceRole::BaseTrainable,
+            "financial quality acceleration must be admitted as a PIT base alpha"
+        );
+        assert_eq!(admission.combo_name, "phase7_financial_quality_change_v1");
+        assert!(admission.reason.contains("PIT"));
+    }
+
+    #[test]
+    fn professional_trainable_alpha_admission_discovery_includes_p37_quality_change_seed() {
+        let config =
+            LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(combo_names.contains("phase7_financial_quality_change_v1"));
+
+        let seed = config
+            .seed_trials
+            .iter()
+            .find(|seed| seed["combo_name"] == "phase7_financial_quality_change_v1")
+            .expect("P3.7 financial quality change seed");
+
+        assert_eq!(
+            seed["trainable_alpha_admission_profile"],
+            "financial_quality_change_acceleration"
+        );
+        assert_eq!(seed["alpha_source_family"], "financial_quality_change");
+        assert_eq!(seed["signal_source"], "factor_combo");
+        assert_eq!(seed["version"], "1.0.0");
+        assert!(
+            !seed.to_string().contains("pred-"),
+            "P3.7 first atom must stay a native PIT factor combo, not a prediction overlay"
+        );
     }
 
     #[test]

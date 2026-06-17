@@ -95,6 +95,15 @@ pub struct Phase7FinancialQualityBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7FinancialQualityChangeBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7IndustryResidualQualityBackfillRequest {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
@@ -249,6 +258,7 @@ struct SetBasedFactorBackfillPlan {
 
 type Phase7PriceVolumeBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7FinancialQualityBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7FinancialQualityChangeBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7IndustryResidualQualityBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7RelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7QualityRelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
@@ -325,6 +335,10 @@ enum Phase7BackfillFactorKind {
         max_event_age_days: i32,
     },
     FinancialAnnualChange {
+        source_column: &'static str,
+        mode: FinancialAnnualChangeMode,
+    },
+    FinancialAnnualAcceleration {
         source_column: &'static str,
         mode: FinancialAnnualChangeMode,
     },
@@ -517,6 +531,54 @@ impl Phase7FinancialQualityBackfillRequest {
             phase: "7-J",
             dependencies: &["market_financial_indicator", "market_trade_calendar"],
             combo_method: "equal_weight",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7FinancialQualityChangeBackfillRequest {
+    fn into_plan(self) -> Result<Phase7FinancialQualityChangeBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "phase7_financial_quality_change_v1",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7FinancialQualityChangeBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_financial_quality_change_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_financial_quality_change_v1",
+            category: "fundamental_change",
+            phase: "7-P3.7",
+            dependencies: &["market_financial_indicator", "market_trade_calendar"],
+            combo_method: "equal_weight_fq_change",
             experiment_type: "phase7_factor_backfill_profile",
             source_combos: Vec::new(),
         })
@@ -1384,6 +1446,71 @@ fn phase7_financial_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
             kind: Phase7BackfillFactorKind::FinancialLatest {
                 source_column: "debt_to_assets",
                 higher_is_better: false,
+            },
+            weight: 1.0 / 6.0,
+        },
+    ]
+}
+
+fn phase7_financial_quality_change_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_roe_yoy_accel_std",
+            name: "Phase 7 PIT ROE YoY acceleration rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualAcceleration {
+                source_column: "roe",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_roa_yoy_accel_std",
+            name: "Phase 7 PIT ROA YoY acceleration rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualAcceleration {
+                source_column: "roa",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_gross_margin_yoy_accel_std",
+            name: "Phase 7 PIT gross margin YoY acceleration rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualAcceleration {
+                source_column: "gross_margin",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_netprofit_margin_yoy_accel_std",
+            name: "Phase 7 PIT net margin YoY acceleration rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualAcceleration {
+                source_column: "netprofit_margin",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_current_ratio_yoy_accel_std",
+            name: "Phase 7 PIT current ratio YoY acceleration rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualAcceleration {
+                source_column: "current_ratio",
+                mode: FinancialAnnualChangeMode::Difference,
+            },
+            weight: 1.0 / 6.0,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fin_debt_to_assets_yoy_decel_std",
+            name: "Phase 7 PIT debt-to-assets YoY deceleration rank",
+            period: 0,
+            kind: Phase7BackfillFactorKind::FinancialAnnualAcceleration {
+                source_column: "debt_to_assets",
+                mode: FinancialAnnualChangeMode::Decrease,
             },
             weight: 1.0 / 6.0,
         },
@@ -3703,6 +3830,137 @@ pub async fn backfill_phase7_financial_quality_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-financial-quality-change-backfill/background
+///
+/// Set-based daily PIT backfill for financial quality YoY acceleration sources.
+pub async fn backfill_phase7_financial_quality_change_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7FinancialQualityChangeBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 financial quality change backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result =
+            run_phase7_financial_quality_change_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = report.total_rows();
+                let total_rows = usize_to_i32(total_rows);
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_financial_quality_change_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 financial quality change backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 financial quality change backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    task_id = %tid,
+                    error = %error,
+                    "Phase 7 financial quality change backfill failed"
+                );
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-industry-residual-quality-backfill/background
 ///
 /// Set-based daily PIT financial quality backfill that removes same-industry
@@ -5361,6 +5619,16 @@ async fn run_phase7_financial_quality_backfill(
     run_set_based_factor_backfill(db, task_id, job).await
 }
 
+async fn run_phase7_financial_quality_change_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7FinancialQualityChangeBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_financial_quality_change_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
 async fn run_phase7_industry_residual_quality_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -6100,6 +6368,10 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             source_column,
             mode,
         } => phase7_financial_annual_change_backfill_sql(source_column, mode),
+        Phase7BackfillFactorKind::FinancialAnnualAcceleration {
+            source_column,
+            mode,
+        } => phase7_financial_annual_acceleration_backfill_sql(source_column, mode),
     }
 }
 
@@ -6623,6 +6895,160 @@ fn phase7_financial_annual_change_backfill_sql(
                 raw_value,
                 percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value) AS normalized_value
             FROM matched
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_financial_annual_acceleration_backfill_sql(
+    source_column: &'static str,
+    mode: FinancialAnnualChangeMode,
+) -> String {
+    let latest_yoy_expression = match mode {
+        FinancialAnnualChangeMode::PercentChange => {
+            "(latest.raw_value - latest_prev.raw_value) / NULLIF(ABS(latest_prev.raw_value), 0.0)"
+        }
+        FinancialAnnualChangeMode::Difference | FinancialAnnualChangeMode::Decrease => {
+            "latest.raw_value - latest_prev.raw_value"
+        }
+    };
+    let prior_yoy_expression = match mode {
+        FinancialAnnualChangeMode::PercentChange => {
+            "(prior_latest.raw_value - prior_prev.raw_value) / NULLIF(ABS(prior_prev.raw_value), 0.0)"
+        }
+        FinancialAnnualChangeMode::Difference | FinancialAnnualChangeMode::Decrease => {
+            "prior_latest.raw_value - prior_prev.raw_value"
+        }
+    };
+    let raw_expression = match mode {
+        FinancialAnnualChangeMode::Decrease => "prior_yoy.raw_value - latest_yoy.raw_value",
+        FinancialAnnualChangeMode::PercentChange | FinancialAnnualChangeMode::Difference => {
+            "latest_yoy.raw_value - prior_yoy.raw_value"
+        }
+    };
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        source_reports AS (
+            SELECT
+                latest.ts_code AS symbol,
+                latest.ann_date,
+                latest.end_date,
+                latest.{source_column}::double precision AS raw_value
+            FROM market_financial_indicator latest
+            WHERE latest.{source_column} IS NOT NULL
+              AND latest.ann_date <= $4
+        ),
+        yoy_points AS (
+            SELECT
+                latest.symbol,
+                latest.ann_date AS latest_ann_date,
+                latest.end_date,
+                GREATEST(latest.ann_date, latest_prev.ann_date, prior_latest.ann_date, prior_prev.ann_date) AS available_at,
+                {raw_expression} AS raw_value
+            FROM source_reports latest
+            JOIN LATERAL (
+                SELECT
+                    ann_date,
+                    end_date,
+                    {source_column}::double precision AS raw_value
+                FROM market_financial_indicator latest_prev
+                WHERE latest_prev.ts_code = latest.symbol
+                  AND latest_prev.end_date = (latest.end_date - INTERVAL '1 year')::date
+                  AND latest_prev.{source_column} IS NOT NULL
+                ORDER BY latest_prev.ann_date DESC
+                LIMIT 1
+            ) latest_prev ON true
+            JOIN LATERAL (
+                SELECT
+                    ann_date,
+                    end_date,
+                    {source_column}::double precision AS raw_value
+                FROM market_financial_indicator prior_latest
+                WHERE prior_latest.ts_code = latest.symbol
+                  AND prior_latest.ann_date < latest.ann_date
+                  AND prior_latest.end_date < latest.end_date
+                  AND prior_latest.{source_column} IS NOT NULL
+                ORDER BY prior_latest.ann_date DESC, prior_latest.end_date DESC
+                LIMIT 1
+            ) prior_latest ON true
+            JOIN LATERAL (
+                SELECT
+                    ann_date,
+                    end_date,
+                    {source_column}::double precision AS raw_value
+                FROM market_financial_indicator prior_prev
+                WHERE prior_prev.ts_code = latest.symbol
+                  AND prior_prev.end_date = (prior_latest.end_date - INTERVAL '1 year')::date
+                  AND prior_prev.{source_column} IS NOT NULL
+                ORDER BY prior_prev.ann_date DESC
+                LIMIT 1
+            ) prior_prev ON true
+            CROSS JOIN LATERAL (
+                SELECT {latest_yoy_expression} AS raw_value
+            ) latest_yoy
+            CROSS JOIN LATERAL (
+                SELECT {prior_yoy_expression} AS raw_value
+            ) prior_yoy
+            WHERE latest_yoy.raw_value IS NOT NULL
+              AND prior_yoy.raw_value IS NOT NULL
+        ),
+        deduped_points AS (
+            SELECT DISTINCT ON (symbol, available_at)
+                symbol,
+                latest_ann_date,
+                end_date,
+                available_at,
+                raw_value
+            FROM yoy_points
+            WHERE available_at <= $4
+              AND raw_value IS NOT NULL
+            ORDER BY symbol, available_at, latest_ann_date DESC, end_date DESC
+        ),
+        yoy_intervals AS (
+            SELECT
+                symbol,
+                available_at,
+                LEAD(available_at) OVER (
+                    PARTITION BY symbol ORDER BY available_at
+                ) AS next_available_at,
+                raw_value
+            FROM deduped_points
+        ),
+        raw AS (
+            SELECT
+                yi.symbol,
+                td.trade_date,
+                yi.available_at,
+                yi.raw_value
+            FROM yoy_intervals yi
+            JOIN trade_days td
+              ON td.trade_date >= yi.available_at
+             AND (yi.next_available_at IS NULL OR td.trade_date < yi.next_available_at)
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value) AS normalized_value
+            FROM raw
             WHERE raw_value IS NOT NULL
         )
         INSERT INTO factor_value
@@ -8931,6 +9357,37 @@ mod tests {
     }
 
     #[test]
+    fn phase7_financial_quality_change_backfill_request_builds_p37_pit_plan() {
+        let req = Phase7FinancialQualityChangeBackfillRequest {
+            start_date: Some("2017-01-03".to_string()),
+            end_date: Some("2026-06-17".to_string()),
+            version: Some("phase7fq-change-test".to_string()),
+            combo_name: None,
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req
+            .into_plan()
+            .expect("valid financial quality change plan");
+
+        assert_eq!(plan.bundle_name, "phase7_financial_quality_change_v1");
+        assert_eq!(plan.combo_name, "phase7_financial_quality_change_v1");
+        assert_eq!(plan.task_type, "phase7_financial_quality_change_backfill");
+        assert_eq!(plan.category, "fundamental_change");
+        assert_eq!(plan.phase, "7-P3.7");
+        assert_eq!(
+            plan.dependencies,
+            &["market_financial_indicator", "market_trade_calendar"]
+        );
+        assert_eq!(plan.combo_method, "equal_weight_fq_change");
+        assert!(
+            plan.combo_method.len() <= 32,
+            "multi_factor_weight.method is varchar(32)"
+        );
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+    }
+
+    #[test]
     fn phase7_industry_residual_quality_backfill_request_builds_daily_pit_plan() {
         let req = Phase7IndustryResidualQualityBackfillRequest {
             start_date: Some("2016-02-01".to_string()),
@@ -9323,6 +9780,36 @@ mod tests {
             ]
         );
         assert!((total_weight - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn phase7_financial_quality_change_specs_capture_acceleration_not_level() {
+        let specs = phase7_financial_quality_change_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "fin_roe_yoy_accel_std",
+                "fin_roa_yoy_accel_std",
+                "fin_gross_margin_yoy_accel_std",
+                "fin_netprofit_margin_yoy_accel_std",
+                "fin_current_ratio_yoy_accel_std",
+                "fin_debt_to_assets_yoy_decel_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(specs
+            .iter()
+            .all(|spec| (spec.weight - 1.0 / 6.0).abs() < 1e-12));
+        assert!(specs.iter().all(|spec| matches!(
+            spec.kind,
+            Phase7BackfillFactorKind::FinancialAnnualAcceleration { .. }
+        )));
     }
 
     #[test]
@@ -9950,6 +10437,40 @@ mod tests {
         assert!(eps_sql
             .contains("(latest.raw_value - prev.raw_value) / NULLIF(ABS(prev.raw_value), 0.0)"));
         assert!(debt_sql.contains("prev.raw_value - latest.raw_value AS raw_value"));
+    }
+
+    #[test]
+    fn phase7_financial_quality_change_sql_uses_prior_disclosed_yoy_acceleration_without_future_data(
+    ) {
+        let specs = phase7_financial_quality_change_backfill_specs();
+        let roe = specs
+            .iter()
+            .find(|spec| spec.factor_code == "fin_roe_yoy_accel_std")
+            .expect("roe acceleration spec");
+        let debt = specs
+            .iter()
+            .find(|spec| spec.factor_code == "fin_debt_to_assets_yoy_decel_std")
+            .expect("debt deceleration spec");
+
+        let roe_sql = phase7_factor_backfill_sql(roe);
+        let debt_sql = phase7_factor_backfill_sql(debt);
+
+        assert!(roe_sql.contains("market_financial_indicator"));
+        assert!(roe_sql.contains("latest.ann_date <= $4"));
+        assert!(
+            roe_sql.contains("latest_prev.end_date = (latest.end_date - INTERVAL '1 year')::date")
+        );
+        assert!(roe_sql.contains("prior_latest.ann_date < latest.ann_date"));
+        assert!(roe_sql
+            .contains("prior_prev.end_date = (prior_latest.end_date - INTERVAL '1 year')::date"));
+        assert!(roe_sql.contains("latest_yoy.raw_value - prior_yoy.raw_value AS raw_value"));
+        assert!(roe_sql.contains("GREATEST(latest.ann_date, latest_prev.ann_date, prior_latest.ann_date, prior_prev.ann_date)"));
+        assert!(roe_sql.contains("WHERE available_at <= $4"));
+        assert!(roe_sql.contains("LEAD(available_at) OVER"));
+        assert!(roe_sql.contains("td.trade_date >= yi.available_at"));
+        assert!(roe_sql.contains("td.trade_date < yi.next_available_at"));
+        assert!(roe_sql.contains("available_at"));
+        assert!(debt_sql.contains("prior_yoy.raw_value - latest_yoy.raw_value AS raw_value"));
     }
 
     #[test]

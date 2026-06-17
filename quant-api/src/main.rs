@@ -304,6 +304,10 @@ async fn main() {
             post(routes::factors::backfill_phase7_financial_quality_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-financial-quality-change-backfill/background",
+            post(routes::factors::backfill_phase7_financial_quality_change_background),
+        )
+        .route(
             "/api/v1/quant/factors/phase7-industry-residual-quality-backfill/background",
             post(routes::factors::backfill_phase7_industry_residual_quality_background),
         )
