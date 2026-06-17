@@ -9104,6 +9104,19 @@ fn filter_dated_values(
         .collect()
 }
 
+const SYMBOL_RETURN_HISTORY_SQL: &str = "SELECT symbol, trade_date, pct_change
+         FROM market_stock_daily_bar
+         WHERE symbol = ANY($1)
+           AND trade_date >= $2 AND trade_date <= $3
+           AND pct_change IS NOT NULL
+         ORDER BY symbol, trade_date";
+
+fn daily_return_from_pct_change(pct_change: Decimal) -> Option<f64> {
+    pct_change
+        .to_f64()
+        .filter(|value| value.is_finite() && *value > -1.0)
+}
+
 async fn load_symbol_return_history(
     pool: &PgPool,
     symbols: &[String],
@@ -9116,55 +9129,27 @@ async fn load_symbol_return_history(
     }
 
     let query_start = return_history_query_start(start_date, lookback_days);
-    let rows: Vec<(String, NaiveDate, Decimal, Option<Decimal>)> = sqlx::query_as(
-        "SELECT symbol, trade_date, close, pre_close
-         FROM market_stock_daily_bar_adj
-         WHERE symbol = ANY($1)
-           AND trade_date >= $2 AND trade_date <= $3
-           AND close IS NOT NULL AND close > 0
-         ORDER BY symbol, trade_date",
-    )
-    .bind(symbols)
-    .bind(query_start)
-    .bind(end_date)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        format!(
-            "Failed to load portfolio construction return history: {}",
-            e
-        )
-    })?;
+    let rows: Vec<(String, NaiveDate, Decimal)> = sqlx::query_as(SYMBOL_RETURN_HISTORY_SQL)
+        .bind(symbols)
+        .bind(query_start)
+        .bind(end_date)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to load portfolio construction return history: {}",
+                e
+            )
+        })?;
 
-    let mut grouped_prices: HashMap<String, Vec<(NaiveDate, f64, Option<f64>)>> = HashMap::new();
-    for (symbol, date, close, pre_close) in rows {
-        if let Some(close) = close
-            .to_f64()
-            .filter(|value| value.is_finite() && *value > 0.0)
-        {
-            let pre_close = pre_close.and_then(|value| value.to_f64());
-            grouped_prices
+    let mut returns_by_symbol: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+    for (symbol, date, pct_change) in rows {
+        if let Some(daily_return) = daily_return_from_pct_change(pct_change) {
+            returns_by_symbol
                 .entry(symbol)
                 .or_default()
-                .push((date, close, pre_close));
+                .push((date, daily_return));
         }
-    }
-
-    let mut returns_by_symbol = HashMap::new();
-    for (symbol, rows) in grouped_prices {
-        let mut returns = Vec::with_capacity(rows.len());
-        let mut previous_close: Option<f64> = None;
-        for (date, close, pre_close) in rows {
-            let base = pre_close.or(previous_close);
-            if let Some(base) = base.filter(|value| value.is_finite() && *value > 0.0) {
-                let daily_return = close / base - 1.0;
-                if daily_return.is_finite() {
-                    returns.push((date, daily_return));
-                }
-            }
-            previous_close = Some(close);
-        }
-        returns_by_symbol.insert(symbol, returns);
     }
 
     Ok(returns_by_symbol)
@@ -23119,6 +23104,25 @@ mod tests {
         assert_eq!(confirm_sleeve.combo_name, "phase7_event_earnings_v1");
         assert_eq!(confirm_sleeve.score_direction, ScoreDirection::Descending);
         assert!((confirm_sleeve.weight - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn symbol_return_history_query_uses_daily_bar_pct_change_without_adjustment_view() {
+        assert!(SYMBOL_RETURN_HISTORY_SQL.contains("pct_change"));
+        assert!(SYMBOL_RETURN_HISTORY_SQL.contains("market_stock_daily_bar"));
+        assert!(!SYMBOL_RETURN_HISTORY_SQL.contains("market_stock_daily_bar_adj"));
+        assert!(!SYMBOL_RETURN_HISTORY_SQL.contains("market_adjustment_factor"));
+    }
+
+    #[test]
+    fn pct_change_decimal_is_already_fractional_daily_return() {
+        let positive = daily_return_from_pct_change(Decimal::new(2352, 6))
+            .expect("positive fractional return");
+        let negative = daily_return_from_pct_change(Decimal::new(-11612, 6))
+            .expect("negative fractional return");
+
+        assert!((positive - 0.002352).abs() < 1e-12);
+        assert!((negative + 0.011612).abs() < 1e-12);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
@@ -524,6 +524,24 @@ fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String>
         feature_set_version_id: req.feature_set_version_id.clone(),
         prediction_set_id: req.prediction_set_id.clone(),
         portfolio_policy_id: req.portfolio_policy_id.clone(),
+        parameters: json!({
+            "request_type": "symbol_weight_backtest",
+            "strategy_version_id": req.strategy_version_id,
+            "data_version_id": req.data_version_id,
+            "research_dataset_id": req.research_dataset_id,
+            "feature_set_version_id": req.feature_set_version_id,
+            "prediction_set_id": req.prediction_set_id,
+            "portfolio_policy_id": req.portfolio_policy_id,
+            "symbols": req.symbols,
+            "weights": req.weights,
+            "benchmark": req.benchmark,
+            "start_date": start,
+            "end_date": end,
+            "rebalance_frequency": req.rebalance_frequency,
+            "cost_model": cost_model_snapshot(&req.cost_model),
+            "execution_rules": execution_rules_snapshot(&req.execution_rules),
+            "persistence_mode": req.persistence_mode
+        }),
         symbols: req.symbols.clone(),
         rebalance_frequency: req
             .rebalance_frequency
@@ -958,7 +976,7 @@ pub struct RunFactorBacktestReq {
     pub return_risk_feature_cache_mode: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MarketRegimeBacktestReq {
     pub enabled: Option<bool>,
     pub policy: Option<String>,
@@ -1366,6 +1384,253 @@ fn parse_execution_max_participation_rate(
         .and_then(|rules| rules.max_participation_rate)
         .map(|value| decimal_from_f64(value, "execution_rules.max_participation_rate"))
         .transpose()
+}
+
+fn cost_model_snapshot(req: &Option<CostModelReq>) -> Value {
+    match req {
+        Some(model) => json!({
+            "commission_rate": model.commission_rate,
+            "min_commission": model.min_commission,
+            "tax_rate": model.tax_rate,
+            "slippage_bps": model.slippage_bps,
+            "cost_multiplier": model.cost_multiplier,
+            "impact_cost_coefficient": model.impact_cost_coefficient
+        }),
+        None => Value::Null,
+    }
+}
+
+fn execution_rules_snapshot(req: &Option<ExecutionRulesReq>) -> Value {
+    match req {
+        Some(rules) => json!({
+            "execution_timing": rules.execution_timing,
+            "execution_price": rules.execution_price,
+            "execution_schedule_profile": rules.execution_schedule_profile,
+            "execution_carry_policy": rules.execution_carry_policy,
+            "execution_daily_target_move_limit_pct": rules.execution_daily_target_move_limit_pct,
+            "execution_max_carry_days": rules.execution_max_carry_days,
+            "max_participation_rate": rules.max_participation_rate
+        }),
+        None => Value::Null,
+    }
+}
+
+fn factor_backtest_parameter_snapshot(
+    req: &RunFactorBacktestReq,
+    effective_start: NaiveDate,
+    end: NaiveDate,
+    benchmark: &str,
+) -> Value {
+    let mut snapshot = json!({
+        "request_type": "factor_backtest",
+        "combo_name": req.combo_name,
+        "version": req.version,
+        "strategy_version_id": req.strategy_version_id,
+        "data_version_id": req.data_version_id,
+        "research_dataset_id": req.research_dataset_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "prediction_set_id": req.prediction_set_id,
+        "prediction_blend_weight": req.prediction_blend_weight,
+        "prediction_min_percentile": req.prediction_min_percentile,
+        "prediction_min_score": req.prediction_min_score,
+        "event_gate_combo_name": req.event_gate_combo_name,
+        "event_gate_version": req.event_gate_version,
+        "event_gate_mode": req.event_gate_mode,
+        "event_gate_min_score": req.event_gate_min_score,
+        "event_gate_boost_weight": req.event_gate_boost_weight,
+        "event_gate_score_direction": req.event_gate_score_direction,
+        "event_gate_active_regimes": req.event_gate_active_regimes,
+        "portfolio_policy_id": req.portfolio_policy_id,
+        "top_n": req.top_n,
+        "rebalance": req.rebalance,
+        "entry_delay": req.entry_delay
+    });
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert("min_amount".into(), json!(req.min_amount));
+        object.insert("max_position_pct".into(), json!(req.max_position_pct));
+        object.insert("skip_top_pct".into(), json!(req.skip_top_pct));
+        object.insert(
+            "max_pairwise_correlation".into(),
+            json!(req.max_pairwise_correlation),
+        );
+        object.insert(
+            "correlation_lookback_days".into(),
+            json!(req.correlation_lookback_days),
+        );
+        object.insert("kelly_fraction".into(), json!(req.kelly_fraction));
+        object.insert("kelly_lookback_days".into(), json!(req.kelly_lookback_days));
+        object.insert("max_gross_exposure".into(), json!(req.max_gross_exposure));
+        object.insert("score_direction".into(), json!(req.score_direction));
+        object.insert("portfolio_method".into(), json!(req.portfolio_method));
+        object.insert(
+            "risk_budget_lookback_days".into(),
+            json!(req.risk_budget_lookback_days),
+        );
+        object.insert(
+            "capacity_penalty_strength".into(),
+            json!(req.capacity_penalty_strength),
+        );
+        object.insert(
+            "industry_max_weight_pct".into(),
+            json!(req.industry_max_weight_pct),
+        );
+        object.insert(
+            "capacity_risk_budget".into(),
+            json!(req.capacity_risk_budget),
+        );
+        object.insert("cash_utilization".into(), json!(req.cash_utilization));
+        object.insert(
+            "execution_impact_budget".into(),
+            json!(req.execution_impact_budget),
+        );
+        object.insert("style_risk_budget".into(), json!(req.style_risk_budget));
+        object.insert(
+            "candidate_risk_filter".into(),
+            json!(req.candidate_risk_filter),
+        );
+        object.insert("candidate_ranking".into(), json!(req.candidate_ranking));
+        object.insert(
+            "risk_contribution_control".into(),
+            json!(req.risk_contribution_control),
+        );
+        object.insert(
+            "stress_fill_confidence_exposure".into(),
+            json!(req.stress_fill_confidence_exposure),
+        );
+        object.insert(
+            "rebalance_hysteresis_pct".into(),
+            json!(req.rebalance_hysteresis_pct),
+        );
+        object.insert(
+            "partial_rebalance_ratio".into(),
+            json!(req.partial_rebalance_ratio),
+        );
+        object.insert(
+            "score_candidate_pool_size".into(),
+            json!(req.score_candidate_pool_size),
+        );
+        object.insert("universe_profile".into(), json!(req.universe_profile));
+        object.insert(
+            "effective_coverage_requested".into(),
+            json!(req.effective_coverage.is_some()),
+        );
+        object.insert("cost_model".into(), cost_model_snapshot(&req.cost_model));
+        object.insert(
+            "execution_rules".into(),
+            execution_rules_snapshot(&req.execution_rules),
+        );
+        object.insert("benchmark".into(), json!(benchmark));
+        object.insert("effective_start_date".into(), json!(effective_start));
+        object.insert("end_date".into(), json!(end));
+        object.insert("market_regime".into(), json!(req.market_regime));
+        object.insert(
+            "return_risk_feature_cache_mode".into(),
+            json!(req.return_risk_feature_cache_mode),
+        );
+        object.insert("persistence_mode".into(), json!(req.persistence_mode));
+    }
+    snapshot
+}
+
+fn prediction_backtest_parameter_snapshot(
+    req: &RunPredictionBacktestReq,
+    prediction_set_id: &str,
+    benchmark: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Value {
+    let mut snapshot = json!({
+        "request_type": "prediction_backtest",
+        "prediction_set_id": prediction_set_id,
+        "strategy_version_id": req.strategy_version_id,
+        "data_version_id": req.data_version_id,
+        "research_dataset_id": req.research_dataset_id,
+        "feature_set_version_id": req.feature_set_version_id,
+        "portfolio_policy_id": req.portfolio_policy_id,
+        "top_n": req.top_n,
+        "rebalance": req.rebalance,
+        "entry_delay": req.entry_delay,
+        "min_amount": req.min_amount,
+        "max_position_pct": req.max_position_pct,
+        "skip_top_pct": req.skip_top_pct,
+        "max_pairwise_correlation": req.max_pairwise_correlation,
+        "correlation_lookback_days": req.correlation_lookback_days,
+        "kelly_fraction": req.kelly_fraction,
+        "kelly_lookback_days": req.kelly_lookback_days,
+        "max_gross_exposure": req.max_gross_exposure,
+        "score_direction": req.score_direction,
+        "portfolio_method": req.portfolio_method,
+        "risk_budget_lookback_days": req.risk_budget_lookback_days
+    });
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert(
+            "capacity_penalty_strength".into(),
+            json!(req.capacity_penalty_strength),
+        );
+        object.insert(
+            "industry_max_weight_pct".into(),
+            json!(req.industry_max_weight_pct),
+        );
+        object.insert(
+            "capacity_risk_budget".into(),
+            json!(req.capacity_risk_budget),
+        );
+        object.insert("cash_utilization".into(), json!(req.cash_utilization));
+        object.insert(
+            "execution_impact_budget".into(),
+            json!(req.execution_impact_budget),
+        );
+        object.insert("style_risk_budget".into(), json!(req.style_risk_budget));
+        object.insert(
+            "candidate_risk_filter".into(),
+            json!(req.candidate_risk_filter),
+        );
+        object.insert("candidate_ranking".into(), json!(req.candidate_ranking));
+        object.insert(
+            "risk_contribution_control".into(),
+            json!(req.risk_contribution_control),
+        );
+        object.insert(
+            "stress_fill_confidence_exposure".into(),
+            json!(req.stress_fill_confidence_exposure),
+        );
+        object.insert(
+            "rebalance_hysteresis_pct".into(),
+            json!(req.rebalance_hysteresis_pct),
+        );
+        object.insert(
+            "partial_rebalance_ratio".into(),
+            json!(req.partial_rebalance_ratio),
+        );
+        object.insert("cost_model".into(), cost_model_snapshot(&req.cost_model));
+        object.insert(
+            "execution_rules".into(),
+            execution_rules_snapshot(&req.execution_rules),
+        );
+        object.insert("benchmark".into(), json!(benchmark));
+        object.insert("start_date".into(), json!(start));
+        object.insert("end_date".into(), json!(end));
+        object.insert("market_regime".into(), json!(req.market_regime));
+        object.insert(
+            "portfolio_volatility_target_pct".into(),
+            json!(req.portfolio_volatility_target_pct),
+        );
+        object.insert(
+            "portfolio_volatility_lookback_days".into(),
+            json!(req.portfolio_volatility_lookback_days),
+        );
+        object.insert(
+            "portfolio_volatility_min_exposure".into(),
+            json!(req.portfolio_volatility_min_exposure),
+        );
+        object.insert(
+            "portfolio_volatility_max_exposure".into(),
+            json!(req.portfolio_volatility_max_exposure),
+        );
+        object.insert("trailing_stop_pct".into(), json!(req.trailing_stop_pct));
+        object.insert("persistence_mode".into(), json!(req.persistence_mode));
+    }
+    snapshot
 }
 
 fn build_factor_signal_config(
@@ -2319,7 +2584,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
 
     let config = BacktestConfig {
         initial_capital: capital,
-        benchmark,
+        benchmark: benchmark.clone(),
         start_date: effective_start,
         end_date: end,
         fee_config,
@@ -2331,6 +2596,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         feature_set_version_id: req.feature_set_version_id.clone(),
         prediction_set_id: req.prediction_set_id.clone(),
         portfolio_policy_id: req.portfolio_policy_id.clone(),
+        parameters: factor_backtest_parameter_snapshot(&req, effective_start, end, &benchmark),
         symbols: all_symbols,
         rebalance_frequency: req.rebalance.clone(),
         execution_timing,
@@ -2493,9 +2759,10 @@ pub(crate) async fn execute_prediction_backtest(
     };
     let persistence_mode = parse_persistence_mode(req.persistence_mode.as_deref())?;
 
+    let benchmark = req.benchmark.clone().unwrap_or_else(|| "000300.SH".into());
     let config = BacktestConfig {
         initial_capital: capital,
-        benchmark: req.benchmark.unwrap_or_else(|| "000300.SH".into()),
+        benchmark: benchmark.clone(),
         start_date: start,
         end_date: end,
         fee_config,
@@ -2505,8 +2772,15 @@ pub(crate) async fn execute_prediction_backtest(
         data_version_id: req.data_version_id.clone(),
         research_dataset_id: req.research_dataset_id.clone(),
         feature_set_version_id: req.feature_set_version_id.clone(),
-        prediction_set_id: Some(prediction_set_id),
+        prediction_set_id: Some(prediction_set_id.clone()),
         portfolio_policy_id: req.portfolio_policy_id.clone(),
+        parameters: prediction_backtest_parameter_snapshot(
+            &req,
+            &prediction_set_id,
+            &benchmark,
+            start,
+            end,
+        ),
         symbols: signals
             .values()
             .flat_map(|signal| signal.target_weights.keys().cloned())
@@ -2707,6 +2981,51 @@ mod tests {
         assert_eq!(blend.prediction_weight, 0.0);
         assert_eq!(blend.prediction_min_percentile, None);
         assert_eq!(blend.prediction_min_score, Some(0.0));
+    }
+
+    #[test]
+    fn factor_backtest_parameter_snapshot_captures_audit_fields() {
+        let mut req = factor_risk_control_request_template(None, None, None, None, None);
+        req.combo_name = "full_pit_icir_37f".to_string();
+        req.prediction_set_id = Some("pred-fullperiod-nlqr-20140101-20260630".to_string());
+        req.prediction_blend_weight = Some(0.5);
+        req.score_direction = "ascending".to_string();
+        req.cost_model = Some(CostModelReq {
+            commission_rate: Some(0.0003),
+            min_commission: None,
+            tax_rate: None,
+            slippage_bps: Some(0.0002),
+            cost_multiplier: Some(1.5),
+            impact_cost_coefficient: Some(0.02),
+        });
+        req.execution_rules = Some(ExecutionRulesReq {
+            execution_timing: Some("next_open".to_string()),
+            execution_price: Some("open".to_string()),
+            execution_schedule_profile: Some("twap".to_string()),
+            execution_carry_policy: Some("carry".to_string()),
+            execution_daily_target_move_limit_pct: Some(0.2),
+            execution_max_carry_days: Some(5),
+            max_participation_rate: Some(0.1),
+        });
+
+        let snapshot = factor_backtest_parameter_snapshot(
+            &req,
+            NaiveDate::from_ymd_opt(2014, 1, 2).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+            "000300.SH",
+        );
+
+        assert_eq!(snapshot["request_type"], "factor_backtest");
+        assert_eq!(snapshot["combo_name"], "full_pit_icir_37f");
+        assert_eq!(snapshot["prediction_blend_weight"], 0.5);
+        assert_eq!(
+            snapshot["prediction_set_id"],
+            "pred-fullperiod-nlqr-20140101-20260630"
+        );
+        assert_eq!(snapshot["score_direction"], "ascending");
+        assert_eq!(snapshot["execution_rules"]["execution_timing"], "next_open");
+        assert_eq!(snapshot["cost_model"]["cost_multiplier"], 1.5);
+        assert_eq!(snapshot["effective_start_date"], "2014-01-02");
     }
 
     #[test]

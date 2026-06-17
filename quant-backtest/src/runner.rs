@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 use rust_decimal::prelude::Zero;
 use rust_decimal::Decimal;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -614,6 +614,28 @@ impl BacktestTaskInsert {
     }
 }
 
+pub fn backtest_task_parameters(config: &BacktestConfig) -> Value {
+    let mut parameters = config.parameters.clone();
+    if !parameters.is_object() {
+        parameters = json!({});
+    }
+    if let Some(object) = parameters.as_object_mut() {
+        object
+            .entry("research_dataset_id")
+            .or_insert_with(|| json!(config.research_dataset_id.as_deref()));
+        object
+            .entry("feature_set_version_id")
+            .or_insert_with(|| json!(config.feature_set_version_id.as_deref()));
+        object
+            .entry("prediction_set_id")
+            .or_insert_with(|| json!(config.prediction_set_id.as_deref()));
+        object
+            .entry("portfolio_policy_id")
+            .or_insert_with(|| json!(config.portfolio_policy_id.as_deref()));
+    }
+    parameters
+}
+
 // ─── Runner ───────────────────────────────────────────────────────
 
 pub struct BacktestRunner {
@@ -1128,12 +1150,7 @@ impl BacktestRunner {
             "max_participation_rate": config.max_participation_rate.map(|v| v.to_string()),
             "persistence_mode": config.persistence_mode
         });
-        let parameters = json!({
-            "research_dataset_id": config.research_dataset_id.as_deref(),
-            "feature_set_version_id": config.feature_set_version_id.as_deref(),
-            "prediction_set_id": config.prediction_set_id.as_deref(),
-            "portfolio_policy_id": config.portfolio_policy_id.as_deref()
-        });
+        let parameters = backtest_task_parameters(config);
         sqlx::query(
             r#"INSERT INTO backtest_task (task_id, strategy_version_id, data_version_id,
                prediction_set_id, benchmark_symbol, symbols, start_date, end_date, initial_capital,

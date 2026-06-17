@@ -207,6 +207,8 @@ pub struct StrategyConfig {
     pub dynamic_target_cap: f64,
     #[serde(default = "default_score_direction")]
     pub score_direction: String,
+    #[serde(default = "default_candidate_tier")]
+    pub candidate_tier: String,
 }
 
 fn default_signal_source() -> String {
@@ -226,6 +228,9 @@ fn default_dynamic_target_cap() -> f64 {
 }
 fn default_score_direction() -> String {
     "descending".into()
+}
+fn default_candidate_tier() -> String {
+    "research_baseline".into()
 }
 
 impl Default for StrategyConfig {
@@ -259,6 +264,7 @@ impl Default for StrategyConfig {
             prediction_set_id: None,
             dynamic_target_cap: 0.06,
             score_direction: "descending".into(),
+            candidate_tier: "research_baseline".into(),
         }
     }
 }
@@ -289,6 +295,10 @@ fn scheduled_task_time_minutes(expr: &str) -> Result<u32, String> {
         return Err(format!("CRON 表达式 '{}' 时/分超出范围", expr));
     }
     Ok(hour * 60 + minute)
+}
+
+fn is_eod_sync_window(hour: u32, minute: u32) -> bool {
+    hour == 16 && minute < 10
 }
 
 fn pre_trade_factor_combo(sc: &StrategyConfig) -> &str {
@@ -335,6 +345,15 @@ mod tests {
     }
 
     #[test]
+    fn eod_sync_window_does_not_replay_after_startup_late_in_day() {
+        assert!(is_eod_sync_window(16, 0));
+        assert!(is_eod_sync_window(16, 9));
+        assert!(!is_eod_sync_window(16, 10));
+        assert!(!is_eod_sync_window(16, 39));
+        assert!(!is_eod_sync_window(17, 0));
+    }
+
+    #[test]
     fn pre_trade_factor_combo_uses_active_strategy_combo_not_price_volume_fallback() {
         let mut strategy = StrategyConfig::default();
         strategy.combo_name = "full_pit_icir_37f".to_string();
@@ -376,7 +395,8 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'top_n', top_n,
             'prediction_set_id', prediction_set_id,
             'dynamic_target_cap', dynamic_target_cap,
-            'score_direction', score_direction
+            'score_direction', score_direction,
+            'candidate_tier', candidate_tier
         ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)
@@ -706,7 +726,7 @@ async fn run_tick(
     }
 
     // ── 16:00 (收盘后): 交易日EOD + 非交易日也执行数据同步 ──
-    if hour >= 16 {
+    if is_eod_sync_window(hour, minute) {
         let should_sync = {
             let st = state.lock().await;
             !st.eod_synced_today

@@ -139,6 +139,23 @@ pub struct PredictionSetCacheEconomicsReportRequest {
     pub persist_report: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PredictionSetReadinessRequest {
+    pub prediction_set_id: String,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub min_day_coverage_ratio: Option<f64>,
+    #[serde(default)]
+    pub min_daily_rows: Option<i64>,
+    #[serde(default)]
+    pub min_p95_daily_row_ratio: Option<f64>,
+    #[serde(default)]
+    pub persist_report: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 struct PredictionSetCacheEconomicsInput {
     prediction_set_id: String,
@@ -619,11 +636,22 @@ pub async fn report_prediction_set_cache_economics(
     }
 }
 
+pub async fn report_prediction_set_readiness(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PredictionSetReadinessRequest>,
+) -> impl IntoResponse {
+    match build_prediction_set_readiness_report_from_request(&state.db, &req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
 async fn create_walk_forward_linear_prediction_set_inner(
     db: &sqlx::PgPool,
     req: WalkForwardLinearPredictionSetRequest,
 ) -> Result<Value, String> {
     let req = normalize_walk_forward_linear_prediction_request(&req)?;
+    ensure_data_version_exists(db, &req.data_version_id).await?;
     let windows = build_walk_forward_windows(&req)?;
     if windows.is_empty() {
         return Err("walk-forward request produced no windows".into());
@@ -967,6 +995,7 @@ pub(crate) async fn create_walk_forward_nonlinear_quantile_ranker_inner(
     let started_at = Instant::now();
     let req = normalize_walk_forward_nonlinear_quantile_ranker_request(&req)?;
     let linear = &req.linear;
+    ensure_data_version_exists(db, &linear.data_version_id).await?;
     let windows = build_walk_forward_windows(linear)?;
     if windows.is_empty() {
         return Err("walk-forward nonlinear request produced no windows".into());
@@ -1104,7 +1133,7 @@ pub(crate) async fn create_walk_forward_nonlinear_quantile_ranker_inner(
     let scoring_elapsed = scoring_started_at.elapsed();
 
     if all_rows.is_empty() {
-        return Err("walk-forward nonlinear ranker produced no prediction rows".into());
+        return Err(walk_forward_nonlinear_no_prediction_rows_error(&summaries));
     }
 
     let skipped_windows = summaries.iter().filter(|summary| summary.skipped).count();
@@ -1414,11 +1443,42 @@ pub(crate) async fn create_walk_forward_nonlinear_quantile_ranker_inner(
     }))
 }
 
+fn walk_forward_nonlinear_no_prediction_rows_error(
+    summaries: &[WalkForwardNonlinearWindowSummary],
+) -> String {
+    let diagnostics = summaries
+        .iter()
+        .take(10)
+        .map(|summary| {
+            format!(
+                "window={} train={}..{} predict={}..{} sample_count={} prediction_rows={} skipped={} skip_reason={}",
+                summary.window_index,
+                summary.train_start_date,
+                summary.train_end_date,
+                summary.prediction_start_date,
+                summary.prediction_end_date,
+                summary.sample_count,
+                summary.prediction_rows,
+                summary.skipped,
+                summary
+                    .skip_reason
+                    .as_deref()
+                    .unwrap_or("none")
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "walk-forward nonlinear ranker produced no prediction rows; window_diagnostics=[{}]",
+        diagnostics.join("; ")
+    )
+}
+
 async fn train_linear_model_inner(
     db: &sqlx::PgPool,
     req: TrainLinearModelRequest,
 ) -> Result<Value, String> {
     let req = normalize_linear_training_request(&req)?;
+    ensure_data_version_exists(db, &req.data_version_id).await?;
     let samples = load_training_samples(db, &req).await?;
     if samples.len() < req.factors.len().max(5) {
         return Err(format!(
@@ -1699,6 +1759,7 @@ pub(crate) async fn train_nonlinear_quantile_ranker_inner(
 ) -> Result<Value, String> {
     let started_at = Instant::now();
     let req = normalize_nonlinear_quantile_ranker_request(&req)?;
+    ensure_data_version_exists(db, &req.data_version_id).await?;
     let training_req = NormalizedLinearTrainingRequest {
         model_code: req.model_code.clone(),
         model_version: req.model_version.clone(),
@@ -2527,6 +2588,409 @@ fn rows_per_symbol(input: &PredictionSetCacheEconomicsInput) -> f64 {
     (input.prediction_rows as f64 / input.symbol_count as f64).round()
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReadinessThresholds {
+    pub min_day_coverage_ratio: f64,
+    pub min_daily_rows: i64,
+    pub min_p95_daily_row_ratio: f64,
+}
+
+impl ReadinessThresholds {
+    pub(crate) fn from_options(
+        min_day_coverage_ratio: Option<f64>,
+        min_daily_rows: Option<i64>,
+        min_p95_daily_row_ratio: Option<f64>,
+    ) -> Self {
+        Self {
+            min_day_coverage_ratio: bounded_finite_f64(min_day_coverage_ratio, 0.98, 0.50, 1.0),
+            min_daily_rows: min_daily_rows.unwrap_or(20).clamp(1, 10_000),
+            min_p95_daily_row_ratio: bounded_finite_f64(min_p95_daily_row_ratio, 0.50, 0.05, 1.0),
+        }
+    }
+}
+
+impl Default for ReadinessThresholds {
+    fn default() -> Self {
+        Self::from_options(None, None, None)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DailyCountDistribution {
+    pub(crate) min_rows: i64,
+    pub(crate) p50_rows: i64,
+    pub(crate) p95_rows: i64,
+    pub(crate) max_rows: i64,
+    pub(crate) weak_day_count: usize,
+    pub(crate) weak_day_threshold: i64,
+}
+
+fn bounded_finite_f64(value: Option<f64>, default: f64, min: f64, max: f64) -> f64 {
+    value
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn percentile_disc_i64(sorted: &[i64], percentile: f64) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() as f64 * percentile).ceil() as usize).saturating_sub(1);
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+pub(crate) fn daily_count_distribution(
+    counts: &[i64],
+    thresholds: ReadinessThresholds,
+) -> DailyCountDistribution {
+    if counts.is_empty() {
+        return DailyCountDistribution {
+            min_rows: 0,
+            p50_rows: 0,
+            p95_rows: 0,
+            max_rows: 0,
+            weak_day_count: 0,
+            weak_day_threshold: thresholds.min_daily_rows,
+        };
+    }
+
+    let mut sorted = counts.to_vec();
+    sorted.sort_unstable();
+    let p95_rows = percentile_disc_i64(&sorted, 0.95);
+    let weak_day_threshold = thresholds
+        .min_daily_rows
+        .max((p95_rows as f64 * thresholds.min_p95_daily_row_ratio).floor() as i64);
+    let weak_day_count = counts
+        .iter()
+        .filter(|count| **count < weak_day_threshold)
+        .count();
+
+    DailyCountDistribution {
+        min_rows: *sorted.first().unwrap_or(&0),
+        p50_rows: percentile_disc_i64(&sorted, 0.50),
+        p95_rows,
+        max_rows: *sorted.last().unwrap_or(&0),
+        weak_day_count,
+        weak_day_threshold,
+    }
+}
+
+fn readiness_ratio(numerator: i64, denominator: i64) -> f64 {
+    if denominator <= 0 {
+        return 1.0;
+    }
+    numerator.max(0) as f64 / denominator as f64
+}
+
+fn readiness_gate(
+    gate: &str,
+    passed: bool,
+    actual: Value,
+    expected: Value,
+    detail: impl Into<String>,
+) -> Value {
+    json!({
+        "gate": gate,
+        "passed": passed,
+        "actual": actual,
+        "expected": expected,
+        "detail": detail.into(),
+    })
+}
+
+fn parse_readiness_date(value: Option<&str>, field: &str) -> Result<Option<NaiveDate>, String> {
+    value
+        .map(|raw| {
+            let trimmed = raw.trim();
+            NaiveDate::parse_from_str(trimmed, "%Y%m%d")
+                .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
+                .map_err(|_| format!("{} must use YYYYMMDD or YYYY-MM-DD format", field))
+        })
+        .transpose()
+}
+
+pub(crate) async fn readiness_expected_open_day_count(
+    db: &sqlx::PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<i64, String> {
+    let calendar_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT trade_date)::int8
+         FROM market_trade_calendar
+         WHERE trade_date >= $1 AND trade_date <= $2 AND is_open = true",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to count market_trade_calendar days: {}", error))?;
+    if calendar_count > 0 {
+        return Ok(calendar_count);
+    }
+
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT trade_date)::int8
+         FROM market_index_daily_bar
+         WHERE symbol='000300.SH' AND trade_date >= $1 AND trade_date <= $2",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to count index trading days: {}", error))
+}
+
+async fn build_prediction_set_readiness_report_from_request(
+    db: &sqlx::PgPool,
+    req: &PredictionSetReadinessRequest,
+) -> Result<Value, String> {
+    let start = parse_readiness_date(req.start_date.as_deref(), "start_date")?;
+    let end = parse_readiness_date(req.end_date.as_deref(), "end_date")?;
+    let thresholds = ReadinessThresholds::from_options(
+        req.min_day_coverage_ratio,
+        req.min_daily_rows,
+        req.min_p95_daily_row_ratio,
+    );
+    let report =
+        build_prediction_set_readiness_report(db, &req.prediction_set_id, start, end, thresholds)
+            .await?;
+    let experiment_run_id = if req.persist_report.unwrap_or(true) {
+        Some(persist_prediction_set_readiness_report(db, &req.prediction_set_id, &report).await?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "report": report,
+    }))
+}
+
+pub(crate) async fn build_prediction_set_readiness_report(
+    db: &sqlx::PgPool,
+    prediction_set_id: &str,
+    start_override: Option<NaiveDate>,
+    end_override: Option<NaiveDate>,
+    thresholds: ReadinessThresholds,
+) -> Result<Value, String> {
+    let prediction_set_id = prediction_set_id.trim();
+    if prediction_set_id.is_empty() {
+        return Err("prediction_set_id must not be empty".into());
+    }
+    let set_row = sqlx::query_as::<
+        _,
+        (
+            String,
+            NaiveDate,
+            NaiveDate,
+            Option<NaiveDate>,
+            String,
+            Option<Value>,
+        ),
+    >(
+        "SELECT status, start_date, end_date, training_end_date, feature_set_version_id, metadata
+         FROM prediction_set
+         WHERE prediction_set_id = $1",
+    )
+    .bind(prediction_set_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("Failed to load prediction_set readiness row: {}", error))?
+    .ok_or_else(|| format!("prediction_set not found: {}", prediction_set_id))?;
+
+    let start = start_override.unwrap_or(set_row.1);
+    let end = end_override.unwrap_or(set_row.2);
+    if start > end {
+        return Err("prediction-set readiness start_date cannot be after end_date".into());
+    }
+
+    let daily_rows = sqlx::query_as::<_, (NaiveDate, i64, i64, i64)>(
+        "SELECT trade_date,
+                COUNT(*)::int8 AS rows,
+                COUNT(DISTINCT symbol)::int8 AS symbols,
+                COUNT(*) FILTER (WHERE available_at > trade_date)::int8 AS future_leak_rows
+         FROM model_prediction
+         WHERE prediction_set_id = $1
+           AND trade_date >= $2 AND trade_date <= $3
+         GROUP BY trade_date
+         ORDER BY trade_date",
+    )
+    .bind(prediction_set_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to summarize model_prediction readiness: {}", error))?;
+
+    let expected_days = readiness_expected_open_day_count(db, start, end).await?;
+    let actual_days = daily_rows.len() as i64;
+    let prediction_rows = daily_rows.iter().map(|(_, rows, _, _)| *rows).sum::<i64>();
+    let symbol_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT symbol)::int8
+         FROM model_prediction
+         WHERE prediction_set_id = $1
+           AND trade_date >= $2 AND trade_date <= $3",
+    )
+    .bind(prediction_set_id)
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to count model_prediction symbols: {}", error))?;
+    let future_leak_rows = daily_rows
+        .iter()
+        .map(|(_, _, _, future_leak)| *future_leak)
+        .sum::<i64>();
+    let counts = daily_rows
+        .iter()
+        .map(|(_, rows, _, _)| *rows)
+        .collect::<Vec<_>>();
+    let distribution = daily_count_distribution(&counts, thresholds);
+    let day_coverage_ratio = readiness_ratio(actual_days, expected_days);
+    let set_covers_requested_window = set_row.1 <= start && set_row.2 >= end;
+    let training_end_pit_ok = set_row.3.map(|date| date < start).unwrap_or(true);
+    let gates = vec![
+        readiness_gate(
+            "prediction_set_status_ready",
+            set_row.0 == "ready",
+            json!(set_row.0),
+            json!("ready"),
+            "prediction_set.status must be ready before use",
+        ),
+        readiness_gate(
+            "prediction_set_date_range",
+            set_covers_requested_window,
+            json!({"set_start": set_row.1, "set_end": set_row.2, "requested_start": start, "requested_end": end}),
+            json!("set_start <= requested_start and set_end >= requested_end"),
+            "prediction_set declared date range must cover the requested evaluation window",
+        ),
+        readiness_gate(
+            "training_end_before_requested_start",
+            training_end_pit_ok,
+            json!(set_row.3),
+            json!(format!("< {}", start)),
+            "when prediction_set.training_end_date is present it must be before the requested prediction window",
+        ),
+        readiness_gate(
+            "prediction_day_coverage",
+            day_coverage_ratio >= thresholds.min_day_coverage_ratio,
+            json!(day_coverage_ratio),
+            json!(thresholds.min_day_coverage_ratio),
+            "model_prediction must cover nearly all expected open days in the requested window",
+        ),
+        readiness_gate(
+            "prediction_future_leak_rows",
+            future_leak_rows == 0,
+            json!(future_leak_rows),
+            json!(0),
+            "model_prediction.available_at must not be after trade_date",
+        ),
+        readiness_gate(
+            "prediction_daily_median_rows",
+            distribution.p50_rows >= thresholds.min_daily_rows,
+            json!(distribution.p50_rows),
+            json!(thresholds.min_daily_rows),
+            "daily cross-section median must be large enough for meaningful ranking",
+        ),
+        readiness_gate(
+            "prediction_daily_row_cliff",
+            distribution.weak_day_count == 0,
+            json!({
+                "weak_day_count": distribution.weak_day_count,
+                "weak_day_threshold": distribution.weak_day_threshold,
+                "p95_rows": distribution.p95_rows,
+            }),
+            json!("weak_day_count = 0"),
+            "daily row counts must not collapse relative to the set's own p95 cross-section",
+        ),
+    ];
+    let passed = gates
+        .iter()
+        .all(|gate| gate["passed"].as_bool().unwrap_or(false));
+
+    Ok(json!({
+        "readiness_type": "prediction_set",
+        "prediction_set_id": prediction_set_id,
+        "feature_set_version_id": set_row.4,
+        "status": set_row.0,
+        "set_start_date": set_row.1,
+        "set_end_date": set_row.2,
+        "training_end_date": set_row.3,
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "passed": passed,
+        "level": if passed { "green" } else { "red" },
+        "thresholds": {
+            "min_day_coverage_ratio": thresholds.min_day_coverage_ratio,
+            "min_daily_rows": thresholds.min_daily_rows,
+            "min_p95_daily_row_ratio": thresholds.min_p95_daily_row_ratio,
+        },
+        "summary": {
+            "expected_open_days": expected_days,
+            "actual_prediction_days": actual_days,
+            "missing_open_days": (expected_days - actual_days).max(0),
+            "day_coverage_ratio": day_coverage_ratio,
+            "prediction_rows": prediction_rows,
+            "symbol_count": symbol_count,
+            "future_leak_rows": future_leak_rows,
+            "daily_rows": {
+                "min": distribution.min_rows,
+                "p50": distribution.p50_rows,
+                "p95": distribution.p95_rows,
+                "max": distribution.max_rows,
+                "weak_day_count": distribution.weak_day_count,
+                "weak_day_threshold": distribution.weak_day_threshold,
+            },
+        },
+        "gates": gates,
+        "metadata": set_row.5.unwrap_or_else(|| json!({})),
+        "repair": {
+            "repairable": false,
+            "reason": "prediction sets must be rebuilt through the PIT training/prediction pipeline; point fixes to model_prediction rows are not safe"
+        }
+    }))
+}
+
+pub(crate) fn prediction_readiness_passed(report: &Value) -> bool {
+    report
+        .get("passed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+async fn persist_prediction_set_readiness_report(
+    db: &sqlx::PgPool,
+    prediction_set_id: &str,
+    report: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let config = json!({
+        "prediction_set_id": prediction_set_id,
+        "report_type": "prediction_set_readiness",
+        "point_in_time_scope": "prediction_set metadata and model_prediction only; no backtest/OOS metrics",
+    });
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'prediction_set_readiness_report', 'prediction_set', $2,
+                 $3, $4, 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(prediction_set_id)
+    .bind(&config)
+    .bind(report)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to persist prediction-set readiness report: {}",
+            error
+        )
+    })?;
+    Ok(experiment_run_id)
+}
+
 fn linear_training_experiment_config(req: &NormalizedLinearTrainingRequest) -> Value {
     json!({
         "model_code": req.model_code,
@@ -2814,6 +3278,7 @@ async fn create_linear_prediction_set_inner(
     req: LinearPredictionSetRequest,
 ) -> Result<Value, String> {
     let req = normalize_linear_prediction_request(&req)?;
+    ensure_data_version_exists(db, &req.data_version_id).await?;
     let metadata = json!({
         "model_type": "linear_factor_smoke",
         "factors": req.factors,
@@ -3023,6 +3488,29 @@ fn normalize_linear_prediction_request(
         end_date,
         factors: req.factors.clone(),
     })
+}
+
+fn missing_data_version_error_message(data_version_id: &str) -> String {
+    format!(
+        "data_version_id '{}' does not exist in data_version; run data readiness/sync first or use an existing canonical data_version_id",
+        data_version_id
+    )
+}
+
+async fn ensure_data_version_exists(
+    db: &sqlx::PgPool,
+    data_version_id: &str,
+) -> Result<(), String> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM data_version WHERE data_version_id = $1)")
+            .bind(data_version_id)
+            .fetch_one(db)
+            .await
+            .map_err(|error| format!("Failed to check data_version: {}", error))?;
+    if !exists {
+        return Err(missing_data_version_error_message(data_version_id));
+    }
+    Ok(())
 }
 
 fn normalize_linear_training_request(
@@ -3349,6 +3837,7 @@ async fn load_training_samples_from_feature_rows(
     req: &NormalizedLinearTrainingRequest,
     feature_rows: Vec<TrainingFeatureMatrixRow>,
 ) -> Result<Vec<TrainingSample>, String> {
+    let price_start_date = training_label_price_start_date(req);
     let label_end_date = req.train_end_date + Duration::days(req.label_horizon_days + 7);
     let price_rows = sqlx::query_as::<_, (String, NaiveDate, Option<f64>)>(
         "SELECT symbol, trade_date, close::double precision
@@ -3358,7 +3847,7 @@ async fn load_training_samples_from_feature_rows(
            AND close IS NOT NULL
          ORDER BY symbol, trade_date",
     )
-    .bind(req.train_start_date)
+    .bind(price_start_date)
     .bind(label_end_date)
     .fetch_all(db)
     .await
@@ -3377,7 +3866,7 @@ async fn load_training_samples_from_feature_rows(
     }
 
     let benchmark_closes = if req.label_objective.requires_benchmark() {
-        load_benchmark_closes(db, "000300.SH", req.train_start_date, label_end_date).await?
+        load_benchmark_closes(db, "000300.SH", price_start_date, label_end_date).await?
     } else {
         Vec::new()
     };
@@ -3391,6 +3880,23 @@ async fn load_training_samples_from_feature_rows(
         req.label_horizon_days,
         req.factors.len(),
     ))
+}
+
+fn training_label_price_start_date(req: &NormalizedLinearTrainingRequest) -> NaiveDate {
+    req.train_start_date
+        - Duration::days(training_label_price_history_lookback_days(
+            req.label_objective,
+        ))
+}
+
+fn training_label_price_history_lookback_days(label_objective: LabelObjective) -> i64 {
+    match label_objective {
+        LabelObjective::QualityAdjustedExcessReturn
+        | LabelObjective::QualityAdjustedRiskAdjustedExcessReturn
+        | LabelObjective::FundamentalQualityAdjustedExcessReturn => 252,
+        LabelObjective::RegimeConditionalExcessReturn => 126,
+        _ => 0,
+    }
 }
 
 async fn load_benchmark_closes(
@@ -5112,6 +5618,27 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn readiness_thresholds_are_bounded() {
+        let thresholds = ReadinessThresholds::from_options(Some(f64::NAN), Some(0), Some(10.0));
+
+        assert_eq!(thresholds.min_day_coverage_ratio, 0.98);
+        assert_eq!(thresholds.min_daily_rows, 1);
+        assert_eq!(thresholds.min_p95_daily_row_ratio, 1.0);
+    }
+
+    #[test]
+    fn daily_count_distribution_flags_profile_row_cliff() {
+        let thresholds = ReadinessThresholds::default();
+        let counts = vec![232, 233, 234, 231, 26, 25, 27, 26];
+
+        let distribution = daily_count_distribution(&counts, thresholds);
+
+        assert_eq!(distribution.p95_rows, 234);
+        assert_eq!(distribution.weak_day_threshold, 117);
+        assert_eq!(distribution.weak_day_count, 4);
+    }
+
+    #[test]
     fn linear_prediction_request_defaults_model_and_prediction_ids() {
         let req = LinearPredictionSetRequest {
             model_code: "linear_alpha_smoke".into(),
@@ -5792,6 +6319,66 @@ mod tests {
         );
         assert_eq!(config["bucket_count"], 7);
         assert_eq!(config["label"]["label"], "future_excess_return");
+    }
+
+    #[test]
+    fn quality_adjusted_label_loads_trailing_price_history_before_train_start() {
+        let req = NormalizedLinearTrainingRequest {
+            model_code: "p7v19ml_nlq_ranker".into(),
+            model_version: "w1-test".into(),
+            model_version_id: "p7v19ml-nlq-w1-test".into(),
+            training_task_id: "train-p7v19ml-w1-test".into(),
+            prediction_set_id: "p7v19ml-w1-test".into(),
+            data_version_id: "dv-v19-alpha-rebuild-smoke".into(),
+            feature_set_version_id: "phase7_gb_quality_value_recovery_low_impact_v6".into(),
+            training_dataset_id: "ds-p7v19ml-w1-test".into(),
+            train_start_date: NaiveDate::from_ymd_opt(2017, 1, 3).unwrap(),
+            train_end_date: NaiveDate::from_ymd_opt(2017, 9, 11).unwrap(),
+            prediction_start_date: NaiveDate::from_ymd_opt(2017, 11, 10).unwrap(),
+            prediction_end_date: NaiveDate::from_ymd_opt(2017, 11, 29).unwrap(),
+            label_horizon_days: 60,
+            label_objective: LabelObjective::QualityAdjustedRiskAdjustedExcessReturn,
+            factors: vec![LinearFactorRef {
+                factor_code: "fin_roe_daily_std".into(),
+                factor_version: "1.0.0".into(),
+            }],
+        };
+
+        let price_start = training_label_price_start_date(&req);
+
+        assert_eq!(price_start, NaiveDate::from_ymd_opt(2016, 4, 26).unwrap());
+    }
+
+    #[test]
+    fn walk_forward_nonlinear_empty_prediction_error_includes_window_diagnostics() {
+        let summaries = vec![WalkForwardNonlinearWindowSummary {
+            window_index: 1,
+            train_start_date: NaiveDate::from_ymd_opt(2017, 1, 3).unwrap(),
+            train_end_date: NaiveDate::from_ymd_opt(2017, 9, 11).unwrap(),
+            prediction_start_date: NaiveDate::from_ymd_opt(2017, 11, 10).unwrap(),
+            prediction_end_date: NaiveDate::from_ymd_opt(2017, 11, 29).unwrap(),
+            sample_count: 0,
+            prediction_rows: 0,
+            skipped: true,
+            skip_reason: Some("sample_count 0 < required_samples 1000".to_string()),
+            model: None,
+        }];
+
+        let message = walk_forward_nonlinear_no_prediction_rows_error(&summaries);
+
+        assert!(message.contains("walk-forward nonlinear ranker produced no prediction rows"));
+        assert!(message.contains("window=1"));
+        assert!(message.contains("sample_count=0"));
+        assert!(message.contains("sample_count 0 < required_samples 1000"));
+    }
+
+    #[test]
+    fn missing_data_version_error_is_actionable() {
+        let message = missing_data_version_error_message("dv-missing-smoke");
+
+        assert!(message.contains("dv-missing-smoke"));
+        assert!(message.contains("does not exist in data_version"));
+        assert!(message.contains("data readiness/sync"));
     }
 
     #[test]

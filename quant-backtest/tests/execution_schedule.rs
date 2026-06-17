@@ -65,7 +65,7 @@ fn signal_on_last_trading_day_is_not_executed_without_next_day() {
     assert!(scheduled.is_empty());
 }
 
-use quant_backtest::runner::BacktestTaskInsert;
+use quant_backtest::runner::{backtest_task_parameters, BacktestTaskInsert};
 
 #[test]
 fn task_insert_uses_config_context_not_placeholders() {
@@ -83,6 +83,47 @@ fn task_insert_uses_config_context_not_placeholders() {
     assert_eq!(insert.data_version_id, "data-v1");
     assert_eq!(insert.symbols, vec!["000001.SZ", "600000.SH"]);
     assert_eq!(insert.rebalance_frequency, "monthly");
+}
+
+#[test]
+fn task_parameters_preserve_request_snapshot_and_fill_core_ids() {
+    let mut config = BacktestConfig {
+        research_dataset_id: Some("research-v1".into()),
+        feature_set_version_id: Some("features-v1".into()),
+        prediction_set_id: Some("prediction-v1".into()),
+        portfolio_policy_id: Some("policy-v1".into()),
+        ..BacktestConfig::default()
+    };
+    config.parameters = serde_json::json!({
+        "request_type": "factor_backtest",
+        "combo_name": "full_pit_icir_37f",
+        "prediction_set_id": "request-prediction-v1",
+        "score_direction": "ascending"
+    });
+
+    let parameters = backtest_task_parameters(&config);
+
+    assert_eq!(parameters["request_type"], "factor_backtest");
+    assert_eq!(parameters["combo_name"], "full_pit_icir_37f");
+    assert_eq!(parameters["score_direction"], "ascending");
+    assert_eq!(parameters["prediction_set_id"], "request-prediction-v1");
+    assert_eq!(parameters["research_dataset_id"], "research-v1");
+    assert_eq!(parameters["feature_set_version_id"], "features-v1");
+    assert_eq!(parameters["portfolio_policy_id"], "policy-v1");
+}
+
+#[test]
+fn task_parameters_replace_non_object_snapshot_with_core_ids() {
+    let mut config = BacktestConfig {
+        prediction_set_id: Some("prediction-v1".into()),
+        ..BacktestConfig::default()
+    };
+    config.parameters = serde_json::json!("invalid-snapshot");
+
+    let parameters = backtest_task_parameters(&config);
+
+    assert!(parameters.is_object());
+    assert_eq!(parameters["prediction_set_id"], "prediction-v1");
 }
 
 use quant_backtest::engine::{BacktestEngine, MarketDay};

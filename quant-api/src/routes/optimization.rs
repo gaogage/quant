@@ -13,6 +13,7 @@ use quant_common::phase7::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sqlx::{Postgres, QueryBuilder};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,9 +27,10 @@ use crate::routes::backtest::{
     RunPredictionBacktestReq,
 };
 use crate::routes::ml::{
-    create_walk_forward_nonlinear_quantile_ranker_inner, train_nonlinear_quantile_ranker_inner,
-    LinearFactorRef, TrainNonlinearQuantileRankerRequest,
-    WalkForwardNonlinearQuantileRankerRequest,
+    build_prediction_set_readiness_report, create_walk_forward_nonlinear_quantile_ranker_inner,
+    daily_count_distribution, prediction_readiness_passed, readiness_expected_open_day_count,
+    train_nonlinear_quantile_ranker_inner, LinearFactorRef, ReadinessThresholds,
+    TrainNonlinearQuantileRankerRequest, WalkForwardNonlinearQuantileRankerRequest,
 };
 use crate::AppState;
 use quant_backtest::runner::{
@@ -131,6 +133,21 @@ pub struct Phase7OosProfileComparisonPlanRequest {
     pub base: Phase7OosWalkForwardDiscoveryRequest,
     pub profiles: Option<Vec<String>>,
     pub return_risk_cache_comparison: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FeatureProfileReadinessRequest {
+    pub feature_profile: String,
+    pub start_date: String,
+    pub end_date: String,
+    #[serde(default)]
+    pub min_day_coverage_ratio: Option<f64>,
+    #[serde(default)]
+    pub min_daily_rows: Option<i64>,
+    #[serde(default)]
+    pub min_p95_daily_row_ratio: Option<f64>,
+    #[serde(default)]
+    pub persist_report: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -415,6 +432,67 @@ struct RobustnessOverlayPersistenceFields {
     gate_result_id: String,
     status: String,
     gate_results: Value,
+}
+
+#[derive(Debug, Clone)]
+struct SleeveAdmissionTrialDiagnosticRow {
+    trial_id: String,
+    trial_index: i32,
+    status: String,
+    score: Option<Decimal>,
+    parameters: Value,
+    metrics: Option<Value>,
+    constraint_violations: Option<Value>,
+    robustness_status: Option<String>,
+    gate_results: Option<Value>,
+}
+
+struct SleeveAdmissionTrialDiagnostic {
+    family: String,
+    robustness_status: String,
+    score: Option<Decimal>,
+    annual_return: Option<f64>,
+    sharpe: Option<f64>,
+    calmar: Option<f64>,
+    fill_ratio: Option<f64>,
+    unfilled_gap: Option<f64>,
+    stress_pass_ratio: Option<f64>,
+    failed_gate_names: Vec<String>,
+    json: Value,
+}
+
+#[derive(Default)]
+struct SleeveAdmissionFamilyAccumulator {
+    trial_count: usize,
+    rejected_count: usize,
+    approved_count: usize,
+    annual_return_sum: f64,
+    annual_return_count: usize,
+    sharpe_sum: f64,
+    sharpe_count: usize,
+    calmar_sum: f64,
+    calmar_count: usize,
+    fill_ratio_sum: f64,
+    fill_ratio_count: usize,
+    unfilled_gap_sum: f64,
+    unfilled_gap_count: usize,
+    stress_pass_ratio_sum: f64,
+    stress_pass_ratio_count: usize,
+    failed_gates: BTreeMap<String, usize>,
+}
+
+#[derive(Default)]
+struct SleeveAdmissionActionAccumulator {
+    total_trial_count: usize,
+    positive_trial_count: usize,
+    positive_stress_evaluated_count: usize,
+    positive_stress_passed_count: usize,
+    positive_fill_below_90_count: usize,
+    positive_unfilled_above_08_count: usize,
+    weak_or_negative_alpha_count: usize,
+    execution_capacity_families: BTreeSet<String>,
+    weak_alpha_families: BTreeSet<String>,
+    stress_failed_families: BTreeSet<String>,
 }
 
 struct NormalizedPromoteRequest {
@@ -753,6 +831,45 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "trainable_alpha_admission_discovery"
         | "phase7_trainable_alpha_admission"
         | "phase7_ft"
+        | "professional_v19_multi_alpha_sleeve_admission"
+        | "v19_multi_alpha_sleeve_admission"
+        | "multi_alpha_sleeve_admission"
+        | "phase7_v19_sleeves"
+        | "professional_v19_execution_repair_admission"
+        | "v19_execution_repair_admission"
+        | "v19_execution_repair"
+        | "phase7_v19_execution_repair"
+        | "phase7_v19_exec_repair"
+        | "professional_v19_train_window_ml_alpha_rebuild"
+        | "v19_train_window_ml_alpha_rebuild"
+        | "v19_ml_alpha_rebuild"
+        | "phase7_v19_train_window_ml_alpha_rebuild"
+        | "phase7_v19_ml_alpha_rebuild"
+        | "professional_v19_train_window_ml_simple_excess_rebuild"
+        | "v19_train_window_ml_simple_excess_rebuild"
+        | "v19_ml_simple_excess_rebuild"
+        | "phase7_v19_train_window_ml_simple_excess"
+        | "phase7_v19_ml_simple_excess"
+        | "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+        | "v19_train_window_ml_simple_excess_low_impact_rebuild"
+        | "v19_ml_simple_excess_low_impact_rebuild"
+        | "phase7_v19_train_window_ml_simple_excess_low_impact"
+        | "phase7_v19_ml_simple_excess_low_impact"
+        | "professional_v19_train_window_ml_h120_low_impact_rebuild"
+        | "v19_train_window_ml_h120_low_impact_rebuild"
+        | "v19_ml_h120_low_impact_rebuild"
+        | "phase7_v19_train_window_ml_h120_low_impact"
+        | "phase7_v19_ml_h120_low_impact"
+        | "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+        | "v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+        | "v19_ml_rae_h120_residual_capacity_rebuild"
+        | "phase7_v19_train_window_ml_rae_h120_residual_capacity"
+        | "phase7_v19_ml_rae_h120_residual_capacity"
+        | "professional_v19_train_window_ml_event_sentiment_rebuild"
+        | "v19_train_window_ml_event_sentiment_rebuild"
+        | "v19_ml_event_sentiment_rebuild"
+        | "phase7_v19_train_window_ml_event_sentiment"
+        | "phase7_v19_ml_event_sentiment"
         | "professional_prediction_capacity_dual_objective"
         | "prediction_capacity_dual_objective"
         | "phase7_prediction_capacity_dual_objective"
@@ -1083,6 +1200,14 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
         | "phase7_t" => (
             "professional_sharpe_stabilization".to_string(),
             LayeredSearchConfig::professional_sharpe_stabilization_default(),
+        ),
+        "professional_v19_current_baseline"
+        | "v19_current_baseline"
+        | "v19_current"
+        | "phase7_v19_current_baseline"
+        | "phase7_v19_current" => (
+            "professional_v19_current_baseline".to_string(),
+            LayeredSearchConfig::professional_v19_current_baseline_default(),
         ),
         "professional_regime_stabilization"
         | "regime_stabilization"
@@ -1914,6 +2039,69 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_trainable_alpha_admission_discovery".to_string(),
             LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default(),
         ),
+        "professional_v19_multi_alpha_sleeve_admission"
+        | "v19_multi_alpha_sleeve_admission"
+        | "multi_alpha_sleeve_admission"
+        | "phase7_v19_sleeves" => (
+            "professional_v19_multi_alpha_sleeve_admission".to_string(),
+            LayeredSearchConfig::professional_v19_multi_alpha_sleeve_admission_default(),
+        ),
+        "professional_v19_execution_repair_admission"
+        | "v19_execution_repair_admission"
+        | "v19_execution_repair"
+        | "phase7_v19_execution_repair"
+        | "phase7_v19_exec_repair" => (
+            "professional_v19_execution_repair_admission".to_string(),
+            LayeredSearchConfig::professional_v19_execution_repair_admission_default(),
+        ),
+        "professional_v19_train_window_ml_alpha_rebuild"
+        | "v19_train_window_ml_alpha_rebuild"
+        | "v19_ml_alpha_rebuild"
+        | "phase7_v19_train_window_ml_alpha_rebuild"
+        | "phase7_v19_ml_alpha_rebuild" => (
+            "professional_v19_train_window_ml_alpha_rebuild".to_string(),
+            LayeredSearchConfig::professional_v19_train_window_ml_alpha_rebuild_default(),
+        ),
+        "professional_v19_train_window_ml_simple_excess_rebuild"
+        | "v19_train_window_ml_simple_excess_rebuild"
+        | "v19_ml_simple_excess_rebuild"
+        | "phase7_v19_train_window_ml_simple_excess"
+        | "phase7_v19_ml_simple_excess" => (
+            "professional_v19_train_window_ml_simple_excess_rebuild".to_string(),
+            LayeredSearchConfig::professional_v19_train_window_ml_simple_excess_rebuild_default(),
+        ),
+        "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+        | "v19_train_window_ml_simple_excess_low_impact_rebuild"
+        | "v19_ml_simple_excess_low_impact_rebuild"
+        | "phase7_v19_train_window_ml_simple_excess_low_impact"
+        | "phase7_v19_ml_simple_excess_low_impact" => (
+            "professional_v19_train_window_ml_simple_excess_low_impact_rebuild".to_string(),
+            LayeredSearchConfig::professional_v19_train_window_ml_simple_excess_low_impact_rebuild_default(),
+        ),
+        "professional_v19_train_window_ml_h120_low_impact_rebuild"
+        | "v19_train_window_ml_h120_low_impact_rebuild"
+        | "v19_ml_h120_low_impact_rebuild"
+        | "phase7_v19_train_window_ml_h120_low_impact"
+        | "phase7_v19_ml_h120_low_impact" => (
+            "professional_v19_train_window_ml_h120_low_impact_rebuild".to_string(),
+            LayeredSearchConfig::professional_v19_train_window_ml_h120_low_impact_rebuild_default(),
+        ),
+        "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+        | "v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+        | "v19_ml_rae_h120_residual_capacity_rebuild"
+        | "phase7_v19_train_window_ml_rae_h120_residual_capacity"
+        | "phase7_v19_ml_rae_h120_residual_capacity" => (
+            "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild".to_string(),
+            LayeredSearchConfig::professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild_default(),
+        ),
+        "professional_v19_train_window_ml_event_sentiment_rebuild"
+        | "v19_train_window_ml_event_sentiment_rebuild"
+        | "v19_ml_event_sentiment_rebuild"
+        | "phase7_v19_train_window_ml_event_sentiment"
+        | "phase7_v19_ml_event_sentiment" => (
+            "professional_v19_train_window_ml_event_sentiment_rebuild".to_string(),
+            LayeredSearchConfig::professional_v19_train_window_ml_event_sentiment_rebuild_default(),
+        ),
         "professional_prediction_capacity_dual_objective"
         | "prediction_capacity_dual_objective"
         | "phase7_prediction_capacity_dual_objective"
@@ -2197,6 +2385,13 @@ fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_
         if search_profile == "professional_train_window_ml_stress_fill_discovery"
             || search_profile == "professional_ensemble_discovery"
             || search_profile == "professional_simple_nlqr_discovery"
+            || search_profile == "professional_v19_train_window_ml_alpha_rebuild"
+            || search_profile == "professional_v19_train_window_ml_simple_excess_rebuild"
+            || search_profile == "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+            || search_profile == "professional_v19_train_window_ml_h120_low_impact_rebuild"
+            || search_profile
+                == "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            || search_profile == "professional_v19_train_window_ml_event_sentiment_rebuild"
         {
             apply_internal_train_window_ml_prediction_set_to_seed_trials(
                 &mut config.seed_trials,
@@ -2229,6 +2424,15 @@ fn profile_accepts_prediction_set_override(search_profile: &str) -> bool {
         "professional_train_window_nonlinear_ranking_discovery"
             | "professional_train_window_stress_fill_target_exposure"
             | "professional_train_window_ml_stress_fill_discovery"
+            | "professional_v19_multi_alpha_sleeve_admission"
+            | "professional_v19_execution_repair_admission"
+            | "professional_v19_train_window_ml_alpha_rebuild"
+            | "professional_v19_train_window_ml_simple_excess_rebuild"
+            | "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+            | "professional_v19_train_window_ml_h120_low_impact_rebuild"
+            | "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            | "professional_v19_train_window_ml_event_sentiment_rebuild"
+            | "professional_v19_current_baseline"
     )
 }
 
@@ -2245,6 +2449,36 @@ fn is_train_window_ml_stress_fill_profile(search_profile: Option<&str>) -> bool 
             | "professional_simple_nlqr_discovery"
             | "phase7_simple_nlqr"
             | "phase7_s1"
+            | "professional_v19_train_window_ml_alpha_rebuild"
+            | "v19_train_window_ml_alpha_rebuild"
+            | "v19_ml_alpha_rebuild"
+            | "phase7_v19_train_window_ml_alpha_rebuild"
+            | "phase7_v19_ml_alpha_rebuild"
+            | "professional_v19_train_window_ml_simple_excess_rebuild"
+            | "v19_train_window_ml_simple_excess_rebuild"
+            | "v19_ml_simple_excess_rebuild"
+            | "phase7_v19_train_window_ml_simple_excess"
+            | "phase7_v19_ml_simple_excess"
+            | "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+            | "v19_train_window_ml_simple_excess_low_impact_rebuild"
+            | "v19_ml_simple_excess_low_impact_rebuild"
+            | "phase7_v19_train_window_ml_simple_excess_low_impact"
+            | "phase7_v19_ml_simple_excess_low_impact"
+            | "professional_v19_train_window_ml_h120_low_impact_rebuild"
+            | "v19_train_window_ml_h120_low_impact_rebuild"
+            | "v19_ml_h120_low_impact_rebuild"
+            | "phase7_v19_train_window_ml_h120_low_impact"
+            | "phase7_v19_ml_h120_low_impact"
+            | "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            | "v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            | "v19_ml_rae_h120_residual_capacity_rebuild"
+            | "phase7_v19_train_window_ml_rae_h120_residual_capacity"
+            | "phase7_v19_ml_rae_h120_residual_capacity"
+            | "professional_v19_train_window_ml_event_sentiment_rebuild"
+            | "v19_train_window_ml_event_sentiment_rebuild"
+            | "v19_ml_event_sentiment_rebuild"
+            | "phase7_v19_train_window_ml_event_sentiment"
+            | "phase7_v19_ml_event_sentiment"
     )
 }
 
@@ -2259,6 +2493,93 @@ fn is_simple_nlqr_profile(search_profile: Option<&str>) -> bool {
     matches!(
         search_profile.map(str::trim).unwrap_or_default(),
         "professional_simple_nlqr_discovery" | "phase7_simple_nlqr" | "phase7_s1"
+    )
+}
+
+fn is_v19_train_window_ml_alpha_rebuild_profile(search_profile: Option<&str>) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_v19_train_window_ml_alpha_rebuild"
+            | "v19_train_window_ml_alpha_rebuild"
+            | "v19_ml_alpha_rebuild"
+            | "phase7_v19_train_window_ml_alpha_rebuild"
+            | "phase7_v19_ml_alpha_rebuild"
+            | "professional_v19_train_window_ml_simple_excess_rebuild"
+            | "v19_train_window_ml_simple_excess_rebuild"
+            | "v19_ml_simple_excess_rebuild"
+            | "phase7_v19_train_window_ml_simple_excess"
+            | "phase7_v19_ml_simple_excess"
+            | "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+            | "v19_train_window_ml_simple_excess_low_impact_rebuild"
+            | "v19_ml_simple_excess_low_impact_rebuild"
+            | "phase7_v19_train_window_ml_simple_excess_low_impact"
+            | "phase7_v19_ml_simple_excess_low_impact"
+            | "professional_v19_train_window_ml_h120_low_impact_rebuild"
+            | "v19_train_window_ml_h120_low_impact_rebuild"
+            | "v19_ml_h120_low_impact_rebuild"
+            | "phase7_v19_train_window_ml_h120_low_impact"
+            | "phase7_v19_ml_h120_low_impact"
+            | "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            | "v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            | "v19_ml_rae_h120_residual_capacity_rebuild"
+            | "phase7_v19_train_window_ml_rae_h120_residual_capacity"
+            | "phase7_v19_ml_rae_h120_residual_capacity"
+            | "professional_v19_train_window_ml_event_sentiment_rebuild"
+            | "v19_train_window_ml_event_sentiment_rebuild"
+            | "v19_ml_event_sentiment_rebuild"
+            | "phase7_v19_train_window_ml_event_sentiment"
+            | "phase7_v19_ml_event_sentiment"
+    )
+}
+
+fn is_v19_train_window_ml_event_sentiment_rebuild_profile(search_profile: Option<&str>) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_v19_train_window_ml_event_sentiment_rebuild"
+            | "v19_train_window_ml_event_sentiment_rebuild"
+            | "v19_ml_event_sentiment_rebuild"
+            | "phase7_v19_train_window_ml_event_sentiment"
+            | "phase7_v19_ml_event_sentiment"
+    )
+}
+
+fn is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(
+    search_profile: Option<&str>,
+) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            | "v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+            | "v19_ml_rae_h120_residual_capacity_rebuild"
+            | "phase7_v19_train_window_ml_rae_h120_residual_capacity"
+            | "phase7_v19_ml_rae_h120_residual_capacity"
+    )
+}
+
+fn is_v19_train_window_ml_h120_low_impact_rebuild_profile(search_profile: Option<&str>) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_v19_train_window_ml_h120_low_impact_rebuild"
+            | "v19_train_window_ml_h120_low_impact_rebuild"
+            | "v19_ml_h120_low_impact_rebuild"
+            | "phase7_v19_train_window_ml_h120_low_impact"
+            | "phase7_v19_ml_h120_low_impact"
+    )
+}
+
+fn is_v19_train_window_ml_simple_excess_rebuild_profile(search_profile: Option<&str>) -> bool {
+    matches!(
+        search_profile.map(str::trim).unwrap_or_default(),
+        "professional_v19_train_window_ml_simple_excess_rebuild"
+            | "v19_train_window_ml_simple_excess_rebuild"
+            | "v19_ml_simple_excess_rebuild"
+            | "phase7_v19_train_window_ml_simple_excess"
+            | "phase7_v19_ml_simple_excess"
+            | "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+            | "v19_train_window_ml_simple_excess_low_impact_rebuild"
+            | "v19_ml_simple_excess_low_impact_rebuild"
+            | "phase7_v19_train_window_ml_simple_excess_low_impact"
+            | "phase7_v19_ml_simple_excess_low_impact"
     )
 }
 
@@ -2791,18 +3112,74 @@ pub async fn run_phase7_oos_walk_forward_discovery(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7OosWalkForwardDiscoveryRequest>,
 ) -> impl IntoResponse {
-    let result = match normalize_oos_execution_mode(req.execution_mode.as_deref()) {
-        Ok("background") if !req.plan_only.unwrap_or(false) => {
-            start_phase7_oos_walk_forward_discovery_background(&state.db, req).await
+    let result = if req.plan_only.unwrap_or(false) {
+        match normalize_oos_execution_mode(req.execution_mode.as_deref()) {
+            Ok(_) => execute_phase7_oos_walk_forward_discovery(&state.db, req, None).await,
+            Err(message) => Err(message),
         }
-        Ok(_) => execute_phase7_oos_walk_forward_discovery(&state.db, req, None).await,
-        Err(message) => Err(message),
+    } else {
+        match ensure_phase7_oos_request_references_exist(&state.db, &req).await {
+            Ok(()) => match normalize_oos_execution_mode(req.execution_mode.as_deref()) {
+                Ok("background") => {
+                    start_phase7_oos_walk_forward_discovery_background(&state.db, req).await
+                }
+                Ok(_) => execute_phase7_oos_walk_forward_discovery(&state.db, req, None).await,
+                Err(message) => Err(message),
+            },
+            Err(message) => Err(message),
+        }
     };
 
     match result {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
+}
+
+fn missing_strategy_version_error_message(strategy_version_id: &str) -> String {
+    format!(
+        "strategy_version_id '{}' does not exist in strategy_version; use an existing canonical strategy_version_id or register the strategy version before running optimization",
+        strategy_version_id
+    )
+}
+
+fn missing_optimization_data_version_error_message(data_version_id: &str) -> String {
+    format!(
+        "data_version_id '{}' does not exist in data_version; run data readiness/sync first or use an existing canonical data_version_id",
+        data_version_id
+    )
+}
+
+async fn ensure_phase7_oos_request_references_exist(
+    db: &sqlx::PgPool,
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+) -> Result<(), String> {
+    let strategy_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM strategy_version WHERE strategy_version_id = $1)",
+    )
+    .bind(&req.strategy_version_id)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to check strategy_version: {}", error))?;
+    if !strategy_exists {
+        return Err(missing_strategy_version_error_message(
+            &req.strategy_version_id,
+        ));
+    }
+
+    let data_version_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM data_version WHERE data_version_id = $1)")
+            .bind(&req.data_version_id)
+            .fetch_one(db)
+            .await
+            .map_err(|error| format!("Failed to check data_version: {}", error))?;
+    if !data_version_exists {
+        return Err(missing_optimization_data_version_error_message(
+            &req.data_version_id,
+        ));
+    }
+
+    Ok(())
 }
 
 pub async fn plan_phase7_oos_profile_comparison(
@@ -2823,6 +3200,16 @@ pub async fn launch_phase7_oos_profile_comparison_smoke(
     Json(req): Json<Phase7OosProfileComparisonPlanRequest>,
 ) -> impl IntoResponse {
     match start_phase7_oos_profile_comparison_smoke(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+pub async fn report_feature_profile_readiness(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FeatureProfileReadinessRequest>,
+) -> impl IntoResponse {
+    match build_feature_profile_readiness_report_from_request(&state.db, &req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
@@ -2891,6 +3278,16 @@ pub async fn get_experiment_run(
     }
 }
 
+pub async fn get_sleeve_admission_diagnostics(
+    State(state): State<Arc<AppState>>,
+    Path(experiment_run_id): Path<String>,
+) -> impl IntoResponse {
+    match build_sleeve_admission_diagnostics(&state.db, &experiment_run_id).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
 pub async fn promote_optimization_trial(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -2909,6 +3306,611 @@ pub async fn report_return_risk_cache_economics(
     match build_return_risk_cache_economics_report(&state.db, &req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn build_sleeve_admission_diagnostics(
+    db: &sqlx::PgPool,
+    experiment_run_id: &str,
+) -> Result<Value, String> {
+    let row = sqlx::query_as::<_, (String, Option<Value>)>(
+        "SELECT status, metrics
+         FROM experiment_run
+         WHERE experiment_run_id = $1",
+    )
+    .bind(experiment_run_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to load experiment_run {}: {}",
+            experiment_run_id, error
+        )
+    })?
+    .ok_or_else(|| format!("experiment_run not found: {}", experiment_run_id))?;
+
+    let metrics = row
+        .1
+        .ok_or_else(|| format!("experiment_run {} has no metrics", experiment_run_id))?;
+    let task_ids = sleeve_admission_train_task_ids(&metrics);
+    let mut rows_by_task = BTreeMap::new();
+    for task_id in task_ids {
+        let rows = load_sleeve_admission_trial_diagnostic_rows(db, &task_id).await?;
+        rows_by_task.insert(task_id, rows);
+    }
+
+    Ok(sleeve_admission_diagnostic_matrix_json(
+        experiment_run_id,
+        &row.0,
+        &metrics,
+        &rows_by_task,
+    ))
+}
+
+async fn load_sleeve_admission_trial_diagnostic_rows(
+    db: &sqlx::PgPool,
+    task_id: &str,
+) -> Result<Vec<SleeveAdmissionTrialDiagnosticRow>, String> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i32,
+            String,
+            Option<Decimal>,
+            Value,
+            Option<Value>,
+            Option<Value>,
+            Option<String>,
+            Option<Value>,
+        ),
+    >(
+        "SELECT trial.trial_id,
+                trial.trial_index,
+                trial.status,
+                trial.score,
+                trial.parameters,
+                trial.metrics,
+                trial.constraint_violations,
+                gate.status,
+                gate.gate_results
+         FROM optimization_trial trial
+         LEFT JOIN LATERAL (
+             SELECT status, gate_results
+             FROM robustness_gate_result
+             WHERE optimization_task_id = trial.optimization_task_id
+               AND trial_id = trial.trial_id
+             ORDER BY created_at DESC
+             LIMIT 1
+         ) gate ON TRUE
+         WHERE trial.optimization_task_id = $1
+         ORDER BY trial.score DESC NULLS LAST, trial.trial_index ASC",
+    )
+    .bind(task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to load sleeve admission trials for task {}: {}",
+            task_id, error
+        )
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                trial_id,
+                trial_index,
+                status,
+                score,
+                parameters,
+                metrics,
+                constraint_violations,
+                robustness_status,
+                gate_results,
+            )| SleeveAdmissionTrialDiagnosticRow {
+                trial_id,
+                trial_index,
+                status,
+                score,
+                parameters,
+                metrics,
+                constraint_violations,
+                robustness_status,
+                gate_results,
+            },
+        )
+        .collect())
+}
+
+fn sleeve_admission_train_task_ids(metrics: &Value) -> BTreeSet<String> {
+    metrics
+        .get("windows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|window| {
+            window
+                .get("train_optimization_task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn sleeve_admission_diagnostic_matrix_json(
+    experiment_run_id: &str,
+    experiment_status: &str,
+    metrics: &Value,
+    rows_by_task: &BTreeMap<String, Vec<SleeveAdmissionTrialDiagnosticRow>>,
+) -> Value {
+    let windows = metrics
+        .get("windows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut family_summary: BTreeMap<String, SleeveAdmissionFamilyAccumulator> = BTreeMap::new();
+    let mut action_summary = SleeveAdmissionActionAccumulator::default();
+    let mut window_reports = Vec::new();
+
+    for window in windows {
+        let task_id = window
+            .get("train_optimization_task_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut rows = rows_by_task.get(&task_id).cloned().unwrap_or_default();
+        rows.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.trial_index.cmp(&right.trial_index))
+        });
+        let diagnostics = rows
+            .iter()
+            .map(sleeve_admission_trial_diagnostic)
+            .collect::<Vec<_>>();
+        for diagnostic in &diagnostics {
+            family_summary
+                .entry(diagnostic.family.clone())
+                .or_default()
+                .record(diagnostic);
+            action_summary.record(diagnostic);
+        }
+
+        let best_rejected_trial = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.robustness_status == "rejected")
+            .map(sleeve_admission_best_trial_json)
+            .unwrap_or(Value::Null);
+        let best_trial = diagnostics
+            .first()
+            .map(sleeve_admission_best_trial_json)
+            .unwrap_or(Value::Null);
+
+        window_reports.push(json!({
+            "window": window.get("window").cloned().unwrap_or(Value::Null),
+            "status": window.get("status").cloned().unwrap_or(Value::Null),
+            "skip_reason": window.get("skip_reason").cloned().unwrap_or(Value::Null),
+            "train_optimization_task_id": task_id,
+            "trial_count": diagnostics.len(),
+            "family_count": diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.family.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            "best_trial": best_trial,
+            "best_rejected_trial": best_rejected_trial,
+            "families": diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.json.clone())
+                .collect::<Vec<_>>(),
+        }));
+    }
+
+    let family_summary = family_summary
+        .into_iter()
+        .map(|(family, accumulator)| accumulator.json(&family))
+        .collect::<Vec<_>>();
+
+    json!({
+        "experiment_run_id": experiment_run_id,
+        "experiment_status": experiment_status,
+        "window_count": window_reports.len(),
+        "windows": window_reports,
+        "family_summary": family_summary,
+        "action_summary": action_summary.json(),
+        "diagnostic_scope": {
+            "source": "experiment_run.metrics.windows -> optimization_trial -> latest robustness_gate_result",
+            "point_in_time_contract": "diagnostic only; does not rerun selection, does not relax train/OOS gates",
+        },
+    })
+}
+
+fn sleeve_admission_trial_diagnostic(
+    row: &SleeveAdmissionTrialDiagnosticRow,
+) -> SleeveAdmissionTrialDiagnostic {
+    let metrics = row.metrics.as_ref();
+    let gate_results = row.gate_results.as_ref();
+    let failed_gates = sleeve_failed_gate_reports(gate_results, row.constraint_violations.as_ref());
+    let failed_gate_names = failed_gates
+        .iter()
+        .filter_map(|gate| gate.get("gate").and_then(Value::as_str).map(str::to_string))
+        .collect::<Vec<_>>();
+    let family = sleeve_admission_family(&row.parameters);
+    let robustness_status = row
+        .robustness_status
+        .clone()
+        .unwrap_or_else(|| sleeve_unevaluated_status(&row.status).to_string());
+    let stress_pass_ratio = sleeve_stress_pass_ratio(gate_results);
+
+    let diagnostic_json = json!({
+        "family": family,
+        "trial_id": row.trial_id,
+        "trial_index": row.trial_index,
+        "trial_status": row.status,
+        "score": row.score,
+        "robustness_status": robustness_status,
+        "parameters": {
+            "alpha_sleeve_family": row.parameters.get("alpha_sleeve_family").cloned().unwrap_or(Value::Null),
+            "alpha_source_family": row.parameters.get("alpha_source_family").cloned().unwrap_or(Value::Null),
+            "combo_name": row.parameters.get("combo_name").cloned().unwrap_or(Value::Null),
+            "score_direction": row.parameters.get("score_direction").cloned().unwrap_or(Value::Null),
+            "market_regime": row.parameters.get("market_regime").cloned().unwrap_or(Value::Null),
+            "candidate_ranking": row.parameters.get("candidate_ranking").cloned().unwrap_or(Value::Null),
+            "capacity_risk_budget": row.parameters.get("capacity_risk_budget").cloned().unwrap_or(Value::Null),
+        },
+        "metrics": {
+            "annual_return_pct": metric_value(metrics, "annual_return_pct"),
+            "excess_return_pct": metric_value(metrics, "excess_return_pct"),
+            "sharpe_ratio": metric_value(metrics, "sharpe_ratio"),
+            "sortino_ratio": metric_value(metrics, "sortino_ratio"),
+            "calmar_ratio": metric_value(metrics, "calmar_ratio"),
+            "max_drawdown_pct": metric_value(metrics, "max_drawdown_pct"),
+            "profit_factor": metric_value(metrics, "profit_factor"),
+            "num_trades": metric_value(metrics, "num_trades"),
+        },
+        "execution_quality": {
+            "fill_ratio": metric_value(metrics, "final_execution_fill_ratio"),
+            "unfilled_target_gap_pct": metric_value(metrics, "final_unfilled_target_gap_pct"),
+            "cash_weight_pct": metric_value(metrics, "final_cash_weight_pct"),
+            "actual_gross_exposure_pct": metric_value(metrics, "final_actual_gross_exposure_pct"),
+            "execution_schedule_expired_count": metric_value(metrics, "execution_schedule_expired_count"),
+            "max_execution_target_gap_pct": metric_value(metrics, "max_execution_target_gap_pct"),
+        },
+        "stress": {
+            "pass_ratio": stress_pass_ratio,
+            "passed_count": sleeve_gate_field(gate_results, "train_cost_capacity_perturbation_pass_ratio", "passed_count"),
+            "total_count": sleeve_gate_field(gate_results, "train_cost_capacity_perturbation_pass_ratio", "total_count"),
+            "avg_perturbed_calmar": sleeve_gate_actual(gate_results, "train_avg_perturbed_calmar"),
+            "min_perturbed_annual_return": sleeve_gate_actual(gate_results, "train_perturbed_annual_return"),
+            "max_perturbed_drawdown_pct": sleeve_gate_field(gate_results, "train_cost_capacity_perturbation_pass_ratio", "max_perturbed_oos_drawdown_pct"),
+        },
+        "failed_gates": failed_gates,
+        "weak_regimes": sleeve_weak_regime_windows(gate_results, 3),
+        "constraint_violations": row.constraint_violations.clone().unwrap_or_else(|| json!([])),
+        "skip_reason": sleeve_trial_skip_reason(&robustness_status, &failed_gate_names),
+    });
+
+    SleeveAdmissionTrialDiagnostic {
+        family,
+        robustness_status,
+        score: row.score,
+        annual_return: metric_f64_value(metrics, "annual_return_pct"),
+        sharpe: metric_f64_value(metrics, "sharpe_ratio"),
+        calmar: metric_f64_value(metrics, "calmar_ratio"),
+        fill_ratio: metric_f64_value(metrics, "final_execution_fill_ratio"),
+        unfilled_gap: metric_f64_value(metrics, "final_unfilled_target_gap_pct"),
+        stress_pass_ratio,
+        failed_gate_names,
+        json: diagnostic_json,
+    }
+}
+
+fn sleeve_admission_family(parameters: &Value) -> String {
+    [
+        "alpha_sleeve_family",
+        "alpha_source_family",
+        "multi_alpha_sleeve_profile",
+        "combo_name",
+    ]
+    .iter()
+    .find_map(|key| parameters.get(*key).and_then(Value::as_str))
+    .unwrap_or("unknown")
+    .to_string()
+}
+
+fn sleeve_unevaluated_status(trial_status: &str) -> &str {
+    if trial_status == "completed" {
+        "not_evaluated"
+    } else {
+        "trial_not_completed"
+    }
+}
+
+fn sleeve_failed_gate_reports(
+    gate_results: Option<&Value>,
+    constraint_violations: Option<&Value>,
+) -> Vec<Value> {
+    let mut gates = gate_results
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|gate| gate.get("passed").and_then(Value::as_bool) == Some(false))
+        .map(|gate| {
+            json!({
+                "gate": gate.get("gate").cloned().unwrap_or(Value::Null),
+                "limit": gate.get("limit").cloned().unwrap_or(Value::Null),
+                "actual": gate.get("actual").cloned().unwrap_or(Value::Null),
+                "passed": false,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if gates.is_empty() {
+        gates = constraint_violations
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|violation| {
+                json!({
+                    "gate": violation.get("constraint").cloned().unwrap_or(Value::Null),
+                    "limit": violation.get("limit").cloned().unwrap_or(Value::Null),
+                    "actual": violation.get("actual").cloned().unwrap_or(Value::Null),
+                    "passed": false,
+                })
+            })
+            .collect();
+    }
+
+    gates
+}
+
+fn sleeve_trial_skip_reason(robustness_status: &str, failed_gate_names: &[String]) -> Value {
+    if robustness_status == "approved_candidate" {
+        return Value::Null;
+    }
+    if failed_gate_names.is_empty() {
+        return json!(format!("robustness_status={}", robustness_status));
+    }
+    json!(format!(
+        "robustness_status={} failed_gates={}",
+        robustness_status,
+        failed_gate_names.join(",")
+    ))
+}
+
+fn sleeve_gate<'a>(gate_results: Option<&'a Value>, gate_name: &str) -> Option<&'a Value> {
+    gate_results
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|gate| gate.get("gate").and_then(Value::as_str) == Some(gate_name))
+}
+
+fn sleeve_gate_actual(gate_results: Option<&Value>, gate_name: &str) -> Value {
+    sleeve_gate(gate_results, gate_name)
+        .and_then(|gate| gate.get("actual"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn sleeve_gate_field(gate_results: Option<&Value>, gate_name: &str, field_name: &str) -> Value {
+    sleeve_gate(gate_results, gate_name)
+        .and_then(|gate| gate.get(field_name))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn sleeve_stress_pass_ratio(gate_results: Option<&Value>) -> Option<f64> {
+    let gate = sleeve_gate(gate_results, "train_cost_capacity_perturbation_pass_ratio")?;
+    if let Some(actual) = gate.get("actual").and_then(value_as_f64) {
+        return Some(actual);
+    }
+    let passed_count = gate.get("passed_count").and_then(value_as_f64)?;
+    let total_count = gate.get("total_count").and_then(value_as_f64)?;
+    if total_count > 0.0 {
+        Some(passed_count / total_count)
+    } else {
+        None
+    }
+}
+
+fn sleeve_weak_regime_windows(gate_results: Option<&Value>, limit: usize) -> Vec<Value> {
+    let windows = sleeve_gate(gate_results, "walk_forward_min_window_count")
+        .and_then(|gate| gate.get("details"))
+        .and_then(|details| details.get("windows"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    rank_weak_walk_forward_windows(&windows, limit)
+}
+
+fn metric_value(metrics: Option<&Value>, key: &str) -> Value {
+    metrics
+        .and_then(|metrics| metrics.get(key))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn metric_f64_value(metrics: Option<&Value>, key: &str) -> Option<f64> {
+    metrics
+        .and_then(|metrics| metrics.get(key))
+        .and_then(value_as_f64)
+}
+
+fn sleeve_admission_best_trial_json(diagnostic: &SleeveAdmissionTrialDiagnostic) -> Value {
+    json!({
+        "trial_id": diagnostic.json.get("trial_id").cloned().unwrap_or(Value::Null),
+        "family": diagnostic.family,
+        "score": diagnostic.score,
+        "robustness_status": diagnostic.robustness_status,
+        "metrics": diagnostic.json.get("metrics").cloned().unwrap_or(Value::Null),
+        "execution_quality": diagnostic.json.get("execution_quality").cloned().unwrap_or(Value::Null),
+        "stress": diagnostic.json.get("stress").cloned().unwrap_or(Value::Null),
+        "failed_gates": diagnostic.json.get("failed_gates").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn avg_json(sum: f64, count: usize) -> Value {
+    if count == 0 {
+        Value::Null
+    } else {
+        json!(sum / count as f64)
+    }
+}
+
+impl SleeveAdmissionFamilyAccumulator {
+    fn record(&mut self, diagnostic: &SleeveAdmissionTrialDiagnostic) {
+        self.trial_count += 1;
+        match diagnostic.robustness_status.as_str() {
+            "approved_candidate" => self.approved_count += 1,
+            "rejected" => self.rejected_count += 1,
+            _ => {}
+        }
+        if let Some(value) = diagnostic.annual_return {
+            self.annual_return_sum += value;
+            self.annual_return_count += 1;
+        }
+        if let Some(value) = diagnostic.sharpe {
+            self.sharpe_sum += value;
+            self.sharpe_count += 1;
+        }
+        if let Some(value) = diagnostic.calmar {
+            self.calmar_sum += value;
+            self.calmar_count += 1;
+        }
+        if let Some(value) = diagnostic.fill_ratio {
+            self.fill_ratio_sum += value;
+            self.fill_ratio_count += 1;
+        }
+        if let Some(value) = diagnostic.unfilled_gap {
+            self.unfilled_gap_sum += value;
+            self.unfilled_gap_count += 1;
+        }
+        if let Some(value) = diagnostic.stress_pass_ratio {
+            self.stress_pass_ratio_sum += value;
+            self.stress_pass_ratio_count += 1;
+        }
+        for gate in &diagnostic.failed_gate_names {
+            *self.failed_gates.entry(gate.clone()).or_default() += 1;
+        }
+    }
+
+    fn json(&self, family: &str) -> Value {
+        let mut failures = self
+            .failed_gates
+            .iter()
+            .map(|(gate, count)| (gate.clone(), *count))
+            .collect::<Vec<_>>();
+        failures.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+        json!({
+            "family": family,
+            "trial_count": self.trial_count,
+            "rejected_count": self.rejected_count,
+            "approved_count": self.approved_count,
+            "avg_annual_return_pct": avg_json(self.annual_return_sum, self.annual_return_count),
+            "avg_sharpe_ratio": avg_json(self.sharpe_sum, self.sharpe_count),
+            "avg_calmar_ratio": avg_json(self.calmar_sum, self.calmar_count),
+            "avg_fill_ratio": avg_json(self.fill_ratio_sum, self.fill_ratio_count),
+            "avg_unfilled_target_gap_pct": avg_json(self.unfilled_gap_sum, self.unfilled_gap_count),
+            "avg_stress_pass_ratio": avg_json(self.stress_pass_ratio_sum, self.stress_pass_ratio_count),
+            "dominant_failure_modes": failures
+                .into_iter()
+                .take(5)
+                .map(|(gate, count)| json!({"gate": gate, "count": count}))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+impl SleeveAdmissionActionAccumulator {
+    fn record(&mut self, diagnostic: &SleeveAdmissionTrialDiagnostic) {
+        self.total_trial_count += 1;
+        let annual_return = diagnostic.annual_return.unwrap_or(0.0);
+        let sharpe = diagnostic.sharpe.unwrap_or(0.0);
+        let positive = annual_return > 0.0;
+        if positive {
+            self.positive_trial_count += 1;
+            if let Some(pass_ratio) = diagnostic.stress_pass_ratio {
+                self.positive_stress_evaluated_count += 1;
+                if pass_ratio >= 0.80 {
+                    self.positive_stress_passed_count += 1;
+                } else {
+                    self.stress_failed_families
+                        .insert(diagnostic.family.clone());
+                    self.execution_capacity_families
+                        .insert(diagnostic.family.clone());
+                }
+            }
+            if diagnostic.fill_ratio.unwrap_or(1.0) < 0.90 {
+                self.positive_fill_below_90_count += 1;
+                self.execution_capacity_families
+                    .insert(diagnostic.family.clone());
+            }
+            if diagnostic.unfilled_gap.unwrap_or(0.0) > 0.08 {
+                self.positive_unfilled_above_08_count += 1;
+                self.execution_capacity_families
+                    .insert(diagnostic.family.clone());
+            }
+        }
+
+        if annual_return <= 0.0 || sharpe < 0.0 {
+            self.weak_or_negative_alpha_count += 1;
+            self.weak_alpha_families.insert(diagnostic.family.clone());
+        }
+    }
+
+    fn json(&self) -> Value {
+        let mut next_actions = Vec::new();
+        if self.positive_trial_count > 0
+            && (!self.execution_capacity_families.is_empty()
+                || self.positive_stress_passed_count < self.positive_stress_evaluated_count)
+        {
+            next_actions.push(json!({
+                "action": "repair_execution_capacity_for_positive_alpha",
+                "priority": "P2",
+                "families": self.execution_capacity_families.iter().cloned().collect::<Vec<_>>(),
+                "evidence": {
+                    "positive_trial_count": self.positive_trial_count,
+                    "positive_stress_evaluated_count": self.positive_stress_evaluated_count,
+                    "positive_stress_passed_count": self.positive_stress_passed_count,
+                    "positive_fill_below_90_count": self.positive_fill_below_90_count,
+                    "positive_unfilled_above_08_count": self.positive_unfilled_above_08_count,
+                },
+                "next_step": "Diagnose train-window fill, unfilled target gap, participation/capacity headroom, and perturbed Calmar before allowing any OOS promotion.",
+            }));
+        }
+        if self.weak_or_negative_alpha_count > 0 {
+            next_actions.push(json!({
+                "action": "rebuild_alpha_sources_for_weak_or_negative_train_windows",
+                "priority": "P2",
+                "families": self.weak_alpha_families.iter().cloned().collect::<Vec<_>>(),
+                "evidence": {
+                    "weak_or_negative_alpha_count": self.weak_or_negative_alpha_count,
+                    "total_trial_count": self.total_trial_count,
+                },
+                "next_step": "Introduce genuinely new PIT-proven low-correlation alpha sources; do not keep scaling the same rejected seed set.",
+            }));
+        }
+
+        json!({
+            "total_trial_count": self.total_trial_count,
+            "positive_trial_count": self.positive_trial_count,
+            "positive_stress_evaluated_count": self.positive_stress_evaluated_count,
+            "positive_stress_passed_count": self.positive_stress_passed_count,
+            "positive_fill_below_90_count": self.positive_fill_below_90_count,
+            "positive_unfilled_above_08_count": self.positive_unfilled_above_08_count,
+            "weak_or_negative_alpha_count": self.weak_or_negative_alpha_count,
+            "stress_failed_families": self.stress_failed_families.iter().cloned().collect::<Vec<_>>(),
+            "next_actions": next_actions,
+            "non_goals": [
+                "do_not_relax_train_or_oos_gates",
+                "do_not_use_oos_strong_windows_for_reverse_tuning",
+                "do_not_promote_rejected_trials"
+            ],
+        })
     }
 }
 
@@ -3264,6 +4266,7 @@ async fn execute_phase7_oos_walk_forward_discovery(
         let execution = execute_oos_discovery_window(
             db,
             &req,
+            experiment_run_id.as_deref(),
             &train_execution_policy,
             window,
             oos_top_n,
@@ -3356,9 +4359,22 @@ async fn execute_phase7_oos_walk_forward_discovery(
     }))
 }
 
+fn should_use_fixed_params_oos_mode(
+    fixed_params_enabled: bool,
+    has_train_window_ml_prediction_sets: bool,
+    search_profile: Option<&str>,
+) -> bool {
+    if !fixed_params_enabled || has_train_window_ml_prediction_sets {
+        return false;
+    }
+    let (_profile_name, search_config) = phase7_search_config(search_profile);
+    search_config.seed_trials.len() == 1
+}
+
 async fn execute_oos_discovery_window(
     db: &sqlx::PgPool,
     req: &Phase7OosWalkForwardDiscoveryRequest,
+    experiment_run_id: Option<&str>,
     train_execution_policy: &OosTrainExecutionPolicy,
     window: &OosDiscoveryWindow,
     oos_top_n: usize,
@@ -3378,8 +4394,24 @@ async fn execute_oos_discovery_window(
         "summary_only",
     )?;
     let train_template_for_selection = train_template.clone();
+    update_oos_walk_forward_experiment_stage(
+        db,
+        experiment_run_id,
+        oos_walk_forward_stage(
+            "window_started",
+            Some(window.window_index),
+            json!({
+                "train_start": window.train_start.format("%Y-%m-%d").to_string(),
+                "train_end": window.train_end.format("%Y-%m-%d").to_string(),
+                "test_start": window.test_start.format("%Y-%m-%d").to_string(),
+                "test_end": window.test_end.format("%Y-%m-%d").to_string(),
+            }),
+        ),
+    )
+    .await?;
     let train_window_ml_prediction_sets =
-        prepare_train_window_ml_prediction_sets_for_oos_window(db, req, window).await?;
+        prepare_train_window_ml_prediction_sets_for_oos_window(db, req, window, experiment_run_id)
+            .await?;
 
     // Fixed-params WFA mode: skip grid search, use seed parameters directly for OOS.
     // Controlled by env var QUANT_WFA_FIXED_PARAMS=true.
@@ -3389,24 +4421,18 @@ async fn execute_oos_discovery_window(
         .map(|v| v.to_lowercase() == "true" || v == "1")
         .unwrap_or(false);
 
-    if fixed_params_enabled && train_window_ml_prediction_sets.is_none() {
+    if should_use_fixed_params_oos_mode(
+        fixed_params_enabled,
+        train_window_ml_prediction_sets.is_some(),
+        req.search_profile.as_deref(),
+    ) {
         // Resolve the search config to get the first seed trial's parameters
         let (_profile_name, search_config) = phase7_search_config(req.search_profile.as_deref());
         let seed_params = search_config
             .seed_trials
             .first()
             .cloned()
-            .unwrap_or_else(|| {
-                // Fallback: use the proven price_volume fixed params
-                json!({
-                    "combo_name": "phase7_price_volume_expanded_v1",
-                    "top_n": 15, "rebalance": "30",
-                    "score_direction": "descending", "skip_top_pct": "0.00",
-                    "max_position_pct": "0.10", "max_gross_exposure": "0.95",
-                    "portfolio_method": "heuristic", "benchmark": "000300.SH",
-                    "universe_profile": "listed_non_st", "entry_delay": "1"
-                })
-            });
+            .expect("fixed params mode requires exactly one seed trial");
 
         let test_template = backtest_template_for_window(
             req.backtest_template
@@ -3486,6 +4512,20 @@ async fn execute_oos_discovery_window(
                 .map(|sets| sets.train_prediction_set_id.as_str()),
         )
         .await?;
+    update_oos_walk_forward_experiment_stage(
+        db,
+        experiment_run_id,
+        oos_walk_forward_stage(
+            "train_optimization_task_created",
+            Some(window.window_index),
+            json!({
+                "optimization_task_id": train_task_id,
+                "planned_trials": bundle.plan.planned_trials,
+                "requested_trials": bundle.plan.requested_trials,
+            }),
+        ),
+    )
+    .await?;
     let trial_batch_limit = req
         .trial_batch_limit
         .unwrap_or(bundle.plan.batch_size as i64)
@@ -3497,7 +4537,23 @@ async fn execute_oos_discovery_window(
     });
     let max_batches = max_batches.clamp(1, 100_000);
     let mut train_batches = Vec::new();
-    for _ in 0..max_batches {
+    for batch_index in 0..max_batches {
+        update_oos_walk_forward_experiment_stage(
+            db,
+            experiment_run_id,
+            oos_walk_forward_stage(
+                "train_batch_started",
+                Some(window.window_index),
+                json!({
+                    "optimization_task_id": train_task_id,
+                    "batch_index": batch_index + 1,
+                    "max_batches": max_batches,
+                    "trial_batch_limit": trial_batch_limit,
+                    "train_cache_mode": train_execution_policy.cache_mode,
+                }),
+            ),
+        )
+        .await?;
         let batch = execute_pending_trials_with_caches_and_concurrency(
             db,
             &train_task_id,
@@ -3509,10 +4565,25 @@ async fn execute_oos_discovery_window(
         )
         .await?;
         let executed = batch["executed"].as_i64().unwrap_or(0);
-        train_batches.push(annotate_oos_train_batch_cache_mode(
-            batch,
-            train_execution_policy,
-        ));
+        let annotated_batch = annotate_oos_train_batch_cache_mode(batch, train_execution_policy);
+        update_oos_walk_forward_experiment_stage(
+            db,
+            experiment_run_id,
+            oos_walk_forward_stage(
+                "train_batch_completed",
+                Some(window.window_index),
+                json!({
+                    "optimization_task_id": train_task_id,
+                    "batch_index": batch_index + 1,
+                    "executed": annotated_batch["executed"],
+                    "completed": annotated_batch["completed"],
+                    "failed": annotated_batch["failed"],
+                    "performance_gate_status": annotated_batch["performance_gate_status"],
+                }),
+            ),
+        )
+        .await?;
+        train_batches.push(annotated_batch);
         if executed == 0 {
             break;
         }
@@ -3723,6 +4794,7 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     db: &sqlx::PgPool,
     req: &Phase7OosWalkForwardDiscoveryRequest,
     window: &OosDiscoveryWindow,
+    experiment_run_id: Option<&str>,
 ) -> Result<Option<TrainWindowMlPredictionSets>, String> {
     if !is_train_window_ml_stress_fill_profile(req.search_profile.as_deref()) {
         return Ok(None);
@@ -3730,12 +4802,28 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
 
     let is_ensemble = is_ensemble_profile(req.search_profile.as_deref());
     let is_simple_nlqr = is_simple_nlqr_profile(req.search_profile.as_deref());
+    let is_v19_alpha_rebuild =
+        is_v19_train_window_ml_alpha_rebuild_profile(req.search_profile.as_deref());
     let short_id = Uuid::new_v4().simple().to_string();
     let short_id = &short_id[..12];
     let prefix = if is_ensemble {
         "p7en"
     } else if is_simple_nlqr {
         "p7sn"
+    } else if is_v19_train_window_ml_event_sentiment_rebuild_profile(req.search_profile.as_deref())
+    {
+        "p7v19evt"
+    } else if is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(
+        req.search_profile.as_deref(),
+    ) {
+        "p7v19rae"
+    } else if is_v19_train_window_ml_h120_low_impact_rebuild_profile(req.search_profile.as_deref())
+    {
+        "p7v19h120"
+    } else if is_v19_train_window_ml_simple_excess_rebuild_profile(req.search_profile.as_deref()) {
+        "p7v19sx"
+    } else if is_v19_alpha_rebuild {
+        "p7v19ml"
     } else {
         "p7gb"
     };
@@ -3754,6 +4842,8 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
         // Simplified NLQR: stable label, fewer buckets for better generalization
         let h = train_window_ml_label_horizon_days(window) as usize;
         ("future_excess_return".to_string(), h, 5usize, 50usize)
+    } else if is_v19_alpha_rebuild {
+        phase7_train_window_ml_label_config_for_search(req.search_profile.as_deref())
     } else {
         let h = train_window_ml_label_horizon_days(window) as usize;
         (
@@ -3779,12 +4869,109 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     let factors = if is_simple_nlqr {
         phase7_train_window_ml_factor_refs_for_profile("phase7_simple_nlqr_core_15f_v1")
     } else {
-        phase7_train_window_ml_factor_refs()
+        phase7_train_window_ml_factor_refs_for_profile(feature_profile)
     };
     if factors.is_empty() {
         return Err("train-window ML ranking factors must not be empty".into());
     }
+    let readiness_thresholds = ReadinessThresholds::default();
+    let train_feature_readiness = build_feature_profile_readiness_report(
+        db,
+        feature_profile,
+        &factors,
+        train_prediction_start,
+        window.train_end,
+        readiness_thresholds,
+    )
+    .await?;
+    if !feature_profile_readiness_passed(&train_feature_readiness) {
+        update_oos_walk_forward_experiment_stage(
+            db,
+            experiment_run_id,
+            oos_walk_forward_stage(
+                "train_window_ml_feature_profile_readiness_failed",
+                Some(window.window_index),
+                json!({
+                    "phase": "train",
+                    "feature_profile": feature_profile,
+                    "readiness": train_feature_readiness,
+                }),
+            ),
+        )
+        .await?;
+        return Err(format!(
+            "{} window {} train feature-profile readiness failed: {}",
+            prefix,
+            window.window_index,
+            readiness_failure_summary(&train_feature_readiness)
+        ));
+    }
+    let test_feature_readiness = build_feature_profile_readiness_report(
+        db,
+        feature_profile,
+        &factors,
+        window.test_start,
+        window.test_end,
+        readiness_thresholds,
+    )
+    .await?;
+    if !feature_profile_readiness_passed(&test_feature_readiness) {
+        update_oos_walk_forward_experiment_stage(
+            db,
+            experiment_run_id,
+            oos_walk_forward_stage(
+                "train_window_ml_feature_profile_readiness_failed",
+                Some(window.window_index),
+                json!({
+                    "phase": "test",
+                    "feature_profile": feature_profile,
+                    "readiness": test_feature_readiness,
+                }),
+            ),
+        )
+        .await?;
+        return Err(format!(
+            "{} window {} test feature-profile readiness failed: {}",
+            prefix,
+            window.window_index,
+            readiness_failure_summary(&test_feature_readiness)
+        ));
+    }
+    update_oos_walk_forward_experiment_stage(
+        db,
+        experiment_run_id,
+        oos_walk_forward_stage(
+            "train_window_ml_feature_profile_readiness_ready",
+            Some(window.window_index),
+            json!({
+                "feature_profile": feature_profile,
+                "train_readiness": train_feature_readiness,
+                "test_readiness": test_feature_readiness,
+            }),
+        ),
+    )
+    .await?;
 
+    update_oos_walk_forward_experiment_stage(
+        db,
+        experiment_run_id,
+        oos_walk_forward_stage(
+            "train_window_ml_train_prediction_started",
+            Some(window.window_index),
+            json!({
+                "prediction_set_id": train_prediction_set_id,
+                "training_task_id": train_training_task_id,
+                "prediction_start": train_prediction_start.format("%Y-%m-%d").to_string(),
+                "prediction_end": window.train_end.format("%Y-%m-%d").to_string(),
+                "feature_profile": feature_profile,
+                "label_objective": label_objective,
+                "label_horizon_days": label_horizon_days,
+                "bucket_count": bucket_count,
+                "min_samples_per_bucket": min_samples,
+            }),
+        ),
+    )
+    .await?;
     create_walk_forward_nonlinear_quantile_ranker_inner(
         db,
         WalkForwardNonlinearQuantileRankerRequest {
@@ -3794,7 +4981,7 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
                 "{}-nlq-w{}-{}-tr",
                 prefix, window.window_index, short_id
             )),
-            training_task_id: Some(train_training_task_id),
+            training_task_id: Some(train_training_task_id.clone()),
             prediction_set_id: Some(train_prediction_set_id.clone()),
             data_version_id: req.data_version_id.clone(),
             feature_set_version_id: feature_profile.to_string(),
@@ -3814,6 +5001,69 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     )
     .await?;
 
+    let train_prediction_readiness = build_prediction_set_readiness_report(
+        db,
+        &train_prediction_set_id,
+        Some(train_prediction_start),
+        Some(window.train_end),
+        readiness_thresholds,
+    )
+    .await?;
+    if !prediction_readiness_passed(&train_prediction_readiness) {
+        update_oos_walk_forward_experiment_stage(
+            db,
+            experiment_run_id,
+            oos_walk_forward_stage(
+                "train_window_ml_prediction_set_readiness_failed",
+                Some(window.window_index),
+                json!({
+                    "phase": "train",
+                    "prediction_set_id": train_prediction_set_id,
+                    "readiness": train_prediction_readiness,
+                }),
+            ),
+        )
+        .await?;
+        return Err(format!(
+            "{} window {} train prediction-set readiness failed: {}",
+            prefix,
+            window.window_index,
+            readiness_failure_summary(&train_prediction_readiness)
+        ));
+    }
+    update_oos_walk_forward_experiment_stage(
+        db,
+        experiment_run_id,
+        oos_walk_forward_stage(
+            "train_window_ml_train_prediction_ready",
+            Some(window.window_index),
+            json!({
+                "prediction_set_id": train_prediction_set_id,
+                "training_task_id": train_training_task_id,
+                "readiness": train_prediction_readiness,
+            }),
+        ),
+    )
+    .await?;
+    update_oos_walk_forward_experiment_stage(
+        db,
+        experiment_run_id,
+        oos_walk_forward_stage(
+            "train_window_ml_test_prediction_started",
+            Some(window.window_index),
+            json!({
+                "prediction_set_id": test_prediction_set_id,
+                "training_task_id": test_training_task_id,
+                "prediction_start": window.test_start.format("%Y-%m-%d").to_string(),
+                "prediction_end": window.test_end.format("%Y-%m-%d").to_string(),
+                "feature_profile": feature_profile,
+                "label_horizon_days": label_horizon_days,
+                "bucket_count": bucket_count,
+                "min_samples_per_bucket": min_samples,
+            }),
+        ),
+    )
+    .await?;
     train_nonlinear_quantile_ranker_inner(
         db,
         TrainNonlinearQuantileRankerRequest {
@@ -3823,7 +5073,7 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
                 "{}-nlq-w{}-{}-te",
                 prefix, window.window_index, short_id
             )),
-            training_task_id: Some(test_training_task_id),
+            training_task_id: Some(test_training_task_id.clone()),
             prediction_set_id: Some(test_prediction_set_id.clone()),
             data_version_id: req.data_version_id.clone(),
             feature_set_version_id: feature_profile.to_string(),
@@ -3838,6 +5088,51 @@ async fn prepare_train_window_ml_prediction_sets_for_oos_window(
             min_samples_per_bucket: Some(min_samples),
             factors,
         },
+    )
+    .await?;
+
+    let test_prediction_readiness = build_prediction_set_readiness_report(
+        db,
+        &test_prediction_set_id,
+        Some(window.test_start),
+        Some(window.test_end),
+        readiness_thresholds,
+    )
+    .await?;
+    if !prediction_readiness_passed(&test_prediction_readiness) {
+        update_oos_walk_forward_experiment_stage(
+            db,
+            experiment_run_id,
+            oos_walk_forward_stage(
+                "train_window_ml_prediction_set_readiness_failed",
+                Some(window.window_index),
+                json!({
+                    "phase": "test",
+                    "prediction_set_id": test_prediction_set_id,
+                    "readiness": test_prediction_readiness,
+                }),
+            ),
+        )
+        .await?;
+        return Err(format!(
+            "{} window {} test prediction-set readiness failed: {}",
+            prefix,
+            window.window_index,
+            readiness_failure_summary(&test_prediction_readiness)
+        ));
+    }
+    update_oos_walk_forward_experiment_stage(
+        db,
+        experiment_run_id,
+        oos_walk_forward_stage(
+            "train_window_ml_test_prediction_ready",
+            Some(window.window_index),
+            json!({
+                "prediction_set_id": test_prediction_set_id,
+                "training_task_id": test_training_task_id,
+                "readiness": test_prediction_readiness,
+            }),
+        ),
     )
     .await?;
 
@@ -3867,16 +5162,39 @@ fn phase7_simple_nlqr_feature_profile() -> &'static str {
     "phase7_simple_nlqr_core_15f_v1"
 }
 
-fn phase7_train_window_ml_feature_profile_for_search(search_profile: Option<&str>) -> &'static str {
-    if is_simple_nlqr_profile(search_profile) {
-        phase7_simple_nlqr_feature_profile()
+fn phase7_train_window_ml_label_config_for_search(
+    search_profile: Option<&str>,
+) -> (String, usize, usize, usize) {
+    if is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(search_profile) {
+        ("risk_adjusted_excess_return".to_string(), 120, 7, 50)
+    } else if is_v19_train_window_ml_event_sentiment_rebuild_profile(search_profile) {
+        ("risk_adjusted_excess_return".to_string(), 120, 7, 50)
+    } else if is_v19_train_window_ml_h120_low_impact_rebuild_profile(search_profile) {
+        ("future_excess_return".to_string(), 120, 5, 50)
+    } else if is_v19_train_window_ml_simple_excess_rebuild_profile(search_profile) {
+        ("future_excess_return".to_string(), 45, 5, 50)
+    } else if is_v19_train_window_ml_alpha_rebuild_profile(search_profile) {
+        (
+            "quality_adjusted_risk_adjusted_excess_return".to_string(),
+            60,
+            10,
+            100,
+        )
     } else {
-        phase7_train_window_ml_feature_profile()
+        ("risk_adjusted_excess_return".to_string(), 45, 7, 250)
     }
 }
 
-fn phase7_train_window_ml_factor_refs() -> Vec<LinearFactorRef> {
-    phase7_train_window_ml_factor_refs_for_profile(phase7_train_window_ml_feature_profile())
+fn phase7_train_window_ml_feature_profile_for_search(search_profile: Option<&str>) -> &'static str {
+    if is_simple_nlqr_profile(search_profile) {
+        phase7_simple_nlqr_feature_profile()
+    } else if is_v19_train_window_ml_event_sentiment_rebuild_profile(search_profile) {
+        "phase7_p4_event_sentiment_high_coverage_v1"
+    } else if is_v19_train_window_ml_alpha_rebuild_profile(search_profile) {
+        "phase7_gb_quality_value_recovery_low_impact_v6"
+    } else {
+        phase7_train_window_ml_feature_profile()
+    }
 }
 
 fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFactorRef> {
@@ -4192,6 +5510,27 @@ fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFa
             "north_flow_std_20d",
             "margin_rz_std_20d",
         ],
+        "phase7_p4_event_sentiment_high_coverage_v1" => &[
+            // High-coverage PIT event fundamentals + margin sentiment.
+            // Excludes sparse post-event return curve factors to preserve train sample size.
+            "event_disclosure_early_days_std",
+            "event_disclosure_timing_bucket_std",
+            "event_forecast_profit_floor_sign_std",
+            "event_forecast_surprise_bucket_std",
+            "event_forecast_change_mid_std",
+            "event_forecast_profit_floor_std",
+            "event_express_roe_bucket_std",
+            "event_express_roe_std",
+            "margin_rz_change_std_20d",
+            "margin_rz_std_20d",
+            "north_flow_std_20d",
+            "mf_net_amount_5d_std",
+            "mf_elg_net_amount_5d_std",
+            "mf_small_sell_pressure_20d_std",
+            "amihud_20d_std",
+            "amt_intensity_20d_std",
+            "vol_20d_std",
+        ],
         _ => &[
             "fin_roe_daily_std",
             "fin_roe_indrel_daily_std",
@@ -4240,6 +5579,455 @@ fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFa
             factor_version: "1.0.0".to_string(),
         })
         .collect()
+}
+
+fn parse_feature_profile_readiness_date(value: &str, field: &str) -> Result<NaiveDate, String> {
+    let trimmed = value.trim();
+    NaiveDate::parse_from_str(trimmed, "%Y%m%d")
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
+        .map_err(|_| format!("{} must use YYYYMMDD or YYYY-MM-DD format", field))
+}
+
+fn profile_readiness_gate(
+    gate: &str,
+    passed: bool,
+    actual: Value,
+    expected: Value,
+    detail: impl Into<String>,
+) -> Value {
+    json!({
+        "gate": gate,
+        "passed": passed,
+        "actual": actual,
+        "expected": expected,
+        "detail": detail.into(),
+    })
+}
+
+fn feature_profile_readiness_passed(report: &Value) -> bool {
+    report
+        .get("passed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn readiness_failure_summary(report: &Value) -> String {
+    report
+        .get("gates")
+        .and_then(|value| value.as_array())
+        .map(|gates| {
+            gates
+                .iter()
+                .filter(|gate| !gate["passed"].as_bool().unwrap_or(false))
+                .take(4)
+                .map(|gate| {
+                    format!(
+                        "{} actual={} expected={}",
+                        gate["gate"].as_str().unwrap_or("unknown_gate"),
+                        gate["actual"],
+                        gate["expected"]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or_else(|| "no failing gate detail".to_string())
+}
+
+async fn build_feature_profile_readiness_report_from_request(
+    db: &sqlx::PgPool,
+    req: &FeatureProfileReadinessRequest,
+) -> Result<Value, String> {
+    let start = parse_feature_profile_readiness_date(&req.start_date, "start_date")?;
+    let end = parse_feature_profile_readiness_date(&req.end_date, "end_date")?;
+    if start > end {
+        return Err("feature-profile readiness start_date cannot be after end_date".into());
+    }
+    let feature_profile = req.feature_profile.trim();
+    if feature_profile.is_empty() {
+        return Err("feature_profile must not be empty".into());
+    }
+    let factors = phase7_train_window_ml_factor_refs_for_profile(feature_profile);
+    let thresholds = ReadinessThresholds::from_options(
+        req.min_day_coverage_ratio,
+        req.min_daily_rows,
+        req.min_p95_daily_row_ratio,
+    );
+    let report = build_feature_profile_readiness_report(
+        db,
+        feature_profile,
+        &factors,
+        start,
+        end,
+        thresholds,
+    )
+    .await?;
+    let experiment_run_id = if req.persist_report.unwrap_or(true) {
+        Some(persist_feature_profile_readiness_report(db, feature_profile, &report).await?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "report": report,
+    }))
+}
+
+async fn build_feature_profile_readiness_report(
+    db: &sqlx::PgPool,
+    feature_profile: &str,
+    factors: &[LinearFactorRef],
+    start: NaiveDate,
+    end: NaiveDate,
+    thresholds: ReadinessThresholds,
+) -> Result<Value, String> {
+    if factors.is_empty() {
+        return Ok(json!({
+            "readiness_type": "feature_profile",
+            "feature_profile": feature_profile,
+            "requested_start_date": start,
+            "requested_end_date": end,
+            "factor_count": 0,
+            "passed": false,
+            "level": "red",
+            "gates": [profile_readiness_gate(
+                "feature_profile_factor_count",
+                false,
+                json!(0),
+                json!("> 0"),
+                "feature profile must resolve to at least one factor",
+            )],
+            "repair": {
+                "repairable": false,
+                "reason": "unknown feature profile; register the profile/factor list before use"
+            }
+        }));
+    }
+
+    let factor_rows = load_feature_profile_factor_readiness_rows(db, factors, start, end).await?;
+    let daily_rows = load_feature_profile_intersection_daily_rows(db, factors, start, end).await?;
+    let expected_days = readiness_expected_open_day_count(db, start, end).await?;
+    let actual_days = daily_rows.len() as i64;
+    let daily_counts = daily_rows
+        .iter()
+        .map(|(_, count)| *count)
+        .collect::<Vec<_>>();
+    let distribution = daily_count_distribution(&daily_counts, thresholds);
+    let day_coverage_ratio = if expected_days <= 0 {
+        1.0
+    } else {
+        actual_days.max(0) as f64 / expected_days as f64
+    };
+    let factor_future_leak_rows = factor_rows
+        .iter()
+        .map(|row| row.future_leak_rows)
+        .sum::<i64>();
+    let missing_factor_count = factor_rows
+        .iter()
+        .filter(|row| row.usable_rows == 0)
+        .count();
+    let min_factor_day_coverage_ratio = factor_rows
+        .iter()
+        .map(|row| {
+            if expected_days <= 0 {
+                1.0
+            } else {
+                row.usable_days.max(0) as f64 / expected_days as f64
+            }
+        })
+        .fold(1.0_f64, f64::min);
+    let gates = vec![
+        profile_readiness_gate(
+            "feature_profile_factor_count",
+            !factors.is_empty(),
+            json!(factors.len()),
+            json!("> 0"),
+            "feature profile must resolve to at least one factor",
+        ),
+        profile_readiness_gate(
+            "feature_factor_missing_count",
+            missing_factor_count == 0,
+            json!(missing_factor_count),
+            json!(0),
+            "every requested factor must have PIT-usable rows in the requested window",
+        ),
+        profile_readiness_gate(
+            "feature_factor_day_coverage",
+            min_factor_day_coverage_ratio >= thresholds.min_day_coverage_ratio,
+            json!(min_factor_day_coverage_ratio),
+            json!(thresholds.min_day_coverage_ratio),
+            "each individual factor must cover nearly all expected open days",
+        ),
+        profile_readiness_gate(
+            "feature_future_leak_rows",
+            factor_future_leak_rows == 0,
+            json!(factor_future_leak_rows),
+            json!(0),
+            "factor_value.available_at must not be after trade_date",
+        ),
+        profile_readiness_gate(
+            "feature_profile_intersection_day_coverage",
+            day_coverage_ratio >= thresholds.min_day_coverage_ratio,
+            json!(day_coverage_ratio),
+            json!(thresholds.min_day_coverage_ratio),
+            "full-factor intersection must cover nearly all expected open days",
+        ),
+        profile_readiness_gate(
+            "feature_profile_daily_median_symbols",
+            distribution.p50_rows >= thresholds.min_daily_rows,
+            json!(distribution.p50_rows),
+            json!(thresholds.min_daily_rows),
+            "full-factor intersection median symbol count must be large enough for ranking",
+        ),
+        profile_readiness_gate(
+            "feature_profile_daily_symbol_cliff",
+            distribution.weak_day_count == 0,
+            json!({
+                "weak_day_count": distribution.weak_day_count,
+                "weak_day_threshold": distribution.weak_day_threshold,
+                "p95_rows": distribution.p95_rows,
+            }),
+            json!("weak_day_count = 0"),
+            "full-factor intersection must not collapse relative to its own p95 breadth",
+        ),
+    ];
+    let passed = gates
+        .iter()
+        .all(|gate| gate["passed"].as_bool().unwrap_or(false));
+
+    Ok(json!({
+        "readiness_type": "feature_profile",
+        "feature_profile": feature_profile,
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "factor_count": factors.len(),
+        "passed": passed,
+        "level": if passed { "green" } else { "red" },
+        "thresholds": {
+            "min_day_coverage_ratio": thresholds.min_day_coverage_ratio,
+            "min_daily_rows": thresholds.min_daily_rows,
+            "min_p95_daily_row_ratio": thresholds.min_p95_daily_row_ratio,
+        },
+        "summary": {
+            "expected_open_days": expected_days,
+            "intersection_days": actual_days,
+            "missing_open_days": (expected_days - actual_days).max(0),
+            "intersection_day_coverage_ratio": day_coverage_ratio,
+            "daily_intersection_symbols": {
+                "min": distribution.min_rows,
+                "p50": distribution.p50_rows,
+                "p95": distribution.p95_rows,
+                "max": distribution.max_rows,
+                "weak_day_count": distribution.weak_day_count,
+                "weak_day_threshold": distribution.weak_day_threshold,
+            },
+            "factor_future_leak_rows": factor_future_leak_rows,
+            "missing_factor_count": missing_factor_count,
+            "min_factor_day_coverage_ratio": min_factor_day_coverage_ratio,
+        },
+        "factors": factor_rows.iter().map(FeatureProfileFactorReadinessRow::to_json).collect::<Vec<_>>(),
+        "gates": gates,
+        "repair": {
+            "repairable": false,
+            "reason": "profile-level gaps must be repaired by rebuilding the missing PIT factor sources/backfills; model_prediction row patching is not safe"
+        }
+    }))
+}
+
+#[derive(Debug)]
+struct FeatureProfileFactorReadinessRow {
+    factor_code: String,
+    factor_version: String,
+    usable_rows: i64,
+    usable_days: i64,
+    usable_symbols: i64,
+    future_leak_rows: i64,
+}
+
+impl FeatureProfileFactorReadinessRow {
+    fn to_json(&self) -> Value {
+        json!({
+            "factor_code": self.factor_code,
+            "factor_version": self.factor_version,
+            "usable_rows": self.usable_rows,
+            "usable_days": self.usable_days,
+            "usable_symbols": self.usable_symbols,
+            "future_leak_rows": self.future_leak_rows,
+        })
+    }
+}
+
+async fn load_feature_profile_factor_readiness_rows(
+    db: &sqlx::PgPool,
+    factors: &[LinearFactorRef],
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<FeatureProfileFactorReadinessRow>, String> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "WITH requested(factor_code, factor_version, factor_idx) AS (",
+    );
+    builder.push_values(
+        factors.iter().enumerate(),
+        |mut row, (factor_idx, factor)| {
+            row.push_bind(&factor.factor_code)
+                .push_bind(&factor.factor_version)
+                .push_bind(factor_idx as i32);
+        },
+    );
+    builder.push(
+        ")
+         SELECT requested.factor_code,
+                requested.factor_version,
+                COUNT(*) FILTER (
+                  WHERE fv.symbol IS NOT NULL
+                    AND fv.normalized_value IS NOT NULL
+                    AND (fv.available_at IS NULL OR fv.available_at <= fv.trade_date)
+                )::int8 AS usable_rows,
+                COUNT(DISTINCT fv.trade_date) FILTER (
+                  WHERE fv.symbol IS NOT NULL
+                    AND fv.normalized_value IS NOT NULL
+                    AND (fv.available_at IS NULL OR fv.available_at <= fv.trade_date)
+                )::int8 AS usable_days,
+                COUNT(DISTINCT fv.symbol) FILTER (
+                  WHERE fv.symbol IS NOT NULL
+                    AND fv.normalized_value IS NOT NULL
+                    AND (fv.available_at IS NULL OR fv.available_at <= fv.trade_date)
+                )::int8 AS usable_symbols,
+                COUNT(*) FILTER (WHERE fv.available_at > fv.trade_date)::int8 AS future_leak_rows
+         FROM requested
+         LEFT JOIN factor_value fv
+           ON fv.factor_code = requested.factor_code
+          AND fv.factor_version = requested.factor_version
+          AND fv.trade_date >= ",
+    );
+    builder.push_bind(start);
+    builder.push(" AND fv.trade_date <= ");
+    builder.push_bind(end);
+    builder.push(
+        "
+         GROUP BY requested.factor_idx, requested.factor_code, requested.factor_version
+         ORDER BY requested.factor_idx",
+    );
+
+    let rows = builder
+        .build_query_as::<(String, String, i64, i64, i64, i64)>()
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("Failed to load feature-profile factor readiness: {}", error))?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                factor_code,
+                factor_version,
+                usable_rows,
+                usable_days,
+                usable_symbols,
+                future_leak_rows,
+            )| FeatureProfileFactorReadinessRow {
+                factor_code,
+                factor_version,
+                usable_rows,
+                usable_days,
+                usable_symbols,
+                future_leak_rows,
+            },
+        )
+        .collect())
+}
+
+async fn load_feature_profile_intersection_daily_rows(
+    db: &sqlx::PgPool,
+    factors: &[LinearFactorRef],
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<(NaiveDate, i64)>, String> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "WITH requested(factor_code, factor_version, factor_idx) AS (",
+    );
+    builder.push_values(
+        factors.iter().enumerate(),
+        |mut row, (factor_idx, factor)| {
+            row.push_bind(&factor.factor_code)
+                .push_bind(&factor.factor_version)
+                .push_bind(factor_idx as i32);
+        },
+    );
+    builder.push(
+        "),
+         complete_rows AS (
+           SELECT fv.symbol, fv.trade_date
+           FROM factor_value fv
+           JOIN requested
+             ON requested.factor_code = fv.factor_code
+            AND requested.factor_version = fv.factor_version
+           WHERE fv.trade_date >= ",
+    );
+    builder.push_bind(start);
+    builder.push(" AND fv.trade_date <= ");
+    builder.push_bind(end);
+    builder.push(
+        "
+             AND (fv.available_at IS NULL OR fv.available_at <= fv.trade_date)
+           GROUP BY fv.symbol, fv.trade_date
+           HAVING COUNT(*) = ",
+    );
+    builder.push_bind(factors.len() as i64);
+    builder.push(
+        "
+              AND bool_and(fv.normalized_value IS NOT NULL)
+         )
+         SELECT trade_date, COUNT(*)::int8 AS symbol_count
+         FROM complete_rows
+         GROUP BY trade_date
+         ORDER BY trade_date",
+    );
+
+    builder
+        .build_query_as::<(NaiveDate, i64)>()
+        .fetch_all(db)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to load feature-profile intersection readiness: {}",
+                error
+            )
+        })
+}
+
+async fn persist_feature_profile_readiness_report(
+    db: &sqlx::PgPool,
+    feature_profile: &str,
+    report: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let config = json!({
+        "feature_profile": feature_profile,
+        "report_type": "feature_profile_readiness",
+        "point_in_time_scope": "factor_value only; no backtest/OOS metrics",
+    });
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'feature_profile_readiness_report', 'feature_profile', $2,
+                 $3, $4, 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(feature_profile)
+    .bind(&config)
+    .bind(report)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to persist feature-profile readiness report: {}",
+            error
+        )
+    })?;
+    Ok(experiment_run_id)
 }
 
 async fn execute_oos_cost_capacity_perturbations(
@@ -7141,6 +8929,76 @@ fn oos_walk_forward_progress_metrics(
     })
 }
 
+fn oos_walk_forward_stage(stage: &str, window_index: Option<usize>, details: Value) -> Value {
+    json!({
+        "stage": stage,
+        "window_index": window_index,
+        "details": details,
+    })
+}
+
+fn append_oos_walk_forward_stage_metrics(mut metrics: Value, stage: Value) -> Value {
+    if !metrics.is_object() {
+        metrics = json!({});
+    }
+    metrics["current_stage"] = stage.clone();
+
+    let mut stage_history = metrics
+        .get("stage_history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    stage_history.push(stage);
+    if stage_history.len() > 50 {
+        let keep_from = stage_history.len() - 50;
+        stage_history = stage_history.split_off(keep_from);
+    }
+    metrics["stage_history"] = json!(stage_history);
+    metrics
+}
+
+async fn update_oos_walk_forward_experiment_stage(
+    db: &sqlx::PgPool,
+    experiment_run_id: Option<&str>,
+    stage: Value,
+) -> Result<(), String> {
+    let Some(experiment_run_id) = experiment_run_id else {
+        return Ok(());
+    };
+    let metrics = sqlx::query_scalar::<_, Option<Value>>(
+        "SELECT metrics FROM experiment_run WHERE experiment_run_id = $1",
+    )
+    .bind(experiment_run_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to load OOS walk-forward experiment metrics: {}",
+            error
+        )
+    })?
+    .flatten()
+    .unwrap_or_else(|| json!({}));
+    let metrics = append_oos_walk_forward_stage_metrics(metrics, stage);
+    sqlx::query(
+        "UPDATE experiment_run
+         SET metrics = $2,
+             status = 'running'
+         WHERE experiment_run_id = $1",
+    )
+    .bind(experiment_run_id)
+    .bind(&metrics)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to update OOS walk-forward experiment stage: {}",
+            error
+        )
+    })?;
+    Ok(())
+}
+
 fn oos_cache_report(signal_cache: &SignalDataCache, backtest_cache: &BacktestDataCache) -> Value {
     json!({
         "oos_signal_cache": signal_cache_stats_delta(
@@ -9691,7 +11549,7 @@ fn build_optimization_trial_request(
             build_prediction_trial_request(task, parameters)
                 .map(OptimizationTrialBacktestRequest::Prediction)
         }
-        Some("factor") | Some("factor_combo") | None => {
+        Some("factor") | Some("factor_combo") | Some("prediction_blend") | None => {
             build_factor_trial_request(task, parameters)
                 .map(OptimizationTrialBacktestRequest::Factor)
         }
@@ -11994,6 +13852,44 @@ mod tests {
     }
 
     #[test]
+    fn oos_walk_forward_stage_progress_sets_current_stage_and_appends_history() {
+        let base = oos_walk_forward_progress_metrics(1, &[], &json!({}), &json!({}));
+        let stage = oos_walk_forward_stage(
+            "train_window_ml_train_prediction_started",
+            Some(1),
+            json!({
+                "prediction_set_id": "p7v19sx-w1-test-tr",
+                "training_task_id": "train-p7v19sx-w1-test-tr"
+            }),
+        );
+
+        let updated = append_oos_walk_forward_stage_metrics(base, stage.clone());
+
+        assert_eq!(updated["progress_pct"], json!(0));
+        assert_eq!(updated["completed_windows"], json!(0));
+        assert_eq!(updated["current_stage"], stage);
+        assert_eq!(updated["stage_history"].as_array().unwrap().len(), 1);
+
+        let next_stage = oos_walk_forward_stage(
+            "train_window_ml_test_prediction_ready",
+            Some(1),
+            json!({"prediction_set_id": "p7v19sx-w1-test-te"}),
+        );
+        let updated = append_oos_walk_forward_stage_metrics(updated, next_stage.clone());
+
+        assert_eq!(updated["current_stage"], next_stage);
+        assert_eq!(updated["stage_history"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            updated["stage_history"][0]["stage"],
+            json!("train_window_ml_train_prediction_started")
+        );
+        assert_eq!(
+            updated["stage_history"][1]["stage"],
+            json!("train_window_ml_test_prediction_ready")
+        );
+    }
+
+    #[test]
     fn oos_walk_forward_plan_uses_non_overlapping_train_and_test_windows() {
         let req = Phase7OosWalkForwardDiscoveryRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
@@ -12048,6 +13944,15 @@ mod tests {
             plan.windows[1].train_start - plan.windows[0].train_start,
             Duration::days(365)
         );
+    }
+
+    #[test]
+    fn missing_strategy_version_error_is_actionable() {
+        let message = missing_strategy_version_error_message("strategy-missing-smoke");
+
+        assert!(message.contains("strategy-missing-smoke"));
+        assert!(message.contains("does not exist in strategy_version"));
+        assert!(message.contains("existing canonical strategy_version_id"));
     }
 
     #[test]
@@ -14684,6 +16589,50 @@ mod tests {
     }
 
     #[test]
+    fn optimization_trial_request_routes_prediction_blend_through_factor_backtest() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "phase7-professional-v1".into(),
+            data_version_id: "dv-v19-audit-ready-20260615".into(),
+            backtest_template: json!({
+                "start_date": "20140102",
+                "end_date": "20260615",
+                "benchmark": "000300.SH",
+                "combo_name": "full_pit_icir_37f",
+                "version": "1.0.0"
+            }),
+            objective: json!({"type": "professional_candidate"}),
+            constraints: None,
+        };
+        let params = json!({
+            "signal_source": "prediction_blend",
+            "prediction_set_id": "pred-fullperiod-nlqr-20140101-20260630",
+            "prediction_blend_weight": "0.5",
+            "top_n": 30,
+            "rebalance": "10",
+            "score_direction": "ascending"
+        });
+
+        let req = build_optimization_trial_request(&task, &params).expect("blend request");
+
+        match req {
+            OptimizationTrialBacktestRequest::Factor(req) => {
+                assert_eq!(req.combo_name, "full_pit_icir_37f");
+                assert_eq!(
+                    req.prediction_set_id.as_deref(),
+                    Some("pred-fullperiod-nlqr-20140101-20260630")
+                );
+                assert_eq!(req.prediction_blend_weight, Some(0.5));
+                assert_eq!(req.top_n, 30);
+                assert_eq!(req.rebalance, "10");
+                assert_eq!(req.score_direction, "ascending");
+            }
+            OptimizationTrialBacktestRequest::Prediction(_) => {
+                panic!("prediction_blend must use factor backtest with blend config")
+            }
+        }
+    }
+
+    #[test]
     fn phase7_layered_request_builds_resource_limited_plan() {
         let req = Phase7LayeredOptimizationRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
@@ -14841,6 +16790,46 @@ mod tests {
                 && trial.parameters["stop_loss_pct"] == "0.075"
                 && trial.parameters["reentry_cooldown_days"] == 20
         }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_current_baseline_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20140102",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["should-not-override-baseline".to_string()]),
+            max_trials: Some(5),
+            search_profile: Some("phase7_v19_current".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_current_baseline"
+        );
+        assert_eq!(bundle.plan.requested_trials, 1);
+        assert_eq!(bundle.plan.planned_trials, 1);
+        let trial = &bundle.plan.trials[0].parameters;
+        assert_eq!(trial["signal_source"], "prediction_blend");
+        assert_eq!(trial["combo_name"], "full_pit_icir_37f");
+        assert_eq!(
+            trial["prediction_set_id"],
+            "pred-fullperiod-nlqr-20140101-20260630"
+        );
+        assert_eq!(trial["prediction_blend_weight"], "0.5");
+        assert_eq!(trial["score_direction"], "ascending");
+        assert_eq!(trial["top_n"], 30);
+        assert_eq!(trial["rebalance"], "10");
     }
 
     #[test]
@@ -20619,6 +22608,757 @@ mod tests {
     }
 
     #[test]
+    fn phase7_layered_request_accepts_v19_multi_alpha_sleeve_admission_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20140102",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["must-not-override-sleeve-admission".to_string()]),
+            max_trials: Some(12),
+            search_profile: Some("phase7_v19_sleeves".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_multi_alpha_sleeve_admission"
+        );
+        let gate_policy =
+            default_oos_train_selection_gate_policy_for_search_profile(Some("phase7_v19_sleeves"));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        let sleeve_families = bundle
+            .plan
+            .trials
+            .iter()
+            .take(12)
+            .map(|trial| {
+                trial.parameters["alpha_sleeve_family"]
+                    .as_str()
+                    .unwrap_or_default()
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(sleeve_families.contains("quality_core"));
+        assert!(sleeve_families.contains("valuation_guard"));
+        assert!(sleeve_families.contains("growth_recovery"));
+        assert!(sleeve_families.contains("relative_strength"));
+        assert!(bundle.plan.trials.iter().take(12).all(|trial| {
+            trial.parameters["signal_source"] == "factor_combo"
+                && trial.parameters["multi_alpha_sleeve_profile"]
+                    == "v19_p2_pit_sleeve_admission_v1"
+        }));
+        assert!(!bundle.plan.trials.iter().take(12).any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_event_surprise_v1")
+                || serialized.contains("phase7_event_window_earnings_v1")
+                || serialized.contains("pred-")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_execution_repair_admission_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20140102",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["must-not-override-v19-execution-repair".to_string()]),
+            max_trials: Some(30),
+            search_profile: Some("phase7_v19_execution_repair".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_execution_repair_admission"
+        );
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_execution_repair",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_execution_repair_admission"
+        ));
+        assert!(bundle.plan.trials.iter().take(30).all(|trial| {
+            trial.parameters["signal_source"] == "factor_combo"
+                && trial.parameters["v19_execution_repair_profile"]
+                    == "v19_p2_pit_execution_repair_v1"
+                && trial.parameters["multi_alpha_sleeve_profile"]
+                    == "v19_p2_pit_sleeve_admission_v1"
+        }));
+        assert!(bundle.plan.trials.iter().take(30).any(|trial| {
+            trial.parameters["cash_utilization"] == "fillable_gross_95_v1"
+                && trial.parameters["execution_schedule_profile"] == "twap_10d_v1"
+                && trial.parameters["score_candidate_pool_size"] == 900
+        }));
+        assert!(!bundle.plan.trials.iter().take(30).any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_event_surprise_v1")
+                || serialized.contains("phase7_event_window_earnings_v1")
+                || serialized.contains("pred-")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_train_window_ml_alpha_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20170103",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["must-not-override-v19-alpha-rebuild".to_string()]),
+            max_trials: Some(12),
+            search_profile: Some("phase7_v19_ml_alpha_rebuild".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle =
+            build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+                &req,
+                resource_plan,
+                500,
+                Some("p7v19ml-train-window-001"),
+            );
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_train_window_ml_alpha_rebuild"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "v19 alpha rebuild must not accept request-level prediction_set overrides"
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_train_window_ml_alpha_rebuild"
+        ));
+        assert!(is_train_window_ml_stress_fill_profile(Some(
+            "phase7_v19_ml_alpha_rebuild"
+        )));
+        assert_eq!(
+            phase7_train_window_ml_feature_profile_for_search(Some("phase7_v19_ml_alpha_rebuild")),
+            "phase7_gb_quality_value_recovery_low_impact_v6"
+        );
+        let factors = phase7_train_window_ml_factor_refs_for_profile(
+            phase7_train_window_ml_feature_profile_for_search(Some("phase7_v19_ml_alpha_rebuild")),
+        );
+        assert!(factors.len() >= 52);
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "margin_rz_std_20d"));
+
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_ml_alpha_rebuild",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(
+            gate_policy["min_train_final_execution_fill_ratio"],
+            json!(0.90)
+        );
+        assert_eq!(
+            gate_policy["max_train_final_unfilled_target_gap_pct"],
+            json!(0.08)
+        );
+        assert_eq!(bundle.plan.trials.len(), 12);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["v19_alpha_rebuild_profile"]
+                == "v19_p3_train_window_ml_alpha_rebuild_v1"
+                && trial.parameters["train_window_ml_feature_profile"]
+                    == "phase7_gb_quality_value_recovery_low_impact_v6"
+                && trial.parameters["train_window_ml_label_objective"]
+                    == "quality_adjusted_risk_adjusted_excess_return"
+                && trial.parameters["prediction_set_id"] == "p7v19ml-train-window-001"
+                && trial.parameters["prediction_set_override_source"] == "train_window_ml_internal"
+                && trial.parameters["prediction_min_score"].is_string()
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_event_surprise_v1")
+                || serialized.contains("phase7_event_window_earnings_v1")
+                || serialized.contains("must-not-override-v19-alpha-rebuild")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_train_window_ml_simple_excess_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20170103",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["must-not-override-v19-simple-excess".to_string()]),
+            max_trials: Some(9),
+            search_profile: Some("phase7_v19_ml_simple_excess".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle =
+            build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+                &req,
+                resource_plan,
+                500,
+                Some("p7v19sx-train-window-001"),
+            );
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_train_window_ml_simple_excess_rebuild"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "v19 simple excess rebuild must not accept request-level prediction_set overrides"
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_train_window_ml_simple_excess_rebuild"
+        ));
+        assert!(is_train_window_ml_stress_fill_profile(Some(
+            "phase7_v19_ml_simple_excess"
+        )));
+        assert!(is_v19_train_window_ml_alpha_rebuild_profile(Some(
+            "phase7_v19_ml_simple_excess"
+        )));
+        assert_eq!(
+            phase7_train_window_ml_label_config_for_search(Some("phase7_v19_ml_simple_excess")),
+            ("future_excess_return".to_string(), 45usize, 5usize, 50usize)
+        );
+        assert_eq!(
+            phase7_train_window_ml_feature_profile_for_search(Some("phase7_v19_ml_simple_excess")),
+            "phase7_gb_quality_value_recovery_low_impact_v6"
+        );
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_ml_simple_excess",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(bundle.plan.trials.len(), 9);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["v19_alpha_rebuild_profile"]
+                == "v19_p3_train_window_ml_simple_excess_rebuild_v1"
+                && trial.parameters["train_window_ml_feature_profile"]
+                    == "phase7_gb_quality_value_recovery_low_impact_v6"
+                && trial.parameters["train_window_ml_label_objective"] == "future_excess_return"
+                && trial.parameters["train_window_ml_label_horizon_days"] == 45
+                && trial.parameters["train_window_ml_bucket_count"] == 5
+                && trial.parameters["prediction_set_id"] == "p7v19sx-train-window-001"
+                && trial.parameters["prediction_set_override_source"] == "train_window_ml_internal"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_event_surprise_v1")
+                || serialized.contains("phase7_event_window_earnings_v1")
+                || serialized.contains("must-not-override-v19-simple-excess")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_train_window_ml_simple_excess_low_impact_rebuild_profile()
+    {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20170103",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec![
+                "must-not-override-v19-simple-excess-low-impact".to_string()
+            ]),
+            max_trials: Some(6),
+            search_profile: Some("phase7_v19_ml_simple_excess_low_impact".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle =
+            build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+                &req,
+                resource_plan,
+                500,
+                Some("p7v19sxli-train-window-001"),
+            );
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "low-impact simple excess rebuild must not accept request-level prediction_set overrides"
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
+        ));
+        assert!(is_train_window_ml_stress_fill_profile(Some(
+            "phase7_v19_ml_simple_excess_low_impact"
+        )));
+        assert!(is_v19_train_window_ml_alpha_rebuild_profile(Some(
+            "phase7_v19_ml_simple_excess_low_impact"
+        )));
+        assert!(is_v19_train_window_ml_simple_excess_rebuild_profile(Some(
+            "phase7_v19_ml_simple_excess_low_impact"
+        )));
+        assert_eq!(
+            phase7_train_window_ml_label_config_for_search(Some(
+                "phase7_v19_ml_simple_excess_low_impact",
+            )),
+            ("future_excess_return".to_string(), 45usize, 5usize, 50usize)
+        );
+        assert_eq!(
+            phase7_train_window_ml_feature_profile_for_search(Some(
+                "phase7_v19_ml_simple_excess_low_impact",
+            )),
+            "phase7_gb_quality_value_recovery_low_impact_v6"
+        );
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_ml_simple_excess_low_impact",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(
+            gate_policy["min_train_final_execution_fill_ratio"],
+            json!(0.90)
+        );
+        assert_eq!(
+            gate_policy["max_train_final_unfilled_target_gap_pct"],
+            json!(0.08)
+        );
+        assert_eq!(bundle.plan.trials.len(), 6);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["v19_alpha_rebuild_profile"]
+                == "v19_p3_train_window_ml_simple_excess_low_impact_rebuild_v1"
+                && trial.parameters["alpha_sleeve_family"] == "growth_recovery"
+                && trial.parameters["train_window_ml_feature_profile"]
+                    == "phase7_gb_quality_value_recovery_low_impact_v6"
+                && trial.parameters["train_window_ml_label_objective"] == "future_excess_return"
+                && trial.parameters["train_window_ml_label_horizon_days"] == 45
+                && trial.parameters["train_window_ml_bucket_count"] == 5
+                && trial.parameters["prediction_set_id"] == "p7v19sxli-train-window-001"
+                && trial.parameters["prediction_set_override_source"] == "train_window_ml_internal"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_event_surprise_v1")
+                || serialized.contains("phase7_event_window_earnings_v1")
+                || serialized.contains("must-not-override-v19-simple-excess-low-impact")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_train_window_ml_h120_low_impact_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20170103",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["must-not-override-v19-h120-low-impact".to_string()]),
+            max_trials: Some(8),
+            search_profile: Some("phase7_v19_ml_h120_low_impact".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle =
+            build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+                &req,
+                resource_plan,
+                500,
+                Some("p7v19h120-train-window-001"),
+            );
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_train_window_ml_h120_low_impact_rebuild"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "H120 low-impact rebuild must not accept request-level prediction_set overrides"
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_train_window_ml_h120_low_impact_rebuild"
+        ));
+        assert!(is_train_window_ml_stress_fill_profile(Some(
+            "phase7_v19_ml_h120_low_impact"
+        )));
+        assert!(is_v19_train_window_ml_alpha_rebuild_profile(Some(
+            "phase7_v19_ml_h120_low_impact"
+        )));
+        assert!(!is_v19_train_window_ml_simple_excess_rebuild_profile(Some(
+            "phase7_v19_ml_h120_low_impact"
+        )));
+        assert!(is_v19_train_window_ml_h120_low_impact_rebuild_profile(
+            Some("phase7_v19_ml_h120_low_impact")
+        ));
+        assert_eq!(
+            phase7_train_window_ml_label_config_for_search(Some("phase7_v19_ml_h120_low_impact",)),
+            (
+                "future_excess_return".to_string(),
+                120usize,
+                5usize,
+                50usize
+            )
+        );
+        assert_eq!(
+            phase7_train_window_ml_feature_profile_for_search(Some(
+                "phase7_v19_ml_h120_low_impact",
+            )),
+            "phase7_gb_quality_value_recovery_low_impact_v6"
+        );
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_ml_h120_low_impact",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(
+            gate_policy["min_train_final_execution_fill_ratio"],
+            json!(0.90)
+        );
+        assert_eq!(
+            gate_policy["max_train_final_unfilled_target_gap_pct"],
+            json!(0.08)
+        );
+        assert_eq!(bundle.plan.trials.len(), 8);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["v19_alpha_rebuild_profile"]
+                == "v19_p3_train_window_ml_h120_low_impact_rebuild_v1"
+                && trial.parameters["train_window_ml_feature_profile"]
+                    == "phase7_gb_quality_value_recovery_low_impact_v6"
+                && trial.parameters["train_window_ml_label_objective"] == "future_excess_return"
+                && trial.parameters["train_window_ml_label_horizon_days"] == 120
+                && trial.parameters["train_window_ml_bucket_count"] == 5
+                && trial.parameters["prediction_set_id"] == "p7v19h120-train-window-001"
+                && trial.parameters["prediction_set_override_source"] == "train_window_ml_internal"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_event_surprise_v1")
+                || serialized.contains("phase7_event_window_earnings_v1")
+                || serialized.contains("must-not-override-v19-h120-low-impact")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(
+    ) {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20170103",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec![
+                "must-not-override-v19-rae-h120-residual-capacity".to_string()
+            ]),
+            max_trials: Some(6),
+            search_profile: Some("phase7_v19_ml_rae_h120_residual_capacity".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle =
+            build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+                &req,
+                resource_plan,
+                500,
+                Some("p7v19rae-train-window-001"),
+            );
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "RAE H120 residual/capacity rebuild must not accept request-level prediction_set overrides"
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
+        ));
+        assert!(is_train_window_ml_stress_fill_profile(Some(
+            "phase7_v19_ml_rae_h120_residual_capacity"
+        )));
+        assert!(is_v19_train_window_ml_alpha_rebuild_profile(Some(
+            "phase7_v19_ml_rae_h120_residual_capacity"
+        )));
+        assert!(
+            is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(Some(
+                "phase7_v19_ml_rae_h120_residual_capacity"
+            ))
+        );
+        assert_eq!(
+            phase7_train_window_ml_label_config_for_search(Some(
+                "phase7_v19_ml_rae_h120_residual_capacity",
+            )),
+            (
+                "risk_adjusted_excess_return".to_string(),
+                120usize,
+                7usize,
+                50usize
+            )
+        );
+        assert_eq!(
+            phase7_train_window_ml_feature_profile_for_search(Some(
+                "phase7_v19_ml_rae_h120_residual_capacity",
+            )),
+            "phase7_gb_quality_value_recovery_low_impact_v6"
+        );
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_ml_rae_h120_residual_capacity",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(bundle.plan.trials.len(), 6);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["v19_alpha_rebuild_profile"]
+                == "v19_p3_3_train_window_ml_rae_h120_residual_capacity_rebuild_v1"
+                && trial.parameters["train_window_ml_feature_profile"]
+                    == "phase7_gb_quality_value_recovery_low_impact_v6"
+                && trial.parameters["train_window_ml_label_objective"]
+                    == "risk_adjusted_excess_return"
+                && trial.parameters["train_window_ml_label_horizon_days"] == 120
+                && trial.parameters["train_window_ml_bucket_count"] == 7
+                && trial.parameters["prediction_set_id"] == "p7v19rae-train-window-001"
+                && trial.parameters["prediction_set_override_source"] == "train_window_ml_internal"
+                && trial.parameters["candidate_ranking"] == "capacity_aware_alpha_liquidity_v1"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_event_surprise_v1")
+                || serialized.contains("phase7_event_window_earnings_v1")
+                || serialized.contains("must-not-override-v19-rae-h120-residual-capacity")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_train_window_ml_event_sentiment_rebuild_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20170103",
+                "end_date": "20260615",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec!["must-not-override-v19-event-sentiment".to_string()]),
+            max_trials: Some(6),
+            search_profile: Some("phase7_v19_ml_event_sentiment".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle =
+            build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
+                &req,
+                resource_plan,
+                500,
+                Some("p7v19evt-train-window-001"),
+            );
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_train_window_ml_event_sentiment_rebuild"
+        );
+        assert_eq!(
+            bundle.search_space["config"]["prediction_set_ids"],
+            json!([]),
+            "event/sentiment rebuild must not accept request-level prediction_set overrides"
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_train_window_ml_event_sentiment_rebuild"
+        ));
+        assert!(is_train_window_ml_stress_fill_profile(Some(
+            "phase7_v19_ml_event_sentiment"
+        )));
+        assert!(is_v19_train_window_ml_alpha_rebuild_profile(Some(
+            "phase7_v19_ml_event_sentiment"
+        )));
+        assert!(is_v19_train_window_ml_event_sentiment_rebuild_profile(
+            Some("phase7_v19_ml_event_sentiment")
+        ));
+        assert_eq!(
+            phase7_train_window_ml_label_config_for_search(Some("phase7_v19_ml_event_sentiment",)),
+            (
+                "risk_adjusted_excess_return".to_string(),
+                120usize,
+                7usize,
+                50usize
+            )
+        );
+        assert_eq!(
+            phase7_train_window_ml_feature_profile_for_search(Some(
+                "phase7_v19_ml_event_sentiment",
+            )),
+            "phase7_p4_event_sentiment_high_coverage_v1"
+        );
+        let factors = phase7_train_window_ml_factor_refs_for_profile(
+            phase7_train_window_ml_feature_profile_for_search(Some(
+                "phase7_v19_ml_event_sentiment",
+            )),
+        );
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "event_forecast_surprise_bucket_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "event_disclosure_timing_bucket_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "event_express_roe_bucket_std"));
+        assert!(factors
+            .iter()
+            .any(|factor| factor.factor_code == "margin_rz_change_std_20d"));
+        assert!(factors
+            .iter()
+            .all(|factor| factor.factor_version == "1.0.0"));
+        assert!(!factors
+            .iter()
+            .any(|factor| factor.factor_code == "event_post_return_forecast_20d_indrel_std"));
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_ml_event_sentiment",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert_eq!(bundle.plan.trials.len(), 6);
+        assert!(bundle.plan.trials.iter().all(|trial| {
+            trial.parameters["v19_alpha_rebuild_profile"]
+                == "v19_p3_4_train_window_ml_event_sentiment_rebuild_v1"
+                && trial.parameters["train_window_ml_feature_profile"]
+                    == "phase7_p4_event_sentiment_high_coverage_v1"
+                && trial.parameters["train_window_ml_label_objective"]
+                    == "risk_adjusted_excess_return"
+                && trial.parameters["train_window_ml_label_horizon_days"] == 120
+                && trial.parameters["train_window_ml_bucket_count"] == 7
+                && trial.parameters["prediction_set_id"] == "p7v19evt-train-window-001"
+                && trial.parameters["prediction_set_override_source"] == "train_window_ml_internal"
+                && trial.parameters["candidate_ranking"] == "capacity_aware_alpha_liquidity_v1"
+        }));
+        assert!(!bundle.plan.trials.iter().any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("must-not-override-v19-event-sentiment")
+        }));
+    }
+
+    #[test]
+    fn fixed_params_oos_mode_does_not_short_circuit_multi_seed_sleeve_admission() {
+        assert!(should_use_fixed_params_oos_mode(
+            true,
+            false,
+            Some("phase7_v19_current")
+        ));
+        assert!(!should_use_fixed_params_oos_mode(
+            true,
+            false,
+            Some("phase7_v19_sleeves")
+        ));
+        assert!(!should_use_fixed_params_oos_mode(
+            true,
+            true,
+            Some("phase7_v19_current")
+        ));
+        assert!(!should_use_fixed_params_oos_mode(
+            false,
+            false,
+            Some("phase7_v19_current")
+        ));
+    }
+
+    #[test]
     fn phase7_layered_request_accepts_prediction_capacity_dual_objective_profile() {
         let req = Phase7LayeredOptimizationRequest {
             strategy_version_id: "phase7-professional-v1".to_string(),
@@ -21378,9 +24118,11 @@ mod tests {
         assert!(bundle.plan.trials.iter().all(|trial| {
             trial.parameters["train_window_ml_ranking_profile"].is_string()
                 && trial.parameters["train_window_ml_feature_profile"]
-                    == "phase7_gb_quality_value_recovery_low_impact_v2"
-                && trial.parameters["train_window_ml_label_objective"]
-                    == "regime_conditional_excess_return"
+                    == "phase7_gb_quality_value_recovery_low_impact_v5"
+                && matches!(
+                    trial.parameters["train_window_ml_label_objective"].as_str(),
+                    Some("regime_conditional_excess_return" | "future_excess_return")
+                )
                 && trial.parameters["train_window_ml_pit_policy"]
                     == "train-window rolling fit; no OOS labels"
                 && trial.parameters["stress_fill_objective_profile"].is_string()
@@ -21482,7 +24224,7 @@ mod tests {
 
         assert_eq!(
             phase7_train_window_ml_feature_profile(),
-            "phase7_gb_quality_value_recovery_low_impact_v2"
+            "phase7_gb_quality_value_recovery_low_impact_v5"
         );
         assert!(factors.len() >= 45);
         assert!(factors
@@ -22121,6 +24863,258 @@ mod tests {
             .expect_err("failed experiment should not be reportable");
         assert!(error.contains("requires completed stats experiment exp-failed"));
         assert!(error.contains("status=failed"));
+    }
+
+    #[test]
+    fn sleeve_admission_diagnostic_matrix_explains_rejected_family_by_window() {
+        let metrics = json!({
+            "windows": [{
+                "status": "skipped",
+                "window": {
+                    "window_index": 1,
+                    "validation_mode": "walk_forward",
+                    "train_start": "2014-01-02",
+                    "train_end": "2016-12-31",
+                    "test_start": "2017-01-01",
+                    "test_end": "2017-12-31"
+                },
+                "train_optimization_task_id": "opt-train-1",
+                "skip_reason": "window 1 has no training candidate passing robustness"
+            }]
+        });
+        let mut rows_by_task = BTreeMap::new();
+        rows_by_task.insert(
+            "opt-train-1".to_string(),
+            vec![SleeveAdmissionTrialDiagnosticRow {
+                trial_id: "trial-valuation".to_string(),
+                trial_index: 2,
+                status: "completed".to_string(),
+                score: Some(Decimal::new(1209, 4)),
+                parameters: json!({
+                    "alpha_sleeve_family": "valuation_guard",
+                    "alpha_source_family": "valuation_guard",
+                    "combo_name": "phase7_valuation_v1"
+                }),
+                metrics: Some(json!({
+                    "annual_return_pct": "0.1209",
+                    "sharpe_ratio": "0.995",
+                    "sortino_ratio": "1.355",
+                    "calmar_ratio": "0.468",
+                    "max_drawdown_pct": "0.258",
+                    "final_execution_fill_ratio": "0.899",
+                    "final_unfilled_target_gap_pct": "0.083"
+                })),
+                constraint_violations: Some(json!([
+                    {"constraint": "min_sharpe", "severity": "hard"}
+                ])),
+                robustness_status: Some("rejected".to_string()),
+                gate_results: Some(json!([
+                    {"gate": "min_sharpe", "passed": true, "actual": "0.995"},
+                    {
+                        "gate": "walk_forward_min_window_count",
+                        "passed": true,
+                        "details": {
+                            "windows": [{
+                                "window_index": 1,
+                                "start_date": "2014-01-29",
+                                "end_date": "2016-02-25",
+                                "scenario": "bear",
+                                "metrics": {
+                                    "annual_return": 0.10,
+                                    "excess_return": -0.04,
+                                    "sharpe_ratio": 0.2,
+                                    "sortino_ratio": 0.4,
+                                    "max_drawdown": 0.22
+                                }
+                            }]
+                        }
+                    },
+                    {
+                        "gate": "train_cost_capacity_perturbation_pass_ratio",
+                        "passed": false,
+                        "actual": 0.0,
+                        "passed_count": 0,
+                        "total_count": 3
+                    },
+                    {
+                        "gate": "train_avg_perturbed_calmar",
+                        "passed": false,
+                        "actual": "0.246"
+                    },
+                    {
+                        "gate": "train_final_execution_fill_ratio",
+                        "passed": false,
+                        "actual": "0.808"
+                    }
+                ])),
+            }],
+        );
+
+        let report = sleeve_admission_diagnostic_matrix_json(
+            "exp-sleeve",
+            "completed",
+            &metrics,
+            &rows_by_task,
+        );
+
+        assert_eq!(report["experiment_run_id"], "exp-sleeve");
+        assert_eq!(report["window_count"], 1);
+        assert_eq!(
+            report["windows"][0]["best_rejected_trial"]["family"],
+            "valuation_guard"
+        );
+        assert_eq!(
+            report["windows"][0]["families"][0]["family"],
+            "valuation_guard"
+        );
+        assert_eq!(
+            report["windows"][0]["families"][0]["metrics"]["annual_return_pct"],
+            "0.1209"
+        );
+        assert_eq!(
+            report["windows"][0]["families"][0]["execution_quality"]["fill_ratio"],
+            "0.899"
+        );
+        assert_eq!(
+            report["windows"][0]["families"][0]["stress"]["pass_ratio"],
+            0.0
+        );
+        assert_eq!(
+            report["windows"][0]["families"][0]["stress"]["avg_perturbed_calmar"],
+            "0.246"
+        );
+        assert_eq!(
+            report["windows"][0]["families"][0]["failed_gates"][0]["gate"],
+            "train_cost_capacity_perturbation_pass_ratio"
+        );
+        assert_eq!(
+            report["windows"][0]["families"][0]["weak_regimes"][0]["scenario"],
+            "bear"
+        );
+        assert_eq!(report["family_summary"][0]["family"], "valuation_guard");
+        assert_eq!(report["family_summary"][0]["rejected_count"], 1);
+    }
+
+    #[test]
+    fn sleeve_admission_diagnostic_matrix_recommends_compliant_next_actions() {
+        let metrics = json!({
+            "windows": [{
+                "status": "skipped",
+                "window": {
+                    "window_index": 1,
+                    "validation_mode": "walk_forward",
+                    "train_start": "2014-01-02",
+                    "train_end": "2016-12-31",
+                    "test_start": "2017-01-01",
+                    "test_end": "2017-12-31"
+                },
+                "train_optimization_task_id": "opt-train-actions",
+                "skip_reason": "window 1 has no training candidate passing robustness"
+            }]
+        });
+        let mut rows_by_task = BTreeMap::new();
+        rows_by_task.insert(
+            "opt-train-actions".to_string(),
+            vec![
+                SleeveAdmissionTrialDiagnosticRow {
+                    trial_id: "trial-positive-unfilled".to_string(),
+                    trial_index: 1,
+                    status: "completed".to_string(),
+                    score: Some(Decimal::new(11, 1)),
+                    parameters: json!({
+                        "alpha_sleeve_family": "valuation_guard",
+                        "combo_name": "phase7_valuation_v1"
+                    }),
+                    metrics: Some(json!({
+                        "annual_return_pct": "0.12",
+                        "sharpe_ratio": "0.95",
+                        "calmar_ratio": "0.46",
+                        "final_execution_fill_ratio": "0.82",
+                        "final_unfilled_target_gap_pct": "0.12"
+                    })),
+                    constraint_violations: Some(json!([])),
+                    robustness_status: Some("rejected".to_string()),
+                    gate_results: Some(json!([
+                        {
+                            "gate": "train_cost_capacity_perturbation_pass_ratio",
+                            "passed": false,
+                            "actual": 0.0,
+                            "passed_count": 0,
+                            "total_count": 3
+                        },
+                        {
+                            "gate": "train_final_unfilled_target_gap",
+                            "passed": false,
+                            "actual": "0.12",
+                            "limit": "0.08"
+                        }
+                    ])),
+                },
+                SleeveAdmissionTrialDiagnosticRow {
+                    trial_id: "trial-negative-alpha".to_string(),
+                    trial_index: 2,
+                    status: "completed".to_string(),
+                    score: Some(Decimal::new(-5, 1)),
+                    parameters: json!({
+                        "alpha_sleeve_family": "relative_strength",
+                        "combo_name": "phase7_quality_relative_strength_v1"
+                    }),
+                    metrics: Some(json!({
+                        "annual_return_pct": "-0.04",
+                        "sharpe_ratio": "-0.30",
+                        "calmar_ratio": "-0.12",
+                        "final_execution_fill_ratio": "0.93",
+                        "final_unfilled_target_gap_pct": "0.04"
+                    })),
+                    constraint_violations: Some(json!([])),
+                    robustness_status: Some("rejected".to_string()),
+                    gate_results: Some(json!([
+                        {
+                            "gate": "min_annual_return",
+                            "passed": false,
+                            "actual": "-0.04",
+                            "limit": "0"
+                        },
+                        {
+                            "gate": "min_sharpe",
+                            "passed": false,
+                            "actual": "-0.30",
+                            "limit": "0"
+                        }
+                    ])),
+                },
+            ],
+        );
+
+        let report = sleeve_admission_diagnostic_matrix_json(
+            "exp-actions",
+            "completed",
+            &metrics,
+            &rows_by_task,
+        );
+        let action_summary = &report["action_summary"];
+
+        assert_eq!(action_summary["positive_trial_count"], 1);
+        assert_eq!(action_summary["positive_stress_evaluated_count"], 1);
+        assert_eq!(action_summary["positive_stress_passed_count"], 0);
+        assert_eq!(action_summary["positive_fill_below_90_count"], 1);
+        assert_eq!(action_summary["positive_unfilled_above_08_count"], 1);
+        assert_eq!(
+            action_summary["next_actions"][0]["action"],
+            "repair_execution_capacity_for_positive_alpha"
+        );
+        assert_eq!(
+            action_summary["next_actions"][0]["families"][0],
+            "valuation_guard"
+        );
+        assert_eq!(
+            action_summary["next_actions"][1]["action"],
+            "rebuild_alpha_sources_for_weak_or_negative_train_windows"
+        );
+        assert_eq!(
+            action_summary["non_goals"][0],
+            "do_not_relax_train_or_oos_gates"
+        );
     }
 
     #[test]

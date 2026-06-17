@@ -100,6 +100,10 @@ async fn main() {
             post(routes::sync::create_sync_task),
         )
         .route(
+            "/api/v1/quant/data/sync-tasks/cleanup-stale",
+            post(routes::sync::cleanup_stale_sync_tasks),
+        )
+        .route(
             "/api/v1/quant/data/sync-tasks/{task_id}",
             get(routes::sync::sync_task_status),
         )
@@ -396,6 +400,14 @@ async fn main() {
             "/api/v1/quant/ml/prediction-sets/cache-economics/report",
             post(routes::ml::report_prediction_set_cache_economics),
         )
+        .route(
+            "/api/v1/quant/ml/prediction-sets/readiness/report",
+            post(routes::ml::report_prediction_set_readiness),
+        )
+        .route(
+            "/api/v1/quant/ml/feature-profiles/readiness/report",
+            post(routes::optimization::report_feature_profile_readiness),
+        )
         // 组合风控
         .route(
             "/api/v1/quant/portfolio/reports/{task_id}",
@@ -495,6 +507,10 @@ async fn main() {
         .route(
             "/api/v1/quant/experiments/return-risk-cache-economics/report",
             post(routes::optimization::report_return_risk_cache_economics),
+        )
+        .route(
+            "/api/v1/quant/experiments/{experiment_run_id}/sleeve-admission-diagnostics",
+            get(routes::optimization::get_sleeve_admission_diagnostics),
         )
         .route(
             "/api/v1/quant/experiments/{experiment_run_id}",

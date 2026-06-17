@@ -417,6 +417,51 @@ fn months_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDat
     result
 }
 
+fn calendar_dates_in_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    let mut dates = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        dates.push(cursor);
+        cursor += Duration::days(1);
+    }
+    dates
+}
+
+fn moneyflow_full_market_trade_dates(
+    start: NaiveDate,
+    end: NaiveDate,
+    open_dates: Vec<NaiveDate>,
+) -> Vec<NaiveDate> {
+    if open_dates.is_empty() {
+        return calendar_dates_in_range(start, end);
+    }
+
+    open_dates
+        .into_iter()
+        .filter(|date| *date >= start && *date <= end)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+async fn load_moneyflow_full_market_trade_dates(
+    pool: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<NaiveDate>, sqlx::Error> {
+    let open_dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT trade_date
+         FROM market_trade_calendar
+         WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
+         ORDER BY trade_date",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
+    Ok(moneyflow_full_market_trade_dates(start, end, open_dates))
+}
+
 /// Split a date range into yearly chunks. Each chunk is at most one calendar year.
 /// This reduces Tushare API calls by ~12× compared to monthly chunks.
 fn years_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
@@ -479,6 +524,10 @@ fn daily_basic_row_from_map(item: &Map<String, Value>) -> Option<MarketStockDail
         total_mv: to_opt_decimal(get_f64(item, "total_mv")),
         circ_mv: to_opt_decimal(get_f64(item, "circ_mv")),
     })
+}
+
+fn is_tushare_hourly_limit_error(message: &str) -> bool {
+    message.contains("40203") || message.contains("每小时最多访问") || message.contains("4000次")
 }
 
 pub async fn sync_daily_basic(
@@ -559,7 +608,25 @@ pub async fn sync_daily_basic(
                         offset += page_limit;
                     }
                     Err(error) => {
-                        warn!("daily_basic {}..{} failed: {}", sd, ed, error);
+                        let err_msg = error.to_string();
+                        warn!("daily_basic {}..{} failed: {}", sd, ed, err_msg);
+                        if is_tushare_hourly_limit_error(&err_msg) {
+                            failed += 1;
+                            repository::update_sync_task(
+                                pool,
+                                &task_id,
+                                "partial",
+                                months.len() as i32,
+                                ok as i32,
+                                failed as i32,
+                            )
+                            .await?;
+                            return Err(format!(
+                                "daily_basic rate limited by Tushare before fallback: {}",
+                                err_msg
+                            )
+                            .into());
+                        }
                         let mut day = *m_start;
                         let mut fallback_failed = false;
                         while day <= *m_end {
@@ -600,9 +667,26 @@ pub async fn sync_daily_basic(
                                         offset += page_limit;
                                     }
                                     Err(day_error) => {
-                                        warn!("daily_basic {} failed: {}", trade_date, day_error);
+                                        let day_err_msg = day_error.to_string();
+                                        warn!("daily_basic {} failed: {}", trade_date, day_err_msg);
                                         failed += 1;
                                         fallback_failed = true;
+                                        if is_tushare_hourly_limit_error(&day_err_msg) {
+                                            repository::update_sync_task(
+                                                pool,
+                                                &task_id,
+                                                "partial",
+                                                months.len() as i32,
+                                                ok as i32,
+                                                failed as i32,
+                                            )
+                                            .await?;
+                                            return Err(format!(
+                                                "daily_basic rate limited by Tushare during daily fallback: {}",
+                                                day_err_msg
+                                            )
+                                            .into());
+                                        }
                                         break;
                                     }
                                 }
@@ -683,9 +767,26 @@ pub async fn sync_daily_basic(
                         offset += page_limit;
                     }
                     Err(error) => {
-                        warn!("{} daily_basic failed: {}", symbol, error);
+                        let err_msg = error.to_string();
+                        warn!("{} daily_basic failed: {}", symbol, err_msg);
                         failed += 1;
                         symbol_failed = true;
+                        if is_tushare_hourly_limit_error(&err_msg) {
+                            repository::update_sync_task(
+                                pool,
+                                &task_id,
+                                "partial",
+                                symbols.len() as i32,
+                                ok as i32,
+                                failed as i32,
+                            )
+                            .await?;
+                            return Err(format!(
+                                "daily_basic rate limited by Tushare at symbol {}: {}",
+                                symbol, err_msg
+                            )
+                            .into());
+                        }
                         break;
                     }
                 }
@@ -1103,19 +1204,20 @@ pub async fn sync_moneyflow(
     let mut failed = 0usize;
 
     if symbols.is_empty() {
-        let months = months_in_range(s, e);
-        for (m_start, m_end) in &months {
-            let sd = m_start.format("%Y%m%d").to_string();
-            let ed = m_end.format("%Y%m%d").to_string();
+        let trade_dates = load_moneyflow_full_market_trade_dates(pool, s, e).await?;
+        let total = trade_dates.len() as i32;
+        for trade_day in &trade_dates {
+            let trade_date = trade_day.format("%Y%m%d").to_string();
             let mut offset = 0usize;
+            let mut day_failed = false;
 
             loop {
                 match client
                     .moneyflow(
                         None,
+                        Some(&trade_date),
                         None,
-                        Some(&sd),
-                        Some(&ed),
+                        None,
                         Some(page_limit),
                         Some(offset),
                     )
@@ -1137,86 +1239,30 @@ pub async fn sync_moneyflow(
                         offset += page_limit;
                     }
                     Err(error) => {
-                        warn!("moneyflow {}..{} failed: {}", sd, ed, error);
-                        let mut day = *m_start;
-                        let mut fallback_failed = false;
-                        while day <= *m_end {
-                            let trade_date = day.format("%Y%m%d").to_string();
-                            let mut offset = 0usize;
-                            loop {
-                                match client
-                                    .moneyflow(
-                                        None,
-                                        Some(&trade_date),
-                                        None,
-                                        None,
-                                        Some(page_limit),
-                                        Some(offset),
-                                    )
-                                    .await
-                                {
-                                    Ok(resp) => {
-                                        let maps = resp
-                                            .data
-                                            .map(|data| data.to_maps())
-                                            .unwrap_or_default();
-                                        let row_count = maps.len();
-                                        let rows: Vec<MarketStockMoneyflow> = maps
-                                            .iter()
-                                            .filter_map(moneyflow_row_from_map)
-                                            .collect();
-                                        if !rows.is_empty() {
-                                            total_rows += rows.len();
-                                            repository::upsert_moneyflow_batch(
-                                                pool, &rows, dv_id, "tushare",
-                                            )
-                                            .await?;
-                                        }
-                                        if row_count < page_limit {
-                                            break;
-                                        }
-                                        offset += page_limit;
-                                    }
-                                    Err(day_error) => {
-                                        warn!("moneyflow {} failed: {}", trade_date, day_error);
-                                        failed += 1;
-                                        fallback_failed = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            day += Duration::days(1);
-                        }
-                        if !fallback_failed {
-                            info!("moneyflow {}..{} recovered by daily fallback", sd, ed);
-                        }
+                        warn!("moneyflow {} failed: {}", trade_date, error);
+                        failed += 1;
+                        day_failed = true;
                         break;
                     }
                 }
             }
-            ok += 1;
+            if !day_failed {
+                ok += 1;
+            }
             repository::update_sync_task(
                 pool,
                 &task_id,
                 "running",
-                months.len() as i32,
+                total,
                 ok as i32,
                 failed as i32,
             )
             .await?;
             if total_rows % 500_000 < page_limit {
-                info!("moneyflow range sync: {} rows", total_rows);
-            }
-            if ok % 12 == 0 {
-                repository::update_sync_task(
-                    pool,
-                    &task_id,
-                    "running",
-                    months.len() as i32,
-                    ok as i32,
-                    failed as i32,
-                )
-                .await?;
+                info!(
+                    "moneyflow daily full-market sync: {} rows through {}",
+                    total_rows, trade_date
+                );
             }
         }
 
@@ -1224,7 +1270,7 @@ pub async fn sync_moneyflow(
             pool,
             &task_id,
             if failed > 0 { "partial" } else { "completed" },
-            months.len() as i32,
+            total,
             ok as i32,
             failed as i32,
         )
@@ -3838,6 +3884,45 @@ mod tests {
     }
 
     #[test]
+    fn moneyflow_full_market_trade_dates_use_open_calendar_days() {
+        let start = NaiveDate::from_ymd_opt(2026, 6, 13).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 17).unwrap();
+        let open_dates = vec![
+            NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 16).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 17).unwrap(),
+        ];
+
+        let dates = moneyflow_full_market_trade_dates(start, end, open_dates);
+
+        assert_eq!(
+            dates,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 16).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 17).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn moneyflow_full_market_trade_dates_fall_back_to_calendar_days() {
+        let start = NaiveDate::from_ymd_opt(2026, 6, 13).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+
+        let dates = moneyflow_full_market_trade_dates(start, end, Vec::new());
+
+        assert_eq!(
+            dates,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 6, 13).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 14).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
     fn date_chunks_by_days_splits_without_crossing_end_date() {
         let start = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 8).unwrap();
@@ -3931,6 +4016,14 @@ mod tests {
         assert_eq!(row.dv_ttm, Decimal::from_f64_retain(4.2));
         assert_eq!(row.total_mv, Decimal::from_f64_retain(123456.7));
         assert_eq!(row.circ_mv, Decimal::from_f64_retain(98765.4));
+    }
+
+    #[test]
+    fn daily_basic_detects_tushare_hourly_limit_errors() {
+        assert!(is_tushare_hourly_limit_error(
+            "API error (code=40203): 抱歉，您每小时最多访问该接口4000次"
+        ));
+        assert!(!is_tushare_hourly_limit_error("network timeout"));
     }
 
     #[test]

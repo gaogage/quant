@@ -47,7 +47,9 @@ pub async fn list_strategies(
         "SELECT strategy_id, name, description, status,
                 etf_symbols, default_weights, vol_target, leverage_cap, leverage_floor,
                 min_stock, max_single, max_single_bull, momentum_blend_ratio,
-                rebalance_freq, ga_population, ga_generations, risk_free_rate
+                rebalance_freq, ga_population, ga_generations, risk_free_rate,
+                signal_source, prediction_blend_weight, combo_name, top_n,
+                prediction_set_id, dynamic_target_cap, score_direction, candidate_tier
          FROM strategy_config
          WHERE status = 'active'
          ORDER BY
@@ -67,6 +69,7 @@ pub async fn list_strategies(
                 "name": r.try_get::<String, _>("name").unwrap_or_default(),
                 "description": r.try_get::<Option<String>, _>("description").unwrap_or(None),
                 "status": r.try_get::<String, _>("status").unwrap_or_default(),
+                "candidate_tier": r.try_get::<String, _>("candidate_tier").unwrap_or_else(|_| "research_baseline".to_string()),
                 "params": serde_json::json!({
                     "etf_symbols": r.try_get::<serde_json::Value, _>("etf_symbols").unwrap_or(serde_json::Value::Null),
                     "default_weights": r.try_get::<serde_json::Value, _>("default_weights").unwrap_or(serde_json::Value::Null),
@@ -81,6 +84,14 @@ pub async fn list_strategies(
                     "ga_population": r.try_get::<Option<i32>, _>("ga_population").unwrap_or(None),
                     "ga_generations": r.try_get::<Option<i32>, _>("ga_generations").unwrap_or(None),
                     "risk_free_rate": r.try_get::<Option<f64>, _>("risk_free_rate").unwrap_or(None),
+                    "signal_source": r.try_get::<String, _>("signal_source").unwrap_or_default(),
+                    "prediction_blend_weight": r.try_get::<Option<f64>, _>("prediction_blend_weight").unwrap_or(None),
+                    "combo_name": r.try_get::<String, _>("combo_name").unwrap_or_default(),
+                    "top_n": r.try_get::<Option<i32>, _>("top_n").unwrap_or(None),
+                    "prediction_set_id": r.try_get::<Option<String>, _>("prediction_set_id").unwrap_or(None),
+                    "dynamic_target_cap": r.try_get::<Option<f64>, _>("dynamic_target_cap").unwrap_or(None),
+                    "score_direction": r.try_get::<String, _>("score_direction").unwrap_or_default(),
+                    "candidate_tier": r.try_get::<String, _>("candidate_tier").unwrap_or_else(|_| "research_baseline".to_string()),
                 }),
                 "owner": "system",
             })
@@ -115,18 +126,45 @@ pub async fn get_strategy(
     Path(strategy_id): Path<String>,
 ) -> impl IntoResponse {
     // 先查系统策略
-    let sys = sqlx::query_as::<_, (String, Option<String>, serde_json::Value, String)>(
-        "SELECT strategy_name, description, params, status FROM strategy_config WHERE strategy_id = $1"
+    let sys = sqlx::query_as::<_, (String, Option<String>, serde_json::Value, String, String)>(
+        "SELECT name,
+                description,
+                jsonb_build_object(
+                    'etf_symbols', etf_symbols,
+                    'default_weights', default_weights,
+                    'vol_target', vol_target,
+                    'leverage_cap', leverage_cap,
+                    'leverage_floor', leverage_floor,
+                    'min_stock', min_stock,
+                    'max_single', max_single,
+                    'max_single_bull', max_single_bull,
+                    'momentum_blend_ratio', momentum_blend_ratio,
+                    'rebalance_freq', rebalance_freq,
+                    'ga_population', ga_population,
+                    'ga_generations', ga_generations,
+                    'risk_free_rate', risk_free_rate,
+                    'signal_source', signal_source,
+                    'prediction_blend_weight', prediction_blend_weight,
+                    'combo_name', combo_name,
+                    'top_n', top_n,
+                    'prediction_set_id', prediction_set_id,
+                    'dynamic_target_cap', dynamic_target_cap,
+                    'score_direction', score_direction,
+                    'candidate_tier', candidate_tier
+                ) AS params,
+                status,
+                candidate_tier
+         FROM strategy_config WHERE strategy_id = $1",
     )
     .bind(&strategy_id)
     .fetch_optional(&state.db)
     .await;
 
-    if let Ok(Some((name, desc, params, status))) = sys {
+    if let Ok(Some((name, desc, params, status, candidate_tier))) = sys {
         return Json(serde_json::json!({
             "code": 0, "data": {
                 "strategy_id": strategy_id, "name": name, "description": desc,
-                "params": params, "status": status, "owner": "system",
+                "params": params, "status": status, "candidate_tier": candidate_tier, "owner": "system",
             }
         }));
     }

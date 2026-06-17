@@ -8,6 +8,7 @@ use chrono::NaiveDate;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive, Zero};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
@@ -95,6 +96,9 @@ pub struct BacktestConfig {
     pub feature_set_version_id: Option<String>,
     pub prediction_set_id: Option<String>,
     pub portfolio_policy_id: Option<String>,
+    /// Immutable strategy/request parameter snapshot used to reproduce and audit a task.
+    #[serde(default)]
+    pub parameters: Value,
     pub symbols: Vec<String>,
     pub rebalance_frequency: String,
     pub execution_timing: ExecutionTiming,
@@ -226,6 +230,7 @@ impl Default for BacktestConfig {
             feature_set_version_id: None,
             prediction_set_id: None,
             portfolio_policy_id: None,
+            parameters: serde_json::json!({}),
             symbols: Vec::new(),
             rebalance_frequency: "daily".into(),
             execution_timing: ExecutionTiming::NextOpen,

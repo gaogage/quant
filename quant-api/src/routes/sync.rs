@@ -44,6 +44,14 @@ pub struct DataSyncTaskReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CleanupStaleSyncTasksReq {
+    #[serde(default)]
+    pub dry_run: bool,
+    pub default_timeout_seconds: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct TusharePermissionSmokeReq {
     #[serde(default)]
     pub sources: Vec<String>,
@@ -59,6 +67,14 @@ pub struct TusharePermissionSmokeReq {
 
 fn default_source() -> String {
     "tushare".into()
+}
+
+fn stale_cleanup_default_timeout_seconds(value: Option<i64>) -> i64 {
+    value.unwrap_or(3600).clamp(60, 86_400)
+}
+
+fn stale_cleanup_limit(value: Option<i64>) -> i64 {
+    value.unwrap_or(100).clamp(1, 1000)
 }
 
 fn generated_data_version_id() -> String {
@@ -3172,6 +3188,117 @@ pub async fn sync_task_status(
     }
 }
 
+/// POST /api/v1/quant/data/sync-tasks/cleanup-stale
+///
+/// 将 heartbeat 超时的 running 同步任务标记为 failed。默认 dry-run=false；
+/// 可用 dry_run=true 先查看候选任务，避免误伤仍在正常推进的后台任务。
+pub async fn cleanup_stale_sync_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CleanupStaleSyncTasksReq>,
+) -> impl IntoResponse {
+    let default_timeout_seconds =
+        stale_cleanup_default_timeout_seconds(req.default_timeout_seconds);
+    let limit = stale_cleanup_limit(req.limit);
+
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        Option<i32>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<i32>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        "SELECT task_id, task_type, status, progress, last_heartbeat_at,
+                heartbeat_timeout_seconds, started_at, created_at
+         FROM data_sync_task
+         WHERE status = 'running'
+           AND COALESCE(last_heartbeat_at, started_at, created_at)
+               < now() - (COALESCE(heartbeat_timeout_seconds, $1)::text || ' seconds')::interval
+         ORDER BY COALESCE(last_heartbeat_at, started_at, created_at) ASC
+         LIMIT $2",
+    )
+    .bind(default_timeout_seconds as i32)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let candidates = rows
+        .iter()
+        .map(
+            |(
+                task_id,
+                task_type,
+                status,
+                progress,
+                last_heartbeat_at,
+                heartbeat_timeout_seconds,
+                started_at,
+                created_at,
+            )| {
+                let observed_at = last_heartbeat_at.or(*started_at).or(*created_at);
+                let timeout_seconds = heartbeat_timeout_seconds
+                    .map(i64::from)
+                    .unwrap_or(default_timeout_seconds);
+                json!({
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "status": status,
+                    "progress": progress,
+                    "last_heartbeat_at": last_heartbeat_at.map(|ts| ts.to_rfc3339()),
+                    "started_at": started_at.map(|ts| ts.to_rfc3339()),
+                    "created_at": created_at.map(|ts| ts.to_rfc3339()),
+                    "observed_at": observed_at.map(|ts| ts.to_rfc3339()),
+                    "heartbeat_timeout_seconds": timeout_seconds
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+
+    if req.dry_run || rows.is_empty() {
+        return Json(json!({"code": 0, "data": {
+            "dry_run": true,
+            "candidate_count": candidates.len(),
+            "updated_count": 0,
+            "candidates": candidates
+        }}));
+    }
+
+    let task_ids = rows
+        .iter()
+        .map(|(task_id, ..)| task_id.clone())
+        .collect::<Vec<_>>();
+    let result = sqlx::query(
+        "UPDATE data_sync_task
+         SET status = 'failed',
+             failed_count = GREATEST(COALESCE(failed_count, 0), 1),
+             completed_at = now(),
+             last_heartbeat_at = now(),
+             error_message = CONCAT(
+                 COALESCE(NULLIF(error_message, '') || '; ', ''),
+                 'stale running task timed out by cleanup-stale: no heartbeat within configured timeout'
+             )
+         WHERE task_id = ANY($1) AND status = 'running'",
+    )
+    .bind(&task_ids)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(result) => Json(json!({"code": 0, "data": {
+            "dry_run": false,
+            "candidate_count": candidates.len(),
+            "updated_count": result.rows_affected(),
+            "candidates": candidates
+        }})),
+        Err(error) => Json(
+            json!({"code": 1, "message": format!("cleanup stale sync tasks failed: {}", error)}),
+        ),
+    }
+}
+
 fn sync_task_cancel_transition(status: &str) -> Option<&'static str> {
     match status {
         "pending" => Some("cancelled"),
@@ -3322,6 +3449,16 @@ mod tests {
 
         assert_eq!(blocked.len(), 1);
         assert_eq!(blocked[0]["item"], json!("A股日线"));
+    }
+
+    #[test]
+    fn stale_cleanup_parameters_are_bounded() {
+        assert_eq!(stale_cleanup_default_timeout_seconds(None), 3600);
+        assert_eq!(stale_cleanup_default_timeout_seconds(Some(10)), 60);
+        assert_eq!(stale_cleanup_default_timeout_seconds(Some(100_000)), 86_400);
+        assert_eq!(stale_cleanup_limit(None), 100);
+        assert_eq!(stale_cleanup_limit(Some(0)), 1);
+        assert_eq!(stale_cleanup_limit(Some(10_000)), 1000);
     }
 
     #[test]
@@ -4363,6 +4500,27 @@ async fn write_data_readiness_audit_event(
     .map_err(|error| format!("写入数据门禁审计失败: {}", error))
 }
 
+async fn write_data_health_check_audit_event(
+    db: &sqlx::PgPool,
+    entity_id: &str,
+    status: &str,
+    report: &Value,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO audit_event
+           (audit_event_id, event_type, entity_type, entity_id, actor, summary, details)
+         VALUES ($1, 'data_readiness.checked', 'data_health_check', $2, 'system', $3, $4)",
+    )
+    .bind(format!("audit-{}", Uuid::new_v4()))
+    .bind(entity_id)
+    .bind(format!("account data health check {}", status))
+    .bind(report)
+    .execute(db)
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("写入数据健康检查审计失败: {}", error))
+}
+
 pub async fn check_paper_account_data_readiness(
     db: &sqlx::PgPool,
     account_id: &str,
@@ -4461,11 +4619,19 @@ pub async fn check_paper_account_data_readiness(
         "checks": checks,
     });
 
+    let audit_status = if passed { "passed" } else { "failed" };
+    if let Err(error) =
+        write_data_readiness_audit_event(db, &account_id, operation, audit_status, &report).await
+    {
+        let base_message = failure_message
+            .clone()
+            .unwrap_or_else(|| format!("{} 数据门禁审计失败", operation));
+        return Err(format!("{}; {}", base_message, error));
+    }
+
     if passed {
         Ok(report)
     } else {
-        let _ =
-            write_data_readiness_audit_event(db, &account_id, operation, "failed", &report).await;
         Err(failure_message.unwrap_or_else(|| format!("{} 数据门禁失败", operation)))
     }
 }
@@ -4624,14 +4790,43 @@ pub async fn account_data_health(
 
     let red = checks.iter().filter(|c| c["level"] == "red").count();
     let yellow = checks.iter().filter(|c| c["level"] == "yellow").count();
+    let status = if red > 0 {
+        "red"
+    } else if yellow > 0 {
+        "yellow"
+    } else {
+        "green"
+    };
+    let mut data = serde_json::json!({
+        "mode": if deep {"range_coverage"} else {"freshness"},
+        "accounts_checked": accounts.len(),
+        "red": red,
+        "yellow": yellow,
+        "checks": checks
+    });
+    let audit_report = json!({
+        "operation": "account_data_health",
+        "status": status,
+        "user_id": req.user_id,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "data": data.clone()
+    });
+    let audit_entity_id = audit_report
+        .get("user_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("all_active_accounts");
+    match write_data_health_check_audit_event(db, audit_entity_id, status, &audit_report).await {
+        Ok(()) => data["audit_persisted"] = json!(true),
+        Err(error) => {
+            data["audit_persisted"] = json!(false);
+            data["audit_error"] = json!(error);
+        }
+    }
+
     Json(serde_json::json!({
         "code": 0,
-        "data": {
-            "mode": if deep {"range_coverage"} else {"freshness"},
-            "accounts_checked": accounts.len(),
-            "red": red, "yellow": yellow,
-            "checks": checks
-        }
+        "data": data
     }))
 }
 
