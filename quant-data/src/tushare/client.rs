@@ -30,6 +30,11 @@ pub struct TushareConfig {
 
 impl Default for TushareConfig {
     fn default() -> Self {
+        let rate_limit_per_minute = std::env::var("TUSHARE_RATE_LIMIT_PER_MINUTE")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(60);
         Self {
             base_url: std::env::var("TUSHARE_API_URL")
                 .unwrap_or_else(|_| "http://api.tushare.pro".to_string()),
@@ -37,7 +42,7 @@ impl Default for TushareConfig {
             timeout_secs: 30,
             max_retries: 3,
             retry_delay_ms: 1000,
-            rate_limit_per_minute: 200,
+            rate_limit_per_minute,
         }
     }
 }
@@ -300,6 +305,9 @@ impl TushareClient {
                 "pb",
                 "ps_ttm",
                 "dv_ttm",
+                "total_share",
+                "float_share",
+                "free_share",
                 "total_mv",
                 "circ_mv",
             ],
@@ -846,6 +854,99 @@ impl TushareClient {
                 "amount",
                 "high_limit",
                 "low_limit",
+            ],
+        )
+        .await
+    }
+
+    /// 限售股解禁。按解禁日期区间拉取，`ann_date` 是 PIT 可得日。
+    pub async fn share_float(
+        &self,
+        ts_code: Option<&str>,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "share_float",
+            params,
+            &[
+                "ts_code",
+                "ann_date",
+                "float_date",
+                "float_share",
+                "float_ratio",
+                "holder_name",
+                "share_type",
+            ],
+        )
+        .await
+    }
+
+    /// 大宗交易。交易日后披露，使用时应按 available_at 做 PIT 过滤。
+    pub async fn block_trade(
+        &self,
+        ts_code: Option<&str>,
+        trade_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = trade_date {
+            params.push(("trade_date", date));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "block_trade",
+            params,
+            &[
+                "ts_code",
+                "trade_date",
+                "price",
+                "vol",
+                "amount",
+                "buyer",
+                "seller",
             ],
         )
         .await

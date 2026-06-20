@@ -12,7 +12,7 @@ use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
     MarketStockExpress, MarketStockForecast, MarketStockMoneyflow, MarketStockRepurchase,
-    MarketTradeCalendar,
+    MarketStockShareFloat, MarketTradeCalendar,
 };
 
 // ─── market_stock ────────────────────────────────────────────────
@@ -148,14 +148,18 @@ pub async fn upsert_daily_basic(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO market_stock_daily_basic
-             (symbol, trade_date, pe_ttm, pb, ps_ttm, dv_ttm, total_mv, circ_mv,
+             (symbol, trade_date, pe_ttm, pb, ps_ttm, dv_ttm, total_share, float_share, free_share,
+              total_mv, circ_mv,
               source, data_version_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            ON CONFLICT (symbol, trade_date) DO UPDATE SET
              pe_ttm = EXCLUDED.pe_ttm,
              pb = EXCLUDED.pb,
              ps_ttm = EXCLUDED.ps_ttm,
              dv_ttm = EXCLUDED.dv_ttm,
+             total_share = EXCLUDED.total_share,
+             float_share = EXCLUDED.float_share,
+             free_share = EXCLUDED.free_share,
              total_mv = EXCLUDED.total_mv,
              circ_mv = EXCLUDED.circ_mv,
              source = EXCLUDED.source,
@@ -167,6 +171,9 @@ pub async fn upsert_daily_basic(
     .bind(row.pb)
     .bind(row.ps_ttm)
     .bind(row.dv_ttm)
+    .bind(row.total_share)
+    .bind(row.float_share)
+    .bind(row.free_share)
     .bind(row.total_mv)
     .bind(row.circ_mv)
     .bind(source)
@@ -190,7 +197,8 @@ pub async fn upsert_daily_basic_batch(
     for chunk in rows.chunks(2_000) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_daily_basic \
-             (symbol, trade_date, pe_ttm, pb, ps_ttm, dv_ttm, total_mv, circ_mv, \
+             (symbol, trade_date, pe_ttm, pb, ps_ttm, dv_ttm, total_share, float_share, free_share, \
+              total_mv, circ_mv, \
               source, data_version_id) ",
         );
 
@@ -202,6 +210,9 @@ pub async fn upsert_daily_basic_batch(
                 .push_bind(item.pb)
                 .push_bind(item.ps_ttm)
                 .push_bind(item.dv_ttm)
+                .push_bind(item.total_share)
+                .push_bind(item.float_share)
+                .push_bind(item.free_share)
                 .push_bind(item.total_mv)
                 .push_bind(item.circ_mv)
                 .push_bind(source)
@@ -214,6 +225,9 @@ pub async fn upsert_daily_basic_batch(
               pb = EXCLUDED.pb, \
               ps_ttm = EXCLUDED.ps_ttm, \
               dv_ttm = EXCLUDED.dv_ttm, \
+              total_share = EXCLUDED.total_share, \
+              float_share = EXCLUDED.float_share, \
+              free_share = EXCLUDED.free_share, \
               total_mv = EXCLUDED.total_mv, \
               circ_mv = EXCLUDED.circ_mv, \
               source = EXCLUDED.source, \
@@ -930,6 +944,73 @@ pub async fn upsert_repurchase_batch(
     Ok(saved)
 }
 
+// ─── market_stock_share_float ───────────────────────────────────
+
+pub async fn upsert_share_float_batch(
+    pool: &PgPool,
+    rows: &[MarketStockShareFloat],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketStockShareFloat> = rows
+        .iter()
+        .filter(|row| {
+            seen.insert((
+                row.symbol.clone(),
+                row.ann_date,
+                row.float_date,
+                row.holder_name.clone(),
+                row.share_type.clone(),
+                row.available_at,
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_share_float \
+             (symbol, ann_date, float_date, available_at, float_share, float_ratio, \
+              holder_name, share_type, raw_payload, source, data_version_id) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.ann_date)
+                .push_bind(item.float_date)
+                .push_bind(item.available_at)
+                .push_bind(item.float_share)
+                .push_bind(item.float_ratio)
+                .push_bind(&item.holder_name)
+                .push_bind(&item.share_type)
+                .push_bind(&item.raw_payload)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+        builder.push(
+            " ON CONFLICT (symbol, ann_date, float_date, holder_name, share_type, available_at) DO UPDATE SET \
+              float_share = EXCLUDED.float_share, \
+              float_ratio = EXCLUDED.float_ratio, \
+              raw_payload = EXCLUDED.raw_payload, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条限售股解禁数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
 // ─── market_index_daily_bar ──────────────────────────────────────
 
 pub async fn upsert_index_daily_bar(
@@ -1157,6 +1238,36 @@ pub async fn update_sync_task(
     .bind(total)
     .bind(success)
     .bind(failed)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_sync_task_with_error(
+    pool: &PgPool,
+    task_id: &str,
+    status: &str,
+    total: i32,
+    success: i32,
+    failed: i32,
+    error_message: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"UPDATE data_sync_task
+           SET status = $2, total_count = $3, success_count = $4, failed_count = $5,
+               error_message = $6,
+               progress = CASE WHEN $3 > 0 THEN ($4 * 100 / $3) ELSE 0 END,
+               last_heartbeat_at = now(),
+               started_at = COALESCE(started_at, now()),
+               completed_at = CASE WHEN $2 IN ('completed','partial','failed') THEN now() ELSE completed_at END
+           WHERE task_id = $1"#,
+    )
+    .bind(task_id)
+    .bind(status)
+    .bind(total)
+    .bind(success)
+    .bind(failed)
+    .bind(error_message)
     .execute(pool)
     .await?;
     Ok(())

@@ -95,11 +95,13 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
     let (role, reason) = match combo_name {
         "phase7_financial_quality_v1"
         | "phase7_financial_quality_change_v1"
+        | "phase7_earnings_recovery_persistence_v1"
         | "phase7_industry_residual_quality_v1"
         | "phase7_growth_recovery_v1"
         | "phase7_quality_relative_strength_v1"
         | "phase7_valuation_v1"
         | "phase7_moneyflow_v1"
+        | "phase7_moneyflow_congestion_interaction_v1"
         | "phase7_quality_moneyflow_pos_5pct_v1"
         | "phase7_quality_cashflow_confirm_v1"
         | "phase7_quality_dividend_confirm_v1"
@@ -114,15 +116,33 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
         ),
         "phase7_event_earnings_v1"
         | "phase7_event_surprise_v1"
+        | "phase7_forecast_revision_surprise_v1"
         | "phase7_event_window_earnings_v1"
         | "phase7_event_window_earnings_10d_v1"
-        | "phase7_event_window_earnings_40d_v1" => (
+        | "phase7_event_window_earnings_40d_v1"
+        | "phase7_event_post_return_curve_20d_v1" => (
             Phase7AlphaSourceRole::EventGateOnly,
             "current event source is sparse and must gate/boost a broad base instead of defining the base universe",
         ),
-        "phase7_quality_event_window_overlay_v1" => (
+        "phase7_quality_event_window_overlay_v1"
+        | "phase7_quality_event_post_return_curve_overlay_v1"
+        | "phase7_fq_change_event_surprise_sleeve_05pct_v1"
+        | "phase7_fq_change_event_surprise_sleeve_10pct_v1"
+        | "phase7_fq_change_event_surprise_sleeve_15pct_v1"
+        | "phase7_supply_float_shock_v1"
+        | "phase7_fq_change_supply_float_sleeve_05pct_v1"
+        | "phase7_fq_change_supply_float_sleeve_10pct_v1"
+        | "phase7_fq_change_supply_float_sleeve_15pct_v1"
+        | "phase7_unlock_supply_pressure_v1"
+        | "phase7_fq_change_unlock_pressure_sleeve_05pct_v1"
+        | "phase7_fq_change_unlock_pressure_sleeve_10pct_v1"
+        | "phase7_fq_change_unlock_pressure_sleeve_15pct_v1"
+        | "phase7_fq_change_forecast_revision_sleeve_05pct_v1"
+        | "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
+        | "phase7_fq_change_forecast_revision_sleeve_15pct_v1"
+        | "phase7_repurchase_supply_shock_v1" => (
             Phase7AlphaSourceRole::OptionalOverlayOnly,
-            "event-window overlay must preserve and audit a broad quality base before entering full-market training",
+            "optional overlay must preserve and audit a broad quality base before entering full-market training",
         ),
         "phase7_quality_event_confirm_v1"
         | "phase7_quality_event_surprise_confirm_v1"
@@ -130,8 +150,7 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
             Phase7AlphaSourceRole::Excluded,
             "event-confirm blend is sparse under the current full-intersection backfill and must be rebuilt as optional overlay before training",
         ),
-        "phase7_event_post_return_curve_20d_v1"
-        | "phase7_event_reaction_segments_20d_v1"
+        "phase7_event_reaction_segments_20d_v1"
         | "phase7_event_reaction_reversal_20d_v1" => (
             Phase7AlphaSourceRole::Excluded,
             "event reaction source is stale/sample-limited and must be rebuilt before full-market training",
@@ -146,11 +165,16 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
         combo_name: match combo_name {
             "phase7_financial_quality_v1" => "phase7_financial_quality_v1",
             "phase7_financial_quality_change_v1" => "phase7_financial_quality_change_v1",
+            "phase7_earnings_recovery_persistence_v1" => "phase7_earnings_recovery_persistence_v1",
+            "phase7_supply_float_shock_v1" => "phase7_supply_float_shock_v1",
             "phase7_industry_residual_quality_v1" => "phase7_industry_residual_quality_v1",
             "phase7_growth_recovery_v1" => "phase7_growth_recovery_v1",
             "phase7_quality_relative_strength_v1" => "phase7_quality_relative_strength_v1",
             "phase7_valuation_v1" => "phase7_valuation_v1",
             "phase7_moneyflow_v1" => "phase7_moneyflow_v1",
+            "phase7_moneyflow_congestion_interaction_v1" => {
+                "phase7_moneyflow_congestion_interaction_v1"
+            }
             "phase7_quality_moneyflow_pos_5pct_v1" => "phase7_quality_moneyflow_pos_5pct_v1",
             "phase7_quality_cashflow_confirm_v1" => "phase7_quality_cashflow_confirm_v1",
             "phase7_quality_dividend_confirm_v1" => "phase7_quality_dividend_confirm_v1",
@@ -178,7 +202,48 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
             "phase7_quality_event_surprise_confirm_v1" => {
                 "phase7_quality_event_surprise_confirm_v1"
             }
+            "phase7_forecast_revision_surprise_v1" => "phase7_forecast_revision_surprise_v1",
             "phase7_quality_event_window_overlay_v1" => "phase7_quality_event_window_overlay_v1",
+            "phase7_quality_event_post_return_curve_overlay_v1" => {
+                "phase7_quality_event_post_return_curve_overlay_v1"
+            }
+            "phase7_fq_change_event_surprise_sleeve_05pct_v1" => {
+                "phase7_fq_change_event_surprise_sleeve_05pct_v1"
+            }
+            "phase7_fq_change_event_surprise_sleeve_10pct_v1" => {
+                "phase7_fq_change_event_surprise_sleeve_10pct_v1"
+            }
+            "phase7_fq_change_event_surprise_sleeve_15pct_v1" => {
+                "phase7_fq_change_event_surprise_sleeve_15pct_v1"
+            }
+            "phase7_fq_change_supply_float_sleeve_05pct_v1" => {
+                "phase7_fq_change_supply_float_sleeve_05pct_v1"
+            }
+            "phase7_fq_change_supply_float_sleeve_10pct_v1" => {
+                "phase7_fq_change_supply_float_sleeve_10pct_v1"
+            }
+            "phase7_fq_change_supply_float_sleeve_15pct_v1" => {
+                "phase7_fq_change_supply_float_sleeve_15pct_v1"
+            }
+            "phase7_unlock_supply_pressure_v1" => "phase7_unlock_supply_pressure_v1",
+            "phase7_fq_change_unlock_pressure_sleeve_05pct_v1" => {
+                "phase7_fq_change_unlock_pressure_sleeve_05pct_v1"
+            }
+            "phase7_fq_change_unlock_pressure_sleeve_10pct_v1" => {
+                "phase7_fq_change_unlock_pressure_sleeve_10pct_v1"
+            }
+            "phase7_fq_change_unlock_pressure_sleeve_15pct_v1" => {
+                "phase7_fq_change_unlock_pressure_sleeve_15pct_v1"
+            }
+            "phase7_fq_change_forecast_revision_sleeve_05pct_v1" => {
+                "phase7_fq_change_forecast_revision_sleeve_05pct_v1"
+            }
+            "phase7_fq_change_forecast_revision_sleeve_10pct_v1" => {
+                "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
+            }
+            "phase7_fq_change_forecast_revision_sleeve_15pct_v1" => {
+                "phase7_fq_change_forecast_revision_sleeve_15pct_v1"
+            }
             "phase7_event_post_return_curve_20d_v1" => "phase7_event_post_return_curve_20d_v1",
             "phase7_event_reaction_segments_20d_v1" => "phase7_event_reaction_segments_20d_v1",
             "phase7_event_reaction_reversal_20d_v1" => "phase7_event_reaction_reversal_20d_v1",
@@ -717,6 +782,150 @@ pub fn phase7_alpha_blend_profiles() -> Vec<AlphaBlendProfile> {
             sources: vec![
                 source("phase7_financial_quality_v1", Decimal::new(95, 2)),
                 source("phase7_event_surprise_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_event_surprise_sleeve_05pct".to_string(),
+            combo_name: "phase7_fq_change_event_surprise_sleeve_05pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 5% event-surprise sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(95, 2)),
+                source("phase7_event_surprise_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_event_surprise_sleeve_10pct".to_string(),
+            combo_name: "phase7_fq_change_event_surprise_sleeve_10pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 10% event-surprise sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(90, 2)),
+                source("phase7_event_surprise_v1", Decimal::new(10, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_event_surprise_sleeve_15pct_boundary".to_string(),
+            combo_name: "phase7_fq_change_event_surprise_sleeve_15pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a 15% event-surprise boundary sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(85, 2)),
+                source("phase7_event_surprise_v1", Decimal::new(15, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_supply_float_sleeve_05pct".to_string(),
+            combo_name: "phase7_fq_change_supply_float_sleeve_05pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 5% supply-float shock sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(95, 2)),
+                source("phase7_supply_float_shock_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_supply_float_sleeve_10pct".to_string(),
+            combo_name: "phase7_fq_change_supply_float_sleeve_10pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 10% supply-float shock sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(90, 2)),
+                source("phase7_supply_float_shock_v1", Decimal::new(10, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_supply_float_sleeve_15pct_boundary".to_string(),
+            combo_name: "phase7_fq_change_supply_float_sleeve_15pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a 15% supply-float shock boundary sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(85, 2)),
+                source("phase7_supply_float_shock_v1", Decimal::new(15, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_unlock_pressure_sleeve_05pct".to_string(),
+            combo_name: "phase7_fq_change_unlock_pressure_sleeve_05pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 5% unlock-pressure sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(95, 2)),
+                source("phase7_unlock_supply_pressure_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_unlock_pressure_sleeve_10pct".to_string(),
+            combo_name: "phase7_fq_change_unlock_pressure_sleeve_10pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 10% unlock-pressure sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(90, 2)),
+                source("phase7_unlock_supply_pressure_v1", Decimal::new(10, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_unlock_pressure_sleeve_15pct_boundary".to_string(),
+            combo_name: "phase7_fq_change_unlock_pressure_sleeve_15pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a 15% unlock-pressure boundary sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(85, 2)),
+                source("phase7_unlock_supply_pressure_v1", Decimal::new(15, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_forecast_revision_sleeve_05pct".to_string(),
+            combo_name: "phase7_fq_change_forecast_revision_sleeve_05pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 5% forecast-revision sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(95, 2)),
+                source("phase7_forecast_revision_surprise_v1", Decimal::new(5, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_forecast_revision_sleeve_10pct".to_string(),
+            combo_name: "phase7_fq_change_forecast_revision_sleeve_10pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 10% forecast-revision sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(90, 2)),
+                source("phase7_forecast_revision_surprise_v1", Decimal::new(10, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_forecast_revision_sleeve_15pct_boundary".to_string(),
+            combo_name: "phase7_fq_change_forecast_revision_sleeve_15pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a 15% forecast-revision boundary sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(85, 2)),
+                source("phase7_forecast_revision_surprise_v1", Decimal::new(15, 2)),
             ],
         },
         AlphaBlendProfile {
@@ -14021,6 +14230,15 @@ fn professional_trainable_alpha_admission_discovery_seed_trials() -> Vec<Value> 
             "alpha_first_low_impact_v1",
         ),
         (
+            "earnings_recovery_persistence",
+            "phase7_earnings_recovery_persistence_v1",
+            ScoreDirection::Descending,
+            100usize,
+            "earnings_recovery_persistence",
+            "quality_mixed_state_risk_memory_router_v14",
+            "alpha_first_low_impact_v1",
+        ),
+        (
             "residual_confirm_5pct_ascending_top120",
             "phase7_quality_residual_confirm_5pct_v1",
             ScoreDirection::Ascending,
@@ -14035,6 +14253,15 @@ fn professional_trainable_alpha_admission_discovery_seed_trials() -> Vec<Value> 
             ScoreDirection::Ascending,
             100usize,
             "moneyflow_quality",
+            "quality_mixed_state_risk_memory_router_v14",
+            "capacity_aware_alpha_liquidity_v1",
+        ),
+        (
+            "moneyflow_congestion",
+            "phase7_moneyflow_congestion_interaction_v1",
+            ScoreDirection::Descending,
+            100usize,
+            "moneyflow_congestion",
             "quality_mixed_state_risk_memory_router_v14",
             "capacity_aware_alpha_liquidity_v1",
         ),
@@ -14234,6 +14461,607 @@ fn professional_v19_multi_alpha_sleeve_admission_seed_trials() -> Vec<Value> {
                 candidate_ranking,
             )],
         );
+    }
+
+    seeds
+}
+
+fn with_v19_event_surprise_sleeve_gate_seed(
+    seed: Value,
+    variant_name: &str,
+    combo_name: &str,
+    top_n: usize,
+    rebalance_days: usize,
+    market_regime: &str,
+    candidate_ranking: &str,
+) -> Value {
+    let mut seed = with_v19_multi_alpha_sleeve_seed(
+        seed,
+        "event_surprise_sleeve_gate",
+        combo_name,
+        ScoreDirection::Descending,
+        top_n,
+        rebalance_days,
+        market_regime,
+        candidate_ranking,
+    );
+    if let Some(object) = seed.as_object_mut() {
+        for key in [
+            "multi_alpha_sleeve_profile",
+            "alpha_sleeve_family",
+            "event_gate_profile",
+            "event_gate_combo_name",
+            "event_gate_version",
+            "event_gate_mode",
+            "event_gate_min_score",
+            "event_gate_boost_weight",
+            "event_gate_score_direction",
+            "event_gate_active_regimes",
+        ] {
+            object.remove(key);
+        }
+    }
+    seed["event_surprise_sleeve_gate_profile"] =
+        json!("v19_p311_fq_change_event_surprise_sleeve_gate_v1");
+    seed["event_surprise_sleeve_gate_variant"] = json!(variant_name);
+    seed["alpha_source_family"] = json!("event_surprise_sleeve_gate");
+    seed
+}
+
+fn professional_v19_event_surprise_sleeve_gate_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    let market_regime = "quality_mixed_state_risk_memory_router_v14";
+    let candidate_ranking = "alpha_first_low_impact_v1";
+
+    for (variant_name, combo_name, top_n) in [
+        (
+            "fq_change_control",
+            "phase7_financial_quality_change_v1",
+            100usize,
+        ),
+        (
+            "event_surprise_sleeve_05pct",
+            "phase7_fq_change_event_surprise_sleeve_05pct_v1",
+            100usize,
+        ),
+        (
+            "event_surprise_sleeve_10pct",
+            "phase7_fq_change_event_surprise_sleeve_10pct_v1",
+            100usize,
+        ),
+        (
+            "event_surprise_sleeve_15pct_boundary",
+            "phase7_fq_change_event_surprise_sleeve_15pct_v1",
+            100usize,
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_v19_event_surprise_sleeve_gate_seed(
+                anchor.clone(),
+                variant_name,
+                combo_name,
+                top_n,
+                60,
+                market_regime,
+                candidate_ranking,
+            )],
+        );
+    }
+
+    for (variant_name, gate_profile, mode, min_score, boost_weight) in [
+        (
+            "fq_change_event_surprise_boost_p75_3pct",
+            "event_surprise_boost_p75_3pct",
+            "boost_positive",
+            "0.35",
+            "0.03",
+        ),
+        (
+            "fq_change_event_surprise_exclude_negative",
+            "event_surprise_exclude_negative",
+            "exclude_negative",
+            "0",
+            "0",
+        ),
+    ] {
+        let seed = with_v19_event_surprise_sleeve_gate_seed(
+            anchor.clone(),
+            variant_name,
+            "phase7_financial_quality_change_v1",
+            100,
+            60,
+            market_regime,
+            candidate_ranking,
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_event_combo_gate_seed_with_min_score(
+                seed,
+                gate_profile,
+                "phase7_event_surprise_v1",
+                mode,
+                min_score,
+                boost_weight,
+                ScoreDirection::Descending,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn with_v19_supply_float_sleeve_seed(
+    seed: Value,
+    variant_name: &str,
+    combo_name: &str,
+    top_n: usize,
+    rebalance_days: usize,
+    market_regime: &str,
+    candidate_ranking: &str,
+) -> Value {
+    let mut seed = with_v19_multi_alpha_sleeve_seed(
+        seed,
+        "supply_float_sleeve",
+        combo_name,
+        ScoreDirection::Descending,
+        top_n,
+        rebalance_days,
+        market_regime,
+        candidate_ranking,
+    );
+    if let Some(object) = seed.as_object_mut() {
+        for key in [
+            "prediction_set_id",
+            "prediction_blend_weight",
+            "prediction_min_score",
+            "prediction_min_percentile",
+            "prediction_label_horizon_days",
+            "train_window_ml_policy",
+            "train_window_ml_profile",
+            "train_window_ml_feature_profile",
+            "multi_alpha_sleeve_profile",
+            "alpha_sleeve_family",
+            "event_gate_profile",
+            "event_gate_combo_name",
+            "event_gate_version",
+            "event_gate_mode",
+            "event_gate_min_score",
+            "event_gate_boost_weight",
+            "event_gate_score_direction",
+            "event_gate_active_regimes",
+        ] {
+            object.remove(key);
+        }
+    }
+    seed["supply_float_sleeve_profile"] = json!("v19_p312_fq_change_supply_float_sleeve_v1");
+    seed["supply_float_sleeve_variant"] = json!(variant_name);
+    seed["alpha_source_family"] = json!("supply_float_sleeve");
+    seed
+}
+
+fn professional_v19_supply_float_sleeve_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    let market_regime = "quality_mixed_state_risk_memory_router_v14";
+    let candidate_ranking = "alpha_first_low_impact_v1";
+
+    for (variant_name, combo_name) in [
+        ("fq_change_control", "phase7_financial_quality_change_v1"),
+        (
+            "supply_float_sleeve_05pct",
+            "phase7_fq_change_supply_float_sleeve_05pct_v1",
+        ),
+        (
+            "supply_float_sleeve_10pct",
+            "phase7_fq_change_supply_float_sleeve_10pct_v1",
+        ),
+        (
+            "supply_float_sleeve_15pct_boundary",
+            "phase7_fq_change_supply_float_sleeve_15pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_v19_supply_float_sleeve_seed(
+                anchor.clone(),
+                variant_name,
+                combo_name,
+                100,
+                60,
+                market_regime,
+                candidate_ranking,
+            )],
+        );
+    }
+
+    seeds
+}
+
+fn with_v19_unlock_pressure_sleeve_seed(
+    seed: Value,
+    variant_name: &str,
+    combo_name: &str,
+    top_n: usize,
+    rebalance_days: usize,
+    market_regime: &str,
+    candidate_ranking: &str,
+) -> Value {
+    let mut seed = with_v19_multi_alpha_sleeve_seed(
+        seed,
+        "unlock_pressure_sleeve",
+        combo_name,
+        ScoreDirection::Descending,
+        top_n,
+        rebalance_days,
+        market_regime,
+        candidate_ranking,
+    );
+    if let Some(object) = seed.as_object_mut() {
+        for key in [
+            "prediction_set_id",
+            "prediction_blend_weight",
+            "prediction_min_score",
+            "prediction_min_percentile",
+            "prediction_label_horizon_days",
+            "train_window_ml_policy",
+            "train_window_ml_profile",
+            "train_window_ml_feature_profile",
+            "multi_alpha_sleeve_profile",
+            "alpha_sleeve_family",
+            "event_gate_profile",
+            "event_gate_combo_name",
+            "event_gate_version",
+            "event_gate_mode",
+            "event_gate_min_score",
+            "event_gate_boost_weight",
+            "event_gate_score_direction",
+            "event_gate_active_regimes",
+        ] {
+            object.remove(key);
+        }
+    }
+    seed["unlock_pressure_sleeve_profile"] = json!("v19_p314_fq_change_unlock_pressure_sleeve_v1");
+    seed["unlock_pressure_sleeve_variant"] = json!(variant_name);
+    seed["unlock_pressure_sleeve_control"] = json!("phase7_financial_quality_change_v1");
+    seed["sideways_regime_policy"] = json!("exclude");
+    seed["oos_policy"] = json!("evaluation_only");
+    seed["alpha_source_family"] = json!("unlock_pressure_sleeve");
+    seed
+}
+
+fn professional_v19_unlock_pressure_sleeve_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    let market_regime = "quality_mixed_state_risk_memory_router_v14";
+    let candidate_ranking = "alpha_first_low_impact_v1";
+
+    for (variant_name, combo_name) in [
+        ("fq_change_control", "phase7_financial_quality_change_v1"),
+        (
+            "unlock_pressure_sleeve_05pct",
+            "phase7_fq_change_unlock_pressure_sleeve_05pct_v1",
+        ),
+        (
+            "unlock_pressure_sleeve_10pct",
+            "phase7_fq_change_unlock_pressure_sleeve_10pct_v1",
+        ),
+        (
+            "unlock_pressure_sleeve_15pct_boundary",
+            "phase7_fq_change_unlock_pressure_sleeve_15pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_v19_unlock_pressure_sleeve_seed(
+                anchor.clone(),
+                variant_name,
+                combo_name,
+                100,
+                60,
+                market_regime,
+                candidate_ranking,
+            )],
+        );
+    }
+
+    for (variant_name, gate_profile, mode, min_score, boost_weight) in [
+        (
+            "unlock_pressure_exclude_sideways_gate",
+            "unlock_pressure_exclude_sideways_gate",
+            "boost_positive",
+            "0.35",
+            "0.03",
+        ),
+        (
+            "unlock_pressure_exclude_sideways_negative_guard",
+            "unlock_pressure_exclude_sideways_negative_guard",
+            "exclude_negative",
+            "0",
+            "0",
+        ),
+    ] {
+        let seed = with_v19_unlock_pressure_sleeve_seed(
+            anchor.clone(),
+            variant_name,
+            "phase7_financial_quality_change_v1",
+            100,
+            60,
+            market_regime,
+            candidate_ranking,
+        );
+        append_unique_seeds(
+            &mut seeds,
+            vec![
+                with_event_combo_gate_seed_active_in_with_min_score_and_boost(
+                    seed,
+                    gate_profile,
+                    "phase7_unlock_supply_pressure_v1",
+                    mode,
+                    min_score,
+                    boost_weight,
+                    ScoreDirection::Descending,
+                    &["bear", "bull", "mixed", "high_volatility"],
+                ),
+            ],
+        );
+    }
+
+    seeds
+}
+
+fn with_v19_forecast_revision_sleeve_seed(
+    seed: Value,
+    variant_name: &str,
+    combo_name: &str,
+    top_n: usize,
+    rebalance_days: usize,
+    market_regime: &str,
+    candidate_ranking: &str,
+) -> Value {
+    let mut seed = with_v19_multi_alpha_sleeve_seed(
+        seed,
+        "forecast_revision_sleeve",
+        combo_name,
+        ScoreDirection::Descending,
+        top_n,
+        rebalance_days,
+        market_regime,
+        candidate_ranking,
+    );
+    if let Some(object) = seed.as_object_mut() {
+        for key in [
+            "prediction_set_id",
+            "prediction_blend_weight",
+            "prediction_min_score",
+            "prediction_min_percentile",
+            "prediction_label_horizon_days",
+            "train_window_ml_policy",
+            "train_window_ml_profile",
+            "train_window_ml_feature_profile",
+            "multi_alpha_sleeve_profile",
+            "alpha_sleeve_family",
+            "event_gate_profile",
+            "event_gate_combo_name",
+            "event_gate_version",
+            "event_gate_mode",
+            "event_gate_min_score",
+            "event_gate_boost_weight",
+            "event_gate_score_direction",
+            "event_gate_active_regimes",
+        ] {
+            object.remove(key);
+        }
+    }
+    seed["forecast_revision_sleeve_profile"] =
+        json!("v19_p313_fq_change_forecast_revision_sleeve_v1");
+    seed["forecast_revision_sleeve_variant"] = json!(variant_name);
+    seed["alpha_source_family"] = json!("forecast_revision_sleeve");
+    seed
+}
+
+fn professional_v19_forecast_revision_sleeve_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    let market_regime = "quality_mixed_state_risk_memory_router_v14";
+    let candidate_ranking = "alpha_first_low_impact_v1";
+
+    for (variant_name, combo_name) in [
+        ("fq_change_control", "phase7_financial_quality_change_v1"),
+        (
+            "forecast_revision_sleeve_05pct",
+            "phase7_fq_change_forecast_revision_sleeve_05pct_v1",
+        ),
+        (
+            "forecast_revision_sleeve_10pct",
+            "phase7_fq_change_forecast_revision_sleeve_10pct_v1",
+        ),
+        (
+            "forecast_revision_sleeve_15pct_boundary",
+            "phase7_fq_change_forecast_revision_sleeve_15pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_v19_forecast_revision_sleeve_seed(
+                anchor.clone(),
+                variant_name,
+                combo_name,
+                100,
+                60,
+                market_regime,
+                candidate_ranking,
+            )],
+        );
+    }
+
+    seeds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_v19_event_post_return_overlay_seed(
+    seed: Value,
+    variant_name: &str,
+    top_n: usize,
+    rebalance_days: usize,
+    score_direction: ScoreDirection,
+    market_regime: &str,
+    candidate_ranking: &str,
+    event_gate: Option<(&str, &str, &str, &str)>,
+) -> Value {
+    let mut seed = seed;
+    if let Some(object) = seed.as_object_mut() {
+        for key in [
+            "prediction_set_id",
+            "prediction_blend_weight",
+            "prediction_min_score",
+            "prediction_min_percentile",
+            "prediction_label_horizon_days",
+            "train_window_ml_policy",
+            "train_window_ml_profile",
+            "train_window_ml_feature_profile",
+            "multi_alpha_sleeve_profile",
+            "alpha_sleeve_family",
+            "event_gate_profile",
+            "event_gate_combo_name",
+            "event_gate_version",
+            "event_gate_mode",
+            "event_gate_min_score",
+            "event_gate_boost_weight",
+            "event_gate_score_direction",
+            "event_gate_active_regimes",
+        ] {
+            object.remove(key);
+        }
+    }
+    seed["event_overlay_profile"] = json!("v19_p39_broad_base_event_post_return_overlay_v1");
+    seed["event_overlay_variant"] = json!(variant_name);
+    seed["alpha_source_family"] = json!("event_post_return_overlay");
+    seed["broad_base_combo_name"] = json!("phase7_financial_quality_v1");
+    seed["event_overlay_combo_name"] = json!("phase7_event_post_return_curve_20d_v1");
+    seed["optional_overlay_combo_name"] =
+        json!("phase7_quality_event_post_return_curve_overlay_v1");
+    seed["signal_source"] = json!("factor_combo");
+    seed["combo_name"] = json!("phase7_quality_event_post_return_curve_overlay_v1");
+    seed["version"] = json!("1.0.0");
+    seed["score_direction"] = json!(score_direction.as_str());
+    seed["top_n"] = json!(top_n);
+    seed["rebalance"] = json!(rebalance_days.to_string());
+    seed["market_regime"] = json!(market_regime);
+    seed["candidate_ranking"] = json!(candidate_ranking);
+    seed["portfolio_method"] = json!("risk_budget");
+    seed["risk_budget_lookback_days"] = json!(165);
+    seed["capacity_penalty_strength"] = json!("0.75");
+    seed["capacity_risk_budget"] =
+        json!("capacity_stress_participation_alpha_headroom_floor_70_v1");
+    seed["cash_utilization"] = json!("stress_fill_gross_98_v1");
+    seed["execution_impact_budget"] = json!("impact_turnover_15pct_v1");
+    seed["execution_schedule_profile"] = json!("twap_20d_v1");
+    seed["execution_carry_policy"] = json!("roll_forward_v1");
+    insert_execution_rule_value(
+        &mut seed,
+        "execution_carry_policy",
+        json!("roll_forward_v1"),
+    );
+    seed["candidate_risk_filter"] = json!("soft_liquidity_low_volatility_low_correlation_v1");
+    seed["risk_contribution_control"] = json!("soft_single_name_20pct_v1");
+    seed["max_position_pct"] = json!("0.08");
+    seed["max_gross_exposure"] = json!("1");
+    seed["score_candidate_pool_size"] = json!(2200);
+    seed["universe_profile"] = json!("listed_non_st");
+    seed["event_gate_profile"] = json!("off");
+
+    if let Some((profile_name, mode, min_score, boost_weight)) = event_gate {
+        seed = with_event_combo_gate_seed_with_min_score(
+            seed,
+            profile_name,
+            "phase7_event_post_return_curve_20d_v1",
+            mode,
+            min_score,
+            boost_weight,
+            ScoreDirection::Descending,
+        );
+    }
+
+    seed
+}
+
+fn professional_v19_event_post_return_overlay_admission_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+
+    for (top_n, rebalance_days, market_regime, candidate_ranking) in [
+        (
+            100usize,
+            160usize,
+            "quality_event_window_return_sharpe_router_v4",
+            "alpha_first_low_impact_v1",
+        ),
+        (
+            120usize,
+            180usize,
+            "quality_nonlinear_alpha_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+        ),
+        (
+            80usize,
+            120usize,
+            "quality_mixed_state_risk_memory_router_v14",
+            "alpha_first_low_impact_v1",
+        ),
+        (
+            100usize,
+            180usize,
+            "quality_mixed_orthogonal_risk_memory_router_v3",
+            "capacity_aware_alpha_liquidity_v1",
+        ),
+    ] {
+        for (variant_name, event_gate) in [
+            ("overlay_only", None),
+            (
+                "overlay_boost_positive_event_post_return",
+                Some((
+                    "event_post_return_boost_pos_5pct",
+                    "boost_positive",
+                    "0",
+                    "0.05",
+                )),
+            ),
+            (
+                "overlay_exclude_negative_event_post_return",
+                Some((
+                    "event_post_return_exclude_negative",
+                    "exclude_negative",
+                    "0",
+                    "0",
+                )),
+            ),
+        ] {
+            append_unique_seeds(
+                &mut seeds,
+                vec![with_v19_event_post_return_overlay_seed(
+                    anchor.clone(),
+                    &format!("{variant_name}_top{top_n}_rebalance{rebalance_days}"),
+                    top_n,
+                    rebalance_days,
+                    ScoreDirection::Descending,
+                    market_regime,
+                    candidate_ranking,
+                    event_gate,
+                )],
+            );
+        }
     }
 
     seeds
@@ -25774,11 +26602,13 @@ impl LayeredSearchConfig {
         config.combo_versions = phase7_base_trainable_combo_versions(&[
             "phase7_financial_quality_v1",
             "phase7_financial_quality_change_v1",
+            "phase7_earnings_recovery_persistence_v1",
             "phase7_industry_residual_quality_v1",
             "phase7_growth_recovery_v1",
             "phase7_quality_relative_strength_v1",
             "phase7_valuation_v1",
             "phase7_moneyflow_v1",
+            "phase7_moneyflow_congestion_interaction_v1",
             "phase7_quality_moneyflow_pos_5pct_v1",
             "phase7_quality_cashflow_confirm_v1",
             "phase7_quality_dividend_confirm_v1",
@@ -25825,6 +26655,90 @@ impl LayeredSearchConfig {
             vec!["soft_liquidity_low_volatility_low_correlation_v1".to_string()];
         config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
         config.seed_trials = professional_v19_multi_alpha_sleeve_admission_seed_trials();
+        config
+    }
+
+    pub fn professional_v19_event_surprise_sleeve_gate_default() -> Self {
+        let mut config = Self::professional_v19_multi_alpha_sleeve_admission_default();
+        config.combo_versions = Vec::new();
+        config.prediction_set_ids = Vec::new();
+        config.event_gate_profiles = vec![EventGateProfile::off()];
+        config.seed_trials = professional_v19_event_surprise_sleeve_gate_seed_trials();
+        config
+    }
+
+    pub fn professional_v19_supply_float_sleeve_default() -> Self {
+        let mut config = Self::professional_v19_multi_alpha_sleeve_admission_default();
+        config.combo_versions = Vec::new();
+        config.prediction_set_ids = Vec::new();
+        config.event_gate_profiles = vec![EventGateProfile::off()];
+        config.seed_trials = professional_v19_supply_float_sleeve_seed_trials();
+        config
+    }
+
+    pub fn professional_v19_unlock_pressure_sleeve_default() -> Self {
+        let mut config = Self::professional_v19_multi_alpha_sleeve_admission_default();
+        config.combo_versions = Vec::new();
+        config.prediction_set_ids = Vec::new();
+        config.event_gate_profiles = vec![EventGateProfile::off()];
+        config.seed_trials = professional_v19_unlock_pressure_sleeve_seed_trials();
+        config
+    }
+
+    pub fn professional_v19_forecast_revision_sleeve_default() -> Self {
+        let mut config = Self::professional_v19_multi_alpha_sleeve_admission_default();
+        config.combo_versions = Vec::new();
+        config.prediction_set_ids = Vec::new();
+        config.event_gate_profiles = vec![EventGateProfile::off()];
+        config.seed_trials = professional_v19_forecast_revision_sleeve_seed_trials();
+        config
+    }
+
+    pub fn professional_v19_event_post_return_overlay_admission_default() -> Self {
+        let mut config = Self::professional_v19_multi_alpha_sleeve_admission_default();
+        config.combo_versions = vec![ComboVersion::new(
+            "phase7_quality_event_post_return_curve_overlay_v1",
+            "1.0.0",
+        )];
+        config.prediction_set_ids = Vec::new();
+        config.score_directions = vec![ScoreDirection::Descending];
+        config.top_n = vec![80, 100, 120];
+        config.rebalance_days = vec![120, 160, 180];
+        config.market_regime_policies = vec![
+            "quality_event_window_return_sharpe_router_v4".to_string(),
+            "quality_nonlinear_alpha_risk_memory_router_v3".to_string(),
+            "quality_mixed_orthogonal_risk_memory_router_v3".to_string(),
+            "quality_mixed_state_risk_memory_router_v14".to_string(),
+        ];
+        config.event_gate_profiles = vec![
+            EventGateProfile::off(),
+            EventGateProfile::event_combo(
+                "event_post_return_boost_pos_5pct",
+                "phase7_event_post_return_curve_20d_v1",
+                "boost_positive",
+                Decimal::ZERO,
+                Decimal::new(5, 2),
+                ScoreDirection::Descending,
+            ),
+            EventGateProfile::event_combo(
+                "event_post_return_exclude_negative",
+                "phase7_event_post_return_curve_20d_v1",
+                "exclude_negative",
+                Decimal::ZERO,
+                Decimal::ZERO,
+                ScoreDirection::Descending,
+            ),
+        ];
+        config.capacity_risk_budget_profiles =
+            vec!["capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()];
+        config.cash_utilization_profiles = vec!["stress_fill_gross_98_v1".to_string()];
+        config.execution_impact_budget_profiles = vec!["impact_turnover_15pct_v1".to_string()];
+        config.execution_schedule_profiles = vec!["twap_20d_v1".to_string()];
+        config.execution_carry_policy_profiles = vec!["roll_forward_v1".to_string()];
+        config.candidate_risk_filter_profiles =
+            vec!["soft_liquidity_low_volatility_low_correlation_v1".to_string()];
+        config.risk_contribution_control_profiles = vec!["soft_single_name_20pct_v1".to_string()];
+        config.seed_trials = professional_v19_event_post_return_overlay_admission_seed_trials();
         config
     }
 
@@ -29012,6 +29926,100 @@ mod tests {
     }
 
     #[test]
+    fn phase7_earnings_recovery_persistence_is_p37_base_trainable_alpha_source() {
+        let admission = phase7_alpha_source_admission("phase7_earnings_recovery_persistence_v1");
+
+        assert_eq!(
+            admission.role,
+            Phase7AlphaSourceRole::BaseTrainable,
+            "earnings recovery persistence must be admitted as a PIT base alpha"
+        );
+        assert_eq!(
+            admission.combo_name,
+            "phase7_earnings_recovery_persistence_v1"
+        );
+        assert!(admission.reason.contains("PIT"));
+    }
+
+    #[test]
+    fn professional_trainable_alpha_admission_discovery_includes_p37_earnings_recovery_seed() {
+        let config =
+            LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(combo_names.contains("phase7_earnings_recovery_persistence_v1"));
+
+        let seed = config
+            .seed_trials
+            .iter()
+            .find(|seed| seed["combo_name"] == "phase7_earnings_recovery_persistence_v1")
+            .expect("P3.7 earnings recovery persistence seed");
+
+        assert_eq!(
+            seed["trainable_alpha_admission_profile"],
+            "earnings_recovery_persistence"
+        );
+        assert_eq!(seed["alpha_source_family"], "earnings_recovery_persistence");
+        assert_eq!(seed["signal_source"], "factor_combo");
+        assert_eq!(seed["version"], "1.0.0");
+        assert!(
+            !seed.to_string().contains("pred-"),
+            "P3.7 second atom must stay a native PIT factor combo, not a prediction overlay"
+        );
+    }
+
+    #[test]
+    fn phase7_moneyflow_congestion_is_p38_base_trainable_alpha_source() {
+        let admission = phase7_alpha_source_admission("phase7_moneyflow_congestion_interaction_v1");
+
+        assert_eq!(
+            admission.role,
+            Phase7AlphaSourceRole::BaseTrainable,
+            "moneyflow congestion interaction must be admitted as a PIT base alpha"
+        );
+        assert_eq!(
+            admission.combo_name,
+            "phase7_moneyflow_congestion_interaction_v1"
+        );
+        assert!(admission.reason.contains("PIT"));
+    }
+
+    #[test]
+    fn professional_trainable_alpha_admission_discovery_includes_p38_moneyflow_congestion_seed() {
+        let config =
+            LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+        let combo_names = config
+            .combo_versions
+            .iter()
+            .map(|combo| combo.combo_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(combo_names.contains("phase7_moneyflow_congestion_interaction_v1"));
+
+        let seed = config
+            .seed_trials
+            .iter()
+            .find(|seed| seed["combo_name"] == "phase7_moneyflow_congestion_interaction_v1")
+            .expect("P3.8 moneyflow congestion seed");
+
+        assert_eq!(
+            seed["trainable_alpha_admission_profile"],
+            "moneyflow_congestion"
+        );
+        assert_eq!(seed["alpha_source_family"], "moneyflow_congestion");
+        assert_eq!(seed["signal_source"], "factor_combo");
+        assert_eq!(seed["version"], "1.0.0");
+        assert!(
+            !seed.to_string().contains("pred-"),
+            "P3.8 atom must stay a native PIT factor combo, not a prediction overlay"
+        );
+    }
+
+    #[test]
     fn professional_v19_multi_alpha_sleeve_admission_profile_is_pit_base_trainable_only() {
         let config = LayeredSearchConfig::professional_v19_multi_alpha_sleeve_admission_default();
         let mut resource_plan = LocalResourcePlan::for_machine(10, 32);
@@ -29058,6 +30066,49 @@ mod tests {
                 || serialized.contains("phase7_quality_event_reaction_segments_overlay_v1")
                 || serialized.contains("pred-")
         }));
+    }
+
+    #[test]
+    fn professional_v19_event_post_return_overlay_profile_keeps_event_source_as_overlay_or_gate() {
+        let config =
+            LayeredSearchConfig::professional_v19_event_post_return_overlay_admission_default();
+        let mut resource_plan = LocalResourcePlan::for_machine(10, 32);
+        resource_plan.max_trials = 12;
+
+        assert_eq!(config.prediction_set_ids, Vec::<String>::new());
+        assert!(config.combo_versions.iter().all(|combo| {
+            combo.combo_name == "phase7_quality_event_post_return_curve_overlay_v1"
+        }));
+        assert!(config.event_gate_profiles.iter().any(|profile| {
+            profile.profile_name == "event_post_return_boost_pos_5pct"
+                && profile.combo_name.as_deref() == Some("phase7_event_post_return_curve_20d_v1")
+        }));
+
+        let plan = build_layered_search_plan(&config, &resource_plan);
+
+        assert!(plan.trials.iter().all(|trial| {
+            trial.parameters["signal_source"] == "factor_combo"
+                && trial.parameters["combo_name"]
+                    == "phase7_quality_event_post_return_curve_overlay_v1"
+                && trial.parameters["event_overlay_profile"]
+                    == "v19_p39_broad_base_event_post_return_overlay_v1"
+                && trial.parameters["broad_base_combo_name"] == "phase7_financial_quality_v1"
+                && trial.parameters["event_overlay_combo_name"]
+                    == "phase7_event_post_return_curve_20d_v1"
+                && trial.parameters["alpha_source_family"] == "event_post_return_overlay"
+        }));
+        assert!(!plan.trials.iter().any(|trial| {
+            trial.parameters["combo_name"] == "phase7_event_post_return_curve_20d_v1"
+                || trial.parameters.to_string().contains("pred-")
+        }));
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_quality_event_post_return_curve_overlay_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+        assert!(
+            !is_phase7_base_trainable_alpha("phase7_event_post_return_curve_20d_v1"),
+            "raw post-return event curve must never become a v19 train-selection base"
+        );
     }
 
     #[test]
@@ -35642,6 +36693,362 @@ mod tests {
     }
 
     #[test]
+    fn phase7_fq_change_event_surprise_sleeves_are_bounded_optional_blends() {
+        let profiles = phase7_alpha_blend_profiles();
+        let expected = [
+            (
+                "fq_change_event_surprise_sleeve_05pct",
+                "phase7_fq_change_event_surprise_sleeve_05pct_v1",
+                Decimal::new(95, 2),
+                Decimal::new(5, 2),
+            ),
+            (
+                "fq_change_event_surprise_sleeve_10pct",
+                "phase7_fq_change_event_surprise_sleeve_10pct_v1",
+                Decimal::new(90, 2),
+                Decimal::new(10, 2),
+            ),
+            (
+                "fq_change_event_surprise_sleeve_15pct_boundary",
+                "phase7_fq_change_event_surprise_sleeve_15pct_v1",
+                Decimal::new(85, 2),
+                Decimal::new(15, 2),
+            ),
+        ];
+
+        for (profile_name, combo_name, fq_weight, event_weight) in expected {
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.combo_name == combo_name)
+                .expect("P3.11 FQ-change/event-surprise sleeve blend profile");
+            let weights = profile
+                .sources
+                .iter()
+                .map(|source| (source.combo_name.as_str(), source.weight))
+                .collect::<std::collections::BTreeMap<_, _>>();
+
+            assert_eq!(profile.profile_name, profile_name);
+            assert_eq!(
+                phase7_alpha_source_admission(combo_name).role,
+                Phase7AlphaSourceRole::OptionalOverlayOnly
+            );
+            assert_eq!(
+                weights.get("phase7_financial_quality_change_v1"),
+                Some(&fq_weight)
+            );
+            assert_eq!(weights.get("phase7_event_surprise_v1"), Some(&event_weight));
+        }
+    }
+
+    #[test]
+    fn phase7_fq_change_supply_float_sleeves_are_bounded_optional_blends() {
+        let profiles = phase7_alpha_blend_profiles();
+        let expected = [
+            (
+                "fq_change_supply_float_sleeve_05pct",
+                "phase7_fq_change_supply_float_sleeve_05pct_v1",
+                Decimal::new(95, 2),
+                Decimal::new(5, 2),
+            ),
+            (
+                "fq_change_supply_float_sleeve_10pct",
+                "phase7_fq_change_supply_float_sleeve_10pct_v1",
+                Decimal::new(90, 2),
+                Decimal::new(10, 2),
+            ),
+            (
+                "fq_change_supply_float_sleeve_15pct_boundary",
+                "phase7_fq_change_supply_float_sleeve_15pct_v1",
+                Decimal::new(85, 2),
+                Decimal::new(15, 2),
+            ),
+        ];
+
+        for (profile_name, combo_name, fq_weight, supply_weight) in expected {
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.combo_name == combo_name)
+                .expect("P3.12 FQ-change/supply-float sleeve blend profile");
+            let weights = profile
+                .sources
+                .iter()
+                .map(|source| (source.combo_name.as_str(), source.weight))
+                .collect::<std::collections::BTreeMap<_, _>>();
+
+            assert_eq!(profile.profile_name, profile_name);
+            assert_eq!(
+                phase7_alpha_source_admission(combo_name).role,
+                Phase7AlphaSourceRole::OptionalOverlayOnly
+            );
+            assert_eq!(
+                weights.get("phase7_financial_quality_change_v1"),
+                Some(&fq_weight)
+            );
+            assert_eq!(
+                weights.get("phase7_supply_float_shock_v1"),
+                Some(&supply_weight)
+            );
+        }
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_supply_float_shock_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+    }
+
+    #[test]
+    fn phase7_fq_change_forecast_revision_sleeves_are_bounded_optional_blends() {
+        let profiles = phase7_alpha_blend_profiles();
+        let expected = [
+            (
+                "fq_change_forecast_revision_sleeve_05pct",
+                "phase7_fq_change_forecast_revision_sleeve_05pct_v1",
+                Decimal::new(95, 2),
+                Decimal::new(5, 2),
+            ),
+            (
+                "fq_change_forecast_revision_sleeve_10pct",
+                "phase7_fq_change_forecast_revision_sleeve_10pct_v1",
+                Decimal::new(90, 2),
+                Decimal::new(10, 2),
+            ),
+            (
+                "fq_change_forecast_revision_sleeve_15pct_boundary",
+                "phase7_fq_change_forecast_revision_sleeve_15pct_v1",
+                Decimal::new(85, 2),
+                Decimal::new(15, 2),
+            ),
+        ];
+
+        for (profile_name, combo_name, fq_weight, revision_weight) in expected {
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.combo_name == combo_name)
+                .expect("P3.13 FQ-change/forecast-revision sleeve blend profile");
+            let weights = profile
+                .sources
+                .iter()
+                .map(|source| (source.combo_name.as_str(), source.weight))
+                .collect::<std::collections::BTreeMap<_, _>>();
+
+            assert_eq!(profile.profile_name, profile_name);
+            assert_eq!(
+                phase7_alpha_source_admission(combo_name).role,
+                Phase7AlphaSourceRole::OptionalOverlayOnly
+            );
+            assert_eq!(
+                weights.get("phase7_financial_quality_change_v1"),
+                Some(&fq_weight)
+            );
+            assert_eq!(
+                weights.get("phase7_forecast_revision_surprise_v1"),
+                Some(&revision_weight)
+            );
+        }
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_forecast_revision_surprise_v1").role,
+            Phase7AlphaSourceRole::EventGateOnly
+        );
+    }
+
+    #[test]
+    fn professional_v19_event_surprise_sleeve_gate_profile_is_seed_only_and_bounded() {
+        let config = LayeredSearchConfig::professional_v19_event_surprise_sleeve_gate_default();
+
+        assert!(
+            config.combo_versions.is_empty(),
+            "bounded profile must not reopen cartesian combo search"
+        );
+        assert!(config.prediction_set_ids.is_empty());
+        assert_eq!(config.event_gate_profiles, vec![EventGateProfile::off()]);
+
+        let serialized = serde_json::to_string(&config.seed_trials).unwrap();
+        assert!(serialized.contains("v19_p311_fq_change_event_surprise_sleeve_gate_v1"));
+        assert!(serialized.contains("phase7_financial_quality_change_v1"));
+        assert!(serialized.contains("phase7_fq_change_event_surprise_sleeve_05pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_event_surprise_sleeve_10pct_v1"));
+        assert!(serialized.contains("event_surprise_boost_p75_3pct"));
+        assert!(!serialized.contains("phase7_moneyflow_congestion_interaction_v1"));
+        assert!(!serialized.contains("phase7_event_post_return_curve_20d_v1"));
+        assert!(!serialized.contains("pred-"));
+
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["signal_source"] == "factor_combo"
+                && trial["event_surprise_sleeve_gate_profile"]
+                    == "v19_p311_fq_change_event_surprise_sleeve_gate_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_change_v1"
+                && trial["event_gate_combo_name"] == "phase7_event_surprise_v1"
+                && trial["event_gate_mode"] == "boost_positive"
+                && trial["event_gate_min_score"] == "0.35"
+                && trial["event_gate_boost_weight"] == "0.03"
+        }));
+    }
+
+    #[test]
+    fn professional_v19_supply_float_sleeve_profile_is_seed_only_and_bounded() {
+        let config = LayeredSearchConfig::professional_v19_supply_float_sleeve_default();
+
+        assert!(
+            config.combo_versions.is_empty(),
+            "bounded profile must not reopen cartesian combo search"
+        );
+        assert!(config.prediction_set_ids.is_empty());
+        assert_eq!(config.event_gate_profiles, vec![EventGateProfile::off()]);
+
+        let serialized = serde_json::to_string(&config.seed_trials).unwrap();
+        assert!(serialized.contains("v19_p312_fq_change_supply_float_sleeve_v1"));
+        assert!(serialized.contains("phase7_financial_quality_change_v1"));
+        assert!(serialized.contains("phase7_fq_change_supply_float_sleeve_05pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_supply_float_sleeve_10pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_supply_float_sleeve_15pct_v1"));
+        assert!(!serialized.contains("phase7_moneyflow_congestion_interaction_v1"));
+        assert!(!serialized.contains("phase7_event_post_return_curve_20d_v1"));
+        assert!(!serialized.contains("pred-"));
+
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["signal_source"] == "factor_combo"
+                && trial["supply_float_sleeve_profile"]
+                    == "v19_p312_fq_change_supply_float_sleeve_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_fq_change_supply_float_sleeve_10pct_v1"
+                && trial["supply_float_sleeve_variant"] == "supply_float_sleeve_10pct"
+        }));
+    }
+
+    #[test]
+    fn phase7_fq_change_unlock_pressure_sleeves_are_bounded_optional_blends() {
+        let profiles = phase7_alpha_blend_profiles();
+        let expected = [
+            (
+                "fq_change_unlock_pressure_sleeve_05pct",
+                "phase7_fq_change_unlock_pressure_sleeve_05pct_v1",
+                Decimal::new(95, 2),
+                Decimal::new(5, 2),
+            ),
+            (
+                "fq_change_unlock_pressure_sleeve_10pct",
+                "phase7_fq_change_unlock_pressure_sleeve_10pct_v1",
+                Decimal::new(90, 2),
+                Decimal::new(10, 2),
+            ),
+            (
+                "fq_change_unlock_pressure_sleeve_15pct_boundary",
+                "phase7_fq_change_unlock_pressure_sleeve_15pct_v1",
+                Decimal::new(85, 2),
+                Decimal::new(15, 2),
+            ),
+        ];
+
+        for (profile_name, combo_name, fq_weight, unlock_weight) in expected {
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.combo_name == combo_name)
+                .expect("P3.14 FQ-change/unlock-pressure sleeve blend profile");
+            let weights = profile
+                .sources
+                .iter()
+                .map(|source| (source.combo_name.as_str(), source.weight))
+                .collect::<std::collections::BTreeMap<_, _>>();
+
+            assert_eq!(profile.profile_name, profile_name);
+            assert_eq!(
+                phase7_alpha_source_admission(combo_name).role,
+                Phase7AlphaSourceRole::OptionalOverlayOnly
+            );
+            assert_eq!(
+                weights.get("phase7_financial_quality_change_v1"),
+                Some(&fq_weight)
+            );
+            assert_eq!(
+                weights.get("phase7_unlock_supply_pressure_v1"),
+                Some(&unlock_weight)
+            );
+        }
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_unlock_supply_pressure_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+    }
+
+    #[test]
+    fn professional_v19_unlock_pressure_sleeve_profile_is_seed_only_and_sideways_bounded() {
+        let config = LayeredSearchConfig::professional_v19_unlock_pressure_sleeve_default();
+
+        assert!(
+            config.combo_versions.is_empty(),
+            "bounded profile must not reopen cartesian combo search"
+        );
+        assert!(config.prediction_set_ids.is_empty());
+        assert_eq!(config.event_gate_profiles, vec![EventGateProfile::off()]);
+
+        let serialized = serde_json::to_string(&config.seed_trials).unwrap();
+        assert!(serialized.contains("v19_p314_fq_change_unlock_pressure_sleeve_v1"));
+        assert!(serialized.contains("phase7_financial_quality_change_v1"));
+        assert!(serialized.contains("phase7_fq_change_unlock_pressure_sleeve_05pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_unlock_pressure_sleeve_10pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_unlock_pressure_sleeve_15pct_v1"));
+        assert!(serialized.contains("unlock_pressure_exclude_sideways_gate"));
+        assert!(serialized.contains("\"sideways_regime_policy\":\"exclude\""));
+        assert!(!serialized.contains("phase7_moneyflow_congestion_interaction_v1"));
+        assert!(!serialized.contains("phase7_event_post_return_curve_20d_v1"));
+        assert!(!serialized.contains("pred-"));
+
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["signal_source"] == "factor_combo"
+                && trial["unlock_pressure_sleeve_profile"]
+                    == "v19_p314_fq_change_unlock_pressure_sleeve_v1"
+                && trial["unlock_pressure_sleeve_control"] == "phase7_financial_quality_change_v1"
+                && trial["sideways_regime_policy"] == "exclude"
+                && trial["oos_policy"] == "evaluation_only"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_fq_change_unlock_pressure_sleeve_10pct_v1"
+                && trial["unlock_pressure_sleeve_variant"] == "unlock_pressure_sleeve_10pct"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_financial_quality_change_v1"
+                && trial["event_gate_combo_name"] == "phase7_unlock_supply_pressure_v1"
+                && trial["event_gate_mode"] == "boost_positive"
+                && trial["event_gate_active_regimes"]
+                    == json!(["bear", "bull", "mixed", "high_volatility"])
+        }));
+    }
+
+    #[test]
+    fn professional_v19_forecast_revision_sleeve_profile_is_seed_only_and_bounded() {
+        let config = LayeredSearchConfig::professional_v19_forecast_revision_sleeve_default();
+
+        assert!(
+            config.combo_versions.is_empty(),
+            "bounded profile must not reopen cartesian combo search"
+        );
+        assert!(config.prediction_set_ids.is_empty());
+        assert_eq!(config.event_gate_profiles, vec![EventGateProfile::off()]);
+
+        let serialized = serde_json::to_string(&config.seed_trials).unwrap();
+        assert!(serialized.contains("v19_p313_fq_change_forecast_revision_sleeve_v1"));
+        assert!(serialized.contains("phase7_financial_quality_change_v1"));
+        assert!(serialized.contains("phase7_fq_change_forecast_revision_sleeve_05pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_forecast_revision_sleeve_10pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_forecast_revision_sleeve_15pct_v1"));
+        assert!(!serialized.contains("phase7_moneyflow_congestion_interaction_v1"));
+        assert!(!serialized.contains("phase7_event_post_return_curve_20d_v1"));
+        assert!(!serialized.contains("pred-"));
+
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["signal_source"] == "factor_combo"
+                && trial["forecast_revision_sleeve_profile"]
+                    == "v19_p313_fq_change_forecast_revision_sleeve_v1"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
+                && trial["forecast_revision_sleeve_variant"] == "forecast_revision_sleeve_10pct"
+        }));
+    }
+
+    #[test]
     fn professional_event_conditioned_sharpe_profile_targets_event_surprise_gates() {
         let config = LayeredSearchConfig::professional_event_conditioned_sharpe_default();
 
@@ -35968,7 +37375,7 @@ mod tests {
             .map(|profile| profile.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(profiles.len(), 19);
+        assert_eq!(profiles.len(), 31);
         assert!(names.contains("phase7_value_quality_growth_rel_v1"));
         assert!(names.contains("phase7_blend_value_tilt_v1"));
         assert!(names.contains("phase7_blend_quality_growth_v1"));
@@ -35980,6 +37387,18 @@ mod tests {
         assert!(names.contains("phase7_quality_cashflow_dividend_confirm_v1"));
         assert!(names.contains("phase7_quality_event_confirm_v1"));
         assert!(names.contains("phase7_quality_event_surprise_confirm_v1"));
+        assert!(names.contains("phase7_fq_change_event_surprise_sleeve_05pct_v1"));
+        assert!(names.contains("phase7_fq_change_event_surprise_sleeve_10pct_v1"));
+        assert!(names.contains("phase7_fq_change_event_surprise_sleeve_15pct_v1"));
+        assert!(names.contains("phase7_fq_change_supply_float_sleeve_05pct_v1"));
+        assert!(names.contains("phase7_fq_change_supply_float_sleeve_10pct_v1"));
+        assert!(names.contains("phase7_fq_change_supply_float_sleeve_15pct_v1"));
+        assert!(names.contains("phase7_fq_change_unlock_pressure_sleeve_05pct_v1"));
+        assert!(names.contains("phase7_fq_change_unlock_pressure_sleeve_10pct_v1"));
+        assert!(names.contains("phase7_fq_change_unlock_pressure_sleeve_15pct_v1"));
+        assert!(names.contains("phase7_fq_change_forecast_revision_sleeve_05pct_v1"));
+        assert!(names.contains("phase7_fq_change_forecast_revision_sleeve_10pct_v1"));
+        assert!(names.contains("phase7_fq_change_forecast_revision_sleeve_15pct_v1"));
         assert!(names.contains("phase7_quality_event_window_overlay_v1"));
         assert!(names.contains("phase7_quality_residual_confirm_5pct_v1"));
         assert!(names.contains("phase7_quality_residual_confirm_10pct_v1"));
@@ -36007,11 +37426,31 @@ mod tests {
             Phase7AlphaSourceRole::BaseTrainable
         );
         assert_eq!(
+            phase7_alpha_source_admission("phase7_supply_float_shock_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+        assert_eq!(
             phase7_alpha_source_admission("phase7_event_surprise_v1").role,
             Phase7AlphaSourceRole::EventGateOnly
         );
         assert_eq!(
+            phase7_alpha_source_admission("phase7_forecast_revision_surprise_v1").role,
+            Phase7AlphaSourceRole::EventGateOnly
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_repurchase_supply_shock_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_unlock_supply_pressure_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+        assert_eq!(
             phase7_alpha_source_admission("phase7_quality_event_window_overlay_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("phase7_quality_event_post_return_curve_overlay_v1").role,
             Phase7AlphaSourceRole::OptionalOverlayOnly
         );
         assert_eq!(

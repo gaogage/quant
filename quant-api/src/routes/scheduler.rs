@@ -320,6 +320,79 @@ fn is_a_share_symbol(symbol: &str) -> bool {
     matches!(code.as_bytes().first(), Some(b'0' | b'3' | b'6'))
 }
 
+fn market_level_freshness_dataset(source: &str) -> Option<&'static str> {
+    match source {
+        "market_margin_regime" => Some("margin"),
+        "market_moneyflow_hsgt_regime" => Some("moneyflow_hsgt"),
+        _ => None,
+    }
+}
+
+fn market_level_freshness_task_slug(source: &str) -> Option<&'static str> {
+    match source {
+        "market_margin_regime" => Some("margin"),
+        "market_moneyflow_hsgt_regime" => Some("hsgt"),
+        _ => None,
+    }
+}
+
+fn market_level_freshness_sync_payload(
+    source: &str,
+    latest_trade_date: Option<NaiveDate>,
+    today: NaiveDate,
+) -> Option<serde_json::Value> {
+    let dataset = market_level_freshness_dataset(source)?;
+    let task_slug = market_level_freshness_task_slug(source)?;
+    let start_date = latest_trade_date
+        .map(|date| (date + chrono::Duration::days(1)).min(today))
+        .unwrap_or(today);
+    Some(serde_json::json!({
+        "dataset": dataset,
+        "source": "tushare",
+        "start_date": start_date.format("%Y%m%d").to_string(),
+        "end_date": today.format("%Y%m%d").to_string(),
+        "data_version_id": format!("dv-p315-{}-{}", task_slug, today.format("%Y%m%d")),
+        "background": true,
+        "reason": "scheduled_p315_market_level_regime_source_freshness"
+    }))
+}
+
+fn market_level_freshness_sources(params: &serde_json::Value) -> Vec<String> {
+    params
+        .get("sources")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                "market_margin_regime".to_string(),
+                "market_moneyflow_hsgt_regime".to_string(),
+            ]
+        })
+}
+
+async fn latest_market_level_trade_date(db: &PgPool, source: &str) -> Option<NaiveDate> {
+    let sql = match source {
+        "market_margin_regime" => "SELECT MAX(trade_date) FROM market_margin",
+        "market_moneyflow_hsgt_regime" => "SELECT MAX(trade_date) FROM market_moneyflow_hsgt",
+        _ => return None,
+    };
+    sqlx::query_scalar::<_, Option<NaiveDate>>(sql)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +415,44 @@ mod tests {
             10 * 60 + 30
         );
         assert!(scheduled_task_time_minutes("not a cron").is_err());
+    }
+
+    #[test]
+    fn market_level_freshness_payload_uses_latest_plus_one_range() {
+        let payload = market_level_freshness_sync_payload(
+            "market_margin_regime",
+            NaiveDate::from_ymd_opt(2026, 6, 18),
+            NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+        )
+        .expect("margin payload");
+
+        assert_eq!(payload["dataset"], "margin");
+        assert_eq!(payload["source"], "tushare");
+        assert_eq!(payload["start_date"], "20260619");
+        assert_eq!(payload["end_date"], "20260620");
+        assert_eq!(payload["background"], true);
+        assert_eq!(payload["data_version_id"], "dv-p315-margin-20260620");
+    }
+
+    #[test]
+    fn market_level_freshness_payload_supports_hsgt_and_rejects_static_industry() {
+        let payload = market_level_freshness_sync_payload(
+            "market_moneyflow_hsgt_regime",
+            NaiveDate::from_ymd_opt(2026, 5, 29),
+            NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+        )
+        .expect("hsgt payload");
+
+        assert_eq!(payload["dataset"], "moneyflow_hsgt");
+        assert_eq!(payload["start_date"], "20260530");
+        assert_eq!(
+            market_level_freshness_sync_payload(
+                "industry_prosperity_proxy",
+                None,
+                NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+            ),
+            None
+        );
     }
 
     #[test]
@@ -569,6 +680,48 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 {
                     Ok(rows) => info!("[scheduler] PIT combo 保鲜完成: {} 行", rows),
                     Err(e) => warn!("[scheduler] PIT combo 保鲜失败: {}", e),
+                }
+            }
+            "market_level_source_freshness" => {
+                let today = chrono::Utc::now().date_naive();
+                let api_base = format!(
+                    "http://localhost:{}",
+                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+                );
+                let client = reqwest::Client::new();
+                for source in market_level_freshness_sources(params) {
+                    let latest = latest_market_level_trade_date(db, &source).await;
+                    let Some(payload) = market_level_freshness_sync_payload(&source, latest, today)
+                    else {
+                        warn!("[scheduler] P3.15 市场级源不支持自动同步: {}", source);
+                        continue;
+                    };
+                    info!(
+                        "[scheduler] P3.15 市场级源保鲜: source={} latest={:?}",
+                        source, latest
+                    );
+                    match client
+                        .post(format!("{}/api/v1/quant/data/sync-tasks", api_base))
+                        .json(&payload)
+                        .timeout(std::time::Duration::from_secs(600))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => match resp.json::<serde_json::Value>().await {
+                            Ok(result) => info!(
+                                "[scheduler] P3.15 市场级源同步任务返回: source={} result={}",
+                                source, result
+                            ),
+                            Err(error) => warn!(
+                                "[scheduler] P3.15 市场级源同步响应解析失败: source={} error={}",
+                                source, error
+                            ),
+                        },
+                        Err(error) => warn!(
+                            "[scheduler] P3.15 市场级源同步任务提交失败: source={} error={}",
+                            source, error
+                        ),
+                    }
                 }
             }
             _ => {}

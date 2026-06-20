@@ -1,6 +1,6 @@
 /// 数据同步路由
 use axum::{extract::State, response::IntoResponse, Json};
-use chrono::{Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -77,6 +77,22 @@ fn stale_cleanup_limit(value: Option<i64>) -> i64 {
     value.unwrap_or(100).clamp(1, 1000)
 }
 
+fn stale_sync_task_cleanup_terminal_status(status: &str) -> Option<&'static str> {
+    match status {
+        "running" => Some("failed"),
+        "cancel_requested" => Some("cancelled"),
+        _ => None,
+    }
+}
+
+fn stale_sync_task_cleanup_action(status: &str) -> &'static str {
+    match stale_sync_task_cleanup_terminal_status(status) {
+        Some("cancelled") => "finalize_cancel_requested",
+        Some("failed") => "mark_running_failed",
+        _ => "ignore",
+    }
+}
+
 fn generated_data_version_id() -> String {
     chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
 }
@@ -140,6 +156,15 @@ const PHASE7_FEASIBILITY_COMBOS: &[&str] = &[
 ];
 
 const PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS: &[&str] = &["cashflow", "dividend", "repurchase"];
+const PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED: &[&str] = &[
+    "cashflow",
+    "dividend",
+    "repurchase",
+    "forecast",
+    "express",
+    "disclosure_date",
+    "share_float",
+];
 const PHASE7_PERMISSION_SMOKE_MAX_SYMBOLS: usize = 3;
 const PHASE7_PERMISSION_SMOKE_MAX_ROWS: usize = 5;
 const PHASE7_OPTIONAL_SOURCE_SYNC_DEFAULT_SYMBOLS: usize = 20;
@@ -150,11 +175,21 @@ const PHASE7_COVERAGE_RUNNER_MAX_BATCH_SIZE: usize = 100;
 const PHASE7_COVERAGE_RUNNER_DEFAULT_BATCH_COUNT: usize = 4;
 const PHASE7_COVERAGE_RUNNER_MAX_BATCH_COUNT: usize = 10;
 const PHASE7_COVERAGE_RUNNER_DEFAULT_PROFILE: &str = "local_mac_safe";
-const PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES: &[&str] = &["cashflow", "dividend", "financial"];
+const PHASE7_COVERAGE_RUNNER_DEFAULT_SOURCES: &[&str] = &["cashflow", "dividend", "financial"];
+const PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES: &[&str] = &[
+    "cashflow",
+    "dividend",
+    "financial",
+    "forecast",
+    "express",
+    "disclosure_date",
+];
 const PHASE7_COVERAGE_RUNNER_DEFAULT_TARGET_COVERAGE_RATIO: f64 = 1.0;
 const PHASE7_COVERAGE_RUNNER_PARTIAL_GATE_RATIO: f64 = 0.30;
 const PHASE7_COVERAGE_RUNNER_DEFAULT_MAX_ROUNDS: usize = PHASE7_COVERAGE_RUNNER_MAX_ROUNDS;
 const PHASE7_COVERAGE_RUNNER_MAX_ROUNDS: usize = 20;
+const PHASE7_SHARE_FLOAT_COVERAGE_DEFAULT_MAX_CHUNKS: usize = 16;
+const PHASE7_SHARE_FLOAT_COVERAGE_MAX_CHUNKS: usize = 64;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Phase7OptionalSourceCoverageSyncReq {
@@ -224,6 +259,32 @@ pub struct Phase7CoverageExpansionRunnerReq {
     pub max_rounds: Option<usize>,
     #[serde(default)]
     pub target_coverage_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Phase7ShareFloatCoverageReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub chunk_granularity: Option<String>,
+    #[serde(default)]
+    pub max_chunks: Option<usize>,
+    #[serde(default)]
+    pub plan_only: Option<bool>,
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub data_version_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Phase7ShareFloatReadinessAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
 }
 
 fn phase7_permission_smoke_sources(requested: &[String]) -> Vec<String> {
@@ -365,9 +426,151 @@ fn phase7_coverage_runner_target_ratio(target: Option<f64>) -> f64 {
         )
 }
 
+fn phase7_share_float_chunk_granularity(granularity: Option<&str>) -> &'static str {
+    match granularity
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("month") | Some("monthly") => "month",
+        Some("quarter") | Some("quarterly") => "quarter",
+        Some("year") | Some("yearly") => "year",
+        _ => "year",
+    }
+}
+
+fn phase7_share_float_coverage_plan_only(plan_only: Option<bool>) -> bool {
+    plan_only.unwrap_or(true)
+}
+
+fn phase7_share_float_coverage_max_chunks(max_chunks: Option<usize>) -> usize {
+    max_chunks
+        .unwrap_or(PHASE7_SHARE_FLOAT_COVERAGE_DEFAULT_MAX_CHUNKS)
+        .clamp(1, PHASE7_SHARE_FLOAT_COVERAGE_MAX_CHUNKS)
+}
+
+fn add_months_clamped(date: NaiveDate, months: u32) -> NaiveDate {
+    let month0 = date.month0() + months;
+    let year = date.year() + (month0 / 12) as i32;
+    let month = (month0 % 12) + 1;
+    NaiveDate::from_ymd_opt(year, month, 1).expect("valid first day")
+}
+
+fn phase7_share_float_next_chunk_start(start: NaiveDate, granularity: &str) -> NaiveDate {
+    let months = match granularity {
+        "month" => 1,
+        "quarter" => 3,
+        _ => 12,
+    };
+    add_months_clamped(
+        NaiveDate::from_ymd_opt(start.year(), start.month(), 1).expect("valid first day"),
+        months,
+    )
+}
+
+fn phase7_share_float_date_chunks(
+    start: NaiveDate,
+    end: NaiveDate,
+    granularity: &str,
+    max_chunks: usize,
+) -> Vec<(NaiveDate, NaiveDate)> {
+    let mut chunks = Vec::new();
+    let mut cursor = start;
+    while cursor <= end && chunks.len() < max_chunks {
+        let next_start = phase7_share_float_next_chunk_start(cursor, granularity);
+        let chunk_end = (next_start - Duration::days(1)).min(end);
+        chunks.push((cursor, chunk_end));
+        cursor = next_start;
+    }
+    chunks
+}
+
+fn phase7_share_float_readiness_sql() -> &'static str {
+    r#"
+    SELECT
+        COUNT(*)::bigint AS row_count,
+        COUNT(DISTINCT symbol)::bigint AS symbol_count,
+        MIN(float_date) AS min_float_date,
+        MAX(float_date) AS max_float_date,
+        MIN(available_at) AS min_available_at,
+        MAX(available_at) AS max_available_at,
+        COUNT(*) FILTER (WHERE available_at > float_date)::bigint AS late_or_invalid_count,
+        COUNT(DISTINCT float_date)::bigint AS distinct_float_dates
+    FROM market_stock_share_float
+    WHERE float_date BETWEEN $1 AND $2
+      AND available_at <= $2
+    "#
+}
+
+fn phase7_share_float_expected_days(start: NaiveDate, end: NaiveDate) -> i64 {
+    end.signed_duration_since(start)
+        .num_days()
+        .saturating_add(1)
+}
+
+fn phase7_share_float_covered_days_from_windows(
+    mut windows: Vec<(NaiveDate, NaiveDate)>,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> i64 {
+    windows.sort_by_key(|(window_start, window_end)| (*window_start, *window_end));
+    let mut covered_days = 0i64;
+    let mut current_start: Option<NaiveDate> = None;
+    let mut current_end: Option<NaiveDate> = None;
+
+    for (window_start, window_end) in windows {
+        let clipped_start = window_start.max(start);
+        let clipped_end = window_end.min(end);
+        if clipped_start > clipped_end {
+            continue;
+        }
+
+        match (current_start, current_end) {
+            (Some(active_start), Some(active_end))
+                if clipped_start <= active_end + Duration::days(1) =>
+            {
+                current_start = Some(active_start);
+                current_end = Some(active_end.max(clipped_end));
+            }
+            (Some(active_start), Some(active_end)) => {
+                covered_days += phase7_share_float_expected_days(active_start, active_end);
+                current_start = Some(clipped_start);
+                current_end = Some(clipped_end);
+            }
+            _ => {
+                current_start = Some(clipped_start);
+                current_end = Some(clipped_end);
+            }
+        }
+    }
+
+    if let (Some(active_start), Some(active_end)) = (current_start, current_end) {
+        covered_days += phase7_share_float_expected_days(active_start, active_end);
+    }
+
+    covered_days
+}
+
+fn phase7_share_float_feature_readiness(
+    row_count: i64,
+    covered_days: i64,
+    expected_days: i64,
+    late_or_invalid_count: i64,
+) -> &'static str {
+    if expected_days > 0 && covered_days < expected_days {
+        "needs_float_date_backfill"
+    } else if row_count <= 0 {
+        "full_sync_empty_review"
+    } else if late_or_invalid_count > 0 {
+        "ready_for_pit_feature_factory_with_late_exclusion"
+    } else {
+        "ready_for_pit_feature_factory"
+    }
+}
+
 fn phase7_coverage_runner_sources(requested: &[String]) -> Result<Vec<String>, String> {
     let raw_sources: Vec<String> = if requested.is_empty() {
-        PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES
+        PHASE7_COVERAGE_RUNNER_DEFAULT_SOURCES
             .iter()
             .map(|source| (*source).to_string())
             .collect()
@@ -384,8 +587,9 @@ fn phase7_coverage_runner_sources(requested: &[String]) -> Result<Vec<String>, S
     for source in raw_sources {
         if !PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES.contains(&source.as_str()) {
             return Err(format!(
-                "unsupported coverage runner source: {}; supported sources are cashflow, dividend, financial",
-                source
+                "unsupported coverage runner source: {}; supported sources are {}",
+                source,
+                PHASE7_COVERAGE_RUNNER_ALLOWED_SOURCES.join(", ")
             ));
         }
         if seen.insert(source.clone()) {
@@ -580,10 +784,11 @@ fn phase7_optional_source_sync_sources(requested: &[String]) -> Result<Vec<Strin
     let mut seen = BTreeSet::new();
     let mut sources = Vec::new();
     for source in raw_sources {
-        if !PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS.contains(&source.as_str()) {
+        if !PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED.contains(&source.as_str()) {
             return Err(format!(
-                "unsupported optional source: {}; supported sources are cashflow, dividend, repurchase",
-                source
+                "unsupported optional source: {}; supported sources are {}",
+                source,
+                PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED.join(", ")
             ));
         }
         if seen.insert(source.clone()) {
@@ -598,6 +803,10 @@ fn phase7_optional_source_table(source: &str) -> Option<&'static str> {
         "cashflow" => Some("market_stock_cashflow"),
         "dividend" => Some("market_stock_dividend"),
         "repurchase" => Some("market_stock_repurchase"),
+        "forecast" => Some("market_stock_forecast"),
+        "express" => Some("market_stock_express"),
+        "disclosure_date" => Some("market_stock_disclosure_date"),
+        "share_float" => Some("market_stock_share_float"),
         _ => None,
     }
 }
@@ -775,6 +984,351 @@ fn phase7_coverage_rows_to_json(
         .collect()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Phase7OptionalSourceSpec {
+    source: &'static str,
+    table: &'static str,
+    next_feature: &'static str,
+}
+
+fn phase7_optional_source_specs() -> &'static [Phase7OptionalSourceSpec] {
+    &[
+        Phase7OptionalSourceSpec {
+            source: "cashflow",
+            table: "market_stock_cashflow",
+            next_feature: "cashflow_quality_pit_features",
+        },
+        Phase7OptionalSourceSpec {
+            source: "dividend",
+            table: "market_stock_dividend",
+            next_feature: "dividend_stability_quality_pit_features",
+        },
+        Phase7OptionalSourceSpec {
+            source: "repurchase",
+            table: "market_stock_repurchase",
+            next_feature: "repurchase_event_capital_return_pit_features",
+        },
+        Phase7OptionalSourceSpec {
+            source: "forecast",
+            table: "market_stock_forecast",
+            next_feature: "event_post_announcement_return_curve_pit_features",
+        },
+        Phase7OptionalSourceSpec {
+            source: "express",
+            table: "market_stock_express",
+            next_feature: "event_post_announcement_return_curve_pit_features",
+        },
+        Phase7OptionalSourceSpec {
+            source: "disclosure_date",
+            table: "market_stock_disclosure_date",
+            next_feature: "event_disclosure_schedule_pit_features",
+        },
+        Phase7OptionalSourceSpec {
+            source: "share_float",
+            table: "market_stock_share_float",
+            next_feature: "unlock_supply_pressure_pit_features",
+        },
+    ]
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Phase7MarketLevelSourceAudit {
+    data_rows: i64,
+    min_trade_date: Option<NaiveDate>,
+    latest_trade_date: Option<NaiveDate>,
+    open_day_lag: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct Phase7MarketLevelSyncAudit {
+    task_id: String,
+    task_type: String,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    status: String,
+    total_count: i32,
+    success_count: i32,
+    failed_count: i32,
+    error_message: Option<String>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Phase7BlockTradeSourceAudit {
+    data_rows: i64,
+    symbols: i64,
+    covered_trade_days: i64,
+    open_days_in_range: i64,
+    min_trade_date: Option<NaiveDate>,
+    latest_trade_date: Option<NaiveDate>,
+    min_available_at: Option<NaiveDate>,
+    latest_available_at: Option<NaiveDate>,
+    pit_violation_rows: i64,
+}
+
+fn phase7_market_level_sync_dataset(source: &str) -> Option<&'static str> {
+    match source {
+        "market_margin_regime" => Some("margin"),
+        "market_moneyflow_hsgt_regime" => Some("moneyflow_hsgt"),
+        _ => None,
+    }
+}
+
+fn phase7_market_level_source_readiness(stats: &Phase7MarketLevelSourceAudit) -> &'static str {
+    if stats.data_rows <= 0 || stats.latest_trade_date.is_none() {
+        return "market_level_needs_sync";
+    }
+    if stats.open_day_lag.unwrap_or(i64::MAX) > 2 {
+        return "market_level_stale_needs_sync";
+    }
+    "market_level_ready_for_regime_feature"
+}
+
+fn phase7_market_level_zero_row_sync_covers_gap(
+    last_sync: Option<&Phase7MarketLevelSyncAudit>,
+    sync_start: NaiveDate,
+    today: NaiveDate,
+) -> bool {
+    let Some(last_sync) = last_sync else {
+        return false;
+    };
+    last_sync.status == "completed"
+        && last_sync.total_count == 0
+        && last_sync.success_count == 0
+        && last_sync
+            .start_date
+            .map(|start_date| start_date <= sync_start)
+            .unwrap_or(false)
+        && last_sync
+            .end_date
+            .map(|end_date| end_date >= today)
+            .unwrap_or(false)
+}
+
+fn phase7_date_json(date: Option<NaiveDate>) -> Value {
+    date.map(|date| json!(date.to_string()))
+        .unwrap_or(Value::Null)
+}
+
+fn phase7_datetime_json(date: Option<chrono::DateTime<chrono::Utc>>) -> Value {
+    date.map(|date| json!(date.to_rfc3339()))
+        .unwrap_or(Value::Null)
+}
+
+fn phase7_ratio(numerator: i64, denominator: i64) -> Option<f64> {
+    if denominator <= 0 {
+        None
+    } else {
+        Some(numerator as f64 / denominator as f64)
+    }
+}
+
+fn phase7_p315_sync_start_date(
+    stats: &Phase7MarketLevelSourceAudit,
+    today: NaiveDate,
+) -> NaiveDate {
+    stats
+        .latest_trade_date
+        .map(|date| (date + Duration::days(1)).min(today))
+        .unwrap_or(today)
+}
+
+fn phase7_new_alpha_candidate_sources() -> Vec<Value> {
+    vec![
+        json!({
+            "source": "market_margin_regime",
+            "current_tables": ["market_margin"],
+            "admission_scope": "regime_or_risk_budget_only",
+            "readiness": "market_level_ready_not_cross_sectional_alpha",
+            "pit_boundary": "trade_date is same-day market-level data; use only after the trade date is closed or as next-session regime input",
+            "why_not_trainable_now": "融资融券汇总是交易所级时间序列，不能直接形成股票横截面排序 alpha",
+            "next_step": "evaluate_as_regime_or_risk_budget_feature"
+        }),
+        json!({
+            "source": "market_moneyflow_hsgt_regime",
+            "current_tables": ["market_moneyflow_hsgt"],
+            "admission_scope": "regime_or_risk_budget_only",
+            "readiness": "market_level_ready_not_cross_sectional_alpha",
+            "pit_boundary": "trade_date is same-day market-level data; use only after the trade date is closed or as next-session regime input",
+            "why_not_trainable_now": "北向资金汇总是市场级资金流，适合 regime/risk budget，不适合作为单股横截面 alpha",
+            "next_step": "evaluate_as_regime_or_risk_budget_feature"
+        }),
+        json!({
+            "source": "industry_prosperity_proxy",
+            "current_tables": ["market_stock", "market_financial_indicator", "market_stock_daily_bar", "market_stock_moneyflow"],
+            "admission_scope": "broad_base_proxy_candidate",
+            "readiness": "requires_pit_industry_history_or_proxy",
+            "pit_boundary": "current market_stock.industry is static and cannot be treated as historical PIT industry classification",
+            "why_not_trainable_now": "行业分类当前缺历史有效期，直接做行业景气会把当前行业快照泄漏到历史",
+            "next_step": "design_broad_base_pit_proxy_before_factor_backfill"
+        }),
+        json!({
+            "source": "block_trade_supply_demand",
+            "current_tables": ["market_stock_block_trade"],
+            "admission_scope": "raw_source_onboarding_required",
+            "readiness": "schema_and_client_ready_permission_smoke_passed",
+            "pit_boundary": "must persist announcement/trade publication date as available_at before any event-window feature",
+            "why_not_trainable_now": "大宗交易原始源已接入，但尚未完成全历史分块补数、coverage/readiness 和 P3.10A-D 诊断",
+            "next_step": "run_bounded_sync_then_p310_diagnostics"
+        }),
+        json!({
+            "source": "equity_incentive_execution_quality",
+            "current_tables": [],
+            "admission_scope": "raw_source_onboarding_required",
+            "readiness": "schema_and_client_missing",
+            "pit_boundary": "must persist disclosure/announcement date as available_at and execution periods as event attributes",
+            "why_not_trainable_now": "当前没有股权激励原始表、Tushare client、同步账本或 PIT 可得日审计",
+            "next_step": "add_permission_smoke_then_schema_and_bounded_sync"
+        }),
+    ]
+}
+
+fn phase7_new_alpha_candidate_sources_with_market_status(
+    market_stats: &BTreeMap<String, Phase7MarketLevelSourceAudit>,
+    market_sync_tasks: &BTreeMap<String, Phase7MarketLevelSyncAudit>,
+    today: NaiveDate,
+) -> Vec<Value> {
+    let mut sources = phase7_new_alpha_candidate_sources();
+    for source in sources.iter_mut() {
+        let Some(source_name) = source.get("source").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(stats) = market_stats.get(source_name) else {
+            continue;
+        };
+        let readiness = phase7_market_level_source_readiness(stats);
+        let sync_start = phase7_p315_sync_start_date(stats, today);
+        let sync_dataset = phase7_market_level_sync_dataset(source_name);
+        let last_sync = market_sync_tasks.get(source_name);
+        let zero_row_sync_covers_gap =
+            phase7_market_level_zero_row_sync_covers_gap(last_sync, sync_start, today);
+        let effective_readiness =
+            if readiness == "market_level_stale_needs_sync" && zero_row_sync_covers_gap {
+                "market_level_upstream_zero_rows_unavailable"
+            } else {
+                readiness
+            };
+        let freshness_gate = if effective_readiness == "market_level_ready_for_regime_feature" {
+            "passed"
+        } else {
+            "failed"
+        };
+
+        if let Value::Object(object) = source {
+            object.insert("readiness".to_string(), json!(effective_readiness));
+            object.insert(
+                "market_data_status".to_string(),
+                json!({
+                    "data_rows": stats.data_rows,
+                    "min_trade_date": phase7_date_json(stats.min_trade_date),
+                    "latest_trade_date": phase7_date_json(stats.latest_trade_date),
+                    "open_day_lag": stats.open_day_lag,
+                    "freshness_max_open_day_lag": 2,
+                    "freshness_gate": freshness_gate,
+                }),
+            );
+            if let Some(last_sync) = last_sync {
+                object.insert(
+                    "last_sync_task".to_string(),
+                    json!({
+                        "task_id": last_sync.task_id,
+                        "task_type": last_sync.task_type,
+                        "start_date": phase7_date_json(last_sync.start_date),
+                        "end_date": phase7_date_json(last_sync.end_date),
+                        "status": last_sync.status,
+                        "total_count": last_sync.total_count,
+                        "success_count": last_sync.success_count,
+                        "failed_count": last_sync.failed_count,
+                        "error_message": last_sync.error_message,
+                        "completed_at": phase7_datetime_json(last_sync.completed_at),
+                    }),
+                );
+            }
+            if effective_readiness == "market_level_upstream_zero_rows_unavailable" {
+                object.insert(
+                    "sync_remediation".to_string(),
+                    json!({
+                        "status": "not_retriable_until_upstream_resolved",
+                        "reason": "latest stale-gap sync completed successfully but returned zero rows; treat this source as live-unavailable until upstream endpoint, permission, fields, or replacement source is fixed",
+                    }),
+                );
+            }
+            if let Some(dataset) = sync_dataset {
+                object.insert(
+                    "sync_task_payload".to_string(),
+                    json!({
+                        "dataset": dataset,
+                        "source": "tushare",
+                        "start_date": sync_start.format("%Y%m%d").to_string(),
+                        "end_date": today.format("%Y%m%d").to_string(),
+                        "background": true,
+                        "reason": "p315_market_level_regime_source_freshness"
+                    }),
+                );
+            }
+        }
+    }
+    sources
+}
+
+fn phase7_block_trade_readiness(stats: &Phase7BlockTradeSourceAudit) -> &'static str {
+    if stats.data_rows <= 0 || stats.latest_trade_date.is_none() {
+        return "schema_and_client_ready_needs_bounded_sync";
+    }
+    if stats.pit_violation_rows > 0 {
+        return "raw_source_pit_failed";
+    }
+    if stats.open_days_in_range >= 120
+        && phase7_ratio(stats.covered_trade_days, stats.open_days_in_range).unwrap_or(0.0) >= 0.80
+    {
+        return "raw_source_ready_for_p310_diagnostics";
+    }
+    "bounded_sample_ready_needs_history_coverage"
+}
+
+fn phase7_new_alpha_candidate_sources_with_block_trade_status(
+    mut sources: Vec<Value>,
+    stats: &Phase7BlockTradeSourceAudit,
+) -> Vec<Value> {
+    for source in sources.iter_mut() {
+        let Some("block_trade_supply_demand") =
+            source.get("source").and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let readiness = phase7_block_trade_readiness(stats);
+        if let Value::Object(object) = source {
+            object.insert("readiness".to_string(), json!(readiness));
+            object.insert(
+                "raw_source_status".to_string(),
+                json!({
+                    "data_rows": stats.data_rows,
+                    "symbols": stats.symbols,
+                    "covered_trade_days": stats.covered_trade_days,
+                    "open_days_in_range": stats.open_days_in_range,
+                    "open_day_coverage_ratio": phase7_ratio(stats.covered_trade_days, stats.open_days_in_range),
+                    "min_trade_date": phase7_date_json(stats.min_trade_date),
+                    "latest_trade_date": phase7_date_json(stats.latest_trade_date),
+                    "min_available_at": phase7_date_json(stats.min_available_at),
+                    "latest_available_at": phase7_date_json(stats.latest_available_at),
+                    "pit_violation_rows": stats.pit_violation_rows,
+                }),
+            );
+            object.insert(
+                "next_step".to_string(),
+                json!(match readiness {
+                    "raw_source_ready_for_p310_diagnostics" => {
+                        "run_p310_rankic_group_decay_turnover_capacity_diagnostics"
+                    }
+                    "raw_source_pit_failed" => "repair_available_at_before_any_diagnostics",
+                    _ => "expand_bounded_history_sync_then_p310_diagnostics",
+                }),
+            );
+        }
+    }
+    sources
+}
+
 fn phase7_optional_source_json(
     source: &str,
     table: &str,
@@ -940,6 +1494,65 @@ async fn execute_sync_task(
                 json!({"task_id": task_id, "dataset": "moneyflow", "status": "completed", "count": count}),
             )
         }
+        "moneyflow_hsgt" | "hsgt_moneyflow" => {
+            let (start, end) = require_range(&req)?;
+            let count =
+                quant_data::sync::sync_moneyflow_hsgt(&state.db, &state.tushare, start, end)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            quant_data::repository::update_sync_task(
+                &state.db,
+                &task_id,
+                "completed",
+                count as i32,
+                count as i32,
+                0,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "moneyflow_hsgt", "status": "completed", "count": count}),
+            )
+        }
+        "margin" | "market_margin" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_margin(&state.db, &state.tushare, start, end)
+                .await
+                .map_err(|e| e.to_string())?;
+            quant_data::repository::update_sync_task(
+                &state.db,
+                &task_id,
+                "completed",
+                count as i32,
+                count as i32,
+                0,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "margin", "status": "completed", "count": count}),
+            )
+        }
+        "block_trade" | "market_stock_block_trade" => {
+            let (start, end) = require_range(&req)?;
+            let count =
+                quant_data::sync::sync_block_trade(&state.db, &state.tushare, &task_id, start, end)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            quant_data::repository::update_sync_task(
+                &state.db,
+                &task_id,
+                "completed",
+                count as i32,
+                count as i32,
+                0,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "block_trade", "status": "completed", "count": count}),
+            )
+        }
         "forecast" | "stock_forecast" => {
             let (start, end) = require_range(&req)?;
             let count = quant_data::sync::sync_forecast(
@@ -1052,6 +1665,28 @@ async fn execute_sync_task(
             .map_err(|e| e.to_string())?;
             Ok(
                 json!({"task_id": task_id, "dataset": "repurchase", "status": "completed", "count": count}),
+            )
+        }
+        "share_float" | "stock_share_float" => {
+            if req.symbols.is_empty() && !optional_source_all_symbols_allowed(req.mode.as_deref()) {
+                return Err(
+                    "symbols must not be empty for share_float sync unless mode=full_market is set"
+                        .into(),
+                );
+            }
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_share_float(
+                &state.db,
+                &state.tushare,
+                &req.symbols,
+                start,
+                end,
+                &task_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "share_float", "status": "completed", "count": count}),
             )
         }
         "adj_factor" => {
@@ -1609,6 +2244,28 @@ pub async fn phase7_coverage_expansion_runner(
     }
 }
 
+/// POST /api/v1/quant/data/phase7-share-float-coverage-batches
+pub async fn phase7_share_float_coverage_batches(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7ShareFloatCoverageReq>,
+) -> impl IntoResponse {
+    match build_phase7_share_float_coverage_batches(state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/phase7-share-float-readiness-audit
+pub async fn phase7_share_float_readiness_audit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7ShareFloatReadinessAuditReq>,
+) -> impl IntoResponse {
+    match build_phase7_share_float_readiness_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
 async fn build_tushare_permission_smoke(
     state: &AppState,
     req: TusharePermissionSmokeReq,
@@ -1656,6 +2313,7 @@ async fn build_tushare_permission_smoke(
         "notes": [
             "This endpoint performs only small read-only Tushare API probes; it does not create tables or sync full-market data.",
             "cashflow and dividend are probed by sample ts_code; repurchase is probed by announcement date range because the Tushare repurchase API has no ts_code input parameter.",
+            "share_float is probed by unlock float_date range; ann_date is still persisted as PIT available_at.",
             "Use this result to decide whether Phase 7-FE should proceed to Rust schema/repository/sync implementation or mark a source as blocked."
         ],
     }))
@@ -1901,6 +2559,296 @@ async fn build_phase7_optional_source_coverage_batches(
             "After a real execution, next_offset resets to 0 because the uncovered set changes as rows are written.",
             "Rerun phase7-feasibility-audit after tasks complete before feature training."
         ],
+    }))
+}
+
+async fn build_phase7_share_float_coverage_batches(
+    state: Arc<AppState>,
+    req: Phase7ShareFloatCoverageReq,
+) -> Result<Value, String> {
+    let today = chrono::Utc::now().date_naive();
+    let start_date = req
+        .start_date
+        .clone()
+        .unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .clone()
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+
+    let granularity = phase7_share_float_chunk_granularity(req.chunk_granularity.as_deref());
+    let max_chunks = phase7_share_float_coverage_max_chunks(req.max_chunks);
+    let plan_only = phase7_share_float_coverage_plan_only(req.plan_only);
+    let chunks = phase7_share_float_date_chunks(start, end, granularity, max_chunks);
+    let truncated = chunks
+        .last()
+        .map(|(_, chunk_end)| *chunk_end < end)
+        .unwrap_or(false);
+    let data_version_prefix = req.data_version_prefix.clone().unwrap_or_else(|| {
+        chrono::Utc::now()
+            .format("dv-p7-share-float-%Y%m%d-%H%M%S%3f")
+            .to_string()
+    });
+
+    let mut batch_results = Vec::new();
+    for (index, (chunk_start, chunk_end)) in chunks.iter().copied().enumerate() {
+        let batch_label = format!("f{:03}", index + 1);
+        let task_id = bounded_phase7_task_id(&[data_version_prefix.as_str(), batch_label.as_str()]);
+        let chunk_start_s = chunk_start.format("%Y%m%d").to_string();
+        let chunk_end_s = chunk_end.format("%Y%m%d").to_string();
+        let sync_req = DataSyncTaskReq {
+            dataset: "share_float".to_string(),
+            source: "tushare".to_string(),
+            mode: Some("full_market".to_string()),
+            symbols: Vec::new(),
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: Some(chunk_start_s.clone()),
+            end_date: Some(chunk_end_s.clone()),
+            data_version_id: Some(task_id.clone()),
+            background: req.background,
+            quality_check: false,
+            create_data_version: true,
+            retry_of_task_id: None,
+            reason: Some("phase7 share_float float_date coverage expansion".to_string()),
+        };
+
+        if plan_only {
+            batch_results.push(json!({
+                "batch_index": index + 1,
+                "task_id": task_id,
+                "status": "planned",
+                "dataset": "share_float",
+                "mode": "full_market",
+                "query_basis": "float_date",
+                "date_range": {
+                    "start_date": chunk_start_s,
+                    "end_date": chunk_end_s,
+                }
+            }));
+        } else if req.background {
+            register_sync_task(&state, &task_id, &sync_req, "running").await?;
+            let state_for_task = state.clone();
+            let task_id_for_task = task_id.clone();
+            let req_for_task = sync_req.clone();
+            tokio::spawn(async move {
+                if let Err(message) = execute_sync_task(
+                    state_for_task.clone(),
+                    task_id_for_task.clone(),
+                    req_for_task,
+                )
+                .await
+                {
+                    let _ = quant_data::repository::fail_sync_task(
+                        &state_for_task.db,
+                        &task_id_for_task,
+                        &message,
+                    )
+                    .await;
+                    tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 share_float float_date补数失败");
+                }
+            });
+            batch_results.push(json!({
+                "batch_index": index + 1,
+                "task_id": task_id,
+                "status": "running",
+                "dataset": "share_float",
+                "mode": "full_market",
+                "query_basis": "float_date",
+                "date_range": {
+                    "start_date": chunk_start_s,
+                    "end_date": chunk_end_s,
+                }
+            }));
+        } else {
+            let execution = execute_sync_task(state.clone(), task_id.clone(), sync_req).await?;
+            batch_results.push(json!({
+                "batch_index": index + 1,
+                "task_id": task_id,
+                "status": "completed",
+                "dataset": "share_float",
+                "mode": "full_market",
+                "query_basis": "float_date",
+                "date_range": {
+                    "start_date": chunk_start_s,
+                    "end_date": chunk_end_s,
+                },
+                "execution": execution,
+            }));
+        }
+    }
+
+    Ok(json!({
+        "audit_version": "phase7-share-float-float-date-coverage-v1",
+        "mode": if plan_only {
+            "plan_only"
+        } else if req.background {
+            "background"
+        } else {
+            "synchronous"
+        },
+        "plan_only": plan_only,
+        "background": req.background,
+        "dataset": "share_float",
+        "query_basis": "float_date",
+        "pit_available_at": "ann_date",
+        "chunk_granularity": granularity,
+        "max_chunks": max_chunks,
+        "chunk_count": chunks.len(),
+        "truncated_by_max_chunks": truncated,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "data_version_prefix": data_version_prefix,
+        "batches": batch_results,
+        "notes": [
+            "share_float must be expanded by unlock float_date windows because the Tushare interface does not support reliable symbol-filtered full-history expansion.",
+            "ann_date is persisted as available_at; downstream PIT features must require available_at <= trade_date.",
+            "plan_only defaults to true. Set plan_only=false only for controlled historical repair runs.",
+            "Run phase7-share-float-readiness-audit after completion before building unlock pressure factors."
+        ],
+    }))
+}
+
+async fn build_phase7_share_float_readiness_audit(
+    state: &AppState,
+    req: Phase7ShareFloatReadinessAuditReq,
+) -> Result<Value, String> {
+    let today = chrono::Utc::now().date_naive();
+    let start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+
+    let row = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+            i64,
+        ),
+    >(phase7_share_float_readiness_sql())
+    .bind(start)
+    .bind(end)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("Failed to audit share_float readiness: {}", error))?;
+
+    let (
+        row_count,
+        symbol_count,
+        min_float_date,
+        max_float_date,
+        min_available_at,
+        max_available_at,
+        late_or_invalid_count,
+        distinct_float_dates,
+    ) = row;
+
+    let completed_windows = sqlx::query_as::<_, (NaiveDate, NaiveDate)>(
+        r#"
+        SELECT start_date, end_date
+        FROM data_sync_task
+        WHERE task_type = 'share_float'
+          AND status = 'completed'
+          AND start_date IS NOT NULL
+          AND end_date IS NOT NULL
+          AND start_date <= $2
+          AND end_date >= $1
+        ORDER BY start_date, end_date
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to audit share_float sync windows: {}", error))?;
+    let expected_days = phase7_share_float_expected_days(start, end);
+    let covered_days =
+        phase7_share_float_covered_days_from_windows(completed_windows.clone(), start, end);
+    let sync_coverage_ratio = if expected_days > 0 {
+        Some(covered_days as f64 / expected_days as f64)
+    } else {
+        None
+    };
+    let coverage_grade = if covered_days >= expected_days {
+        phase7_coverage_grade(symbol_count, 1.max(symbol_count))
+    } else {
+        "incomplete_range"
+    };
+    let readiness = phase7_share_float_feature_readiness(
+        row_count,
+        covered_days,
+        expected_days,
+        late_or_invalid_count,
+    );
+    let completed_windows_json: Vec<Value> = completed_windows
+        .into_iter()
+        .map(|(window_start, window_end)| {
+            json!({
+                "start_date": window_start,
+                "end_date": window_end,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "audit_version": "phase7-share-float-readiness-v1",
+        "dataset": "share_float",
+        "query_basis": "float_date",
+        "pit_available_at": "ann_date",
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "row_count": row_count,
+        "symbol_count": symbol_count,
+        "distinct_float_dates": distinct_float_dates,
+        "expected_days": expected_days,
+        "covered_days": covered_days,
+        "sync_coverage_ratio": sync_coverage_ratio,
+        "completed_sync_windows": completed_windows_json,
+        "min_float_date": min_float_date,
+        "max_float_date": max_float_date,
+        "min_available_at": min_available_at,
+        "max_available_at": max_available_at,
+        "late_or_invalid_count": late_or_invalid_count,
+        "coverage_grade": coverage_grade,
+        "feature_readiness": readiness,
+        "pit_contract": {
+            "source_event_date": "float_date",
+            "source_available_at": "ann_date",
+            "feature_filter": "available_at <= trade_date AND float_date >= trade_date"
+        },
+        "late_announcement_policy": {
+            "late_or_invalid_count": late_or_invalid_count,
+            "feature_handling": "exclude_from_pre_unlock_pressure",
+            "rationale": "late source announcements are not PIT-available before unlock and must not be backdated"
+        },
+        "notes": [
+            "Rows with available_at after float_date are retained as raw source records but excluded from pre-unlock pressure by the PIT feature filter.",
+            "This audit is source readiness only; RankIC/group return/turnover/capacity still require alpha-source diagnostics after factor backfill."
+        ]
     }))
 }
 
@@ -2669,6 +3617,74 @@ fn phase7_optional_source_uncovered_symbols_sql(source: &str) -> Option<&'static
             OFFSET $3 LIMIT $4
             "#,
         ),
+        "forecast" => Some(
+            r#"
+            SELECT stock.symbol
+            FROM market_stock stock
+            WHERE stock.list_status = 'L'
+              AND NOT EXISTS (
+                  SELECT 1 FROM data_sync_attempt attempt
+                  WHERE attempt.source = 'forecast'
+                    AND attempt.symbol = stock.symbol
+                    AND attempt.status = 'completed'
+                    AND attempt.start_date <= $1
+                    AND attempt.end_date >= $2
+              )
+            ORDER BY stock.symbol
+            OFFSET $3 LIMIT $4
+            "#,
+        ),
+        "express" => Some(
+            r#"
+            SELECT stock.symbol
+            FROM market_stock stock
+            WHERE stock.list_status = 'L'
+              AND NOT EXISTS (
+                  SELECT 1 FROM data_sync_attempt attempt
+                  WHERE attempt.source = 'express'
+                    AND attempt.symbol = stock.symbol
+                    AND attempt.status = 'completed'
+                    AND attempt.start_date <= $1
+                    AND attempt.end_date >= $2
+              )
+            ORDER BY stock.symbol
+            OFFSET $3 LIMIT $4
+            "#,
+        ),
+        "disclosure_date" => Some(
+            r#"
+            SELECT stock.symbol
+            FROM market_stock stock
+            WHERE stock.list_status = 'L'
+              AND NOT EXISTS (
+                  SELECT 1 FROM data_sync_attempt attempt
+                  WHERE attempt.source = 'disclosure_date'
+                    AND attempt.symbol = stock.symbol
+                    AND attempt.status = 'completed'
+                    AND attempt.start_date <= $1
+                    AND attempt.end_date >= $2
+              )
+            ORDER BY stock.symbol
+            OFFSET $3 LIMIT $4
+            "#,
+        ),
+        "share_float" => Some(
+            r#"
+            SELECT stock.symbol
+            FROM market_stock stock
+            WHERE stock.list_status = 'L'
+              AND NOT EXISTS (
+                  SELECT 1 FROM data_sync_attempt attempt
+                  WHERE attempt.source = 'share_float'
+                    AND attempt.symbol = stock.symbol
+                    AND attempt.status = 'completed'
+                    AND attempt.start_date <= $1
+                    AND attempt.end_date >= $2
+              )
+            ORDER BY stock.symbol
+            OFFSET $3 LIMIT $4
+            "#,
+        ),
         _ => None,
     }
 }
@@ -2789,6 +3805,29 @@ async fn run_tushare_permission_source_smoke(
                 "symbol_filter_supported": false,
             })
         }
+        "share_float" => {
+            let result = state
+                .tushare
+                .share_float(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let probe = phase7_tushare_probe_json(source, None, "unlock_date_range", result);
+            let probes = vec![probe];
+            json!({
+                "source": source,
+                "query_scope": "unlock_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": false,
+                "pit_available_at": "ann_date"
+            })
+        }
         unsupported => json!({
             "source": unsupported,
             "status": "unsupported_source",
@@ -2906,7 +3945,11 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
           AND table_name IN (
               'market_stock_cashflow',
               'market_stock_dividend',
-              'market_stock_repurchase'
+              'market_stock_repurchase',
+              'market_stock_forecast',
+              'market_stock_express',
+              'market_stock_disclosure_date',
+              'market_stock_share_float'
           )
         ORDER BY table_name
         "#,
@@ -2930,30 +3973,14 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
     .await
     .map_err(|error| error.to_string())?;
 
-    let optional_source_specs = [
-        (
-            "cashflow",
-            "market_stock_cashflow",
-            "cashflow_quality_pit_features",
-        ),
-        (
-            "dividend",
-            "market_stock_dividend",
-            "dividend_stability_quality_pit_features",
-        ),
-        (
-            "repurchase",
-            "market_stock_repurchase",
-            "repurchase_event_capital_return_pit_features",
-        ),
-    ];
+    let optional_source_specs = phase7_optional_source_specs();
     let optional_query_parts: Vec<&str> = optional_source_specs
         .iter()
-        .filter_map(|(_, table, _)| {
-            if !available_optional_tables.contains(*table) {
+        .filter_map(|spec| {
+            if !available_optional_tables.contains(spec.table) {
                 return None;
             }
-            match *table {
+            match spec.table {
                 "market_stock_cashflow" => Some(
                     "SELECT 'cashflow'::text, COUNT(*)::bigint, MIN(available_at), MAX(available_at), COUNT(DISTINCT symbol)::bigint FROM market_stock_cashflow",
                 ),
@@ -2962,6 +3989,18 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
                 ),
                 "market_stock_repurchase" => Some(
                     "SELECT 'repurchase'::text, COUNT(*)::bigint, MIN(available_at), MAX(available_at), COUNT(DISTINCT symbol)::bigint FROM market_stock_repurchase",
+                ),
+                "market_stock_forecast" => Some(
+                    "SELECT 'forecast'::text, COUNT(*)::bigint, MIN(available_at), MAX(available_at), COUNT(DISTINCT symbol)::bigint FROM market_stock_forecast",
+                ),
+                "market_stock_express" => Some(
+                    "SELECT 'express'::text, COUNT(*)::bigint, MIN(available_at), MAX(available_at), COUNT(DISTINCT symbol)::bigint FROM market_stock_express",
+                ),
+                "market_stock_disclosure_date" => Some(
+                    "SELECT 'disclosure_date'::text, COUNT(*)::bigint, MIN(available_at), MAX(available_at), COUNT(DISTINCT symbol)::bigint FROM market_stock_disclosure_date",
+                ),
+                "market_stock_share_float" => Some(
+                    "SELECT 'share_float'::text, COUNT(*)::bigint, MIN(available_at), MAX(available_at), COUNT(DISTINCT symbol)::bigint FROM market_stock_share_float",
                 ),
                 _ => None,
             }
@@ -2987,7 +4026,7 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
                    COUNT(DISTINCT symbol)::bigint AS attempted_symbols,
                    COUNT(DISTINCT CASE WHEN row_count = 0 THEN symbol END)::bigint AS zero_row_symbols
             FROM data_sync_attempt
-            WHERE source IN ('cashflow', 'dividend', 'repurchase')
+            WHERE source IN ('cashflow', 'dividend', 'repurchase', 'forecast', 'express', 'disclosure_date')
               AND status = 'completed'
             GROUP BY source
             "#,
@@ -3004,24 +4043,235 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
     }
 
     let optional_data_sources: Vec<Value> = optional_source_specs
-        .into_iter()
-        .map(|(source, table, next_feature)| {
+        .iter()
+        .map(|spec| {
             let (attempted_symbols, zero_row_symbols) = optional_attempts_by_source
-                .get(source)
+                .get(spec.source)
                 .copied()
                 .unwrap_or_default();
             phase7_optional_source_json(
-                source,
-                table,
-                available_optional_tables.contains(table),
-                optional_stats_by_source.get(source),
+                spec.source,
+                spec.table,
+                available_optional_tables.contains(spec.table),
+                optional_stats_by_source.get(spec.source),
                 attempted_symbols,
                 zero_row_symbols,
                 listed_stock_count,
-                next_feature,
+                spec.next_feature,
             )
         })
         .collect();
+
+    let market_level_source_rows: Vec<(
+        String,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        r#"
+        WITH stats AS (
+            SELECT 'market_margin_regime'::text AS source,
+                   COUNT(*)::bigint AS data_rows,
+                   MIN(trade_date) AS min_trade_date,
+                   MAX(trade_date) AS latest_trade_date
+            FROM market_margin
+            UNION ALL
+            SELECT 'market_moneyflow_hsgt_regime'::text AS source,
+                   COUNT(*)::bigint AS data_rows,
+                   MIN(trade_date) AS min_trade_date,
+                   MAX(trade_date) AS latest_trade_date
+            FROM market_moneyflow_hsgt
+        )
+        SELECT source,
+               data_rows,
+               min_trade_date,
+               latest_trade_date,
+               CASE
+                   WHEN latest_trade_date IS NULL THEN NULL
+                   ELSE (
+                       SELECT COUNT(DISTINCT cal.trade_date)::bigint
+                       FROM market_trade_calendar cal
+                       WHERE cal.is_open
+                         AND cal.trade_date > stats.latest_trade_date
+                         AND cal.trade_date <= CURRENT_DATE
+                   )
+               END AS open_day_lag
+        FROM stats
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut market_level_source_stats = BTreeMap::new();
+    for (source, data_rows, min_trade_date, latest_trade_date, open_day_lag) in
+        market_level_source_rows
+    {
+        market_level_source_stats.insert(
+            source,
+            Phase7MarketLevelSourceAudit {
+                data_rows,
+                min_trade_date,
+                latest_trade_date,
+                open_day_lag,
+            },
+        );
+    }
+    let market_level_sync_task_rows: Vec<(
+        String,
+        String,
+        String,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        String,
+        i32,
+        i32,
+        i32,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        r#"
+        WITH tasks AS (
+            SELECT CASE
+                       WHEN task_type = 'margin' THEN 'market_margin_regime'
+                       WHEN task_type = 'moneyflow_hsgt' THEN 'market_moneyflow_hsgt_regime'
+                   END AS source,
+                   task_id,
+                   task_type,
+                   start_date,
+                   end_date,
+                   status,
+                   total_count,
+                   success_count,
+                   failed_count,
+                   error_message,
+                   completed_at,
+                   created_at
+            FROM data_sync_task
+            WHERE task_type IN ('margin', 'moneyflow_hsgt')
+        ),
+        ranked AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (PARTITION BY source ORDER BY created_at DESC) AS rn
+            FROM tasks
+            WHERE source IS NOT NULL
+        )
+        SELECT source,
+               task_id,
+               task_type,
+               start_date,
+               end_date,
+               status,
+               total_count,
+               success_count,
+               failed_count,
+               error_message,
+               completed_at
+        FROM ranked
+        WHERE rn = 1
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut market_level_sync_tasks = BTreeMap::new();
+    for (
+        source,
+        task_id,
+        task_type,
+        start_date,
+        end_date,
+        status,
+        total_count,
+        success_count,
+        failed_count,
+        error_message,
+        completed_at,
+    ) in market_level_sync_task_rows
+    {
+        market_level_sync_tasks.insert(
+            source,
+            Phase7MarketLevelSyncAudit {
+                task_id,
+                task_type,
+                start_date,
+                end_date,
+                status,
+                total_count,
+                success_count,
+                failed_count,
+                error_message,
+                completed_at,
+            },
+        );
+    }
+    let block_trade_source_stats: (
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        i64,
+    ) = sqlx::query_as(
+        r#"
+        WITH stats AS (
+            SELECT COUNT(*)::bigint AS data_rows,
+                   COUNT(DISTINCT ts_code)::bigint AS symbols,
+                   COUNT(DISTINCT trade_date)::bigint AS covered_trade_days,
+                   MIN(trade_date) AS min_trade_date,
+                   MAX(trade_date) AS latest_trade_date,
+                   MIN(available_at) AS min_available_at,
+                   MAX(available_at) AS latest_available_at,
+                   COUNT(*) FILTER (WHERE available_at <= trade_date)::bigint AS pit_violation_rows
+            FROM market_stock_block_trade
+        )
+        SELECT stats.data_rows,
+               stats.symbols,
+               stats.covered_trade_days,
+               CASE
+                   WHEN stats.min_trade_date IS NULL OR stats.latest_trade_date IS NULL THEN 0
+                   ELSE (
+                       SELECT COUNT(DISTINCT cal.trade_date)::bigint
+                       FROM market_trade_calendar cal
+                       WHERE cal.exchange = 'SSE'
+                         AND cal.is_open
+                         AND cal.trade_date BETWEEN stats.min_trade_date AND stats.latest_trade_date
+                   )
+               END AS open_days_in_range,
+               stats.min_trade_date,
+               stats.latest_trade_date,
+               stats.min_available_at,
+               stats.latest_available_at,
+               stats.pit_violation_rows
+        FROM stats
+        "#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
+    let block_trade_source_stats = Phase7BlockTradeSourceAudit {
+        data_rows: block_trade_source_stats.0,
+        symbols: block_trade_source_stats.1,
+        covered_trade_days: block_trade_source_stats.2,
+        open_days_in_range: block_trade_source_stats.3,
+        min_trade_date: block_trade_source_stats.4,
+        latest_trade_date: block_trade_source_stats.5,
+        min_available_at: block_trade_source_stats.6,
+        latest_available_at: block_trade_source_stats.7,
+        pit_violation_rows: block_trade_source_stats.8,
+    };
+    let p315_new_alpha_candidate_sources =
+        phase7_new_alpha_candidate_sources_with_block_trade_status(
+            phase7_new_alpha_candidate_sources_with_market_status(
+                &market_level_source_stats,
+                &market_level_sync_tasks,
+                Utc::now().date_naive(),
+            ),
+            &block_trade_source_stats,
+        );
 
     Ok(json!({
         "audit_version": "phase7-fd-v1",
@@ -3032,6 +4282,7 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
         "event_coverage": phase7_coverage_rows_to_json(event_rows, listed_stock_count),
         "phase7_combo_coverage": combo_coverage,
         "optional_data_sources": optional_data_sources,
+        "p315_new_alpha_candidate_sources": p315_new_alpha_candidate_sources,
         "tushare_permission_notes": {
             "forecast": "2000-point interface is usable by symbol; full-market quarterly forecast_vip requires higher permission.",
             "express": "2000-point interface is usable by symbol; full-market quarterly express_vip requires higher permission.",
@@ -3190,8 +4441,9 @@ pub async fn sync_task_status(
 
 /// POST /api/v1/quant/data/sync-tasks/cleanup-stale
 ///
-/// 将 heartbeat 超时的 running 同步任务标记为 failed。默认 dry-run=false；
-/// 可用 dry_run=true 先查看候选任务，避免误伤仍在正常推进的后台任务。
+/// 将 heartbeat 超时的 running 同步任务标记为 failed，将超时的 cancel_requested
+/// 任务收敛为 cancelled。默认 dry-run=false；可用 dry_run=true 先查看候选任务，
+/// 避免误伤仍在正常推进的后台任务。
 pub async fn cleanup_stale_sync_tasks(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CleanupStaleSyncTasksReq>,
@@ -3213,7 +4465,7 @@ pub async fn cleanup_stale_sync_tasks(
         "SELECT task_id, task_type, status, progress, last_heartbeat_at,
                 heartbeat_timeout_seconds, started_at, created_at
          FROM data_sync_task
-         WHERE status = 'running'
+         WHERE status IN ('running', 'cancel_requested')
            AND COALESCE(last_heartbeat_at, started_at, created_at)
                < now() - (COALESCE(heartbeat_timeout_seconds, $1)::text || ' seconds')::interval
          ORDER BY COALESCE(last_heartbeat_at, started_at, created_at) ASC
@@ -3251,7 +4503,9 @@ pub async fn cleanup_stale_sync_tasks(
                     "started_at": started_at.map(|ts| ts.to_rfc3339()),
                     "created_at": created_at.map(|ts| ts.to_rfc3339()),
                     "observed_at": observed_at.map(|ts| ts.to_rfc3339()),
-                    "heartbeat_timeout_seconds": timeout_seconds
+                    "heartbeat_timeout_seconds": timeout_seconds,
+                    "cleanup_action": stale_sync_task_cleanup_action(status),
+                    "terminal_status": stale_sync_task_cleanup_terminal_status(status)
                 })
             },
         )
@@ -3272,15 +4526,26 @@ pub async fn cleanup_stale_sync_tasks(
         .collect::<Vec<_>>();
     let result = sqlx::query(
         "UPDATE data_sync_task
-         SET status = 'failed',
-             failed_count = GREATEST(COALESCE(failed_count, 0), 1),
+         SET status = CASE
+                 WHEN status = 'cancel_requested' THEN 'cancelled'
+                 ELSE 'failed'
+             END,
+             failed_count = CASE
+                 WHEN status = 'running' THEN GREATEST(COALESCE(failed_count, 0), 1)
+                 ELSE COALESCE(failed_count, 0)
+             END,
              completed_at = now(),
              last_heartbeat_at = now(),
              error_message = CONCAT(
                  COALESCE(NULLIF(error_message, '') || '; ', ''),
-                 'stale running task timed out by cleanup-stale: no heartbeat within configured timeout'
+                 CASE
+                     WHEN status = 'cancel_requested' THEN
+                         'stale cancel_requested task finalized by cleanup-stale: no worker acknowledgement within configured timeout'
+                     ELSE
+                         'stale running task timed out by cleanup-stale: no heartbeat within configured timeout'
+                 END
              )
-         WHERE task_id = ANY($1) AND status = 'running'",
+         WHERE task_id = ANY($1) AND status IN ('running', 'cancel_requested')",
     )
     .bind(&task_ids)
     .execute(&state.db)
@@ -3462,6 +4727,28 @@ mod tests {
     }
 
     #[test]
+    fn stale_cleanup_terminal_statuses_cover_cancel_requested() {
+        assert_eq!(
+            stale_sync_task_cleanup_terminal_status("running"),
+            Some("failed")
+        );
+        assert_eq!(
+            stale_sync_task_cleanup_terminal_status("cancel_requested"),
+            Some("cancelled")
+        );
+        assert_eq!(
+            stale_sync_task_cleanup_action("running"),
+            "mark_running_failed"
+        );
+        assert_eq!(
+            stale_sync_task_cleanup_action("cancel_requested"),
+            "finalize_cancel_requested"
+        );
+        assert_eq!(stale_sync_task_cleanup_terminal_status("completed"), None);
+        assert_eq!(stale_sync_task_cleanup_action("completed"), "ignore");
+    }
+
+    #[test]
     fn event_sync_source_quality_requires_official_source_after_limit_api_earliest_date() {
         let date = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
 
@@ -3600,7 +4887,311 @@ mod tests {
             .expect("deduped sources"),
             vec!["cashflow", "dividend"]
         );
-        assert!(phase7_optional_source_sync_sources(&["forecast".to_string()]).is_err());
+        assert_eq!(
+            phase7_optional_source_sync_sources(&[
+                "forecast".to_string(),
+                "express".to_string(),
+                "disclosure_date".to_string(),
+                "forecast".to_string(),
+            ])
+            .expect("event sources"),
+            vec!["forecast", "express", "disclosure_date"]
+        );
+        assert!(phase7_optional_source_sync_sources(&["unknown".to_string()]).is_err());
+    }
+
+    #[test]
+    fn phase7_optional_source_tables_include_event_sources() {
+        assert_eq!(
+            phase7_optional_source_table("forecast"),
+            Some("market_stock_forecast")
+        );
+        assert_eq!(
+            phase7_optional_source_table("express"),
+            Some("market_stock_express")
+        );
+        assert_eq!(
+            phase7_optional_source_table("disclosure_date"),
+            Some("market_stock_disclosure_date")
+        );
+        assert_eq!(
+            phase7_optional_source_table("share_float"),
+            Some("market_stock_share_float")
+        );
+    }
+
+    #[test]
+    fn phase7_optional_source_specs_include_financial_and_event_expansion_sources() {
+        let specs = phase7_optional_source_specs();
+        let sources: Vec<&str> = specs.iter().map(|spec| spec.source).collect();
+
+        assert_eq!(
+            sources,
+            vec![
+                "cashflow",
+                "dividend",
+                "repurchase",
+                "forecast",
+                "express",
+                "disclosure_date",
+                "share_float",
+            ]
+        );
+        assert!(specs
+            .iter()
+            .any(|spec| spec.table == "market_stock_forecast"
+                && spec.next_feature == "event_post_announcement_return_curve_pit_features"));
+        assert!(specs
+            .iter()
+            .any(|spec| spec.table == "market_stock_share_float"
+                && spec.next_feature == "unlock_supply_pressure_pit_features"));
+    }
+
+    #[test]
+    fn phase7_new_alpha_candidate_sources_mark_p315_boundaries() {
+        let sources = phase7_new_alpha_candidate_sources();
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            by_source["market_margin_regime"]["admission_scope"],
+            "regime_or_risk_budget_only"
+        );
+        assert_eq!(
+            by_source["market_moneyflow_hsgt_regime"]["admission_scope"],
+            "regime_or_risk_budget_only"
+        );
+        assert_eq!(
+            by_source["industry_prosperity_proxy"]["readiness"],
+            "requires_pit_industry_history_or_proxy"
+        );
+        assert_eq!(
+            by_source["block_trade_supply_demand"]["readiness"],
+            "schema_and_client_ready_permission_smoke_passed"
+        );
+        assert_eq!(
+            by_source["equity_incentive_execution_quality"]["readiness"],
+            "schema_and_client_missing"
+        );
+        assert_eq!(
+            by_source["block_trade_supply_demand"]["next_step"],
+            "run_bounded_sync_then_p310_diagnostics"
+        );
+        assert_eq!(
+            by_source["industry_prosperity_proxy"]["next_step"],
+            "design_broad_base_pit_proxy_before_factor_backfill"
+        );
+    }
+
+    #[test]
+    fn phase7_block_trade_status_reports_bounded_sample_coverage() {
+        let sources = phase7_new_alpha_candidate_sources_with_block_trade_status(
+            phase7_new_alpha_candidate_sources(),
+            &Phase7BlockTradeSourceAudit {
+                data_rows: 2168,
+                symbols: 1000,
+                covered_trade_days: 14,
+                open_days_in_range: 14,
+                min_trade_date: Some(NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()),
+                latest_trade_date: Some(NaiveDate::from_ymd_opt(2026, 6, 18).unwrap()),
+                min_available_at: Some(NaiveDate::from_ymd_opt(2026, 6, 2).unwrap()),
+                latest_available_at: Some(NaiveDate::from_ymd_opt(2026, 6, 19).unwrap()),
+                pit_violation_rows: 0,
+            },
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+        let block_trade = by_source["block_trade_supply_demand"];
+
+        assert_eq!(
+            block_trade["readiness"],
+            "bounded_sample_ready_needs_history_coverage"
+        );
+        assert_eq!(
+            block_trade["next_step"],
+            "expand_bounded_history_sync_then_p310_diagnostics"
+        );
+        assert_eq!(block_trade["raw_source_status"]["data_rows"], 2168);
+        assert_eq!(block_trade["raw_source_status"]["covered_trade_days"], 14);
+        assert_eq!(block_trade["raw_source_status"]["open_days_in_range"], 14);
+        assert_eq!(block_trade["raw_source_status"]["pit_violation_rows"], 0);
+    }
+
+    #[test]
+    fn phase7_block_trade_status_blocks_pit_violations() {
+        let sources = phase7_new_alpha_candidate_sources_with_block_trade_status(
+            phase7_new_alpha_candidate_sources(),
+            &Phase7BlockTradeSourceAudit {
+                data_rows: 10,
+                symbols: 5,
+                covered_trade_days: 3,
+                open_days_in_range: 3,
+                min_trade_date: Some(NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()),
+                latest_trade_date: Some(NaiveDate::from_ymd_opt(2026, 6, 3).unwrap()),
+                min_available_at: Some(NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()),
+                latest_available_at: Some(NaiveDate::from_ymd_opt(2026, 6, 4).unwrap()),
+                pit_violation_rows: 2,
+            },
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+        let block_trade = by_source["block_trade_supply_demand"];
+
+        assert_eq!(block_trade["readiness"], "raw_source_pit_failed");
+        assert_eq!(
+            block_trade["next_step"],
+            "repair_available_at_before_any_diagnostics"
+        );
+        assert_eq!(block_trade["raw_source_status"]["pit_violation_rows"], 2);
+    }
+
+    #[test]
+    fn p315_market_level_source_status_marks_stale_and_builds_sync_payload() {
+        let mut stats = BTreeMap::new();
+        stats.insert(
+            "market_margin_regime".to_string(),
+            Phase7MarketLevelSourceAudit {
+                data_rows: 5_846,
+                min_trade_date: Some(NaiveDate::from_ymd_opt(2016, 1, 4).unwrap()),
+                latest_trade_date: Some(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap()),
+                open_day_lag: Some(14),
+            },
+        );
+
+        let sources = phase7_new_alpha_candidate_sources_with_market_status(
+            &stats,
+            &BTreeMap::new(),
+            NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+        let margin = by_source["market_margin_regime"];
+
+        assert_eq!(margin["admission_scope"], "regime_or_risk_budget_only");
+        assert_eq!(margin["readiness"], "market_level_stale_needs_sync");
+        assert_eq!(margin["market_data_status"]["data_rows"], 5_846);
+        assert_eq!(margin["market_data_status"]["min_trade_date"], "2016-01-04");
+        assert_eq!(
+            margin["market_data_status"]["latest_trade_date"],
+            "2026-05-29"
+        );
+        assert_eq!(margin["market_data_status"]["open_day_lag"], 14);
+        assert_eq!(margin["sync_task_payload"]["dataset"], "margin");
+        assert_eq!(margin["sync_task_payload"]["source"], "tushare");
+        assert_eq!(margin["sync_task_payload"]["start_date"], "20260530");
+        assert_eq!(margin["sync_task_payload"]["end_date"], "20260620");
+        assert_eq!(margin["sync_task_payload"]["background"], true);
+    }
+
+    #[test]
+    fn p315_market_level_status_reports_zero_row_upstream_unavailable_after_sync_attempt() {
+        let mut stats = BTreeMap::new();
+        stats.insert(
+            "market_moneyflow_hsgt_regime".to_string(),
+            Phase7MarketLevelSourceAudit {
+                data_rows: 2_339,
+                min_trade_date: Some(NaiveDate::from_ymd_opt(2016, 1, 4).unwrap()),
+                latest_trade_date: Some(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap()),
+                open_day_lag: Some(14),
+            },
+        );
+        let mut sync_tasks = BTreeMap::new();
+        sync_tasks.insert(
+            "market_moneyflow_hsgt_regime".to_string(),
+            Phase7MarketLevelSyncAudit {
+                task_id: "dv-p315-hsgt-20260620".to_string(),
+                task_type: "moneyflow_hsgt".to_string(),
+                start_date: Some(NaiveDate::from_ymd_opt(2026, 5, 30).unwrap()),
+                end_date: Some(NaiveDate::from_ymd_opt(2026, 6, 20).unwrap()),
+                status: "completed".to_string(),
+                total_count: 0,
+                success_count: 0,
+                failed_count: 0,
+                error_message: None,
+                completed_at: None,
+            },
+        );
+
+        let sources = phase7_new_alpha_candidate_sources_with_market_status(
+            &stats,
+            &sync_tasks,
+            NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+        let hsgt = by_source["market_moneyflow_hsgt_regime"];
+
+        assert_eq!(
+            hsgt["readiness"],
+            "market_level_upstream_zero_rows_unavailable"
+        );
+        assert_eq!(hsgt["market_data_status"]["freshness_gate"], "failed");
+        assert_eq!(hsgt["last_sync_task"]["task_id"], "dv-p315-hsgt-20260620");
+        assert_eq!(
+            hsgt["sync_remediation"]["status"],
+            "not_retriable_until_upstream_resolved"
+        );
+    }
+
+    #[test]
+    fn p315_market_level_sync_task_datasets_are_supported() {
+        assert_eq!(
+            phase7_market_level_sync_dataset("market_margin_regime"),
+            Some("margin")
+        );
+        assert_eq!(
+            phase7_market_level_sync_dataset("market_moneyflow_hsgt_regime"),
+            Some("moneyflow_hsgt")
+        );
+        assert_eq!(
+            phase7_market_level_sync_dataset("industry_prosperity_proxy"),
+            None
+        );
     }
 
     #[test]
@@ -3699,6 +5290,100 @@ mod tests {
     }
 
     #[test]
+    fn phase7_coverage_runner_sources_include_bounded_event_sync() {
+        assert_eq!(
+            phase7_coverage_runner_sources(&[
+                " forecast ".to_string(),
+                "express".to_string(),
+                "disclosure_date".to_string(),
+                "forecast".to_string(),
+            ])
+            .expect("event sources accepted"),
+            vec!["forecast", "express", "disclosure_date"]
+        );
+        assert!(phase7_coverage_runner_sources(&["repurchase".to_string()]).is_err());
+        assert!(phase7_coverage_runner_sources(&["share_float".to_string()]).is_err());
+    }
+
+    #[test]
+    fn share_float_coverage_runner_uses_float_date_chunks_and_safe_defaults() {
+        assert_eq!(phase7_share_float_chunk_granularity(None), "year");
+        assert_eq!(
+            phase7_share_float_chunk_granularity(Some(" month ")),
+            "month"
+        );
+        assert_eq!(
+            phase7_share_float_chunk_granularity(Some("quarter")),
+            "quarter"
+        );
+        assert_eq!(phase7_share_float_chunk_granularity(Some("week")), "year");
+        assert!(phase7_share_float_coverage_plan_only(None));
+        assert_eq!(phase7_share_float_coverage_max_chunks(None), 16);
+        assert_eq!(phase7_share_float_coverage_max_chunks(Some(10_000)), 64);
+
+        let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2015, 5, 31).unwrap();
+        let chunks = phase7_share_float_date_chunks(start, end, "year", 16);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].0, NaiveDate::from_ymd_opt(2014, 1, 1).unwrap());
+        assert_eq!(chunks[0].1, NaiveDate::from_ymd_opt(2014, 12, 31).unwrap());
+        assert_eq!(chunks[1].0, NaiveDate::from_ymd_opt(2015, 1, 1).unwrap());
+        assert_eq!(chunks[1].1, NaiveDate::from_ymd_opt(2015, 5, 31).unwrap());
+    }
+
+    #[test]
+    fn share_float_readiness_sql_audits_float_date_and_pit_leaks() {
+        let sql = phase7_share_float_readiness_sql();
+
+        assert!(sql.contains("MIN(float_date)"));
+        assert!(sql.contains("MAX(float_date)"));
+        assert!(sql.contains("MIN(available_at)"));
+        assert!(sql.contains("MAX(available_at)"));
+        assert!(sql.contains("COUNT(*) FILTER (WHERE available_at > float_date)"));
+        assert!(sql.contains("float_date BETWEEN $1 AND $2"));
+        assert!(sql.contains("available_at <= $2"));
+    }
+
+    #[test]
+    fn share_float_readiness_requires_requested_float_date_span() {
+        let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 19).unwrap();
+        let expected_days = phase7_share_float_expected_days(start, end);
+        let smoke_covered_days = phase7_share_float_covered_days_from_windows(
+            vec![(
+                NaiveDate::from_ymd_opt(2026, 6, 19).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 19).unwrap(),
+            )],
+            start,
+            end,
+        );
+        let smoke_only =
+            phase7_share_float_feature_readiness(10, smoke_covered_days, expected_days, 0);
+
+        assert_eq!(smoke_only, "needs_float_date_backfill");
+
+        let full_covered_days = phase7_share_float_covered_days_from_windows(
+            vec![
+                (start, NaiveDate::from_ymd_opt(2015, 12, 31).unwrap()),
+                (NaiveDate::from_ymd_opt(2016, 1, 1).unwrap(), end),
+            ],
+            start,
+            end,
+        );
+        let full_span =
+            phase7_share_float_feature_readiness(50_000, full_covered_days, expected_days, 0);
+        assert_eq!(full_span, "ready_for_pit_feature_factory");
+
+        let full_span_with_late_rows =
+            phase7_share_float_feature_readiness(50_000, full_covered_days, expected_days, 12);
+        assert_eq!(
+            full_span_with_late_rows,
+            "ready_for_pit_feature_factory_with_late_exclusion"
+        );
+    }
+
+    #[test]
     fn phase7_coverage_runner_auto_continue_targets_full_coverage_with_bounds() {
         assert!(!phase7_coverage_runner_auto_continue(None));
         assert!(phase7_coverage_runner_auto_continue(Some(true)));
@@ -3747,6 +5432,21 @@ mod tests {
         assert!(sql.contains("attempt.start_date <= $1"));
         assert!(sql.contains("attempt.end_date >= $2"));
         assert!(sql.contains("OFFSET $3 LIMIT $4"));
+    }
+
+    #[test]
+    fn phase7_event_source_symbol_resolver_uses_attempt_ledger() {
+        for source in ["forecast", "express", "disclosure_date"] {
+            let sql = phase7_optional_source_uncovered_symbols_sql(source).expect("event sql");
+
+            assert!(sql.contains("data_sync_attempt attempt"));
+            assert!(sql.contains(&format!("attempt.source = '{}'", source)));
+            assert!(sql.contains("attempt.status = 'completed'"));
+            assert!(sql.contains("attempt.symbol = stock.symbol"));
+            assert!(sql.contains("attempt.start_date <= $1"));
+            assert!(sql.contains("attempt.end_date >= $2"));
+            assert!(sql.contains("OFFSET $3 LIMIT $4"));
+        }
     }
 
     #[test]

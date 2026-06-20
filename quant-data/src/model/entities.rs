@@ -56,6 +56,9 @@ pub struct MarketStockDailyBasic {
     pub pb: Option<Decimal>,
     pub ps_ttm: Option<Decimal>,
     pub dv_ttm: Option<Decimal>,
+    pub total_share: Option<Decimal>,
+    pub float_share: Option<Decimal>,
+    pub free_share: Option<Decimal>,
     pub total_mv: Option<Decimal>,
     pub circ_mv: Option<Decimal>,
 }
@@ -179,6 +182,20 @@ pub struct MarketStockRepurchase {
     pub amount: Option<Decimal>,
     pub high_limit: Option<Decimal>,
     pub low_limit: Option<Decimal>,
+    pub raw_payload: Value,
+}
+
+/// 限售股解禁 (market_stock_share_float)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockShareFloat {
+    pub symbol: String,
+    pub ann_date: NaiveDate,
+    pub float_date: NaiveDate,
+    pub available_at: NaiveDate,
+    pub float_share: Option<Decimal>,
+    pub float_ratio: Option<Decimal>,
+    pub holder_name: String,
+    pub share_type: String,
     pub raw_payload: Value,
 }
 

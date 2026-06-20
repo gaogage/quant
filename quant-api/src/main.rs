@@ -238,6 +238,14 @@ async fn main() {
             post(routes::sync::phase7_coverage_expansion_runner),
         )
         .route(
+            "/api/v1/quant/data/phase7-share-float-coverage-batches",
+            post(routes::sync::phase7_share_float_coverage_batches),
+        )
+        .route(
+            "/api/v1/quant/data/phase7-share-float-readiness-audit",
+            post(routes::sync::phase7_share_float_readiness_audit),
+        )
+        .route(
             "/api/v1/quant/data/tushare/permission-smoke",
             post(routes::sync::tushare_permission_smoke),
         )
@@ -308,6 +316,10 @@ async fn main() {
             post(routes::factors::backfill_phase7_financial_quality_change_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-earnings-recovery-persistence-backfill/background",
+            post(routes::factors::backfill_phase7_earnings_recovery_persistence_background),
+        )
+        .route(
             "/api/v1/quant/factors/phase7-industry-residual-quality-backfill/background",
             post(routes::factors::backfill_phase7_industry_residual_quality_background),
         )
@@ -332,6 +344,10 @@ async fn main() {
             post(routes::factors::backfill_phase7_moneyflow_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-moneyflow-congestion-backfill/background",
+            post(routes::factors::backfill_phase7_moneyflow_congestion_background),
+        )
+        .route(
             "/api/v1/quant/factors/phase7-cashflow-quality-backfill/background",
             post(routes::factors::backfill_phase7_cashflow_quality_background),
         )
@@ -346,6 +362,26 @@ async fn main() {
         .route(
             "/api/v1/quant/factors/phase7-event-surprise-backfill/background",
             post(routes::factors::backfill_phase7_event_surprise_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-forecast-revision-surprise-backfill/background",
+            post(routes::factors::backfill_phase7_forecast_revision_surprise_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-repurchase-supply-shock-backfill/background",
+            post(routes::factors::backfill_phase7_repurchase_supply_shock_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-block-trade-supply-demand-backfill/background",
+            post(routes::factors::backfill_phase7_block_trade_supply_demand_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-unlock-supply-pressure-backfill/background",
+            post(routes::factors::backfill_phase7_unlock_supply_pressure_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-supply-float-shock-backfill/background",
+            post(routes::factors::backfill_phase7_supply_float_shock_background),
         )
         .route(
             "/api/v1/quant/factors/phase7-event-window-alpha-backfill/background",
@@ -411,6 +447,10 @@ async fn main() {
         .route(
             "/api/v1/quant/ml/feature-profiles/readiness/report",
             post(routes::optimization::report_feature_profile_readiness),
+        )
+        .route(
+            "/api/v1/quant/alpha-sources/diagnostics/report",
+            post(routes::optimization::report_alpha_source_diagnostics),
         )
         // 组合风控
         .route(
@@ -509,8 +549,16 @@ async fn main() {
             post(routes::optimization::launch_phase7_oos_profile_comparison_smoke),
         )
         .route(
+            "/api/v1/quant/optimizations/cleanup-stale",
+            post(routes::optimization::cleanup_stale_optimization_tasks),
+        )
+        .route(
             "/api/v1/quant/experiments/return-risk-cache-economics/report",
             post(routes::optimization::report_return_risk_cache_economics),
+        )
+        .route(
+            "/api/v1/quant/experiments/cleanup-stale",
+            post(routes::optimization::cleanup_stale_experiment_runs),
         )
         .route(
             "/api/v1/quant/experiments/{experiment_run_id}/sleeve-admission-diagnostics",

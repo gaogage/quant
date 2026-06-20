@@ -13,7 +13,7 @@ use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
     MarketStockExpress, MarketStockForecast, MarketStockMoneyflow, MarketStockRepurchase,
-    MarketTradeCalendar,
+    MarketStockShareFloat, MarketTradeCalendar,
 };
 use crate::repository;
 use crate::tushare::client::TushareClient;
@@ -521,6 +521,9 @@ fn daily_basic_row_from_map(item: &Map<String, Value>) -> Option<MarketStockDail
         pb: to_opt_decimal(get_f64(item, "pb")),
         ps_ttm: to_opt_decimal(get_f64(item, "ps_ttm")),
         dv_ttm: to_opt_decimal(get_f64(item, "dv_ttm")),
+        total_share: to_opt_decimal(get_f64(item, "total_share")),
+        float_share: to_opt_decimal(get_f64(item, "float_share")),
+        free_share: to_opt_decimal(get_f64(item, "free_share")),
         total_mv: to_opt_decimal(get_f64(item, "total_mv")),
         circ_mv: to_opt_decimal(get_f64(item, "circ_mv")),
     })
@@ -1490,6 +1493,128 @@ pub async fn sync_margin(
     Ok(total)
 }
 
+// ─── sync_block_trade (大宗交易) ─────────────────────────────────
+
+pub async fn sync_block_trade(
+    pool: &PgPool,
+    client: &TushareClient,
+    task_id: &str,
+    start: &str,
+    end: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    let mut total = 0usize;
+    let mut trade_dates: Vec<NaiveDate> = sqlx::query_scalar(
+        r#"
+        SELECT trade_date
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open
+          AND trade_date BETWEEN $1 AND $2
+        ORDER BY trade_date
+        "#,
+    )
+    .bind(s)
+    .bind(e)
+    .fetch_all(pool)
+    .await?;
+
+    if trade_dates.is_empty() {
+        let mut current = s;
+        while current <= e {
+            trade_dates.push(current);
+            current += chrono::Duration::days(1);
+        }
+    }
+
+    let total_days = trade_dates.len();
+    let progress_interval = event_sync_progress_interval(total_days, 100);
+    repository::heartbeat_sync_task(pool, task_id, total_days as i32, 0, 0, 0).await?;
+
+    for (day_idx, trade_date) in trade_dates.into_iter().enumerate() {
+        let trade_date_str = trade_date.format("%Y%m%d").to_string();
+        let resp = client
+            .block_trade(None, Some(&trade_date_str), None, None)
+            .await?;
+        if let Some(data) = resp.data {
+            for (idx, item) in data.items.into_iter().enumerate() {
+                let source_row_no = (idx + 1) as i32;
+                let code = item.first().and_then(|v| v.as_str()).unwrap_or("");
+                let date = item.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                if code.is_empty() || date.is_empty() {
+                    continue;
+                }
+                let numeric = |idx: usize| {
+                    item.get(idx)
+                        .and_then(|v| {
+                            v.as_f64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                        })
+                        .unwrap_or(0.0)
+                };
+                let price = numeric(2);
+                let vol = numeric(3);
+                let amount = numeric(4);
+                let buyer = item.get(5).and_then(|v| v.as_str()).unwrap_or("");
+                let seller = item.get(6).and_then(|v| v.as_str()).unwrap_or("");
+                let row_trade_date = NaiveDate::parse_from_str(date, "%Y%m%d")?;
+                let available_at = row_trade_date + chrono::Duration::days(1);
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO market_stock_block_trade (
+                        source_row_no, ts_code, trade_date, price, vol, amount, buyer, seller, available_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (trade_date, source_row_no)
+                    DO UPDATE SET ts_code = EXCLUDED.ts_code,
+                                  price = EXCLUDED.price,
+                                  vol = EXCLUDED.vol,
+                                  amount = EXCLUDED.amount,
+                                  buyer = EXCLUDED.buyer,
+                                  seller = EXCLUDED.seller,
+                                  available_at = EXCLUDED.available_at,
+                                  updated_at = now()
+                    "#,
+                )
+                .bind(source_row_no)
+                .bind(code)
+                .bind(row_trade_date)
+                .bind(price)
+                .bind(vol)
+                .bind(amount)
+                .bind(buyer)
+                .bind(seller)
+                .bind(available_at)
+                .execute(pool)
+                .await?;
+                total += 1;
+            }
+        }
+        info!(?trade_date, batch_rows = total, "Block trade 同步进度");
+        let completed_days = day_idx + 1;
+        if completed_days % progress_interval == 0 || completed_days == total_days {
+            let progress = if total_days > 0 {
+                ((completed_days * 100) / total_days).min(99) as i32
+            } else {
+                0
+            };
+            repository::heartbeat_sync_task(
+                pool,
+                task_id,
+                total_days as i32,
+                completed_days as i32,
+                0,
+                progress,
+            )
+            .await?;
+        }
+    }
+
+    Ok(total)
+}
+
 // ─── sync_trade_calendar ─────────────────────────────────────────
 
 pub async fn sync_trade_calendar(
@@ -2179,6 +2304,65 @@ pub async fn sync_financial_data_with_task(
 
 // ─── sync_forecast ───────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EventSymbolSyncAttempt {
+    source: String,
+    symbol: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    task_id: String,
+    status: &'static str,
+    row_count: i64,
+    error_message: Option<String>,
+}
+
+fn event_symbol_sync_attempt(
+    source: &str,
+    symbol: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    task_id: &str,
+    row_count: usize,
+    error_message: Option<String>,
+) -> EventSymbolSyncAttempt {
+    EventSymbolSyncAttempt {
+        source: source.to_string(),
+        symbol: symbol.to_string(),
+        start_date,
+        end_date,
+        task_id: task_id.to_string(),
+        status: if error_message.is_some() {
+            "failed"
+        } else {
+            "completed"
+        },
+        row_count: row_count as i64,
+        error_message,
+    }
+}
+
+fn event_sync_progress_interval(total: usize, max_interval: usize) -> usize {
+    (total / 10).clamp(1, max_interval.max(1))
+}
+
+async fn record_event_symbol_sync_attempt(
+    pool: &PgPool,
+    attempt: EventSymbolSyncAttempt,
+) -> Result<(), sqlx::Error> {
+    repository::upsert_sync_attempt(
+        pool,
+        &attempt.source,
+        &attempt.symbol,
+        attempt.start_date,
+        attempt.end_date,
+        &attempt.task_id,
+        attempt.status,
+        attempt.row_count,
+        attempt.error_message.as_deref(),
+    )
+    .await
+}
+
 fn forecast_row_from_map(item: &Map<String, Value>) -> Option<MarketStockForecast> {
     let ann_date = to_date(&get_str(item, "ann_date"))?;
     let end_date = to_date(&get_str(item, "end_date"))?;
@@ -2193,7 +2377,7 @@ fn forecast_row_from_map(item: &Map<String, Value>) -> Option<MarketStockForecas
         net_profit_min: to_opt_decimal(get_f64(item, "net_profit_min")),
         net_profit_max: to_opt_decimal(get_f64(item, "net_profit_max")),
         first_ann_date,
-        available_at: first_ann_date,
+        available_at: ann_date,
         summary: get_opt_str(item, "summary"),
         change_reason: get_opt_str(item, "change_reason"),
         raw_payload: raw_payload(item),
@@ -2241,14 +2425,18 @@ pub async fn sync_forecast(
     let fallback_symbols = repository::list_listed_stock_symbols(pool).await?;
     let symbols = list_or_stock_symbols(symbols, &fallback_symbols);
     let total = symbols.len();
+    let progress_interval = event_sync_progress_interval(total, 100);
     let mut ok = 0usize;
     let mut failed = 0usize;
     let mut total_rows = 0usize;
     let page_limit = 2000usize;
+    repository::update_sync_task(pool, &task_id, "running", total as i32, 0, 0).await?;
 
     for symbol in symbols {
         let mut offset = 0usize;
         let mut symbol_failed = false;
+        let mut symbol_rows = 0usize;
+        let mut symbol_error = None;
         loop {
             match client
                 .forecast(
@@ -2269,9 +2457,11 @@ pub async fn sync_forecast(
                     let rows: Vec<MarketStockForecast> =
                         maps.iter().filter_map(forecast_row_from_map).collect();
                     if !rows.is_empty() {
-                        total_rows +=
+                        let saved =
                             repository::upsert_forecast_batch(pool, &rows, dv_id, "tushare")
                                 .await?;
+                        symbol_rows += saved;
+                        total_rows += saved;
                     }
                     if row_count < page_limit {
                         break;
@@ -2279,17 +2469,33 @@ pub async fn sync_forecast(
                     offset += page_limit;
                 }
                 Err(error) => {
-                    warn!("{} forecast failed: {}", symbol, error);
+                    let error_message = error.to_string();
+                    warn!("{} forecast failed: {}", symbol, error_message);
                     failed += 1;
                     symbol_failed = true;
+                    symbol_error = Some(error_message);
                     break;
                 }
             }
         }
+        record_event_symbol_sync_attempt(
+            pool,
+            event_symbol_sync_attempt(
+                "forecast",
+                symbol,
+                s,
+                e,
+                &task_id,
+                symbol_rows,
+                symbol_error,
+            ),
+        )
+        .await?;
         if !symbol_failed {
             ok += 1;
         }
-        if ok % 100 == 0 {
+        let completed = ok + failed;
+        if completed % progress_interval == 0 || completed == total {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -2382,14 +2588,18 @@ pub async fn sync_express(
     let fallback_symbols = repository::list_listed_stock_symbols(pool).await?;
     let symbols = list_or_stock_symbols(symbols, &fallback_symbols);
     let total = symbols.len();
+    let progress_interval = event_sync_progress_interval(total, 100);
     let mut ok = 0usize;
     let mut failed = 0usize;
     let mut total_rows = 0usize;
     let page_limit = 2000usize;
+    repository::update_sync_task(pool, &task_id, "running", total as i32, 0, 0).await?;
 
     for symbol in symbols {
         let mut offset = 0usize;
         let mut symbol_failed = false;
+        let mut symbol_rows = 0usize;
+        let mut symbol_error = None;
         loop {
             match client
                 .express(
@@ -2409,8 +2619,10 @@ pub async fn sync_express(
                     let rows: Vec<MarketStockExpress> =
                         maps.iter().filter_map(express_row_from_map).collect();
                     if !rows.is_empty() {
-                        total_rows +=
+                        let saved =
                             repository::upsert_express_batch(pool, &rows, dv_id, "tushare").await?;
+                        symbol_rows += saved;
+                        total_rows += saved;
                     }
                     if row_count < page_limit {
                         break;
@@ -2418,17 +2630,25 @@ pub async fn sync_express(
                     offset += page_limit;
                 }
                 Err(error) => {
-                    warn!("{} express failed: {}", symbol, error);
+                    let error_message = error.to_string();
+                    warn!("{} express failed: {}", symbol, error_message);
                     failed += 1;
                     symbol_failed = true;
+                    symbol_error = Some(error_message);
                     break;
                 }
             }
         }
+        record_event_symbol_sync_attempt(
+            pool,
+            event_symbol_sync_attempt("express", symbol, s, e, &task_id, symbol_rows, symbol_error),
+        )
+        .await?;
         if !symbol_failed {
             ok += 1;
         }
-        if ok % 100 == 0 {
+        let completed = ok + failed;
+        if completed % progress_interval == 0 || completed == total {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -2463,14 +2683,20 @@ fn disclosure_date_row_from_map(item: &Map<String, Value>) -> Option<MarketStock
     let end_date = to_date(&get_str(item, "end_date"))?;
     let ann_date = to_date(&get_str(item, "ann_date"))?;
     let actual_date = to_date(&get_str(item, "actual_date"));
+    let modify_date = to_date(&get_str(item, "modify_date"));
+    let available_at = [Some(ann_date), actual_date, modify_date]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(ann_date);
     Some(MarketStockDisclosureDate {
         symbol: get_str(item, "ts_code"),
         end_date,
         ann_date,
         pre_date: to_date(&get_str(item, "pre_date")),
         actual_date,
-        modify_date: to_date(&get_str(item, "modify_date")),
-        available_at: actual_date.unwrap_or(ann_date),
+        modify_date,
+        available_at,
         raw_payload: raw_payload(item),
     })
 }
@@ -2523,12 +2749,19 @@ pub async fn sync_disclosure_date(
                 .collect::<std::collections::HashSet<_>>(),
         )
     };
+    let mut symbol_row_counts = symbols
+        .iter()
+        .map(|symbol| (symbol.clone(), 0usize))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut sync_error = None;
     let periods = quarter_end_dates_in_range(s, e);
     let total = periods.len();
+    let progress_interval = event_sync_progress_interval(total, 8);
     let mut ok = 0usize;
     let mut failed = 0usize;
     let mut total_rows = 0usize;
     let page_limit = 3000usize;
+    repository::update_sync_task(pool, &task_id, "running", total as i32, 0, 0).await?;
 
     for period in &periods {
         let mut offset = 0usize;
@@ -2560,6 +2793,11 @@ pub async fn sync_disclosure_date(
                                 .unwrap_or(true)
                         })
                         .collect();
+                    for row in &rows {
+                        if let Some(count) = symbol_row_counts.get_mut(&row.symbol) {
+                            *count += 1;
+                        }
+                    }
                     if !rows.is_empty() {
                         total_rows +=
                             repository::upsert_disclosure_date_batch(pool, &rows, dv_id, "tushare")
@@ -2576,6 +2814,10 @@ pub async fn sync_disclosure_date(
                         period.format("%Y%m%d"),
                         error
                     );
+                    sync_error = Some(append_symbol_error(
+                        sync_error,
+                        format!("period {} failed: {}", period.format("%Y%m%d"), error),
+                    ));
                     failed += 1;
                     period_failed = true;
                     break;
@@ -2585,7 +2827,8 @@ pub async fn sync_disclosure_date(
         if !period_failed {
             ok += 1;
         }
-        if ok % 8 == 0 {
+        let completed = ok + failed;
+        if completed % progress_interval == 0 || completed == total {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -2607,6 +2850,22 @@ pub async fn sync_disclosure_date(
         failed as i32,
     )
     .await?;
+
+    for (symbol, symbol_rows) in symbol_row_counts {
+        record_event_symbol_sync_attempt(
+            pool,
+            event_symbol_sync_attempt(
+                "disclosure_date",
+                &symbol,
+                s,
+                e,
+                &task_id,
+                symbol_rows,
+                sync_error.clone(),
+            ),
+        )
+        .await?;
+    }
     info!(
         "disclosure_date 同步完成: rows={}, ok={}, failed={}",
         total_rows, ok, failed
@@ -3057,6 +3316,177 @@ pub async fn sync_repurchase(
         "repurchase 同步完成: rows={}, failed={}",
         total_rows, failed
     );
+    Ok(total_rows)
+}
+
+// ─── sync_share_float ───────────────────────────────────────────
+
+fn share_float_row_from_map(item: &Map<String, Value>) -> Option<MarketStockShareFloat> {
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let float_date = to_date(&get_str(item, "float_date"))?;
+    Some(MarketStockShareFloat {
+        symbol: get_str(item, "ts_code"),
+        ann_date,
+        float_date,
+        available_at: ann_date,
+        float_share: to_opt_decimal(get_f64(item, "float_share")),
+        float_ratio: to_opt_decimal(get_f64(item, "float_ratio")),
+        holder_name: get_opt_str(item, "holder_name").unwrap_or_default(),
+        share_type: get_opt_str(item, "share_type").unwrap_or_default(),
+        raw_payload: raw_payload(item),
+    })
+}
+
+pub async fn sync_share_float(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "share_float",
+        "tushare",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "share float unlock-date sync",
+        "tushare",
+        &["market_stock_share_float"],
+        s,
+        e,
+    )
+    .await?;
+
+    let symbol_filter = if symbols.is_empty() {
+        None
+    } else {
+        Some(
+            symbols
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+    let mut failed = 0usize;
+    let mut total_rows = 0usize;
+    let mut rows_by_symbol = std::collections::HashMap::<String, usize>::new();
+    let mut sync_error: Option<String> = None;
+    let page_limit = 2000usize;
+    let mut offset = 0usize;
+
+    loop {
+        match client
+            .share_float(
+                None,
+                None,
+                Some(start),
+                Some(end),
+                Some(page_limit),
+                Some(offset),
+            )
+            .await
+        {
+            Ok(resp) => {
+                let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                let row_count = maps.len();
+                let rows: Vec<MarketStockShareFloat> = maps
+                    .iter()
+                    .filter_map(share_float_row_from_map)
+                    .filter(|row| {
+                        symbol_filter
+                            .as_ref()
+                            .map(|filter| filter.contains(&row.symbol))
+                            .unwrap_or(true)
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    for row in &rows {
+                        *rows_by_symbol.entry(row.symbol.clone()).or_insert(0) += 1;
+                    }
+                    total_rows +=
+                        repository::upsert_share_float_batch(pool, &rows, dv_id, "tushare").await?;
+                }
+                if row_count < page_limit {
+                    break;
+                }
+                offset += page_limit;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                warn!("share_float {}..{} failed: {}", start, end, message);
+                sync_error = Some(message);
+                failed += 1;
+                repository::update_sync_task_with_error(
+                    pool,
+                    &task_id,
+                    "partial",
+                    1,
+                    0,
+                    failed as i32,
+                    sync_error.as_deref().unwrap_or("share_float sync failed"),
+                )
+                .await?;
+                break;
+            }
+        }
+    }
+
+    if !symbols.is_empty() {
+        for symbol in symbols {
+            record_event_symbol_sync_attempt(
+                pool,
+                event_symbol_sync_attempt(
+                    "share_float",
+                    symbol,
+                    s,
+                    e,
+                    &task_id,
+                    rows_by_symbol.get(symbol).copied().unwrap_or_default(),
+                    sync_error.clone(),
+                ),
+            )
+            .await?;
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        &task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        1,
+        if failed > 0 { 0 } else { 1 },
+        failed as i32,
+    )
+    .await?;
+    info!(
+        "share_float 同步完成: rows={}, failed={}",
+        total_rows, failed
+    );
+    if let Some(message) = sync_error {
+        return Err(format!(
+            "share_float {}..{} partial: rows_saved={}, error={}",
+            start, end, total_rows, message
+        )
+        .into());
+    }
     Ok(total_rows)
 }
 
@@ -4000,6 +4430,9 @@ mod tests {
         item.insert("pb".to_string(), json!(0.72));
         item.insert("ps_ttm".to_string(), json!(1.15));
         item.insert("dv_ttm".to_string(), json!(4.2));
+        item.insert("total_share".to_string(), json!(1940591.8198));
+        item.insert("float_share".to_string(), json!(1940554.4675));
+        item.insert("free_share".to_string(), json!(1800000.25));
         item.insert("total_mv".to_string(), json!(123456.7));
         item.insert("circ_mv".to_string(), json!(98765.4));
 
@@ -4014,6 +4447,9 @@ mod tests {
         assert_eq!(row.pb, Decimal::from_f64_retain(0.72));
         assert_eq!(row.ps_ttm, Decimal::from_f64_retain(1.15));
         assert_eq!(row.dv_ttm, Decimal::from_f64_retain(4.2));
+        assert_eq!(row.total_share, Decimal::from_f64_retain(1940591.8198));
+        assert_eq!(row.float_share, Decimal::from_f64_retain(1940554.4675));
+        assert_eq!(row.free_share, Decimal::from_f64_retain(1800000.25));
         assert_eq!(row.total_mv, Decimal::from_f64_retain(123456.7));
         assert_eq!(row.circ_mv, Decimal::from_f64_retain(98765.4));
     }
@@ -4186,6 +4622,32 @@ mod tests {
     }
 
     #[test]
+    fn share_float_row_maps_ann_date_as_available_at_and_keeps_unlock_date() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("ann_date".to_string(), json!("20260115"));
+        item.insert("float_date".to_string(), json!("20260301"));
+        item.insert("float_share".to_string(), json!(12500.0));
+        item.insert("float_ratio".to_string(), json!(2.5));
+        item.insert("holder_name".to_string(), json!("Sample Holder"));
+        item.insert("share_type".to_string(), json!("首发原股东限售股份"));
+
+        let row = share_float_row_from_map(&item).expect("share float row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(row.ann_date, NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
+        assert_eq!(row.float_date, NaiveDate::from_ymd_opt(2026, 3, 1).unwrap());
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()
+        );
+        assert_eq!(row.float_share, Decimal::from_f64_retain(12500.0));
+        assert_eq!(row.float_ratio, Decimal::from_f64_retain(2.5));
+        assert_eq!(row.holder_name, "Sample Holder");
+        assert_eq!(row.share_type, "首发原股东限售股份");
+    }
+
+    #[test]
     fn quarter_end_dates_in_range_includes_supported_report_periods() {
         let start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
@@ -4203,7 +4665,54 @@ mod tests {
     }
 
     #[test]
-    fn forecast_row_maps_event_fields_and_available_at() {
+    fn event_sync_progress_interval_updates_bounded_tasks_before_completion() {
+        assert_eq!(event_sync_progress_interval(0, 100), 1);
+        assert_eq!(event_sync_progress_interval(20, 100), 2);
+        assert_eq!(event_sync_progress_interval(100, 100), 10);
+        assert_eq!(event_sync_progress_interval(2_000, 100), 100);
+        assert_eq!(event_sync_progress_interval(37, 8), 3);
+    }
+
+    #[test]
+    fn event_sync_attempt_status_tracks_symbol_success_and_row_count() {
+        let attempt = event_symbol_sync_attempt(
+            "forecast",
+            "000001.SZ",
+            NaiveDate::from_ymd_opt(2017, 1, 3).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 18).unwrap(),
+            "task-1",
+            3,
+            None,
+        );
+
+        assert_eq!(attempt.source, "forecast");
+        assert_eq!(attempt.symbol, "000001.SZ");
+        assert_eq!(attempt.status, "completed");
+        assert_eq!(attempt.row_count, 3);
+        assert_eq!(attempt.error_message, None);
+    }
+
+    #[test]
+    fn event_sync_attempt_preserves_failed_symbol_error() {
+        let attempt = event_symbol_sync_attempt(
+            "express",
+            "600000.SH",
+            NaiveDate::from_ymd_opt(2017, 1, 3).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 18).unwrap(),
+            "task-2",
+            0,
+            Some("permission denied".to_string()),
+        );
+
+        assert_eq!(attempt.source, "express");
+        assert_eq!(attempt.symbol, "600000.SH");
+        assert_eq!(attempt.status, "failed");
+        assert_eq!(attempt.row_count, 0);
+        assert_eq!(attempt.error_message.as_deref(), Some("permission denied"));
+    }
+
+    #[test]
+    fn forecast_row_uses_revision_ann_date_as_available_at() {
         let mut item = Map::new();
         item.insert("ts_code".to_string(), json!("600896.SH"));
         item.insert("ann_date".to_string(), json!("20240501"));
@@ -4224,7 +4733,7 @@ mod tests {
         assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2023, 12, 31).unwrap());
         assert_eq!(
             row.available_at,
-            NaiveDate::from_ymd_opt(2024, 4, 30).unwrap()
+            NaiveDate::from_ymd_opt(2024, 5, 1).unwrap()
         );
         assert_eq!(row.forecast_type, "续亏");
         assert_eq!(row.p_change_min, Decimal::from_f64_retain(4.6273));
@@ -4260,10 +4769,10 @@ mod tests {
     }
 
     #[test]
-    fn disclosure_date_row_maps_available_at_from_actual_date() {
+    fn disclosure_date_row_uses_latest_required_available_date() {
         let mut item = Map::new();
         item.insert("ts_code".to_string(), json!("000001.SZ"));
-        item.insert("ann_date".to_string(), json!("20240131"));
+        item.insert("ann_date".to_string(), json!("20240401"));
         item.insert("end_date".to_string(), json!("20231231"));
         item.insert("pre_date".to_string(), json!("20240315"));
         item.insert("actual_date".to_string(), json!("20240314"));
@@ -4275,7 +4784,7 @@ mod tests {
         assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2023, 12, 31).unwrap());
         assert_eq!(
             row.available_at,
-            NaiveDate::from_ymd_opt(2024, 3, 14).unwrap()
+            NaiveDate::from_ymd_opt(2024, 4, 1).unwrap()
         );
         assert_eq!(
             row.pre_date,
