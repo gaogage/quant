@@ -4,16 +4,19 @@ use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration as StdDuration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::model::entities::{
-    MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
+    MarketAdjustmentFactor, MarketFuturesDaily, MarketFuturesHoldingRank,
+    MarketFuturesWarehouseReceipt, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
     MarketStockExpress, MarketStockForecast, MarketStockIndustryMembershipPit,
-    MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat, MarketTradeCalendar,
+    MarketStockMainBusiness, MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat,
+    MarketTradeCalendar,
 };
 use crate::repository;
 use crate::tushare::client::TushareClient;
@@ -67,6 +70,39 @@ fn quarter_end_dates_in_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate
 
 fn raw_payload(item: &Map<String, Value>) -> Value {
     Value::Object(item.clone())
+}
+
+fn value_key_part(item: &Map<String, Value>, key: &str) -> String {
+    match item.get(key) {
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(Value::Number(value)) => value.to_string(),
+        Some(Value::Bool(value)) => value.to_string(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => value.to_string(),
+    }
+}
+
+fn stable_source_row_hash(parts: &[String]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:016x}", hash)
+}
+
+fn main_business_attempt_source(symbols: &[String]) -> &'static str {
+    if symbols.is_empty() {
+        "main_business"
+    } else {
+        "main_business_sample"
+    }
 }
 
 fn list_or_stock_symbols<'a>(symbols: &'a [String], fallback: &'a [String]) -> &'a [String] {
@@ -3337,6 +3373,529 @@ fn share_float_row_from_map(item: &Map<String, Value>) -> Option<MarketStockShar
     })
 }
 
+fn main_business_row_from_map(
+    item: &Map<String, Value>,
+    available_at: NaiveDate,
+) -> Option<MarketStockMainBusiness> {
+    let symbol = get_str(item, "ts_code");
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    let business_type = get_opt_str(item, "bz_code").unwrap_or_else(|| "P".to_string());
+    let bz_item = get_opt_str(item, "bz_item").unwrap_or_default();
+    let bz_code = get_opt_str(item, "bz_code").unwrap_or_default();
+    let curr_type = get_opt_str(item, "curr_type").unwrap_or_default();
+    let update_flag = get_opt_str(item, "update_flag").unwrap_or_default();
+    if symbol.is_empty() || available_at < end_date {
+        return None;
+    }
+    let source_row_hash = stable_source_row_hash(&[
+        symbol.clone(),
+        end_date.to_string(),
+        business_type.clone(),
+        bz_item.clone(),
+        bz_code.clone(),
+        value_key_part(item, "bz_sales"),
+        value_key_part(item, "bz_profit"),
+        value_key_part(item, "bz_cost"),
+        curr_type.clone(),
+        update_flag.clone(),
+    ]);
+
+    Some(MarketStockMainBusiness {
+        symbol,
+        end_date,
+        available_at,
+        business_type,
+        bz_item,
+        bz_code,
+        bz_sales: to_opt_decimal(get_f64(item, "bz_sales")),
+        bz_profit: to_opt_decimal(get_f64(item, "bz_profit")),
+        bz_cost: to_opt_decimal(get_f64(item, "bz_cost")),
+        curr_type,
+        update_flag,
+        source_row_hash,
+        raw_payload: raw_payload(item),
+    })
+}
+
+// ─── sync_futures_price_chain ───────────────────────────────────
+
+fn futures_price_chain_available_at(trade_date: NaiveDate) -> NaiveDate {
+    trade_date + Duration::days(1)
+}
+
+fn required_text(item: &Map<String, Value>, key: &str) -> Option<String> {
+    let value = get_str(item, key).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn futures_daily_row_from_map(item: &Map<String, Value>) -> Option<MarketFuturesDaily> {
+    let ts_code = required_text(item, "ts_code")?;
+    let trade_date = to_date(&get_str(item, "trade_date"))?;
+    Some(MarketFuturesDaily {
+        ts_code,
+        trade_date,
+        pre_close: to_opt_decimal(get_f64(item, "pre_close")),
+        pre_settle: to_opt_decimal(get_f64(item, "pre_settle")),
+        open: to_opt_decimal(get_f64(item, "open")),
+        high: to_opt_decimal(get_f64(item, "high")),
+        low: to_opt_decimal(get_f64(item, "low")),
+        close: to_opt_decimal(get_f64(item, "close")),
+        settle: to_opt_decimal(get_f64(item, "settle")),
+        change1: to_opt_decimal(get_f64(item, "change1")),
+        change2: to_opt_decimal(get_f64(item, "change2")),
+        vol: to_opt_decimal(get_f64(item, "vol")),
+        amount: to_opt_decimal(get_f64(item, "amount")),
+        oi: to_opt_decimal(get_f64(item, "oi")),
+        oi_chg: to_opt_decimal(get_f64(item, "oi_chg")),
+        delv_settle: to_opt_decimal(get_f64(item, "delv_settle")),
+        available_at: futures_price_chain_available_at(trade_date),
+        source_published_at: None,
+        raw_payload: raw_payload(item),
+    })
+}
+
+fn futures_warehouse_receipt_row_from_map(
+    item: &Map<String, Value>,
+) -> Option<MarketFuturesWarehouseReceipt> {
+    let trade_date = to_date(&get_str(item, "trade_date"))?;
+    let symbol = required_text(item, "symbol")?;
+    let exchange = required_text(item, "exchange")?;
+    let warehouse = required_text(item, "warehouse")?;
+    Some(MarketFuturesWarehouseReceipt {
+        trade_date,
+        symbol,
+        exchange,
+        fut_name: get_opt_str(item, "fut_name"),
+        warehouse,
+        wh_id: get_opt_str(item, "wh_id"),
+        pre_vol: to_opt_decimal(get_f64(item, "pre_vol")),
+        vol: to_opt_decimal(get_f64(item, "vol")),
+        vol_chg: to_opt_decimal(get_f64(item, "vol_chg")),
+        area: get_opt_str(item, "area"),
+        year: get_opt_str(item, "year"),
+        grade: get_opt_str(item, "grade"),
+        brand: get_opt_str(item, "brand"),
+        place: get_opt_str(item, "place"),
+        pd: to_opt_decimal(get_f64(item, "pd")),
+        is_ct: get_opt_str(item, "is_ct"),
+        unit: get_opt_str(item, "unit"),
+        available_at: futures_price_chain_available_at(trade_date),
+        source_published_at: None,
+        raw_payload: raw_payload(item),
+    })
+}
+
+fn futures_holding_rank_row_from_map(
+    item: &Map<String, Value>,
+) -> Option<MarketFuturesHoldingRank> {
+    let trade_date = to_date(&get_str(item, "trade_date"))?;
+    let symbol = required_text(item, "symbol")?;
+    let exchange = required_text(item, "exchange")?;
+    let broker = required_text(item, "broker")?;
+    Some(MarketFuturesHoldingRank {
+        trade_date,
+        symbol,
+        exchange,
+        broker,
+        vol: to_opt_decimal(get_f64(item, "vol")),
+        vol_chg: to_opt_decimal(get_f64(item, "vol_chg")),
+        long_hld: to_opt_decimal(get_f64(item, "long_hld")),
+        long_chg: to_opt_decimal(get_f64(item, "long_chg")),
+        short_hld: to_opt_decimal(get_f64(item, "short_hld")),
+        short_chg: to_opt_decimal(get_f64(item, "short_chg")),
+        available_at: futures_price_chain_available_at(trade_date),
+        source_published_at: None,
+        raw_payload: raw_payload(item),
+    })
+}
+
+fn futures_price_chain_dates(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    if start > end {
+        return Vec::new();
+    }
+    let mut dates = Vec::new();
+    let mut current = start;
+    while current <= end {
+        dates.push(current);
+        current += Duration::days(1);
+    }
+    dates
+}
+
+fn futures_price_chain_attempt_key(
+    trade_date: NaiveDate,
+    symbol: Option<&str>,
+    exchange: Option<&str>,
+) -> String {
+    let mut key = format!("trade_date:{}", trade_date.format("%Y%m%d"));
+    if let Some(value) = symbol.filter(|value| !value.trim().is_empty()) {
+        key.push_str(":symbol:");
+        key.push_str(value.trim());
+    }
+    if let Some(value) = exchange.filter(|value| !value.trim().is_empty()) {
+        key.push_str(":exchange:");
+        key.push_str(value.trim());
+    }
+    key
+}
+
+pub async fn sync_futures_price_chain(
+    pool: &PgPool,
+    client: &TushareClient,
+    task_id: &str,
+    symbols: &[String],
+    exchanges: &[String],
+    start: &str,
+    end: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    if s > e {
+        return Err("futures_price_chain start_date cannot be after end_date".into());
+    }
+    let dates = futures_price_chain_dates(s, e);
+    repository::create_sync_task_with_context(
+        pool,
+        task_id,
+        "futures_price_chain",
+        "tushare:fut_daily+fut_wsr+fut_holding",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        task_id,
+        "futures price-chain raw PIT sync",
+        "tushare:futures_price_chain",
+        &[
+            "market_futures_daily",
+            "market_futures_warehouse_receipt",
+            "market_futures_holding_rank",
+        ],
+        s,
+        e,
+    )
+    .await?;
+
+    let symbol_filters: Vec<Option<&str>> = if symbols.is_empty() {
+        vec![None]
+    } else {
+        symbols.iter().map(|value| Some(value.as_str())).collect()
+    };
+    let exchange_filters: Vec<Option<&str>> = if exchanges.is_empty() {
+        vec![None]
+    } else {
+        exchanges.iter().map(|value| Some(value.as_str())).collect()
+    };
+    let total_units = dates.len() * symbol_filters.len() * exchange_filters.len() * 3;
+    let progress_interval = event_sync_progress_interval(total_units, 20);
+    repository::heartbeat_sync_task(pool, task_id, total_units as i32, 0, 0, 0).await?;
+
+    const PAGE_LIMIT: usize = 5_000;
+    let mut completed_units = 0usize;
+    let mut failed_units = 0usize;
+    let mut total_rows = 0usize;
+
+    for trade_date in dates {
+        let trade_date_str = trade_date.format("%Y%m%d").to_string();
+        for symbol_filter in &symbol_filters {
+            for exchange_filter in &exchange_filters {
+                let attempt_key =
+                    futures_price_chain_attempt_key(trade_date, *symbol_filter, *exchange_filter);
+
+                let mut daily_rows = Vec::new();
+                let mut daily_offset = 0usize;
+                loop {
+                    let resp = client
+                        .fut_daily(
+                            *symbol_filter,
+                            Some(&trade_date_str),
+                            *exchange_filter,
+                            None,
+                            None,
+                            Some(PAGE_LIMIT),
+                            Some(daily_offset),
+                        )
+                        .await;
+                    match resp {
+                        Ok(resp) => {
+                            let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                            let row_count = maps.len();
+                            daily_rows.extend(maps.iter().filter_map(futures_daily_row_from_map));
+                            if row_count < PAGE_LIMIT {
+                                break;
+                            }
+                            daily_offset += PAGE_LIMIT;
+                        }
+                        Err(error) => {
+                            failed_units += 1;
+                            let message = error.to_string();
+                            repository::upsert_sync_attempt(
+                                pool,
+                                "futures_price_chain_daily",
+                                &attempt_key,
+                                trade_date,
+                                trade_date,
+                                task_id,
+                                "failed",
+                                daily_rows.len() as i64,
+                                Some(message.as_str()),
+                            )
+                            .await?;
+                            repository::update_sync_task_with_error(
+                                pool,
+                                task_id,
+                                "partial",
+                                total_units as i32,
+                                completed_units as i32,
+                                failed_units as i32,
+                                &message,
+                            )
+                            .await?;
+                            return Err(format!(
+                                "futures_price_chain fut_daily {} failed: {}",
+                                attempt_key, message
+                            )
+                            .into());
+                        }
+                    }
+                }
+                let saved = repository::upsert_futures_daily_batch(
+                    pool,
+                    &daily_rows,
+                    task_id,
+                    "tushare:fut_daily",
+                )
+                .await?;
+                total_rows += saved;
+                completed_units += 1;
+                repository::upsert_sync_attempt(
+                    pool,
+                    "futures_price_chain_daily",
+                    &attempt_key,
+                    trade_date,
+                    trade_date,
+                    task_id,
+                    "completed",
+                    saved as i64,
+                    None,
+                )
+                .await?;
+
+                let mut wsr_rows = Vec::new();
+                let mut wsr_offset = 0usize;
+                loop {
+                    let resp = client
+                        .fut_wsr(
+                            Some(&trade_date_str),
+                            *symbol_filter,
+                            None,
+                            None,
+                            *exchange_filter,
+                            Some(PAGE_LIMIT),
+                            Some(wsr_offset),
+                        )
+                        .await;
+                    match resp {
+                        Ok(resp) => {
+                            let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                            let row_count = maps.len();
+                            wsr_rows.extend(
+                                maps.iter()
+                                    .filter_map(futures_warehouse_receipt_row_from_map),
+                            );
+                            if row_count < PAGE_LIMIT {
+                                break;
+                            }
+                            wsr_offset += PAGE_LIMIT;
+                        }
+                        Err(error) => {
+                            failed_units += 1;
+                            let message = error.to_string();
+                            repository::upsert_sync_attempt(
+                                pool,
+                                "futures_price_chain_wsr",
+                                &attempt_key,
+                                trade_date,
+                                trade_date,
+                                task_id,
+                                "failed",
+                                wsr_rows.len() as i64,
+                                Some(message.as_str()),
+                            )
+                            .await?;
+                            repository::update_sync_task_with_error(
+                                pool,
+                                task_id,
+                                "partial",
+                                total_units as i32,
+                                completed_units as i32,
+                                failed_units as i32,
+                                &message,
+                            )
+                            .await?;
+                            return Err(format!(
+                                "futures_price_chain fut_wsr {} failed: {}",
+                                attempt_key, message
+                            )
+                            .into());
+                        }
+                    }
+                }
+                let saved = repository::upsert_futures_warehouse_receipt_batch(
+                    pool,
+                    &wsr_rows,
+                    task_id,
+                    "tushare:fut_wsr",
+                )
+                .await?;
+                total_rows += saved;
+                completed_units += 1;
+                repository::upsert_sync_attempt(
+                    pool,
+                    "futures_price_chain_wsr",
+                    &attempt_key,
+                    trade_date,
+                    trade_date,
+                    task_id,
+                    "completed",
+                    saved as i64,
+                    None,
+                )
+                .await?;
+
+                let mut holding_rows = Vec::new();
+                let mut holding_offset = 0usize;
+                loop {
+                    let resp = client
+                        .fut_holding(
+                            Some(&trade_date_str),
+                            *symbol_filter,
+                            None,
+                            None,
+                            *exchange_filter,
+                            Some(PAGE_LIMIT),
+                            Some(holding_offset),
+                        )
+                        .await;
+                    match resp {
+                        Ok(resp) => {
+                            let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                            let row_count = maps.len();
+                            holding_rows
+                                .extend(maps.iter().filter_map(futures_holding_rank_row_from_map));
+                            if row_count < PAGE_LIMIT {
+                                break;
+                            }
+                            holding_offset += PAGE_LIMIT;
+                        }
+                        Err(error) => {
+                            failed_units += 1;
+                            let message = error.to_string();
+                            repository::upsert_sync_attempt(
+                                pool,
+                                "futures_price_chain_holding",
+                                &attempt_key,
+                                trade_date,
+                                trade_date,
+                                task_id,
+                                "failed",
+                                holding_rows.len() as i64,
+                                Some(message.as_str()),
+                            )
+                            .await?;
+                            repository::update_sync_task_with_error(
+                                pool,
+                                task_id,
+                                "partial",
+                                total_units as i32,
+                                completed_units as i32,
+                                failed_units as i32,
+                                &message,
+                            )
+                            .await?;
+                            return Err(format!(
+                                "futures_price_chain fut_holding {} failed: {}",
+                                attempt_key, message
+                            )
+                            .into());
+                        }
+                    }
+                }
+                let saved = repository::upsert_futures_holding_rank_batch(
+                    pool,
+                    &holding_rows,
+                    task_id,
+                    "tushare:fut_holding",
+                )
+                .await?;
+                total_rows += saved;
+                completed_units += 1;
+                repository::upsert_sync_attempt(
+                    pool,
+                    "futures_price_chain_holding",
+                    &attempt_key,
+                    trade_date,
+                    trade_date,
+                    task_id,
+                    "completed",
+                    saved as i64,
+                    None,
+                )
+                .await?;
+
+                if completed_units % progress_interval == 0 || completed_units == total_units {
+                    let progress = if total_units > 0 {
+                        ((completed_units * 100) / total_units).min(99) as i32
+                    } else {
+                        0
+                    };
+                    repository::heartbeat_sync_task(
+                        pool,
+                        task_id,
+                        total_units as i32,
+                        completed_units as i32,
+                        failed_units as i32,
+                        progress,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        task_id,
+        if failed_units > 0 {
+            "partial"
+        } else {
+            "completed"
+        },
+        total_units as i32,
+        completed_units as i32,
+        failed_units as i32,
+    )
+    .await?;
+    info!(
+        total_rows,
+        completed_units, failed_units, "futures_price_chain 同步完成"
+    );
+    Ok(total_rows)
+}
+
 pub async fn sync_share_float(
     pool: &PgPool,
     client: &TushareClient,
@@ -3487,6 +4046,321 @@ pub async fn sync_share_float(
         )
         .into());
     }
+    Ok(total_rows)
+}
+
+async fn load_main_business_available_at_for_period(
+    pool: &PgPool,
+    period: NaiveDate,
+    symbols: &[String],
+) -> Result<std::collections::BTreeMap<String, NaiveDate>, sqlx::Error> {
+    let mut unique_symbols: Vec<String> = symbols
+        .iter()
+        .filter(|symbol| !symbol.is_empty())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if unique_symbols.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    unique_symbols.sort();
+
+    let mut mapped = std::collections::BTreeMap::new();
+    let financial_rows = sqlx::query_as::<_, (String, NaiveDate)>(
+        r#"
+        WITH input AS (
+            SELECT DISTINCT symbol
+            FROM UNNEST($1::text[]) AS input(symbol)
+        )
+        SELECT input.symbol, MIN(fs.ann_date) AS available_at
+        FROM input
+        JOIN market_financial_statement fs
+          ON fs.ts_code = input.symbol
+         AND fs.end_date = $2
+         AND fs.ann_date >= $2
+        GROUP BY input.symbol
+        "#,
+    )
+    .bind(&unique_symbols)
+    .bind(period)
+    .fetch_all(pool)
+    .await?;
+    for (symbol, available_at) in financial_rows {
+        mapped.insert(symbol, available_at);
+    }
+
+    let missing_symbols: Vec<String> = unique_symbols
+        .into_iter()
+        .filter(|symbol| !mapped.contains_key(symbol))
+        .collect();
+    if missing_symbols.is_empty() {
+        return Ok(mapped);
+    }
+
+    let disclosure_rows = sqlx::query_as::<_, (String, NaiveDate)>(
+        r#"
+        WITH input AS (
+            SELECT DISTINCT symbol
+            FROM UNNEST($1::text[]) AS input(symbol)
+        )
+        SELECT input.symbol, MIN(disclosure.available_at) AS available_at
+        FROM input
+        JOIN market_stock_disclosure_date disclosure
+          ON disclosure.symbol = input.symbol
+         AND disclosure.end_date = $2
+         AND disclosure.available_at >= $2
+        GROUP BY input.symbol
+        "#,
+    )
+    .bind(&missing_symbols)
+    .bind(period)
+    .fetch_all(pool)
+    .await?;
+    for (symbol, available_at) in disclosure_rows {
+        mapped.insert(symbol, available_at);
+    }
+    Ok(mapped)
+}
+
+async fn load_main_business_market_universe_for_period(
+    pool: &PgPool,
+    period: NaiveDate,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        r#"
+        SELECT symbol
+        FROM market_stock
+        WHERE symbol IS NOT NULL
+          AND (list_date IS NULL OR list_date <= $1)
+          AND (delist_date IS NULL OR delist_date >= $1)
+        "#,
+    )
+    .bind(period)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(symbol,)| symbol).collect())
+}
+
+pub async fn sync_main_business(
+    pool: &PgPool,
+    client: &TushareClient,
+    task_id: &str,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    business_type: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    let periods = quarter_end_dates_in_range(s, e);
+    repository::create_sync_task_with_context(
+        pool,
+        task_id,
+        "main_business",
+        "tushare:fina_mainbz_vip",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        task_id,
+        "main business composition PIT sync",
+        "tushare:fina_mainbz_vip",
+        &["market_stock_main_business"],
+        s,
+        e,
+    )
+    .await?;
+
+    let requested_symbol_filter = if symbols.is_empty() {
+        None
+    } else {
+        Some(symbols.iter().cloned().collect::<HashSet<_>>())
+    };
+    let total_periods = periods.len();
+    let progress_interval = event_sync_progress_interval(total_periods, 20);
+    let attempt_source = main_business_attempt_source(symbols);
+    repository::heartbeat_sync_task(pool, task_id, total_periods as i32, 0, 0, 0).await?;
+
+    let mut total_rows = 0usize;
+    let mut failed = 0usize;
+    let mut total_missing_available_at = 0usize;
+    const PAGE_LIMIT: usize = 5_000;
+
+    for (period_idx, period) in periods.into_iter().enumerate() {
+        let period_str = period.format("%Y%m%d").to_string();
+        let period_attempt_key = format!("period:{}", period_str);
+        let period_symbol_filter = match &requested_symbol_filter {
+            Some(filter) => filter.clone(),
+            None => load_main_business_market_universe_for_period(pool, period).await?,
+        };
+        let mut offset = 0usize;
+        let mut period_saved = 0usize;
+        let mut period_raw_rows = 0usize;
+        let mut period_out_of_universe_rows = 0usize;
+        let mut period_missing_available_at = 0usize;
+
+        loop {
+            let resp = match client
+                .fina_mainbz_vip(
+                    &period_str,
+                    Some(business_type),
+                    Some(PAGE_LIMIT),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(resp) => resp,
+                Err(error) => {
+                    failed += 1;
+                    let message = error.to_string();
+                    repository::upsert_sync_attempt(
+                        pool,
+                        attempt_source,
+                        &period_attempt_key,
+                        period,
+                        period,
+                        task_id,
+                        "failed",
+                        period_saved as i64,
+                        Some(message.as_str()),
+                    )
+                    .await?;
+                    repository::update_sync_task_with_error(
+                        pool,
+                        task_id,
+                        "partial",
+                        total_periods as i32,
+                        period_idx as i32,
+                        failed as i32,
+                        &message,
+                    )
+                    .await?;
+                    return Err(format!("main_business {} failed: {}", period_str, message).into());
+                }
+            };
+
+            let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+            let row_count = maps.len();
+            period_raw_rows += row_count;
+            let page_symbols: Vec<String> = maps
+                .iter()
+                .map(|item| get_str(item, "ts_code"))
+                .filter(|symbol| period_symbol_filter.contains(symbol))
+                .collect();
+            let available_by_symbol =
+                load_main_business_available_at_for_period(pool, period, &page_symbols).await?;
+            let mut rows = Vec::new();
+            for item in &maps {
+                let symbol = get_str(item, "ts_code");
+                if !period_symbol_filter.contains(&symbol) {
+                    period_out_of_universe_rows += 1;
+                    continue;
+                }
+                let Some(available_at) = available_by_symbol.get(&symbol).copied() else {
+                    period_missing_available_at += 1;
+                    continue;
+                };
+                if let Some(row) = main_business_row_from_map(item, available_at) {
+                    if row.end_date == period {
+                        rows.push(row);
+                    }
+                }
+            }
+            if !rows.is_empty() {
+                period_saved +=
+                    repository::upsert_main_business_batch(pool, &rows, task_id, "tushare").await?;
+            }
+            if row_count < PAGE_LIMIT {
+                break;
+            }
+            offset += PAGE_LIMIT;
+        }
+
+        total_rows += period_saved;
+        total_missing_available_at += period_missing_available_at;
+        let attempt_note = if period_missing_available_at > 0 || period_out_of_universe_rows > 0 {
+            let mut parts = Vec::new();
+            if period_missing_available_at > 0 {
+                parts.push(format!(
+                    "missing_available_at_rows={}",
+                    period_missing_available_at
+                ));
+            }
+            if period_out_of_universe_rows > 0 {
+                parts.push(format!(
+                    "out_of_universe_rows={}",
+                    period_out_of_universe_rows
+                ));
+            }
+            parts.push(format!("raw_rows={}", period_raw_rows));
+            Some(parts.join(", "))
+        } else {
+            None
+        };
+        repository::upsert_sync_attempt(
+            pool,
+            attempt_source,
+            &period_attempt_key,
+            period,
+            period,
+            task_id,
+            "completed",
+            period_saved as i64,
+            attempt_note.as_deref(),
+        )
+        .await?;
+
+        let completed_periods = period_idx + 1;
+        if completed_periods % progress_interval == 0 || completed_periods == total_periods {
+            let progress = if total_periods > 0 {
+                ((completed_periods * 100) / total_periods).min(99) as i32
+            } else {
+                0
+            };
+            repository::heartbeat_sync_task(
+                pool,
+                task_id,
+                total_periods as i32,
+                completed_periods as i32,
+                failed as i32,
+                progress,
+            )
+            .await?;
+        }
+        info!(
+            %period_str,
+            period_saved,
+            period_raw_rows,
+            period_out_of_universe_rows,
+            period_missing_available_at,
+            total_rows,
+            "main_business period sync complete"
+        );
+    }
+
+    repository::update_sync_task(
+        pool,
+        task_id,
+        if failed > 0 { "partial" } else { "completed" },
+        total_periods as i32,
+        total_periods.saturating_sub(failed) as i32,
+        failed as i32,
+    )
+    .await?;
+    info!(
+        total_rows,
+        total_missing_available_at, "main_business 同步完成"
+    );
     Ok(total_rows)
 }
 
@@ -4887,6 +5761,95 @@ mod tests {
         assert_eq!(row.float_ratio, Decimal::from_f64_retain(2.5));
         assert_eq!(row.holder_name, "Sample Holder");
         assert_eq!(row.share_type, "首发原股东限售股份");
+    }
+
+    #[test]
+    fn main_business_row_uses_joined_available_at_and_stable_row_hash() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("end_date".to_string(), json!("20231231"));
+        item.insert("bz_item".to_string(), json!("零售金融业务"));
+        item.insert("bz_code".to_string(), json!("P"));
+        item.insert("bz_sales".to_string(), json!(123456.78));
+        item.insert("bz_profit".to_string(), json!(34567.89));
+        item.insert("bz_cost".to_string(), json!(88888.89));
+        item.insert("curr_type".to_string(), json!("CNY"));
+        item.insert("update_flag".to_string(), json!("0"));
+        let available_at = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+
+        let row = main_business_row_from_map(&item, available_at).expect("main business row");
+        let same_row =
+            main_business_row_from_map(&item, available_at).expect("same main business row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2023, 12, 31).unwrap());
+        assert_eq!(row.available_at, available_at);
+        assert_eq!(row.business_type, "P");
+        assert_eq!(row.bz_item, "零售金融业务");
+        assert_eq!(row.bz_sales, Decimal::from_f64_retain(123456.78));
+        assert_eq!(row.bz_profit, Decimal::from_f64_retain(34567.89));
+        assert_eq!(row.bz_cost, Decimal::from_f64_retain(88888.89));
+        assert_eq!(row.source_row_hash.len(), 16);
+        assert_eq!(row.source_row_hash, same_row.source_row_hash);
+    }
+
+    #[test]
+    fn main_business_sample_sync_uses_separate_attempt_source() {
+        assert_eq!(main_business_attempt_source(&[]), "main_business");
+        assert_eq!(
+            main_business_attempt_source(&["000001.SZ".to_string()]),
+            "main_business_sample"
+        );
+    }
+
+    #[test]
+    fn futures_price_chain_rows_use_next_day_available_at_for_pit_safety() {
+        let mut daily = Map::new();
+        daily.insert("ts_code".to_string(), json!("CU1811.SHF"));
+        daily.insert("trade_date".to_string(), json!("20181113"));
+        daily.insert("close".to_string(), json!(48900.0));
+        daily.insert("settle".to_string(), json!(48820.0));
+        daily.insert("vol".to_string(), json!(153210.0));
+        daily.insert("oi".to_string(), json!(232410.0));
+
+        let row = futures_daily_row_from_map(&daily).expect("futures daily row");
+
+        assert_eq!(row.ts_code, "CU1811.SHF");
+        assert_eq!(
+            row.trade_date,
+            NaiveDate::from_ymd_opt(2018, 11, 13).unwrap()
+        );
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2018, 11, 14).unwrap()
+        );
+        assert_eq!(row.close, Decimal::from_f64_retain(48900.0));
+        assert_eq!(row.raw_payload["ts_code"], json!("CU1811.SHF"));
+    }
+
+    #[test]
+    fn futures_price_chain_rows_require_native_keys_before_syncing() {
+        let mut wsr = Map::new();
+        wsr.insert("trade_date".to_string(), json!("20181113"));
+        wsr.insert("symbol".to_string(), json!("CU"));
+        wsr.insert("exchange".to_string(), json!("SHFE"));
+        wsr.insert("warehouse".to_string(), json!("上港物流"));
+        wsr.insert("vol_chg".to_string(), json!(-500.0));
+
+        let row = futures_warehouse_receipt_row_from_map(&wsr).expect("warehouse row");
+        assert_eq!(row.symbol, "CU");
+        assert_eq!(row.exchange, "SHFE");
+        assert_eq!(row.warehouse, "上港物流");
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2018, 11, 14).unwrap()
+        );
+
+        let mut missing_broker = Map::new();
+        missing_broker.insert("trade_date".to_string(), json!("20181113"));
+        missing_broker.insert("symbol".to_string(), json!("CU"));
+        missing_broker.insert("exchange".to_string(), json!("SHFE"));
+        assert!(futures_holding_rank_row_from_map(&missing_broker).is_none());
     }
 
     #[test]

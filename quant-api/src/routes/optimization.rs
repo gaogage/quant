@@ -193,6 +193,38 @@ pub struct AlphaSourceDiagnosticsRequest {
     pub max_exposure_regime_days: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MainBusinessDiagnosticsRequest {
+    pub start_date: String,
+    pub end_date: String,
+    #[serde(default)]
+    pub business_type: Option<String>,
+    #[serde(default)]
+    pub universe_profile: Option<String>,
+    #[serde(default)]
+    pub profiles: Option<Vec<String>>,
+    #[serde(default)]
+    pub min_day_coverage_ratio: Option<f64>,
+    #[serde(default)]
+    pub min_daily_rows: Option<i64>,
+    #[serde(default)]
+    pub min_p95_daily_row_ratio: Option<f64>,
+    #[serde(default)]
+    pub min_daily_coverage_ratio: Option<f64>,
+    #[serde(default)]
+    pub persist_report: Option<bool>,
+    #[serde(default)]
+    pub return_horizons: Option<Vec<i64>>,
+    #[serde(default)]
+    pub bucket_count: Option<i64>,
+    #[serde(default)]
+    pub max_rank_ic_days: Option<i64>,
+    #[serde(default)]
+    pub include_exposure_regime_metrics: Option<bool>,
+    #[serde(default)]
+    pub max_exposure_regime_days: Option<i64>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OosCostCapacityPerturbationRequest {
     pub name: Option<String>,
@@ -3619,6 +3651,16 @@ pub async fn report_alpha_source_diagnostics(
     }
 }
 
+pub async fn report_main_business_diagnostics(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MainBusinessDiagnosticsRequest>,
+) -> impl IntoResponse {
+    match build_main_business_diagnostics_report_from_request(&state.db, &req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
 pub async fn get_experiment_run(
     State(state): State<Arc<AppState>>,
     Path(experiment_run_id): Path<String>,
@@ -6468,6 +6510,208 @@ fn alpha_source_research_diagnostics_options(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainBusinessDiagnosticsUniverse {
+    ListedNonSt,
+    MainChinextNonSt,
+}
+
+impl MainBusinessDiagnosticsUniverse {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ListedNonSt => "listed_non_st",
+            Self::MainChinextNonSt => "main_chinext_non_st",
+        }
+    }
+
+    fn market_filter_sql(self) -> &'static str {
+        match self {
+            Self::ListedNonSt => "",
+            Self::MainChinextNonSt => "AND ms.market IN ('主板', '创业板')",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::ListedNonSt => "all listed non-ST A-share symbols with daily bars",
+            Self::MainChinextNonSt => {
+                "main-board and ChiNext listed non-ST symbols only; STAR market excluded by explicit scope"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MainBusinessDiagnosticsProfile {
+    SalesYoy,
+    ProfitYoy,
+    GrossMarginDeltaYoy,
+    SegmentConcentrationInverse,
+}
+
+impl MainBusinessDiagnosticsProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SalesYoy => "sales_yoy",
+            Self::ProfitYoy => "profit_yoy",
+            Self::GrossMarginDeltaYoy => "gross_margin_delta_yoy",
+            Self::SegmentConcentrationInverse => "segment_concentration_inverse",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SalesYoy => "YoY主营收入增长",
+            Self::ProfitYoy => "YoY主营利润增长",
+            Self::GrossMarginDeltaYoy => "主营毛利率同比变化",
+            Self::SegmentConcentrationInverse => "业务分散度",
+        }
+    }
+
+    fn score_expression_sql(self) -> &'static str {
+        match self {
+            Self::SalesYoy => {
+                "CASE WHEN sales > 0 AND prev_sales > 0 THEN LN(sales / prev_sales) END"
+            }
+            Self::ProfitYoy => {
+                "CASE WHEN profit > 0 AND prev_profit > 0 THEN LN(profit / prev_profit) END"
+            }
+            Self::GrossMarginDeltaYoy => {
+                "CASE
+                    WHEN sales > 0 AND prev_sales > 0 AND profit IS NOT NULL AND prev_profit IS NOT NULL
+                    THEN (profit / sales) - (prev_profit / prev_sales)
+                 END"
+            }
+            Self::SegmentConcentrationInverse => {
+                "CASE WHEN sales_hhi IS NOT NULL THEN -sales_hhi END"
+            }
+        }
+    }
+}
+
+fn main_business_diagnostics_business_type(req: &MainBusinessDiagnosticsRequest) -> String {
+    req.business_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("P")
+        .to_ascii_uppercase()
+}
+
+fn main_business_diagnostics_universe_profile(
+    req: &MainBusinessDiagnosticsRequest,
+) -> Result<MainBusinessDiagnosticsUniverse, String> {
+    match req
+        .universe_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("listed_non_st")
+    {
+        "listed_non_st" | "listed-non-st" => Ok(MainBusinessDiagnosticsUniverse::ListedNonSt),
+        "main_chinext_non_st" | "main-chinext-non-st" => {
+            Ok(MainBusinessDiagnosticsUniverse::MainChinextNonSt)
+        }
+        other => Err(format!(
+            "unsupported main_business universe_profile '{other}'; supported profiles are listed_non_st and main_chinext_non_st"
+        )),
+    }
+}
+
+fn parse_main_business_diagnostics_profile(
+    value: &str,
+) -> Result<MainBusinessDiagnosticsProfile, String> {
+    match value.trim() {
+        "sales_yoy" | "sales-yoy" => Ok(MainBusinessDiagnosticsProfile::SalesYoy),
+        "profit_yoy" | "profit-yoy" => Ok(MainBusinessDiagnosticsProfile::ProfitYoy),
+        "gross_margin_delta_yoy" | "gross-margin-delta-yoy" => {
+            Ok(MainBusinessDiagnosticsProfile::GrossMarginDeltaYoy)
+        }
+        "segment_concentration_inverse" | "segment-concentration-inverse" => {
+            Ok(MainBusinessDiagnosticsProfile::SegmentConcentrationInverse)
+        }
+        other => Err(format!(
+            "main_business diagnostics profile '{other}' is not pre-registered; supported profiles are sales_yoy, profit_yoy, gross_margin_delta_yoy and segment_concentration_inverse"
+        )),
+    }
+}
+
+fn main_business_diagnostics_profiles(
+    req: &MainBusinessDiagnosticsRequest,
+) -> Result<Vec<MainBusinessDiagnosticsProfile>, String> {
+    let requested = req.profiles.clone().unwrap_or_else(|| {
+        vec![
+            "sales_yoy".to_string(),
+            "profit_yoy".to_string(),
+            "gross_margin_delta_yoy".to_string(),
+            "segment_concentration_inverse".to_string(),
+        ]
+    });
+    let mut profiles = BTreeSet::new();
+    for profile in requested {
+        let trimmed = profile.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        profiles.insert(parse_main_business_diagnostics_profile(trimmed)?);
+    }
+    if profiles.is_empty() {
+        return Err(
+            "main_business diagnostics requires at least one pre-registered profile".into(),
+        );
+    }
+    Ok(profiles.into_iter().collect())
+}
+
+fn main_business_diagnostics_thresholds(
+    req: &MainBusinessDiagnosticsRequest,
+) -> ReadinessThresholds {
+    ReadinessThresholds::from_options(
+        req.min_day_coverage_ratio,
+        req.min_daily_rows,
+        req.min_p95_daily_row_ratio,
+    )
+}
+
+fn bounded_main_business_f64(value: Option<f64>, default: f64, min: f64, max: f64) -> f64 {
+    value
+        .filter(|candidate| candidate.is_finite())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn main_business_daily_coverage_ratio_threshold(req: &MainBusinessDiagnosticsRequest) -> f64 {
+    bounded_main_business_f64(req.min_daily_coverage_ratio, 0.90, 0.0, 1.0)
+}
+
+fn main_business_diagnostics_persist_default(value: Option<bool>) -> bool {
+    value.unwrap_or(true)
+}
+
+fn main_business_research_diagnostics_options(
+    req: &MainBusinessDiagnosticsRequest,
+) -> AlphaSourceResearchDiagnosticsOptions {
+    let proxy = AlphaSourceDiagnosticsRequest {
+        combo_name: "phase7_main_business_research_only_v1".to_string(),
+        version: None,
+        start_date: req.start_date.clone(),
+        end_date: req.end_date.clone(),
+        alpha_admission_gate_id: None,
+        universe_profile: req.universe_profile.clone(),
+        min_day_coverage_ratio: req.min_day_coverage_ratio,
+        min_daily_rows: req.min_daily_rows,
+        min_p95_daily_row_ratio: req.min_p95_daily_row_ratio,
+        persist_report: req.persist_report,
+        include_research_metrics: Some(true),
+        return_horizons: req.return_horizons.clone(),
+        bucket_count: req.bucket_count,
+        max_rank_ic_days: req.max_rank_ic_days,
+        include_exposure_regime_metrics: Some(req.include_exposure_regime_metrics.unwrap_or(true)),
+        max_exposure_regime_days: req.max_exposure_regime_days,
+    };
+    alpha_source_research_diagnostics_options(&proxy)
+}
+
 fn parse_feature_profile_readiness_date(value: &str, field: &str) -> Result<NaiveDate, String> {
     let trimmed = value.trim();
     NaiveDate::parse_from_str(trimmed, "%Y%m%d")
@@ -6722,6 +6966,853 @@ async fn build_alpha_source_diagnostics_report(
             }
         }
     }))
+}
+
+#[derive(Debug, Clone)]
+struct MainBusinessRawSummary {
+    raw_rows: i64,
+    raw_symbols: i64,
+    report_periods: i64,
+    pit_violation_rows: i64,
+    out_of_market_stock_rows: i64,
+    period_universe_mismatch_rows: i64,
+    first_end_date: Option<NaiveDate>,
+    last_end_date: Option<NaiveDate>,
+    first_available_at: Option<NaiveDate>,
+    last_available_at: Option<NaiveDate>,
+}
+
+#[derive(Debug, Clone)]
+struct MainBusinessDailyCoverageRow {
+    trade_date: NaiveDate,
+    eligible_symbols: i64,
+    covered_symbols: i64,
+}
+
+impl MainBusinessDailyCoverageRow {
+    fn coverage_ratio(&self) -> f64 {
+        if self.eligible_symbols <= 0 {
+            0.0
+        } else {
+            self.covered_symbols.max(0) as f64 / self.eligible_symbols as f64
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MainBusinessScoreRow {
+    trade_date: NaiveDate,
+    symbol: String,
+    score: f64,
+    amount: Option<f64>,
+    circ_mv: Option<f64>,
+    total_mv: Option<f64>,
+    industry: Option<String>,
+}
+
+async fn build_main_business_diagnostics_report_from_request(
+    db: &sqlx::PgPool,
+    req: &MainBusinessDiagnosticsRequest,
+) -> Result<Value, String> {
+    let business_type = main_business_diagnostics_business_type(req);
+    let universe = main_business_diagnostics_universe_profile(req)?;
+    let profiles = main_business_diagnostics_profiles(req)?;
+    let start = parse_feature_profile_readiness_date(&req.start_date, "start_date")?;
+    let end = parse_feature_profile_readiness_date(&req.end_date, "end_date")?;
+    if start > end {
+        return Err("main_business diagnostics start_date cannot be after end_date".into());
+    }
+    let thresholds = main_business_diagnostics_thresholds(req);
+    let min_daily_coverage_ratio = main_business_daily_coverage_ratio_threshold(req);
+    let research_options = main_business_research_diagnostics_options(req);
+    let report = build_main_business_diagnostics_report(
+        db,
+        &business_type,
+        universe,
+        &profiles,
+        start,
+        end,
+        thresholds,
+        min_daily_coverage_ratio,
+        research_options,
+    )
+    .await?;
+    let experiment_run_id = if main_business_diagnostics_persist_default(req.persist_report) {
+        Some(
+            persist_main_business_diagnostics_report(
+                db,
+                &business_type,
+                universe,
+                &profiles,
+                &report,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    Ok(json!({
+        "experiment_run_id": experiment_run_id,
+        "report": report,
+    }))
+}
+
+async fn build_main_business_diagnostics_report(
+    db: &sqlx::PgPool,
+    business_type: &str,
+    universe: MainBusinessDiagnosticsUniverse,
+    profiles: &[MainBusinessDiagnosticsProfile],
+    start: NaiveDate,
+    end: NaiveDate,
+    thresholds: ReadinessThresholds,
+    min_daily_coverage_ratio: f64,
+    research_options: AlphaSourceResearchDiagnosticsOptions,
+) -> Result<Value, String> {
+    let raw_summary = load_main_business_raw_summary(db, business_type).await?;
+    let daily_coverage =
+        load_main_business_daily_coverage(db, business_type, universe, start, end).await?;
+    let expected_days = readiness_expected_open_day_count(db, start, end).await?;
+    let effective_start = daily_coverage
+        .iter()
+        .find(|row| {
+            row.covered_symbols >= thresholds.min_daily_rows
+                && row.coverage_ratio() >= min_daily_coverage_ratio
+        })
+        .map(|row| row.trade_date);
+    let effective_coverage = daily_coverage
+        .iter()
+        .filter(|row| {
+            effective_start
+                .map(|date| row.trade_date >= date)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let effective_expected_days = match effective_start {
+        Some(effective_start) => {
+            readiness_expected_open_day_count(db, effective_start, end).await?
+        }
+        None => 0,
+    };
+    let effective_counts = effective_coverage
+        .iter()
+        .filter(|row| row.covered_symbols > 0)
+        .map(|row| row.covered_symbols)
+        .collect::<Vec<_>>();
+    let effective_daily_rows = effective_coverage
+        .iter()
+        .filter(|row| row.covered_symbols > 0)
+        .map(|row| (row.trade_date, row.covered_symbols))
+        .collect::<Vec<_>>();
+    let distribution = daily_count_distribution(&effective_counts, thresholds);
+    let effective_covered_days = effective_daily_rows.len() as i64;
+    let effective_day_coverage_ratio = if effective_expected_days <= 0 {
+        0.0
+    } else {
+        effective_covered_days as f64 / effective_expected_days as f64
+    };
+    let daily_coverage_ratios = effective_coverage
+        .iter()
+        .map(MainBusinessDailyCoverageRow::coverage_ratio)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    let sorted_daily_coverage_ratios = sorted_finite(daily_coverage_ratios.iter().copied());
+    let median_daily_coverage_ratio = percentile(&sorted_daily_coverage_ratios, 0.50);
+    let min_daily_coverage_ratio_actual =
+        sorted_daily_coverage_ratios.first().copied().unwrap_or(0.0);
+    let prefix_without_snapshot_days = daily_coverage
+        .iter()
+        .filter(|row| {
+            effective_start
+                .map(|date| row.trade_date < date)
+                .unwrap_or(true)
+        })
+        .count() as i64;
+    let gates = vec![
+        profile_readiness_gate(
+            "main_business_raw_rows",
+            raw_summary.raw_rows > 0,
+            json!(raw_summary.raw_rows),
+            json!("> 0"),
+            "market_stock_main_business must contain PIT-mapped raw rows before diagnostics",
+        ),
+        profile_readiness_gate(
+            "main_business_raw_pit_contract",
+            raw_summary.pit_violation_rows == 0,
+            json!(raw_summary.pit_violation_rows),
+            json!(0),
+            "market_stock_main_business.available_at must be on or after end_date",
+        ),
+        profile_readiness_gate(
+            "main_business_period_universe_clean",
+            raw_summary.out_of_market_stock_rows == 0
+                && raw_summary.period_universe_mismatch_rows == 0,
+            json!({
+                "out_of_market_stock_rows": raw_summary.out_of_market_stock_rows,
+                "period_universe_mismatch_rows": raw_summary.period_universe_mismatch_rows,
+            }),
+            json!({"out_of_market_stock_rows": 0, "period_universe_mismatch_rows": 0}),
+            "raw rows must not include non-market_stock symbols or pre-listing/post-delist report periods",
+        ),
+        profile_readiness_gate(
+            "main_business_effective_snapshot_start",
+            effective_start.is_some(),
+            json!(effective_start),
+            json!("first date with enough covered symbols and coverage ratio"),
+            "diagnostics use the first stable PIT snapshot date instead of treating the pre-disclosure prefix as tradable coverage",
+        ),
+        profile_readiness_gate(
+            "main_business_effective_day_coverage",
+            effective_day_coverage_ratio >= thresholds.min_day_coverage_ratio,
+            json!(effective_day_coverage_ratio),
+            json!(thresholds.min_day_coverage_ratio),
+            "after effective_start, PIT snapshots must cover enough expected open days",
+        ),
+        profile_readiness_gate(
+            "main_business_daily_median_symbols",
+            distribution.p50_rows >= thresholds.min_daily_rows,
+            json!(distribution.p50_rows),
+            json!(thresholds.min_daily_rows),
+            "daily PIT snapshots must have enough cross-sectional breadth for RankIC/group-return diagnostics",
+        ),
+        profile_readiness_gate(
+            "main_business_daily_median_coverage_ratio",
+            median_daily_coverage_ratio >= min_daily_coverage_ratio,
+            json!(median_daily_coverage_ratio),
+            json!(min_daily_coverage_ratio),
+            "covered symbols should be a stable share of the listed non-ST universe",
+        ),
+    ];
+    let passed = alpha_source_diagnostics_gates_passed(&gates);
+    let research_metrics = build_main_business_research_diagnostics(
+        db,
+        business_type,
+        universe,
+        profiles,
+        thresholds,
+        &effective_daily_rows,
+        &research_options,
+    )
+    .await?;
+
+    Ok(json!({
+        "diagnostics_type": "main_business_source",
+        "source": "tushare:fina_mainbz_vip",
+        "business_type": business_type,
+        "universe_profile": universe.as_str(),
+        "requested_start_date": start,
+        "requested_end_date": end,
+        "effective_start_date": effective_start,
+        "effective_end_date": if effective_start.is_some() { Some(end) } else { None },
+        "passed": passed,
+        "level": alpha_source_diagnostics_level(passed),
+        "thresholds": {
+            "min_day_coverage_ratio": thresholds.min_day_coverage_ratio,
+            "min_daily_rows": thresholds.min_daily_rows,
+            "min_p95_daily_row_ratio": thresholds.min_p95_daily_row_ratio,
+            "min_daily_coverage_ratio": min_daily_coverage_ratio,
+        },
+        "summary": {
+            "raw_rows": raw_summary.raw_rows,
+            "raw_symbols": raw_summary.raw_symbols,
+            "report_periods": raw_summary.report_periods,
+            "pit_violation_rows": raw_summary.pit_violation_rows,
+            "out_of_market_stock_rows": raw_summary.out_of_market_stock_rows,
+            "period_universe_mismatch_rows": raw_summary.period_universe_mismatch_rows,
+            "first_end_date": raw_summary.first_end_date,
+            "last_end_date": raw_summary.last_end_date,
+            "first_available_at": raw_summary.first_available_at,
+            "last_available_at": raw_summary.last_available_at,
+            "requested_open_days": expected_days,
+            "prefix_without_stable_snapshot_days": prefix_without_snapshot_days,
+            "effective_expected_open_days": effective_expected_days,
+            "effective_covered_days": effective_covered_days,
+            "effective_missing_open_days": (effective_expected_days - effective_covered_days).max(0),
+            "effective_day_coverage_ratio": effective_day_coverage_ratio,
+            "daily_symbols": {
+                "min": distribution.min_rows,
+                "p50": distribution.p50_rows,
+                "p95": distribution.p95_rows,
+                "max": distribution.max_rows,
+                "weak_day_count": distribution.weak_day_count,
+                "weak_day_threshold": distribution.weak_day_threshold,
+            },
+            "daily_universe_coverage_ratio": {
+                "min": min_daily_coverage_ratio_actual,
+                "p50": median_daily_coverage_ratio,
+                "p95": percentile(&sorted_daily_coverage_ratios, 0.95),
+            },
+        },
+        "profiles": profiles.iter().map(|profile| json!({
+            "profile": profile.as_str(),
+            "label": profile.label(),
+        })).collect::<Vec<_>>(),
+        "gates": gates,
+        "research_metrics": research_metrics,
+        "scope": {
+            "point_in_time": "market_stock_main_business.available_at <= trade_date; report values are never joined by end_date alone",
+            "raw_source_policy": "uses only period-universe-clean raw rows already persisted in market_stock_main_business",
+            "research_stage": "coverage_readiness_rankic_group_decay_turnover_capacity_exposure_regime",
+            "not_a_factor_backfill": true,
+            "does_not_write_multi_factor_value": true,
+            "forward_return_labels": "future returns are used only as diagnostic labels and are not persisted to factor/model inputs",
+            "universe": universe.description(),
+        },
+        "repair": {
+            "repairable": false,
+            "reason": "negative economics or insufficient effective coverage must stop this source; do not repair by using pre-listing data, static backfill, sign flip, OOS reverse tuning, or v19 train-selection admission"
+        }
+    }))
+}
+
+async fn load_main_business_raw_summary(
+    db: &sqlx::PgPool,
+    business_type: &str,
+) -> Result<MainBusinessRawSummary, String> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+        ),
+    >(
+        "SELECT
+             COUNT(*)::int8 AS raw_rows,
+             COUNT(DISTINCT mb.symbol)::int8 AS raw_symbols,
+             COUNT(DISTINCT mb.end_date)::int8 AS report_periods,
+             COUNT(*) FILTER (WHERE mb.available_at < mb.end_date)::int8 AS pit_violation_rows,
+             COUNT(*) FILTER (WHERE ms.symbol IS NULL)::int8 AS out_of_market_stock_rows,
+             COUNT(*) FILTER (
+               WHERE ms.symbol IS NOT NULL
+                 AND (ms.list_date > mb.end_date OR (ms.delist_date IS NOT NULL AND ms.delist_date < mb.end_date))
+             )::int8 AS period_universe_mismatch_rows,
+             MIN(mb.end_date) AS first_end_date,
+             MAX(mb.end_date) AS last_end_date,
+             MIN(mb.available_at) AS first_available_at,
+             MAX(mb.available_at) AS last_available_at
+         FROM market_stock_main_business mb
+         LEFT JOIN market_stock ms ON ms.symbol = mb.symbol
+         WHERE mb.business_type = $1",
+    )
+    .bind(business_type)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to load main_business raw summary: {error}"))?;
+    Ok(MainBusinessRawSummary {
+        raw_rows: row.0,
+        raw_symbols: row.1,
+        report_periods: row.2,
+        pit_violation_rows: row.3,
+        out_of_market_stock_rows: row.4,
+        period_universe_mismatch_rows: row.5,
+        first_end_date: row.6,
+        last_end_date: row.7,
+        first_available_at: row.8,
+        last_available_at: row.9,
+    })
+}
+
+fn main_business_daily_coverage_sql(universe: MainBusinessDiagnosticsUniverse) -> String {
+    format!(
+        "WITH reports AS (
+             SELECT symbol, end_date, MIN(available_at) AS available_at
+             FROM market_stock_main_business
+             WHERE business_type = $1
+             GROUP BY symbol, end_date
+         ),
+         intervals AS (
+             SELECT symbol,
+                    end_date,
+                    available_at,
+                    LEAD(available_at) OVER (PARTITION BY symbol ORDER BY available_at, end_date) AS next_available_at
+             FROM reports
+         ),
+         days AS (
+             SELECT trade_date
+             FROM market_trade_calendar
+             WHERE exchange = 'SSE'
+               AND is_open = true
+               AND trade_date >= $2
+               AND trade_date <= $3
+         )
+         SELECT d.trade_date,
+                COUNT(DISTINCT db.symbol) FILTER (WHERE ms.symbol IS NOT NULL)::int8 AS eligible_symbols,
+                COUNT(DISTINCT i.symbol) FILTER (WHERE ms.symbol IS NOT NULL)::int8 AS covered_symbols
+         FROM days d
+         LEFT JOIN market_stock_daily_bar db
+           ON db.trade_date = d.trade_date
+         LEFT JOIN market_stock ms
+           ON ms.symbol = db.symbol
+          AND ms.list_date <= d.trade_date
+          AND (ms.delist_date IS NULL OR ms.delist_date >= d.trade_date)
+          AND COALESCE(ms.is_st, false) = false
+          {market_filter}
+         LEFT JOIN intervals i
+           ON i.symbol = db.symbol
+          AND i.available_at <= d.trade_date
+          AND (i.next_available_at IS NULL OR i.next_available_at > d.trade_date)
+         GROUP BY d.trade_date
+         ORDER BY d.trade_date",
+        market_filter = universe.market_filter_sql()
+    )
+}
+
+async fn load_main_business_daily_coverage(
+    db: &sqlx::PgPool,
+    business_type: &str,
+    universe: MainBusinessDiagnosticsUniverse,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<MainBusinessDailyCoverageRow>, String> {
+    let sql = main_business_daily_coverage_sql(universe);
+    let rows = sqlx::query_as::<_, (NaiveDate, i64, i64)>(&sql)
+        .bind(business_type)
+        .bind(start)
+        .bind(end)
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("Failed to load main_business daily coverage: {error}"))?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(trade_date, eligible_symbols, covered_symbols)| MainBusinessDailyCoverageRow {
+                trade_date,
+                eligible_symbols,
+                covered_symbols,
+            },
+        )
+        .collect())
+}
+
+async fn build_main_business_research_diagnostics(
+    db: &sqlx::PgPool,
+    business_type: &str,
+    universe: MainBusinessDiagnosticsUniverse,
+    profiles: &[MainBusinessDiagnosticsProfile],
+    thresholds: ReadinessThresholds,
+    daily_rows: &[(NaiveDate, i64)],
+    options: &AlphaSourceResearchDiagnosticsOptions,
+) -> Result<Value, String> {
+    if daily_rows.is_empty() {
+        return Ok(json!({
+            "included": false,
+            "reason": "no effective PIT main_business daily snapshots passed coverage/readiness gates",
+        }));
+    }
+    let min_daily_sample_size = thresholds.min_daily_rows.max(100);
+    let sampled_trade_dates =
+        sample_alpha_source_research_days(daily_rows, options.max_rank_ic_days);
+    let exposure_regime_trade_dates =
+        sample_alpha_source_research_days(daily_rows, options.max_exposure_regime_days);
+    let regime_split_trade_dates =
+        sample_alpha_source_regime_days(&sampled_trade_dates, &exposure_regime_trade_dates);
+    let market_regimes = if options.include_exposure_regime_metrics {
+        load_alpha_source_market_regimes(db, &regime_split_trade_dates, 60).await?
+    } else {
+        BTreeMap::new()
+    };
+    let exposure_regime_trade_date_set = exposure_regime_trade_dates
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let exposure_market_regimes = market_regimes
+        .iter()
+        .filter(|(trade_date, _)| exposure_regime_trade_date_set.contains(trade_date))
+        .map(|(trade_date, regime)| (*trade_date, regime.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let all_score_dates = sampled_trade_dates
+        .iter()
+        .chain(exposure_regime_trade_dates.iter())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut profile_reports = Vec::new();
+    for profile in profiles {
+        let score_rows =
+            load_main_business_score_rows(db, business_type, universe, *profile, &all_score_dates)
+                .await?;
+        let mut rank_ic_by_horizon = Vec::new();
+        let mut group_return_by_horizon = Vec::new();
+        let mut turnover_capacity_by_horizon = Vec::new();
+        let mut regime_split_by_horizon = Vec::new();
+        let mut decay_curve = Vec::new();
+        for horizon_days in &options.return_horizons {
+            let labeled_rows = label_main_business_score_rows(
+                db,
+                &score_rows,
+                &sampled_trade_dates,
+                *horizon_days,
+            )
+            .await?;
+            let rank_ic_rows = daily_rank_ic_from_labeled_rows(
+                *horizon_days,
+                &labeled_rows,
+                min_daily_sample_size,
+            );
+            let rank_ic_summary = summarize_rank_ic_samples(*horizon_days, &rank_ic_rows);
+            let bucket_rows = group_return_rows_from_labeled_rows(
+                &labeled_rows,
+                min_daily_sample_size,
+                options.bucket_count,
+            );
+            let group_summary =
+                summarize_group_return_buckets(*horizon_days, options.bucket_count, &bucket_rows);
+            let turnover_capacity_summary = turnover_capacity_summary_from_labeled_rows(
+                *horizon_days,
+                &labeled_rows,
+                min_daily_sample_size,
+                options.bucket_count,
+            );
+            if options.include_exposure_regime_metrics {
+                regime_split_by_horizon.push(json!({
+                    "horizon_days": horizon_days,
+                    "regimes": regime_split_summaries_from_labeled_rows(
+                        *horizon_days,
+                        &labeled_rows,
+                        &market_regimes,
+                        min_daily_sample_size,
+                        options.bucket_count,
+                    )
+                    .iter()
+                    .map(AlphaSourceRegimeSplitSummary::to_json)
+                    .collect::<Vec<_>>()
+                }));
+            }
+            decay_curve.push(json!({
+                "horizon_days": horizon_days,
+                "mean_rank_ic": rank_ic_summary.mean_rank_ic,
+                "median_rank_ic": rank_ic_summary.median_rank_ic,
+                "high_minus_low_spread": group_summary.high_minus_low_spread,
+                "sampled_days": rank_ic_summary.sampled_days.min(turnover_capacity_summary.sampled_days),
+            }));
+            rank_ic_by_horizon.push(rank_ic_summary.to_json());
+            group_return_by_horizon.push(group_summary.to_json());
+            turnover_capacity_by_horizon.push(turnover_capacity_summary.to_json());
+        }
+        let exposure_regime_metrics = if options.include_exposure_regime_metrics {
+            let exposure_rows = score_rows
+                .iter()
+                .filter(|row| exposure_regime_trade_date_set.contains(&row.trade_date))
+                .map(|row| AlphaSourceExposureRow {
+                    trade_date: row.trade_date,
+                    score: row.score,
+                    amount: row.amount,
+                    circ_mv: row.circ_mv,
+                    total_mv: row.total_mv,
+                    industry: row.industry.clone(),
+                })
+                .collect::<Vec<_>>();
+            let exposure_summary = high_bucket_exposure_summary_from_rows(
+                &exposure_rows,
+                options.bucket_count,
+                min_daily_sample_size,
+            );
+            json!({
+                "included": true,
+                "research_only": true,
+                "high_score_bucket_exposure": exposure_summary.to_json(),
+                "market_regime_distribution": market_regime_distribution(&exposure_market_regimes),
+                "market_regime_samples": exposure_market_regimes.values().map(AlphaSourceMarketRegime::to_json).collect::<Vec<_>>(),
+                "regime_split_by_horizon": regime_split_by_horizon,
+                "input_policy": {
+                    "exposure": "same-day amount/circ_mv/total_mv are diagnostic descriptors; market_stock.industry is current/static and not promoted to PIT factor input",
+                    "regime": "regime labels use only index bars with trade_date <= sample trade_date",
+                    "forward_return_labels": "future returns are post-hoc diagnostics labels only"
+                }
+            })
+        } else {
+            json!({
+                "included": false,
+                "reason": "set include_exposure_regime_metrics=true to include P3.10D exposure/regime diagnostics"
+            })
+        };
+        profile_reports.push(json!({
+            "profile": profile.as_str(),
+            "label": profile.label(),
+            "score_policy": "pre-registered fixed transformation over the latest PIT main_business report; no OOS sign flip or weight tuning",
+            "score_rows": score_rows.len(),
+            "rank_ic_by_horizon": rank_ic_by_horizon,
+            "group_return_by_horizon": group_return_by_horizon,
+            "decay_curve": decay_curve,
+            "turnover_capacity_by_horizon": turnover_capacity_by_horizon,
+            "exposure_regime_metrics": exposure_regime_metrics,
+        }));
+    }
+    Ok(json!({
+        "included": true,
+        "research_only": true,
+        "label_policy": "Forward returns compound market_stock_daily_bar.pct_change over the next N SSE open days for diagnostics only; labels are not persisted to factor/model inputs.",
+        "options": {
+            "return_horizons": options.return_horizons,
+            "bucket_count": options.bucket_count,
+            "max_rank_ic_days": options.max_rank_ic_days,
+            "include_exposure_regime_metrics": options.include_exposure_regime_metrics,
+            "max_exposure_regime_days": options.max_exposure_regime_days,
+            "sampled_trade_dates": sampled_trade_dates,
+            "exposure_regime_sampled_trade_dates": exposure_regime_trade_dates,
+            "min_daily_sample_size": min_daily_sample_size,
+            "sampling": "evenly spaced eligible PIT main_business days within the effective range",
+            "forward_calendar": "market_trade_calendar exchange=SSE, is_open=true",
+        },
+        "profiles": profile_reports,
+    }))
+}
+
+fn main_business_score_rows_sql(
+    profile: MainBusinessDiagnosticsProfile,
+    universe: MainBusinessDiagnosticsUniverse,
+) -> String {
+    let score_expression = profile.score_expression_sql();
+    format!(
+        "WITH report_base AS (
+             SELECT symbol,
+                    end_date,
+                    MIN(available_at) AS available_at,
+                    SUM(bz_sales) AS sales,
+                    SUM(bz_profit) AS profit,
+                    CASE
+                      WHEN SUM(GREATEST(COALESCE(bz_sales, 0), 0)) > 0
+                      THEN SUM(POWER(GREATEST(COALESCE(bz_sales, 0), 0), 2))
+                           / POWER(SUM(GREATEST(COALESCE(bz_sales, 0), 0)), 2)
+                    END AS sales_hhi
+             FROM market_stock_main_business
+             WHERE business_type = $1
+             GROUP BY symbol, end_date
+         ),
+         report_metrics AS (
+             SELECT *,
+                    CASE
+                      WHEN EXTRACT(MONTH FROM end_date) = 6 THEN 'H1'
+                      WHEN EXTRACT(MONTH FROM end_date) = 12 THEN 'FY'
+                      ELSE TO_CHAR(end_date, 'MMDD')
+                    END AS period_bucket,
+                    LAG(sales) OVER (
+                      PARTITION BY symbol,
+                        CASE
+                          WHEN EXTRACT(MONTH FROM end_date) = 6 THEN 'H1'
+                          WHEN EXTRACT(MONTH FROM end_date) = 12 THEN 'FY'
+                          ELSE TO_CHAR(end_date, 'MMDD')
+                        END
+                      ORDER BY end_date
+                    ) AS prev_sales,
+                    LAG(profit) OVER (
+                      PARTITION BY symbol,
+                        CASE
+                          WHEN EXTRACT(MONTH FROM end_date) = 6 THEN 'H1'
+                          WHEN EXTRACT(MONTH FROM end_date) = 12 THEN 'FY'
+                          ELSE TO_CHAR(end_date, 'MMDD')
+                        END
+                      ORDER BY end_date
+                    ) AS prev_profit
+             FROM report_base
+         ),
+         intervals AS (
+             SELECT *,
+                    LEAD(available_at) OVER (PARTITION BY symbol ORDER BY available_at, end_date) AS next_available_at
+             FROM report_metrics
+         ),
+         scored AS (
+             SELECT sample.trade_date,
+                    db.symbol,
+                    ({score_expression})::float8 AS score,
+                    db.amount::float8 AS amount,
+                    basic.circ_mv::float8 AS circ_mv,
+                    basic.total_mv::float8 AS total_mv,
+                    ms.industry
+             FROM unnest($2::date[]) AS sample(trade_date)
+             JOIN market_stock_daily_bar db
+               ON db.trade_date = sample.trade_date
+             JOIN market_stock ms
+               ON ms.symbol = db.symbol
+              AND ms.list_date <= sample.trade_date
+              AND (ms.delist_date IS NULL OR ms.delist_date >= sample.trade_date)
+              AND COALESCE(ms.is_st, false) = false
+              {market_filter}
+             JOIN intervals
+               ON intervals.symbol = db.symbol
+              AND intervals.available_at <= sample.trade_date
+              AND (intervals.next_available_at IS NULL OR intervals.next_available_at > sample.trade_date)
+             LEFT JOIN market_stock_daily_basic basic
+               ON basic.trade_date = sample.trade_date
+              AND basic.symbol = db.symbol
+         )
+         SELECT trade_date, symbol, score, amount, circ_mv, total_mv, industry
+         FROM scored
+         WHERE score IS NOT NULL
+         ORDER BY trade_date, symbol",
+        market_filter = universe.market_filter_sql()
+    )
+}
+
+async fn load_main_business_score_rows(
+    db: &sqlx::PgPool,
+    business_type: &str,
+    universe: MainBusinessDiagnosticsUniverse,
+    profile: MainBusinessDiagnosticsProfile,
+    sampled_trade_dates: &[NaiveDate],
+) -> Result<Vec<MainBusinessScoreRow>, String> {
+    if sampled_trade_dates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = main_business_score_rows_sql(profile, universe);
+    let rows = sqlx::query_as::<
+        _,
+        (
+            NaiveDate,
+            String,
+            f64,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<String>,
+        ),
+    >(&sql)
+    .bind(business_type)
+    .bind(sampled_trade_dates)
+    .fetch_all(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to load main_business {} score rows: {}",
+            profile.as_str(),
+            error
+        )
+    })?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, _, score, _, _, _, _)| score.is_finite())
+        .map(
+            |(trade_date, symbol, score, amount, circ_mv, total_mv, industry)| {
+                MainBusinessScoreRow {
+                    trade_date,
+                    symbol,
+                    score,
+                    amount,
+                    circ_mv,
+                    total_mv,
+                    industry,
+                }
+            },
+        )
+        .collect())
+}
+
+async fn label_main_business_score_rows(
+    db: &sqlx::PgPool,
+    score_rows: &[MainBusinessScoreRow],
+    sampled_trade_dates: &[NaiveDate],
+    horizon_days: i64,
+) -> Result<Vec<AlphaSourceLabeledRow>, String> {
+    if score_rows.is_empty() || sampled_trade_dates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let min_sample_date = sampled_trade_dates
+        .iter()
+        .copied()
+        .min()
+        .ok_or_else(|| "sampled_trade_dates cannot be empty".to_string())?;
+    let max_sample_date = sampled_trade_dates
+        .iter()
+        .copied()
+        .max()
+        .ok_or_else(|| "sampled_trade_dates cannot be empty".to_string())?;
+    let calendar_end = max_sample_date + Duration::days((horizon_days.max(1) * 5 + 30).min(1400));
+    let open_days = sqlx::query_scalar::<_, NaiveDate>(
+        "SELECT trade_date
+         FROM market_trade_calendar
+         WHERE exchange = 'SSE'
+           AND is_open = true
+           AND trade_date >= $1
+           AND trade_date <= $2
+         ORDER BY trade_date",
+    )
+    .bind(min_sample_date)
+    .bind(calendar_end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load main_business diagnostics calendar: {error}"))?;
+    let open_day_index = open_days
+        .iter()
+        .enumerate()
+        .map(|(idx, trade_date)| (*trade_date, idx))
+        .collect::<BTreeMap<_, _>>();
+    let mut future_dates_by_sample = BTreeMap::<NaiveDate, Vec<NaiveDate>>::new();
+    let mut needed_bar_dates = BTreeSet::<NaiveDate>::new();
+    for sample_date in sampled_trade_dates {
+        let Some(start_idx) = open_day_index.get(sample_date).copied() else {
+            continue;
+        };
+        let end_idx = start_idx + horizon_days.max(1) as usize;
+        if end_idx >= open_days.len() {
+            continue;
+        }
+        let future_dates = open_days[(start_idx + 1)..=end_idx].to_vec();
+        for future_date in &future_dates {
+            needed_bar_dates.insert(*future_date);
+        }
+        future_dates_by_sample.insert(*sample_date, future_dates);
+    }
+    if future_dates_by_sample.is_empty() {
+        return Ok(Vec::new());
+    }
+    let needed_bar_dates = needed_bar_dates.into_iter().collect::<Vec<_>>();
+    let bar_rows = sqlx::query_as::<_, (NaiveDate, String, Option<f64>)>(
+        "SELECT trade_date, symbol, pct_change::float8
+         FROM market_stock_daily_bar
+         WHERE trade_date = ANY($1::date[])",
+    )
+    .bind(&needed_bar_dates)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load main_business diagnostics return rows: {error}"))?;
+    let bar_by_key = bar_rows
+        .into_iter()
+        .map(|(trade_date, symbol, pct_change)| ((trade_date, symbol), pct_change))
+        .collect::<HashMap<_, _>>();
+    let sampled_trade_date_set = sampled_trade_dates.iter().copied().collect::<BTreeSet<_>>();
+    let mut labeled_rows = Vec::new();
+    for row in score_rows
+        .iter()
+        .filter(|row| sampled_trade_date_set.contains(&row.trade_date))
+    {
+        let Some(future_dates) = future_dates_by_sample.get(&row.trade_date) else {
+            continue;
+        };
+        let mut compounded = 1.0;
+        let mut complete = true;
+        for future_date in future_dates {
+            let Some(Some(pct_change)) = bar_by_key.get(&(*future_date, row.symbol.clone())) else {
+                complete = false;
+                break;
+            };
+            if !pct_change.is_finite() || *pct_change <= -0.999999 {
+                complete = false;
+                break;
+            }
+            compounded *= 1.0 + *pct_change;
+        }
+        if !complete {
+            continue;
+        }
+        labeled_rows.push(AlphaSourceLabeledRow {
+            trade_date: row.trade_date,
+            symbol: row.symbol.clone(),
+            score: row.score,
+            forward_return: compounded - 1.0,
+            amount: row.amount,
+            circ_mv: row.circ_mv,
+        });
+    }
+    Ok(labeled_rows)
 }
 
 fn validate_alpha_source_diagnostics_admission(
@@ -8673,6 +9764,48 @@ async fn persist_alpha_source_diagnostics_report(
     .map_err(|error| {
         format!(
             "Failed to persist alpha source diagnostics report: {}",
+            error
+        )
+    })?;
+    Ok(experiment_run_id)
+}
+
+async fn persist_main_business_diagnostics_report(
+    db: &sqlx::PgPool,
+    business_type: &str,
+    universe: MainBusinessDiagnosticsUniverse,
+    profiles: &[MainBusinessDiagnosticsProfile],
+    report: &Value,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let profile_names = profiles
+        .iter()
+        .map(|profile| profile.as_str())
+        .collect::<Vec<_>>();
+    let config = json!({
+        "business_type": business_type,
+        "universe_profile": universe.as_str(),
+        "profiles": profile_names,
+        "report_type": "main_business_source_diagnostics",
+        "point_in_time_scope": "market_stock_main_business.available_at <= trade_date",
+        "research_only": true,
+        "does_not_write_multi_factor_value": true,
+    });
+    sqlx::query(
+        "INSERT INTO experiment_run
+           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+            config, metrics, status, started_at, completed_at)
+         VALUES ($1, 'main_business_source_diagnostics_report', 'alpha_source', 'main_business',
+                 $2, $3, 'completed', now(), now())",
+    )
+    .bind(&experiment_run_id)
+    .bind(&config)
+    .bind(report)
+    .execute(db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to persist main_business source diagnostics report: {}",
             error
         )
     })?;
@@ -30588,5 +31721,96 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("sharpe_shortfall")));
+    }
+
+    #[test]
+    fn main_business_diagnostics_defaults_are_research_only_and_bounded() {
+        let req = MainBusinessDiagnosticsRequest {
+            start_date: "20140101".to_string(),
+            end_date: "20260531".to_string(),
+            business_type: None,
+            universe_profile: None,
+            profiles: None,
+            min_day_coverage_ratio: Some(2.0),
+            min_daily_rows: Some(0),
+            min_p95_daily_row_ratio: Some(-1.0),
+            min_daily_coverage_ratio: Some(2.0),
+            persist_report: None,
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+
+        assert_eq!(main_business_diagnostics_business_type(&req), "P");
+        assert_eq!(
+            main_business_diagnostics_universe_profile(&req).unwrap(),
+            MainBusinessDiagnosticsUniverse::ListedNonSt
+        );
+        assert!(main_business_diagnostics_persist_default(None));
+        assert!(!main_business_diagnostics_persist_default(Some(false)));
+
+        let thresholds = main_business_diagnostics_thresholds(&req);
+        assert_eq!(thresholds.min_day_coverage_ratio, 1.0);
+        assert_eq!(thresholds.min_daily_rows, 1);
+        assert_eq!(thresholds.min_p95_daily_row_ratio, 0.05);
+
+        let options = main_business_research_diagnostics_options(&req);
+        assert_eq!(options.return_horizons, vec![20, 45, 60, 120]);
+        assert_eq!(options.bucket_count, 10);
+        assert_eq!(options.max_rank_ic_days, 260);
+        assert!(options.include_research_metrics);
+        assert!(options.include_exposure_regime_metrics);
+    }
+
+    #[test]
+    fn main_business_diagnostics_profiles_are_pre_registered_not_free_form() {
+        let req = MainBusinessDiagnosticsRequest {
+            start_date: "20140101".to_string(),
+            end_date: "20260531".to_string(),
+            business_type: Some(" P ".to_string()),
+            universe_profile: Some(" listed_non_st ".to_string()),
+            profiles: Some(vec![
+                "sales_yoy".to_string(),
+                "profit_yoy".to_string(),
+                "gross_margin_delta_yoy".to_string(),
+                "segment_concentration_inverse".to_string(),
+                "sales_yoy".to_string(),
+            ]),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            min_daily_coverage_ratio: None,
+            persist_report: Some(false),
+            return_horizons: Some(vec![60, 20, 0, 500, 20]),
+            bucket_count: Some(2),
+            max_rank_ic_days: Some(10_000),
+            include_exposure_regime_metrics: Some(false),
+            max_exposure_regime_days: Some(10_000),
+        };
+
+        let profiles = main_business_diagnostics_profiles(&req).unwrap();
+        assert_eq!(
+            profiles,
+            vec![
+                MainBusinessDiagnosticsProfile::SalesYoy,
+                MainBusinessDiagnosticsProfile::ProfitYoy,
+                MainBusinessDiagnosticsProfile::GrossMarginDeltaYoy,
+                MainBusinessDiagnosticsProfile::SegmentConcentrationInverse,
+            ]
+        );
+
+        let options = main_business_research_diagnostics_options(&req);
+        assert_eq!(options.return_horizons, vec![20, 60, 252]);
+        assert_eq!(options.bucket_count, 3);
+        assert_eq!(options.max_rank_ic_days, 520);
+        assert!(!options.include_exposure_regime_metrics);
+
+        let mut invalid = req;
+        invalid.profiles = Some(vec!["free_form_factor".to_string()]);
+        let err = main_business_diagnostics_profiles(&invalid).unwrap_err();
+        assert!(err.contains("pre-registered"));
+        assert!(err.contains("free_form_factor"));
     }
 }

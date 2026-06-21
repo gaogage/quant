@@ -199,6 +199,91 @@ pub struct MarketStockShareFloat {
     pub raw_payload: Value,
 }
 
+/// 主营业务构成 (market_stock_main_business)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockMainBusiness {
+    pub symbol: String,
+    pub end_date: NaiveDate,
+    pub available_at: NaiveDate,
+    pub business_type: String,
+    pub bz_item: String,
+    pub bz_code: String,
+    pub bz_sales: Option<Decimal>,
+    pub bz_profit: Option<Decimal>,
+    pub bz_cost: Option<Decimal>,
+    pub curr_type: String,
+    pub update_flag: String,
+    pub source_row_hash: String,
+    pub raw_payload: Value,
+}
+
+/// 期货日线行情 (market_futures_daily)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketFuturesDaily {
+    pub ts_code: String,
+    pub trade_date: NaiveDate,
+    pub pre_close: Option<Decimal>,
+    pub pre_settle: Option<Decimal>,
+    pub open: Option<Decimal>,
+    pub high: Option<Decimal>,
+    pub low: Option<Decimal>,
+    pub close: Option<Decimal>,
+    pub settle: Option<Decimal>,
+    pub change1: Option<Decimal>,
+    pub change2: Option<Decimal>,
+    pub vol: Option<Decimal>,
+    pub amount: Option<Decimal>,
+    pub oi: Option<Decimal>,
+    pub oi_chg: Option<Decimal>,
+    pub delv_settle: Option<Decimal>,
+    pub available_at: NaiveDate,
+    pub source_published_at: Option<DateTime<Utc>>,
+    pub raw_payload: Value,
+}
+
+/// 期货仓单日报 (market_futures_warehouse_receipt)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketFuturesWarehouseReceipt {
+    pub trade_date: NaiveDate,
+    pub symbol: String,
+    pub exchange: String,
+    pub fut_name: Option<String>,
+    pub warehouse: String,
+    pub wh_id: Option<String>,
+    pub pre_vol: Option<Decimal>,
+    pub vol: Option<Decimal>,
+    pub vol_chg: Option<Decimal>,
+    pub area: Option<String>,
+    pub year: Option<String>,
+    pub grade: Option<String>,
+    pub brand: Option<String>,
+    pub place: Option<String>,
+    pub pd: Option<Decimal>,
+    pub is_ct: Option<String>,
+    pub unit: Option<String>,
+    pub available_at: NaiveDate,
+    pub source_published_at: Option<DateTime<Utc>>,
+    pub raw_payload: Value,
+}
+
+/// 期货每日成交持仓排名 (market_futures_holding_rank)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketFuturesHoldingRank {
+    pub trade_date: NaiveDate,
+    pub symbol: String,
+    pub exchange: String,
+    pub broker: String,
+    pub vol: Option<Decimal>,
+    pub vol_chg: Option<Decimal>,
+    pub long_hld: Option<Decimal>,
+    pub long_chg: Option<Decimal>,
+    pub short_hld: Option<Decimal>,
+    pub short_chg: Option<Decimal>,
+    pub available_at: NaiveDate,
+    pub source_published_at: Option<DateTime<Utc>>,
+    pub raw_payload: Value,
+}
+
 /// PIT 行业成员历史 (market_stock_industry_membership_pit)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketStockIndustryMembershipPit {

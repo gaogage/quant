@@ -9,10 +9,12 @@ use std::collections::HashSet;
 use tracing::{debug, info};
 
 use crate::model::entities::{
-    MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
+    MarketAdjustmentFactor, MarketFuturesDaily, MarketFuturesHoldingRank,
+    MarketFuturesWarehouseReceipt, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
     MarketStockExpress, MarketStockForecast, MarketStockIndustryMembershipPit,
-    MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat, MarketTradeCalendar,
+    MarketStockMainBusiness, MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat,
+    MarketTradeCalendar,
 };
 
 // ─── market_stock ────────────────────────────────────────────────
@@ -1005,6 +1007,329 @@ pub async fn upsert_share_float_batch(
     }
     info!(
         "批量 upsert {} 条限售股解禁数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
+// ─── market_stock_main_business ─────────────────────────────────
+
+pub async fn upsert_main_business_batch(
+    pool: &PgPool,
+    rows: &[MarketStockMainBusiness],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketStockMainBusiness> = rows
+        .iter()
+        .filter(|row| {
+            seen.insert((
+                row.symbol.clone(),
+                row.end_date,
+                row.business_type.clone(),
+                row.source_row_hash.clone(),
+                row.available_at,
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_main_business \
+             (symbol, end_date, available_at, business_type, bz_item, bz_code, bz_sales, bz_profit, \
+              bz_cost, curr_type, update_flag, source_row_hash, raw_payload, source, data_version_id) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.end_date)
+                .push_bind(item.available_at)
+                .push_bind(&item.business_type)
+                .push_bind(&item.bz_item)
+                .push_bind(&item.bz_code)
+                .push_bind(item.bz_sales)
+                .push_bind(item.bz_profit)
+                .push_bind(item.bz_cost)
+                .push_bind(&item.curr_type)
+                .push_bind(&item.update_flag)
+                .push_bind(&item.source_row_hash)
+                .push_bind(&item.raw_payload)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+        builder.push(
+            " ON CONFLICT (symbol, end_date, business_type, source_row_hash, available_at) DO UPDATE SET \
+              bz_item = EXCLUDED.bz_item, \
+              bz_code = EXCLUDED.bz_code, \
+              bz_sales = EXCLUDED.bz_sales, \
+              bz_profit = EXCLUDED.bz_profit, \
+              bz_cost = EXCLUDED.bz_cost, \
+              curr_type = EXCLUDED.curr_type, \
+              update_flag = EXCLUDED.update_flag, \
+              raw_payload = EXCLUDED.raw_payload, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id, \
+              updated_at = now()",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条主营业务构成数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
+// ─── market_futures_* raw price-chain sources ───────────────────
+
+pub async fn upsert_futures_daily_batch(
+    pool: &PgPool,
+    rows: &[MarketFuturesDaily],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketFuturesDaily> = rows
+        .iter()
+        .filter(|row| seen.insert((row.ts_code.clone(), row.trade_date)))
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_futures_daily \
+             (ts_code, trade_date, pre_close, pre_settle, open, high, low, close, settle, change1, \
+              change2, vol, amount, oi, oi_chg, delv_settle, available_at, source_published_at, \
+              raw_payload, data_version_id, source) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.ts_code)
+                .push_bind(item.trade_date)
+                .push_bind(item.pre_close)
+                .push_bind(item.pre_settle)
+                .push_bind(item.open)
+                .push_bind(item.high)
+                .push_bind(item.low)
+                .push_bind(item.close)
+                .push_bind(item.settle)
+                .push_bind(item.change1)
+                .push_bind(item.change2)
+                .push_bind(item.vol)
+                .push_bind(item.amount)
+                .push_bind(item.oi)
+                .push_bind(item.oi_chg)
+                .push_bind(item.delv_settle)
+                .push_bind(item.available_at)
+                .push_bind(item.source_published_at)
+                .push_bind(&item.raw_payload)
+                .push_bind(data_version_id)
+                .push_bind(source);
+        });
+        builder.push(
+            " ON CONFLICT (ts_code, trade_date) DO UPDATE SET \
+              pre_close = EXCLUDED.pre_close, \
+              pre_settle = EXCLUDED.pre_settle, \
+              open = EXCLUDED.open, \
+              high = EXCLUDED.high, \
+              low = EXCLUDED.low, \
+              close = EXCLUDED.close, \
+              settle = EXCLUDED.settle, \
+              change1 = EXCLUDED.change1, \
+              change2 = EXCLUDED.change2, \
+              vol = EXCLUDED.vol, \
+              amount = EXCLUDED.amount, \
+              oi = EXCLUDED.oi, \
+              oi_chg = EXCLUDED.oi_chg, \
+              delv_settle = EXCLUDED.delv_settle, \
+              available_at = EXCLUDED.available_at, \
+              source_published_at = EXCLUDED.source_published_at, \
+              raw_payload = EXCLUDED.raw_payload, \
+              data_version_id = EXCLUDED.data_version_id, \
+              source = EXCLUDED.source, \
+              updated_at = now()",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条期货日线数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
+pub async fn upsert_futures_warehouse_receipt_batch(
+    pool: &PgPool,
+    rows: &[MarketFuturesWarehouseReceipt],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketFuturesWarehouseReceipt> = rows
+        .iter()
+        .filter(|row| {
+            seen.insert((
+                row.trade_date,
+                row.symbol.clone(),
+                row.exchange.clone(),
+                row.warehouse.clone(),
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_futures_warehouse_receipt \
+             (trade_date, symbol, exchange, fut_name, warehouse, wh_id, pre_vol, vol, vol_chg, \
+              area, year, grade, brand, place, pd, is_ct, unit, available_at, source_published_at, \
+              raw_payload, data_version_id, source) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(item.trade_date)
+                .push_bind(&item.symbol)
+                .push_bind(&item.exchange)
+                .push_bind(&item.fut_name)
+                .push_bind(&item.warehouse)
+                .push_bind(&item.wh_id)
+                .push_bind(item.pre_vol)
+                .push_bind(item.vol)
+                .push_bind(item.vol_chg)
+                .push_bind(&item.area)
+                .push_bind(&item.year)
+                .push_bind(&item.grade)
+                .push_bind(&item.brand)
+                .push_bind(&item.place)
+                .push_bind(item.pd)
+                .push_bind(&item.is_ct)
+                .push_bind(&item.unit)
+                .push_bind(item.available_at)
+                .push_bind(item.source_published_at)
+                .push_bind(&item.raw_payload)
+                .push_bind(data_version_id)
+                .push_bind(source);
+        });
+        builder.push(
+            " ON CONFLICT (trade_date, symbol, exchange, warehouse) DO UPDATE SET \
+              fut_name = EXCLUDED.fut_name, \
+              wh_id = EXCLUDED.wh_id, \
+              pre_vol = EXCLUDED.pre_vol, \
+              vol = EXCLUDED.vol, \
+              vol_chg = EXCLUDED.vol_chg, \
+              area = EXCLUDED.area, \
+              year = EXCLUDED.year, \
+              grade = EXCLUDED.grade, \
+              brand = EXCLUDED.brand, \
+              place = EXCLUDED.place, \
+              pd = EXCLUDED.pd, \
+              is_ct = EXCLUDED.is_ct, \
+              unit = EXCLUDED.unit, \
+              available_at = EXCLUDED.available_at, \
+              source_published_at = EXCLUDED.source_published_at, \
+              raw_payload = EXCLUDED.raw_payload, \
+              data_version_id = EXCLUDED.data_version_id, \
+              source = EXCLUDED.source, \
+              updated_at = now()",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条期货仓单数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
+pub async fn upsert_futures_holding_rank_batch(
+    pool: &PgPool,
+    rows: &[MarketFuturesHoldingRank],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketFuturesHoldingRank> = rows
+        .iter()
+        .filter(|row| {
+            seen.insert((
+                row.trade_date,
+                row.symbol.clone(),
+                row.exchange.clone(),
+                row.broker.clone(),
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_futures_holding_rank \
+             (trade_date, symbol, exchange, broker, vol, vol_chg, long_hld, long_chg, short_hld, \
+              short_chg, available_at, source_published_at, raw_payload, data_version_id, source) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(item.trade_date)
+                .push_bind(&item.symbol)
+                .push_bind(&item.exchange)
+                .push_bind(&item.broker)
+                .push_bind(item.vol)
+                .push_bind(item.vol_chg)
+                .push_bind(item.long_hld)
+                .push_bind(item.long_chg)
+                .push_bind(item.short_hld)
+                .push_bind(item.short_chg)
+                .push_bind(item.available_at)
+                .push_bind(item.source_published_at)
+                .push_bind(&item.raw_payload)
+                .push_bind(data_version_id)
+                .push_bind(source);
+        });
+        builder.push(
+            " ON CONFLICT (trade_date, symbol, exchange, broker) DO UPDATE SET \
+              vol = EXCLUDED.vol, \
+              vol_chg = EXCLUDED.vol_chg, \
+              long_hld = EXCLUDED.long_hld, \
+              long_chg = EXCLUDED.long_chg, \
+              short_hld = EXCLUDED.short_hld, \
+              short_chg = EXCLUDED.short_chg, \
+              available_at = EXCLUDED.available_at, \
+              source_published_at = EXCLUDED.source_published_at, \
+              raw_payload = EXCLUDED.raw_payload, \
+              data_version_id = EXCLUDED.data_version_id, \
+              source = EXCLUDED.source, \
+              updated_at = now()",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条期货持仓排名数据，去重 {} 条",
         saved,
         rows.len().saturating_sub(unique_rows.len())
     );

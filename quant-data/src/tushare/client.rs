@@ -65,6 +65,92 @@ const INDEX_MEMBER_FIELDS: &[&str] = &[
     "out_date",
     "is_new",
 ];
+const FINA_MAINBZ_FIELDS: &[&str] = &[
+    "ts_code",
+    "end_date",
+    "bz_item",
+    "bz_code",
+    "bz_sales",
+    "bz_profit",
+    "bz_cost",
+    "curr_type",
+    "update_flag",
+];
+const FINA_MAINBZ_VIP_FIELDS: &[&str] = FINA_MAINBZ_FIELDS;
+const REPORT_RC_FIELDS: &[&str] = &[
+    "ts_code",
+    "name",
+    "report_date",
+    "report_title",
+    "report_type",
+    "classify",
+    "org_name",
+    "author_name",
+    "quarter",
+    "op_rt",
+    "op_pr",
+    "tp",
+    "np",
+    "eps",
+    "pe",
+    "rd",
+    "roe",
+    "ev_ebitda",
+    "rating",
+    "max_price",
+    "min_price",
+    "imp_dg",
+    "create_time",
+];
+const FUT_DAILY_FIELDS: &[&str] = &[
+    "ts_code",
+    "trade_date",
+    "pre_close",
+    "pre_settle",
+    "open",
+    "high",
+    "low",
+    "close",
+    "settle",
+    "change1",
+    "change2",
+    "vol",
+    "amount",
+    "oi",
+    "oi_chg",
+    "delv_settle",
+];
+const FUT_WSR_FIELDS: &[&str] = &[
+    "trade_date",
+    "symbol",
+    "fut_name",
+    "warehouse",
+    "wh_id",
+    "pre_vol",
+    "vol",
+    "vol_chg",
+    "area",
+    "year",
+    "grade",
+    "brand",
+    "place",
+    "pd",
+    "is_ct",
+    "unit",
+    "exchange",
+];
+const FUT_HOLDING_FIELDS: &[&str] = &[
+    "trade_date",
+    "symbol",
+    "broker",
+    "vol",
+    "vol_chg",
+    "long_hld",
+    "long_chg",
+    "short_hld",
+    "short_chg",
+    "exchange",
+];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +172,54 @@ mod tests {
         assert!(INDEX_MEMBER_FIELDS.contains(&"in_date"));
         assert!(INDEX_MEMBER_FIELDS.contains(&"out_date"));
         assert!(INDEX_MEMBER_FIELDS.contains(&"is_new"));
+    }
+
+    #[test]
+    fn main_business_specs_require_available_at_join() {
+        assert_eq!(
+            FINA_MAINBZ_FIELDS,
+            &[
+                "ts_code",
+                "end_date",
+                "bz_item",
+                "bz_code",
+                "bz_sales",
+                "bz_profit",
+                "bz_cost",
+                "curr_type",
+                "update_flag",
+            ]
+        );
+        assert!(!FINA_MAINBZ_FIELDS.contains(&"ann_date"));
+    }
+
+    #[test]
+    fn main_business_vip_specs_support_period_paging_without_native_available_at() {
+        assert_eq!(FINA_MAINBZ_VIP_FIELDS, FINA_MAINBZ_FIELDS);
+        assert!(!FINA_MAINBZ_VIP_FIELDS.contains(&"ann_date"));
+        assert!(!FINA_MAINBZ_VIP_FIELDS.contains(&"f_ann_date"));
+    }
+
+    #[test]
+    fn report_rc_specs_include_pit_and_revision_fields() {
+        assert!(REPORT_RC_FIELDS.contains(&"report_date"));
+        assert!(REPORT_RC_FIELDS.contains(&"quarter"));
+        assert!(REPORT_RC_FIELDS.contains(&"eps"));
+        assert!(REPORT_RC_FIELDS.contains(&"rating"));
+        assert!(REPORT_RC_FIELDS.contains(&"max_price"));
+        assert!(REPORT_RC_FIELDS.contains(&"min_price"));
+    }
+
+    #[test]
+    fn futures_price_chain_specs_keep_daily_pit_and_supply_demand_fields() {
+        assert!(FUT_DAILY_FIELDS.contains(&"trade_date"));
+        assert!(FUT_DAILY_FIELDS.contains(&"close"));
+        assert!(FUT_DAILY_FIELDS.contains(&"settle"));
+        assert!(FUT_DAILY_FIELDS.contains(&"oi"));
+        assert!(FUT_WSR_FIELDS.contains(&"trade_date"));
+        assert!(FUT_WSR_FIELDS.contains(&"vol_chg"));
+        assert!(FUT_HOLDING_FIELDS.contains(&"long_hld"));
+        assert!(FUT_HOLDING_FIELDS.contains(&"short_hld"));
     }
 }
 
@@ -797,6 +931,224 @@ impl TushareClient {
             params.push(("end_date", e));
         }
         self.call_api::<Vec<serde_json::Value>>("fina_indicator", params, &[])
+            .await
+    }
+
+    /// 主营业务构成。该接口没有公告日字段，任何 PIT 特征都必须先用财报公告/披露链路补 available_at。
+    pub async fn fina_mainbz(
+        &self,
+        ts_code: &str,
+        period: Option<&str>,
+        business_type: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = vec![("ts_code", ts_code)];
+        if let Some(value) = period {
+            params.push(("period", value));
+        }
+        if let Some(value) = business_type {
+            params.push(("type", value));
+        }
+        if let Some(value) = start_date {
+            params.push(("start_date", value));
+        }
+        if let Some(value) = end_date {
+            params.push(("end_date", value));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("fina_mainbz", params, FINA_MAINBZ_FIELDS)
+            .await
+    }
+
+    /// 主营业务构成 VIP。按报告期拉全市场，适合 P3.19E 全历史分块补数。
+    pub async fn fina_mainbz_vip(
+        &self,
+        period: &str,
+        business_type: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_s;
+        let offset_s;
+        let mut params: Vec<(&str, &str)> = vec![("period", period)];
+        if let Some(value) = business_type {
+            params.push(("type", value));
+        }
+        if let Some(value) = limit {
+            limit_s = value.to_string();
+            params.push(("limit", limit_s.as_str()));
+        }
+        if let Some(value) = offset {
+            offset_s = value.to_string();
+            params.push(("offset", offset_s.as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("fina_mainbz_vip", params, FINA_MAINBZ_VIP_FIELDS)
+            .await
+    }
+
+    /// 卖方盈利预测数据。用于 P3.19 后续 broad analyst revision 源发现的只读权限探针。
+    pub async fn report_rc(
+        &self,
+        ts_code: Option<&str>,
+        report_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_s;
+        let offset_s;
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(value) = ts_code {
+            params.push(("ts_code", value));
+        }
+        if let Some(value) = report_date {
+            params.push(("report_date", value));
+        }
+        if let Some(value) = start_date {
+            params.push(("start_date", value));
+        }
+        if let Some(value) = end_date {
+            params.push(("end_date", value));
+        }
+        if let Some(value) = limit {
+            limit_s = value.to_string();
+            params.push(("limit", limit_s.as_str()));
+        }
+        if let Some(value) = offset {
+            offset_s = value.to_string();
+            params.push(("offset", offset_s.as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("report_rc", params, REPORT_RC_FIELDS)
+            .await
+    }
+
+    /// 期货日线行情。用于 P3.19 产业链/价格链高频代理的只读权限探针。
+    pub async fn fut_daily(
+        &self,
+        ts_code: Option<&str>,
+        trade_date: Option<&str>,
+        exchange: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_s;
+        let offset_s;
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(value) = ts_code {
+            params.push(("ts_code", value));
+        }
+        if let Some(value) = trade_date {
+            params.push(("trade_date", value));
+        }
+        if let Some(value) = exchange {
+            params.push(("exchange", value));
+        }
+        if let Some(value) = start_date {
+            params.push(("start_date", value));
+        }
+        if let Some(value) = end_date {
+            params.push(("end_date", value));
+        }
+        if let Some(value) = limit {
+            limit_s = value.to_string();
+            params.push(("limit", limit_s.as_str()));
+        }
+        if let Some(value) = offset {
+            offset_s = value.to_string();
+            params.push(("offset", offset_s.as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("fut_daily", params, FUT_DAILY_FIELDS)
+            .await
+    }
+
+    /// 期货仓单日报。用于 P3.19 产业链/价格链高频代理的只读权限探针。
+    pub async fn fut_wsr(
+        &self,
+        trade_date: Option<&str>,
+        symbol: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        exchange: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_s;
+        let offset_s;
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(value) = trade_date {
+            params.push(("trade_date", value));
+        }
+        if let Some(value) = symbol {
+            params.push(("symbol", value));
+        }
+        if let Some(value) = start_date {
+            params.push(("start_date", value));
+        }
+        if let Some(value) = end_date {
+            params.push(("end_date", value));
+        }
+        if let Some(value) = exchange {
+            params.push(("exchange", value));
+        }
+        if let Some(value) = limit {
+            limit_s = value.to_string();
+            params.push(("limit", limit_s.as_str()));
+        }
+        if let Some(value) = offset {
+            offset_s = value.to_string();
+            params.push(("offset", offset_s.as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("fut_wsr", params, FUT_WSR_FIELDS)
+            .await
+    }
+
+    /// 期货每日成交持仓排名。用于 P3.19 产业链/价格链高频代理的只读权限探针。
+    pub async fn fut_holding(
+        &self,
+        trade_date: Option<&str>,
+        symbol: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        exchange: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_s;
+        let offset_s;
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(value) = trade_date {
+            params.push(("trade_date", value));
+        }
+        if let Some(value) = symbol {
+            params.push(("symbol", value));
+        }
+        if let Some(value) = start_date {
+            params.push(("start_date", value));
+        }
+        if let Some(value) = end_date {
+            params.push(("end_date", value));
+        }
+        if let Some(value) = exchange {
+            params.push(("exchange", value));
+        }
+        if let Some(value) = limit {
+            limit_s = value.to_string();
+            params.push(("limit", limit_s.as_str()));
+        }
+        if let Some(value) = offset {
+            offset_s = value.to_string();
+            params.push(("offset", offset_s.as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("fut_holding", params, FUT_HOLDING_FIELDS)
             .await
     }
 

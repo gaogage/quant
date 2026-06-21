@@ -232,6 +232,18 @@ async fn main() {
             get(routes::sync::phase7_feasibility_audit),
         )
         .route(
+            "/api/v1/quant/data/futures-price-chain/schema-contract",
+            get(routes::sync::futures_price_chain_schema_contract),
+        )
+        .route(
+            "/api/v1/quant/data/futures-price-chain/readiness-audit",
+            get(routes::sync::futures_price_chain_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/futures-price-chain/sync",
+            post(routes::sync::futures_price_chain_sync),
+        )
+        .route(
             "/api/v1/quant/data/phase7-optional-source-coverage-sync",
             post(routes::sync::phase7_optional_source_coverage_sync),
         )
@@ -258,6 +270,18 @@ async fn main() {
         .route(
             "/api/v1/quant/data/tushare/permission-smoke",
             post(routes::sync::tushare_permission_smoke),
+        )
+        .route(
+            "/api/v1/quant/data/main-business/available-at-audit",
+            post(routes::sync::main_business_available_at_audit),
+        )
+        .route(
+            "/api/v1/quant/data/main-business/readiness-audit",
+            get(routes::sync::main_business_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/broad-analyst-revision/audit",
+            get(routes::sync::broad_analyst_revision_audit),
         )
         .route(
             "/api/v1/quant/data/sync/financial",
@@ -473,6 +497,10 @@ async fn main() {
         .route(
             "/api/v1/quant/alpha-sources/diagnostics/report",
             post(routes::optimization::report_alpha_source_diagnostics),
+        )
+        .route(
+            "/api/v1/quant/alpha-sources/main-business/diagnostics/report",
+            post(routes::optimization::report_main_business_diagnostics),
         )
         // 组合风控
         .route(
