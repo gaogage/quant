@@ -11,8 +11,8 @@ use tracing::{debug, info};
 use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
-    MarketStockExpress, MarketStockForecast, MarketStockMoneyflow, MarketStockRepurchase,
-    MarketStockShareFloat, MarketTradeCalendar,
+    MarketStockExpress, MarketStockForecast, MarketStockIndustryMembershipPit,
+    MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat, MarketTradeCalendar,
 };
 
 // ─── market_stock ────────────────────────────────────────────────
@@ -1005,6 +1005,87 @@ pub async fn upsert_share_float_batch(
     }
     info!(
         "批量 upsert {} 条限售股解禁数据，去重 {} 条",
+        saved,
+        rows.len().saturating_sub(unique_rows.len())
+    );
+    Ok(saved)
+}
+
+// ─── market_stock_industry_membership_pit ───────────────────────
+
+pub async fn upsert_industry_membership_batch(
+    pool: &PgPool,
+    rows: &[MarketStockIndustryMembershipPit],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut seen = HashSet::new();
+    let unique_rows: Vec<MarketStockIndustryMembershipPit> = rows
+        .iter()
+        .filter(|row| {
+            seen.insert((
+                row.classification_source.clone(),
+                row.index_code.clone(),
+                row.symbol.clone(),
+                row.in_date,
+            ))
+        })
+        .cloned()
+        .collect();
+    let mut saved = 0usize;
+    for chunk in unique_rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_industry_membership_pit \
+             (classification_source, industry_level, index_code, index_name, industry_code, \
+              industry_name, parent_code, symbol, symbol_name, in_date, out_date, available_at, \
+              exit_available_at, is_new, raw_payload, source, data_version_id) ",
+        );
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.classification_source)
+                .push_bind(&item.industry_level)
+                .push_bind(&item.index_code)
+                .push_bind(&item.index_name)
+                .push_bind(&item.industry_code)
+                .push_bind(&item.industry_name)
+                .push_bind(&item.parent_code)
+                .push_bind(&item.symbol)
+                .push_bind(&item.symbol_name)
+                .push_bind(item.in_date)
+                .push_bind(item.out_date)
+                .push_bind(item.available_at)
+                .push_bind(item.exit_available_at)
+                .push_bind(&item.is_new)
+                .push_bind(&item.raw_payload)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+        builder.push(
+            " ON CONFLICT (classification_source, index_code, symbol, in_date) DO UPDATE SET \
+              industry_level = EXCLUDED.industry_level, \
+              index_name = EXCLUDED.index_name, \
+              industry_code = EXCLUDED.industry_code, \
+              industry_name = EXCLUDED.industry_name, \
+              parent_code = EXCLUDED.parent_code, \
+              symbol_name = EXCLUDED.symbol_name, \
+              out_date = EXCLUDED.out_date, \
+              available_at = EXCLUDED.available_at, \
+              exit_available_at = EXCLUDED.exit_available_at, \
+              is_new = EXCLUDED.is_new, \
+              raw_payload = EXCLUDED.raw_payload, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id, \
+              updated_at = now()",
+        );
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+    info!(
+        "批量 upsert {} 条行业成员 PIT 数据，去重 {} 条",
         saved,
         rows.len().saturating_sub(unique_rows.len())
     );

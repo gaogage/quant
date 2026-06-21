@@ -199,6 +199,26 @@ pub struct MarketStockShareFloat {
     pub raw_payload: Value,
 }
 
+/// PIT 行业成员历史 (market_stock_industry_membership_pit)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockIndustryMembershipPit {
+    pub classification_source: String,
+    pub industry_level: String,
+    pub index_code: String,
+    pub index_name: String,
+    pub industry_code: String,
+    pub industry_name: String,
+    pub parent_code: String,
+    pub symbol: String,
+    pub symbol_name: String,
+    pub in_date: NaiveDate,
+    pub out_date: Option<NaiveDate>,
+    pub available_at: NaiveDate,
+    pub exit_available_at: Option<NaiveDate>,
+    pub is_new: String,
+    pub raw_payload: Value,
+}
+
 /// 指数日线 (market_index_daily_bar)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketIndexDailyBar {

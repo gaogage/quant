@@ -288,6 +288,24 @@ fn build_universe_filter(profile: TradableUniverseProfile) -> (&'static str, Str
             "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
             format!("\n           AND ms.list_status = 'L'{}", pit_st_not_in),
         ),
+        TradableUniverseProfile::MainChinextNonSt => (
+            "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
+            format!(
+                "\n           AND ms.list_status = 'L'
+           AND ms.exchange IN ('SSE', 'SZSE')
+           AND ms.market IN ('主板', '创业板')
+           AND ms.symbol NOT LIKE '688%SH'
+           AND ms.symbol NOT IN (
+               SELECT symbol FROM market_stock_suspension
+               WHERE trade_date = mfv.trade_date AND suspend_type = 'S'
+           )
+           AND ms.symbol NOT IN (
+               SELECT symbol FROM market_stock_limit
+               WHERE trade_date = mfv.trade_date
+           ){}",
+                pit_st_not_in
+            ),
+        ),
         TradableUniverseProfile::MainBoardNonSt => (
             "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol",
             format!(
@@ -2846,6 +2864,17 @@ mod tests {
         assert!(sql.contains("ms.list_status = 'L'"));
         assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
         assert!(sql.contains("ms.market = '主板'"));
+    }
+
+    #[test]
+    fn effective_coverage_main_chinext_filter_excludes_star_market() {
+        let sql = effective_factor_coverage_sql(TradableUniverseProfile::MainChinextNonSt);
+
+        assert!(sql.contains("JOIN market_stock ms ON ms.symbol = mfv.symbol"));
+        assert!(sql.contains("ms.list_status = 'L'"));
+        assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
     }
 
     #[test]

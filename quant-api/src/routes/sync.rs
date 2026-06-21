@@ -1,5 +1,9 @@
 /// 数据同步路由
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    response::IntoResponse,
+    Json,
+};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -12,6 +16,10 @@ use std::{
 use tracing::info;
 use uuid::Uuid;
 
+use crate::phase7_alpha_admission::{
+    industry_prosperity_alpha_admission_policy, industry_prosperity_alpha_admission_policy_static,
+    INDUSTRY_MEMBERSHIP_COVERAGE_THRESHOLD, INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
+};
 use crate::AppState;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,6 +164,13 @@ const PHASE7_FEASIBILITY_COMBOS: &[&str] = &[
 ];
 
 const PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS: &[&str] = &["cashflow", "dividend", "repurchase"];
+const PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED: &[&str] = &[
+    "cashflow",
+    "dividend",
+    "repurchase",
+    "share_float",
+    "industry_membership",
+];
 const PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED: &[&str] = &[
     "cashflow",
     "dividend",
@@ -285,6 +300,16 @@ pub struct Phase7ShareFloatReadinessAuditReq {
     pub start_date: Option<String>,
     #[serde(default)]
     pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Phase7IndustryMembershipCoverageAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 fn phase7_permission_smoke_sources(requested: &[String]) -> Vec<String> {
@@ -1066,6 +1091,24 @@ struct Phase7BlockTradeSourceAudit {
     pit_violation_rows: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Phase7IndustryMembershipSourceAudit {
+    data_rows: i64,
+    symbols: i64,
+    index_codes: i64,
+    current_active_stock_symbols: i64,
+    current_covered_stock_symbols: i64,
+    min_in_date: Option<NaiveDate>,
+    latest_in_date: Option<NaiveDate>,
+    min_out_date: Option<NaiveDate>,
+    latest_out_date: Option<NaiveDate>,
+    min_available_at: Option<NaiveDate>,
+    latest_available_at: Option<NaiveDate>,
+    pit_violation_rows: i64,
+    invalid_interval_rows: i64,
+    duplicate_key_rows: i64,
+}
+
 fn phase7_market_level_sync_dataset(source: &str) -> Option<&'static str> {
     match source {
         "market_margin_regime" => Some("margin"),
@@ -1156,11 +1199,13 @@ fn phase7_new_alpha_candidate_sources() -> Vec<Value> {
         json!({
             "source": "industry_prosperity_proxy",
             "current_tables": ["market_stock", "market_financial_indicator", "market_stock_daily_bar", "market_stock_moneyflow"],
+            "candidate_raw_sources": ["tushare:index_classify", "tushare:index_member"],
             "admission_scope": "broad_base_proxy_candidate",
-            "readiness": "requires_pit_industry_history_or_proxy",
+            "alpha_admission_gate": industry_prosperity_alpha_admission_policy_static(),
+            "readiness": "industry_membership_permission_probe_required",
             "pit_boundary": "current market_stock.industry is static and cannot be treated as historical PIT industry classification",
-            "why_not_trainable_now": "行业分类当前缺历史有效期，直接做行业景气会把当前行业快照泄漏到历史",
-            "next_step": "design_broad_base_pit_proxy_before_factor_backfill"
+            "why_not_trainable_now": "行业 PIT 原始源接入后仍需通过全历史 membership snapshot/coverage 审计和 P3.10 诊断，不能直接进入训练",
+            "next_step": "run_industry_membership_permission_smoke_then_schema_available_at_audit"
         }),
         json!({
             "source": "block_trade_supply_demand",
@@ -1329,6 +1374,341 @@ fn phase7_new_alpha_candidate_sources_with_block_trade_status(
     sources
 }
 
+fn phase7_industry_membership_readiness(
+    stats: &Phase7IndustryMembershipSourceAudit,
+) -> &'static str {
+    if stats.data_rows <= 0 {
+        return "industry_membership_schema_ready_needs_bounded_sync";
+    }
+    if stats.pit_violation_rows > 0
+        || stats.invalid_interval_rows > 0
+        || stats.duplicate_key_rows > 0
+    {
+        return "industry_membership_raw_source_pit_failed";
+    }
+    if phase7_ratio(
+        stats.current_covered_stock_symbols,
+        stats.current_active_stock_symbols,
+    )
+    .unwrap_or(0.0)
+        < 0.95
+    {
+        return "industry_membership_current_coverage_undercovered";
+    }
+    "industry_membership_raw_source_ready_for_coverage_audit"
+}
+
+fn phase7_new_alpha_candidate_sources_with_industry_membership_status(
+    mut sources: Vec<Value>,
+    stats: &Phase7IndustryMembershipSourceAudit,
+) -> Vec<Value> {
+    for source in sources.iter_mut() {
+        let Some("industry_prosperity_proxy") =
+            source.get("source").and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let readiness = phase7_industry_membership_readiness(stats);
+        if let Value::Object(object) = source {
+            object.insert("readiness".to_string(), json!(readiness));
+            object.insert(
+                "raw_source_status".to_string(),
+                json!({
+                    "table": "market_stock_industry_membership_pit",
+                    "data_rows": stats.data_rows,
+                    "symbols": stats.symbols,
+                    "index_codes": stats.index_codes,
+                    "current_active_stock_symbols": stats.current_active_stock_symbols,
+                    "current_covered_stock_symbols": stats.current_covered_stock_symbols,
+                    "current_missing_stock_symbols": stats.current_active_stock_symbols.saturating_sub(stats.current_covered_stock_symbols),
+                    "current_stock_coverage_ratio": phase7_ratio(stats.current_covered_stock_symbols, stats.current_active_stock_symbols),
+                    "min_in_date": phase7_date_json(stats.min_in_date),
+                    "latest_in_date": phase7_date_json(stats.latest_in_date),
+                    "min_out_date": phase7_date_json(stats.min_out_date),
+                    "latest_out_date": phase7_date_json(stats.latest_out_date),
+                    "min_available_at": phase7_date_json(stats.min_available_at),
+                    "latest_available_at": phase7_date_json(stats.latest_available_at),
+                    "pit_violation_rows": stats.pit_violation_rows,
+                    "invalid_interval_rows": stats.invalid_interval_rows,
+                    "duplicate_key_rows": stats.duplicate_key_rows,
+                }),
+            );
+            object.insert(
+                "next_step".to_string(),
+                json!(match readiness {
+                    "industry_membership_raw_source_ready_for_coverage_audit" => {
+                        "run_full_history_coverage_and_pit_membership_snapshot_audit"
+                    }
+                    "industry_membership_raw_source_pit_failed" => {
+                        "repair_industry_membership_intervals_before_factor_design"
+                    }
+                    "industry_membership_current_coverage_undercovered" => {
+                        "run_full_l1_membership_sync_or_repair_missing_symbols"
+                    }
+                    _ => "run_bounded_industry_membership_sync",
+                }),
+            );
+        }
+    }
+    sources
+}
+
+fn phase7_industry_membership_snapshot_readiness(
+    expected_symbol_days: i64,
+    covered_symbol_days: i64,
+    _missing_symbol_days: i64,
+    multi_membership_symbol_days: i64,
+    pit_violation_rows: i64,
+    invalid_interval_rows: i64,
+    duplicate_key_rows: i64,
+    missing_exit_available_at_rows: i64,
+) -> &'static str {
+    if expected_symbol_days <= 0 {
+        return "snapshot_no_universe_symbol_days";
+    }
+    if pit_violation_rows > 0
+        || invalid_interval_rows > 0
+        || duplicate_key_rows > 0
+        || missing_exit_available_at_rows > 0
+    {
+        return "snapshot_raw_source_pit_failed";
+    }
+    if multi_membership_symbol_days > 0 {
+        return "snapshot_multi_membership_blocked";
+    }
+    if phase7_ratio(covered_symbol_days, expected_symbol_days).unwrap_or(0.0) < 0.995 {
+        return "snapshot_coverage_gaps_need_review";
+    }
+    "snapshot_ready_for_p310_diagnostics"
+}
+
+fn phase7_industry_membership_audit_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(20).clamp(1, 100)
+}
+
+fn phase7_industry_membership_market_scope_eligible(
+    coverage_ratio: Option<f64>,
+    multi_membership_symbol_days: i64,
+) -> bool {
+    multi_membership_symbol_days == 0 && coverage_ratio.unwrap_or(0.0) >= 0.995
+}
+
+fn phase7_industry_membership_snapshot_summary_sql() -> &'static str {
+    r#"
+    WITH params AS (
+        SELECT $1::date AS start_date, $2::date AS end_date
+    ),
+    days AS (
+        SELECT cal.trade_date
+        FROM market_trade_calendar cal
+        JOIN params ON cal.trade_date BETWEEN params.start_date AND params.end_date
+        WHERE cal.exchange = 'SSE'
+          AND cal.is_open
+    ),
+    universe AS (
+        SELECT days.trade_date, stock.symbol
+        FROM days
+        JOIN market_stock stock
+          ON COALESCE(stock.market, '') <> ''
+         AND (stock.list_date IS NULL OR stock.list_date <= days.trade_date)
+         AND (stock.delist_date IS NULL OR stock.delist_date > days.trade_date)
+    ),
+    membership_counts AS (
+        SELECT days.trade_date,
+               membership.symbol,
+               COUNT(DISTINCT membership.index_code)::bigint AS active_index_count
+        FROM days
+        JOIN market_stock_industry_membership_pit membership
+          ON membership.classification_source = CASE
+                 WHEN days.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                 ELSE 'SW2021'
+             END
+         AND membership.industry_level = 'L1'
+         AND membership.available_at <= days.trade_date
+         AND membership.in_date <= days.trade_date
+         AND (
+             membership.exit_available_at IS NULL
+             OR membership.exit_available_at > days.trade_date
+         )
+        GROUP BY days.trade_date, membership.symbol
+    ),
+    joined AS (
+        SELECT universe.trade_date,
+               universe.symbol,
+               COALESCE(membership_counts.active_index_count, 0) AS active_index_count
+        FROM universe
+        LEFT JOIN membership_counts
+          ON membership_counts.trade_date = universe.trade_date
+         AND membership_counts.symbol = universe.symbol
+    ),
+    raw_stats AS (
+        SELECT COUNT(*) FILTER (WHERE available_at < in_date)::bigint AS pit_violation_rows,
+               COUNT(*) FILTER (WHERE out_date IS NOT NULL AND out_date < in_date)::bigint
+                   AS invalid_interval_rows,
+               COUNT(*) FILTER (WHERE out_date IS NOT NULL AND exit_available_at IS NULL)::bigint
+                   AS missing_exit_available_at_rows
+        FROM market_stock_industry_membership_pit
+        WHERE classification_source IN ('SW2014', 'SW2021')
+          AND industry_level = 'L1'
+    ),
+    duplicate_keys AS (
+        SELECT COALESCE(SUM(row_count - 1), 0)::bigint AS duplicate_key_rows
+        FROM (
+            SELECT classification_source, index_code, symbol, in_date, COUNT(*)::bigint AS row_count
+            FROM market_stock_industry_membership_pit
+            WHERE classification_source IN ('SW2014', 'SW2021')
+              AND industry_level = 'L1'
+            GROUP BY classification_source, index_code, symbol, in_date
+            HAVING COUNT(*) > 1
+        ) duplicate_groups
+    )
+    SELECT COUNT(DISTINCT joined.trade_date)::bigint AS trade_days,
+           COUNT(*)::bigint AS expected_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count = 1)::bigint AS covered_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count = 0)::bigint AS missing_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count > 1)::bigint
+               AS multi_membership_symbol_days,
+           MIN(joined.trade_date) AS min_trade_date,
+           MAX(joined.trade_date) AS max_trade_date,
+           raw_stats.pit_violation_rows,
+           raw_stats.invalid_interval_rows,
+           duplicate_keys.duplicate_key_rows,
+           raw_stats.missing_exit_available_at_rows
+    FROM joined, raw_stats, duplicate_keys
+    GROUP BY raw_stats.pit_violation_rows,
+             raw_stats.invalid_interval_rows,
+             duplicate_keys.duplicate_key_rows,
+             raw_stats.missing_exit_available_at_rows
+    "#
+}
+
+fn phase7_industry_membership_year_breakdown_sql() -> &'static str {
+    r#"
+    WITH params AS (
+        SELECT $1::date AS start_date, $2::date AS end_date
+    ),
+    days AS (
+        SELECT cal.trade_date
+        FROM market_trade_calendar cal
+        JOIN params ON cal.trade_date BETWEEN params.start_date AND params.end_date
+        WHERE cal.exchange = 'SSE'
+          AND cal.is_open
+    ),
+    universe AS (
+        SELECT days.trade_date, stock.symbol
+        FROM days
+        JOIN market_stock stock
+          ON COALESCE(stock.market, '') <> ''
+         AND (stock.list_date IS NULL OR stock.list_date <= days.trade_date)
+         AND (stock.delist_date IS NULL OR stock.delist_date > days.trade_date)
+    ),
+    membership_counts AS (
+        SELECT days.trade_date,
+               membership.symbol,
+               COUNT(DISTINCT membership.index_code)::bigint AS active_index_count
+        FROM days
+        JOIN market_stock_industry_membership_pit membership
+          ON membership.classification_source = CASE
+                 WHEN days.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                 ELSE 'SW2021'
+             END
+         AND membership.industry_level = 'L1'
+         AND membership.available_at <= days.trade_date
+         AND membership.in_date <= days.trade_date
+         AND (
+             membership.exit_available_at IS NULL
+             OR membership.exit_available_at > days.trade_date
+         )
+        GROUP BY days.trade_date, membership.symbol
+    ),
+    joined AS (
+        SELECT universe.trade_date,
+               universe.symbol,
+               COALESCE(membership_counts.active_index_count, 0) AS active_index_count
+        FROM universe
+        LEFT JOIN membership_counts
+          ON membership_counts.trade_date = universe.trade_date
+         AND membership_counts.symbol = universe.symbol
+    )
+    SELECT DATE_TRUNC('year', joined.trade_date)::date AS period_start,
+           COUNT(*)::bigint AS expected_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count = 1)::bigint AS covered_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count = 0)::bigint AS missing_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count > 1)::bigint
+               AS multi_membership_symbol_days,
+           (COUNT(*) FILTER (WHERE joined.active_index_count = 1))::double precision
+               / NULLIF(COUNT(*), 0)::double precision AS coverage_ratio
+    FROM joined
+    GROUP BY DATE_TRUNC('year', joined.trade_date)::date
+    ORDER BY period_start
+    "#
+}
+
+fn phase7_industry_membership_market_breakdown_sql() -> &'static str {
+    r#"
+    WITH params AS (
+        SELECT $1::date AS start_date, $2::date AS end_date
+    ),
+    days AS (
+        SELECT cal.trade_date
+        FROM market_trade_calendar cal
+        JOIN params ON cal.trade_date BETWEEN params.start_date AND params.end_date
+        WHERE cal.exchange = 'SSE'
+          AND cal.is_open
+    ),
+    universe AS (
+        SELECT days.trade_date,
+               stock.symbol,
+               COALESCE(stock.market, '') AS market
+        FROM days
+        JOIN market_stock stock
+          ON COALESCE(stock.market, '') <> ''
+         AND (stock.list_date IS NULL OR stock.list_date <= days.trade_date)
+         AND (stock.delist_date IS NULL OR stock.delist_date > days.trade_date)
+    ),
+    membership_counts AS (
+        SELECT days.trade_date,
+               membership.symbol,
+               COUNT(DISTINCT membership.index_code)::bigint AS active_index_count
+        FROM days
+        JOIN market_stock_industry_membership_pit membership
+          ON membership.classification_source = CASE
+                 WHEN days.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                 ELSE 'SW2021'
+             END
+         AND membership.industry_level = 'L1'
+         AND membership.available_at <= days.trade_date
+         AND membership.in_date <= days.trade_date
+         AND (
+             membership.exit_available_at IS NULL
+             OR membership.exit_available_at > days.trade_date
+         )
+        GROUP BY days.trade_date, membership.symbol
+    ),
+    joined AS (
+        SELECT universe.trade_date,
+               universe.symbol,
+               universe.market,
+               COALESCE(membership_counts.active_index_count, 0) AS active_index_count
+        FROM universe
+        LEFT JOIN membership_counts
+          ON membership_counts.trade_date = universe.trade_date
+         AND membership_counts.symbol = universe.symbol
+    )
+    SELECT joined.market,
+           COUNT(*)::bigint AS expected_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count = 1)::bigint AS covered_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count = 0)::bigint AS missing_symbol_days,
+           COUNT(*) FILTER (WHERE joined.active_index_count > 1)::bigint
+               AS multi_membership_symbol_days,
+           (COUNT(*) FILTER (WHERE joined.active_index_count = 1))::double precision
+               / NULLIF(COUNT(*), 0)::double precision AS coverage_ratio
+    FROM joined
+    GROUP BY joined.market
+    ORDER BY missing_symbol_days DESC, joined.market
+    "#
+}
+
 fn phase7_optional_source_json(
     source: &str,
     table: &str,
@@ -1389,6 +1769,11 @@ async fn register_sync_task(
     let end_date = parse_optional_date(req.end_date.as_deref())?;
     let symbols = match req.dataset.as_str() {
         "index_daily" if !req.index_codes.is_empty() => req.index_codes.as_slice(),
+        "industry_membership" | "market_stock_industry_membership_pit"
+            if !req.index_codes.is_empty() =>
+        {
+            req.index_codes.as_slice()
+        }
         "trade_cal" if !req.exchanges.is_empty() => req.exchanges.as_slice(),
         _ => req.symbols.as_slice(),
     };
@@ -1551,6 +1936,32 @@ async fn execute_sync_task(
             .map_err(|e| e.to_string())?;
             Ok(
                 json!({"task_id": task_id, "dataset": "block_trade", "status": "completed", "count": count}),
+            )
+        }
+        "industry_membership" | "market_stock_industry_membership_pit" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_industry_membership(
+                &state.db,
+                &state.tushare,
+                &task_id,
+                &req.index_codes,
+                start,
+                end,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            quant_data::repository::update_sync_task(
+                &state.db,
+                &task_id,
+                "completed",
+                count as i32,
+                count as i32,
+                0,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "industry_membership", "status": "completed", "count": count}),
             )
         }
         "forecast" | "stock_forecast" => {
@@ -2266,6 +2677,17 @@ pub async fn phase7_share_float_readiness_audit(
     }
 }
 
+/// GET /api/v1/quant/data/phase7-industry-membership-coverage-audit
+pub async fn phase7_industry_membership_coverage_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<Phase7IndustryMembershipCoverageAuditReq>,
+) -> impl IntoResponse {
+    match build_phase7_industry_membership_coverage_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
 async fn build_tushare_permission_smoke(
     state: &AppState,
     req: TusharePermissionSmokeReq,
@@ -2314,6 +2736,7 @@ async fn build_tushare_permission_smoke(
             "This endpoint performs only small read-only Tushare API probes; it does not create tables or sync full-market data.",
             "cashflow and dividend are probed by sample ts_code; repurchase is probed by announcement date range because the Tushare repurchase API has no ts_code input parameter.",
             "share_float is probed by unlock float_date range; ann_date is still persisted as PIT available_at.",
+            "industry_membership probes index_classify and index_member only; it remains blocked from factor backfill until schema and available_at policy are audited.",
             "Use this result to decide whether Phase 7-FE should proceed to Rust schema/repository/sync implementation or mark a source as blocked."
         ],
     }))
@@ -2848,6 +3271,537 @@ async fn build_phase7_share_float_readiness_audit(
         "notes": [
             "Rows with available_at after float_date are retained as raw source records but excluded from pre-unlock pressure by the PIT feature filter.",
             "This audit is source readiness only; RankIC/group return/turnover/capacity still require alpha-source diagnostics after factor backfill."
+        ]
+    }))
+}
+
+async fn build_phase7_industry_membership_coverage_audit(
+    state: &AppState,
+    req: Phase7IndustryMembershipCoverageAuditReq,
+) -> Result<Value, String> {
+    let latest_open_date: Option<NaiveDate> = sqlx::query_scalar(
+        r#"
+        SELECT MAX(trade_date)
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open
+          AND trade_date <= CURRENT_DATE
+        "#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("Failed to resolve latest open trade date: {}", error))?;
+    let default_end = latest_open_date.unwrap_or_else(|| chrono::Utc::now().date_naive());
+    let requested_start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let requested_end_date = req
+        .end_date
+        .unwrap_or_else(|| default_end.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(requested_start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let requested_end = parse_optional_date(Some(requested_end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    let end = requested_end.min(default_end);
+    if start > end {
+        return Err("start_date must be <= effective end_date".to_string());
+    }
+    let limit = phase7_industry_membership_audit_limit(req.limit);
+
+    let summary = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+            i64,
+            i64,
+            i64,
+        ),
+    >(phase7_industry_membership_snapshot_summary_sql())
+    .bind(start)
+    .bind(end)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to audit industry membership snapshot coverage: {}",
+            error
+        )
+    })?;
+    let (
+        trade_days,
+        expected_symbol_days,
+        covered_symbol_days,
+        missing_symbol_days,
+        multi_membership_symbol_days,
+        min_trade_date,
+        max_trade_date,
+        pit_violation_rows,
+        invalid_interval_rows,
+        duplicate_key_rows,
+        missing_exit_available_at_rows,
+    ) = summary;
+    let coverage_ratio = phase7_ratio(covered_symbol_days, expected_symbol_days);
+    let readiness = phase7_industry_membership_snapshot_readiness(
+        expected_symbol_days,
+        covered_symbol_days,
+        missing_symbol_days,
+        multi_membership_symbol_days,
+        pit_violation_rows,
+        invalid_interval_rows,
+        duplicate_key_rows,
+        missing_exit_available_at_rows,
+    );
+
+    let missing_symbol_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            bool,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+        ),
+    >(
+        r#"
+        WITH params AS (
+            SELECT $1::date AS start_date, $2::date AS end_date
+        ),
+        days AS (
+            SELECT cal.trade_date
+            FROM market_trade_calendar cal
+            JOIN params ON cal.trade_date BETWEEN params.start_date AND params.end_date
+            WHERE cal.exchange = 'SSE'
+              AND cal.is_open
+        ),
+        universe AS (
+            SELECT days.trade_date, stock.symbol
+            FROM days
+            JOIN market_stock stock
+              ON COALESCE(stock.market, '') <> ''
+             AND (stock.list_date IS NULL OR stock.list_date <= days.trade_date)
+             AND (stock.delist_date IS NULL OR stock.delist_date > days.trade_date)
+        ),
+        membership_counts AS (
+            SELECT days.trade_date,
+                   membership.symbol,
+                   COUNT(DISTINCT membership.index_code)::bigint AS active_index_count
+            FROM days
+            JOIN market_stock_industry_membership_pit membership
+              ON membership.classification_source = CASE
+                     WHEN days.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                     ELSE 'SW2021'
+                 END
+             AND membership.industry_level = 'L1'
+             AND membership.available_at <= days.trade_date
+             AND membership.in_date <= days.trade_date
+             AND (
+                 membership.exit_available_at IS NULL
+                 OR membership.exit_available_at > days.trade_date
+             )
+            GROUP BY days.trade_date, membership.symbol
+        ),
+        joined AS (
+            SELECT universe.trade_date,
+                   universe.symbol,
+                   COALESCE(membership_counts.active_index_count, 0) AS active_index_count
+            FROM universe
+            LEFT JOIN membership_counts
+              ON membership_counts.trade_date = universe.trade_date
+             AND membership_counts.symbol = universe.symbol
+        )
+        SELECT joined.symbol,
+               COALESCE(stock.name, '') AS name,
+               COALESCE(stock.list_status, '') AS list_status,
+               COALESCE(stock.market, '') AS market,
+               COALESCE(stock.is_st, false) AS is_st,
+               MIN(joined.trade_date) AS first_missing_date,
+               MAX(joined.trade_date) AS latest_missing_date,
+               COUNT(*)::bigint AS missing_days
+        FROM joined
+        LEFT JOIN market_stock stock ON stock.symbol = joined.symbol
+        WHERE joined.active_index_count = 0
+        GROUP BY joined.symbol, stock.name, stock.list_status, stock.market, stock.is_st
+        ORDER BY missing_days DESC, joined.symbol
+        LIMIT $3
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to sample missing industry memberships: {}", error))?;
+    let missing_symbols: Vec<Value> = missing_symbol_rows
+        .into_iter()
+        .map(
+            |(
+                symbol,
+                name,
+                list_status,
+                market,
+                is_st,
+                first_missing_date,
+                latest_missing_date,
+                missing_days,
+            )| {
+                json!({
+                    "symbol": symbol,
+                    "name": name,
+                    "list_status": list_status,
+                    "market": market,
+                    "is_st": is_st,
+                    "first_missing_date": first_missing_date,
+                    "latest_missing_date": latest_missing_date,
+                    "missing_days": missing_days,
+                })
+            },
+        )
+        .collect();
+
+    let multi_membership_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+            i64,
+            Option<String>,
+        ),
+    >(
+        r#"
+        WITH params AS (
+            SELECT $1::date AS start_date, $2::date AS end_date
+        ),
+        days AS (
+            SELECT cal.trade_date
+            FROM market_trade_calendar cal
+            JOIN params ON cal.trade_date BETWEEN params.start_date AND params.end_date
+            WHERE cal.exchange = 'SSE'
+              AND cal.is_open
+        ),
+        membership_counts AS (
+            SELECT days.trade_date,
+                   membership.symbol,
+                   COUNT(DISTINCT membership.index_code)::bigint AS active_index_count,
+                   STRING_AGG(DISTINCT membership.index_code, ',' ORDER BY membership.index_code)
+                       AS index_codes
+            FROM days
+            JOIN market_stock_industry_membership_pit membership
+              ON membership.classification_source = CASE
+                     WHEN days.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                     ELSE 'SW2021'
+                 END
+             AND membership.industry_level = 'L1'
+             AND membership.available_at <= days.trade_date
+             AND membership.in_date <= days.trade_date
+             AND (
+                 membership.exit_available_at IS NULL
+                 OR membership.exit_available_at > days.trade_date
+             )
+            GROUP BY days.trade_date, membership.symbol
+            HAVING COUNT(DISTINCT membership.index_code) > 1
+        )
+        SELECT membership_counts.symbol,
+               COALESCE(stock.name, '') AS name,
+               MIN(membership_counts.trade_date) AS first_multi_date,
+               MAX(membership_counts.trade_date) AS latest_multi_date,
+               COUNT(*)::bigint AS multi_days,
+               MAX(membership_counts.active_index_count)::bigint AS max_active_index_count,
+               MIN(membership_counts.index_codes) AS sample_index_codes
+        FROM membership_counts
+        LEFT JOIN market_stock stock ON stock.symbol = membership_counts.symbol
+        GROUP BY membership_counts.symbol, stock.name
+        ORDER BY multi_days DESC, membership_counts.symbol
+        LIMIT $3
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to sample multi-membership symbols: {}", error))?;
+    let multi_membership_symbols: Vec<Value> = multi_membership_rows
+        .into_iter()
+        .map(
+            |(
+                symbol,
+                name,
+                first_multi_date,
+                latest_multi_date,
+                multi_days,
+                max_active_index_count,
+                sample_index_codes,
+            )| {
+                json!({
+                    "symbol": symbol,
+                    "name": name,
+                    "first_multi_date": first_multi_date,
+                    "latest_multi_date": latest_multi_date,
+                    "multi_days": multi_days,
+                    "max_active_index_count": max_active_index_count,
+                    "sample_index_codes": sample_index_codes,
+                })
+            },
+        )
+        .collect();
+
+    let worst_day_rows = sqlx::query_as::<_, (NaiveDate, i64, i64, i64, Option<f64>)>(
+        r#"
+        WITH params AS (
+            SELECT $1::date AS start_date, $2::date AS end_date
+        ),
+        days AS (
+            SELECT cal.trade_date
+            FROM market_trade_calendar cal
+            JOIN params ON cal.trade_date BETWEEN params.start_date AND params.end_date
+            WHERE cal.exchange = 'SSE'
+              AND cal.is_open
+        ),
+        universe AS (
+            SELECT days.trade_date, stock.symbol
+            FROM days
+            JOIN market_stock stock
+              ON COALESCE(stock.market, '') <> ''
+             AND (stock.list_date IS NULL OR stock.list_date <= days.trade_date)
+             AND (stock.delist_date IS NULL OR stock.delist_date > days.trade_date)
+        ),
+        membership_counts AS (
+            SELECT days.trade_date,
+                   membership.symbol,
+                   COUNT(DISTINCT membership.index_code)::bigint AS active_index_count
+            FROM days
+            JOIN market_stock_industry_membership_pit membership
+              ON membership.classification_source = CASE
+                     WHEN days.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                     ELSE 'SW2021'
+                 END
+             AND membership.industry_level = 'L1'
+             AND membership.available_at <= days.trade_date
+             AND membership.in_date <= days.trade_date
+             AND (
+                 membership.exit_available_at IS NULL
+                 OR membership.exit_available_at > days.trade_date
+             )
+            GROUP BY days.trade_date, membership.symbol
+        ),
+        joined AS (
+            SELECT universe.trade_date,
+                   universe.symbol,
+                   COALESCE(membership_counts.active_index_count, 0) AS active_index_count
+            FROM universe
+            LEFT JOIN membership_counts
+              ON membership_counts.trade_date = universe.trade_date
+             AND membership_counts.symbol = universe.symbol
+        )
+        SELECT joined.trade_date,
+               COUNT(*)::bigint AS expected_symbols,
+               COUNT(*) FILTER (WHERE joined.active_index_count = 0)::bigint AS missing_symbols,
+               COUNT(*) FILTER (WHERE joined.active_index_count > 1)::bigint AS multi_membership_symbols,
+               (COUNT(*) FILTER (WHERE joined.active_index_count = 1))::double precision
+                   / NULLIF(COUNT(*), 0)::double precision AS coverage_ratio
+        FROM joined
+        GROUP BY joined.trade_date
+        ORDER BY (COUNT(*) FILTER (WHERE joined.active_index_count = 0)
+                  + COUNT(*) FILTER (WHERE joined.active_index_count > 1)) DESC,
+                 joined.trade_date
+        LIMIT $3
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to sample worst industry membership days: {}", error))?;
+    let worst_days: Vec<Value> = worst_day_rows
+        .into_iter()
+        .map(
+            |(
+                trade_date,
+                expected_symbols,
+                missing_symbols,
+                multi_membership_symbols,
+                daily_coverage_ratio,
+            )| {
+                json!({
+                    "trade_date": trade_date,
+                    "expected_symbols": expected_symbols,
+                    "missing_symbols": missing_symbols,
+                    "multi_membership_symbols": multi_membership_symbols,
+                    "coverage_ratio": daily_coverage_ratio,
+                })
+            },
+        )
+        .collect();
+
+    let year_breakdown_rows = sqlx::query_as::<_, (NaiveDate, i64, i64, i64, i64, Option<f64>)>(
+        phase7_industry_membership_year_breakdown_sql(),
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to build industry membership year breakdown: {}",
+            error
+        )
+    })?;
+    let by_year: Vec<Value> = year_breakdown_rows
+        .into_iter()
+        .map(
+            |(
+                period_start,
+                expected_symbol_days,
+                covered_symbol_days,
+                missing_symbol_days,
+                multi_membership_symbol_days,
+                period_coverage_ratio,
+            )| {
+                json!({
+                    "year": period_start.year(),
+                    "period_start": period_start,
+                    "expected_symbol_days": expected_symbol_days,
+                    "covered_symbol_days": covered_symbol_days,
+                    "missing_symbol_days": missing_symbol_days,
+                    "multi_membership_symbol_days": multi_membership_symbol_days,
+                    "coverage_ratio": period_coverage_ratio,
+                })
+            },
+        )
+        .collect();
+
+    let market_breakdown_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64, Option<f64>)>(
+        phase7_industry_membership_market_breakdown_sql(),
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to build industry membership market breakdown: {}",
+            error
+        )
+    })?;
+    let mut eligible_markets = Vec::new();
+    let mut excluded_markets = Vec::new();
+    let by_market: Vec<Value> = market_breakdown_rows
+        .into_iter()
+        .map(
+            |(
+                market,
+                expected_symbol_days,
+                covered_symbol_days,
+                missing_symbol_days,
+                multi_membership_symbol_days,
+                market_coverage_ratio,
+            )| {
+                if phase7_industry_membership_market_scope_eligible(
+                    market_coverage_ratio,
+                    multi_membership_symbol_days,
+                ) {
+                    eligible_markets.push(market.clone());
+                } else {
+                    excluded_markets.push(market.clone());
+                }
+                json!({
+                    "market": market,
+                    "expected_symbol_days": expected_symbol_days,
+                    "covered_symbol_days": covered_symbol_days,
+                    "missing_symbol_days": missing_symbol_days,
+                    "multi_membership_symbol_days": multi_membership_symbol_days,
+                    "coverage_ratio": market_coverage_ratio,
+                })
+            },
+        )
+        .collect();
+    let alpha_admission_gate = industry_prosperity_alpha_admission_policy(
+        eligible_markets.clone(),
+        excluded_markets.clone(),
+    );
+
+    Ok(json!({
+        "audit_version": "phase7-industry-membership-coverage-v1",
+        "dataset": "market_stock_industry_membership_pit",
+        "classification_source": "SW2014_until_2021_12_12_then_SW2021",
+        "source_version_gate": {
+            "SW2014": "trade_date < 2021-12-13",
+            "SW2021": "trade_date >= 2021-12-13"
+        },
+        "industry_level": "L1",
+        "date_range": {
+            "requested_start_date": requested_start_date,
+            "requested_end_date": requested_end_date,
+            "start_date": start,
+            "end_date": end,
+            "latest_open_trade_date": latest_open_date,
+            "capped_by_latest_open_trade_date": requested_end > end,
+        },
+        "trade_days": trade_days,
+        "expected_symbol_days": expected_symbol_days,
+        "covered_symbol_days": covered_symbol_days,
+        "missing_symbol_days": missing_symbol_days,
+        "multi_membership_symbol_days": multi_membership_symbol_days,
+        "coverage_ratio": coverage_ratio,
+        "min_trade_date": min_trade_date,
+        "max_trade_date": max_trade_date,
+        "raw_source_checks": {
+            "pit_violation_rows": pit_violation_rows,
+            "invalid_interval_rows": invalid_interval_rows,
+            "duplicate_key_rows": duplicate_key_rows,
+            "missing_exit_available_at_rows": missing_exit_available_at_rows,
+        },
+        "breakdown": {
+            "by_year": by_year,
+            "by_market": by_market,
+        },
+        "market_scope_gate_candidate": {
+            "coverage_threshold": INDUSTRY_MEMBERSHIP_COVERAGE_THRESHOLD,
+            "eligible_markets": eligible_markets,
+            "excluded_markets": excluded_markets,
+            "required_universe_profile": INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
+            "gate_rule": "Only evaluate industry prosperity proxy for markets with coverage_ratio >= 0.995 and multi_membership_symbol_days = 0; excluded markets must not be statically backfilled."
+        },
+        "alpha_admission_gate": alpha_admission_gate,
+        "readiness": readiness,
+        "next_step": match readiness {
+            "snapshot_ready_for_p310_diagnostics" => {
+                "run_p310_rankic_group_decay_turnover_capacity_diagnostics"
+            }
+            "snapshot_multi_membership_blocked" => {
+                "repair_sw2021_retroactive_current_memberships_or_add_source_version_gate"
+            }
+            "snapshot_raw_source_pit_failed" => "repair_raw_interval_available_at_contract",
+            "snapshot_coverage_gaps_need_review" => "classify_missing_symbol_days_before_factor_design",
+            _ => "repair_universe_or_calendar_inputs",
+        },
+        "samples": {
+            "limit": limit,
+            "top_missing_symbols": missing_symbols,
+            "top_multi_membership_symbols": multi_membership_symbols,
+            "worst_days": worst_days,
+        },
+        "pit_contract": {
+            "entry_filter": "available_at <= trade_date AND in_date <= trade_date",
+            "exit_filter": "exit_available_at IS NULL OR exit_available_at > trade_date",
+            "forbidden_inputs": ["market_stock.industry static snapshot"]
+        },
+        "notes": [
+            "This audit is source coverage/readiness only; it does not construct an alpha factor and does not unlock bounded WFA.",
+            "Multi-membership symbol-days are blocking because a cross-sectional industry proxy cannot choose between overlapping L1 memberships without an explicit PIT source-version rule.",
+            "Coverage gaps may be acceptable only after they are classified as ST/special shares or otherwise outside the intended tradable universe."
         ]
     }))
 }
@@ -3727,6 +4681,23 @@ fn phase7_financial_uncovered_symbols_sql() -> &'static str {
     "#
 }
 
+fn phase7_first_tushare_string_field(
+    response: &quant_data::model::tushare_dto::TushareResponse<Vec<serde_json::Value>>,
+    field: &str,
+) -> Option<String> {
+    response
+        .data
+        .as_ref()?
+        .to_maps()
+        .into_iter()
+        .find_map(|row| {
+            row.get(field)
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
 async fn run_tushare_permission_source_smoke(
     state: &AppState,
     source: &str,
@@ -3828,10 +4799,63 @@ async fn run_tushare_permission_source_smoke(
                 "pit_available_at": "ann_date"
             })
         }
+        "industry_membership" => {
+            let classify_result = state
+                .tushare
+                .index_classify(None, Some("L1"), None, Some("SW2021"))
+                .await;
+            let index_code = classify_result
+                .as_ref()
+                .ok()
+                .and_then(|response| phase7_first_tushare_string_field(response, "index_code"))
+                .unwrap_or_else(|| "801010.SI".to_string());
+            let classify_probe = phase7_tushare_probe_json(
+                source,
+                None,
+                "sw2021_l1_index_classify",
+                classify_result,
+            );
+
+            let member_result = state
+                .tushare
+                .index_member(Some(&index_code), None, Some("Y"), Some(row_limit), Some(0))
+                .await;
+            let member_probe = phase7_tushare_probe_json(
+                source,
+                None,
+                "sw_index_member_by_index_code",
+                member_result,
+            );
+
+            let history_member_result = state
+                .tushare
+                .index_member(Some(&index_code), None, None, Some(row_limit), Some(0))
+                .await;
+            let history_member_probe = phase7_tushare_probe_json(
+                source,
+                None,
+                "sw_index_member_history_by_index_code",
+                history_member_result,
+            );
+            let probes = vec![classify_probe, member_probe, history_member_probe];
+
+            json!({
+                "source": source,
+                "query_scope": "classification_and_membership",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "classification_source": "SW2021",
+                "sample_index_code": index_code,
+                "symbol_filter_supported": true,
+                "pit_required_fields": ["in_date", "out_date", "is_new"],
+                "pit_available_at_policy": "schema audit required; if source has no publication date, available_at must be no earlier than membership effective in_date and must never revise prior samples before the change is observable",
+                "admission_gate": "schema_and_available_at_audit_required_before_factor_backfill"
+            })
+        }
         unsupported => json!({
             "source": unsupported,
             "status": "unsupported_source",
-            "supported_sources": PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS,
+            "supported_sources": PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED,
         }),
     }
 }
@@ -4263,12 +5287,124 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
         latest_available_at: block_trade_source_stats.7,
         pit_violation_rows: block_trade_source_stats.8,
     };
+    let industry_membership_source_stats: (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        r#"
+        WITH stats AS (
+            SELECT COUNT(*)::bigint AS data_rows,
+                   COUNT(DISTINCT symbol)::bigint AS symbols,
+                   COUNT(DISTINCT index_code)::bigint AS index_codes,
+                   MIN(in_date) AS min_in_date,
+                   MAX(in_date) AS latest_in_date,
+                   MIN(out_date) AS min_out_date,
+                   MAX(out_date) AS latest_out_date,
+                   MIN(available_at) AS min_available_at,
+                   MAX(available_at) AS latest_available_at,
+                   COUNT(*) FILTER (WHERE available_at < in_date)::bigint AS pit_violation_rows,
+                   COUNT(*) FILTER (WHERE out_date IS NOT NULL AND out_date < in_date)::bigint AS invalid_interval_rows
+            FROM market_stock_industry_membership_pit
+        ),
+        duplicate_keys AS (
+            SELECT COALESCE(SUM(row_count - 1), 0)::bigint AS duplicate_key_rows
+            FROM (
+                SELECT classification_source, index_code, symbol, in_date, COUNT(*)::bigint AS row_count
+                FROM market_stock_industry_membership_pit
+                GROUP BY classification_source, index_code, symbol, in_date
+                HAVING COUNT(*) > 1
+            ) duplicate_groups
+        ),
+        current_asof AS (
+            SELECT MAX(trade_date) AS asof_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open
+              AND trade_date <= CURRENT_DATE
+        ),
+        active_stocks AS (
+            SELECT DISTINCT symbol
+            FROM market_stock
+            WHERE list_status = 'L'
+              AND COALESCE(market, '') <> ''
+        ),
+        current_membership AS (
+            SELECT DISTINCT membership.symbol
+            FROM market_stock_industry_membership_pit membership
+            CROSS JOIN current_asof
+            WHERE current_asof.asof_date IS NOT NULL
+              AND membership.classification_source = 'SW2021'
+              AND membership.industry_level = 'L1'
+              AND membership.available_at <= current_asof.asof_date
+              AND membership.in_date <= current_asof.asof_date
+              AND (
+                  membership.exit_available_at IS NULL
+                  OR membership.exit_available_at > current_asof.asof_date
+              )
+        ),
+        current_coverage AS (
+            SELECT COUNT(DISTINCT active_stocks.symbol)::bigint AS current_active_stock_symbols,
+                   COUNT(DISTINCT current_membership.symbol)::bigint AS current_covered_stock_symbols
+            FROM active_stocks
+            LEFT JOIN current_membership ON current_membership.symbol = active_stocks.symbol
+        )
+        SELECT stats.data_rows,
+               stats.symbols,
+               stats.index_codes,
+               current_coverage.current_active_stock_symbols,
+               current_coverage.current_covered_stock_symbols,
+               stats.min_in_date,
+               stats.latest_in_date,
+               stats.min_out_date,
+               stats.latest_out_date,
+               stats.min_available_at,
+               stats.latest_available_at,
+               stats.pit_violation_rows,
+               stats.invalid_interval_rows,
+               duplicate_keys.duplicate_key_rows
+        FROM stats, duplicate_keys, current_coverage
+        "#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
+    let industry_membership_source_stats = Phase7IndustryMembershipSourceAudit {
+        data_rows: industry_membership_source_stats.0,
+        symbols: industry_membership_source_stats.1,
+        index_codes: industry_membership_source_stats.2,
+        current_active_stock_symbols: industry_membership_source_stats.3,
+        current_covered_stock_symbols: industry_membership_source_stats.4,
+        min_in_date: industry_membership_source_stats.5,
+        latest_in_date: industry_membership_source_stats.6,
+        min_out_date: industry_membership_source_stats.7,
+        latest_out_date: industry_membership_source_stats.8,
+        min_available_at: industry_membership_source_stats.9,
+        latest_available_at: industry_membership_source_stats.10,
+        pit_violation_rows: industry_membership_source_stats.11,
+        invalid_interval_rows: industry_membership_source_stats.12,
+        duplicate_key_rows: industry_membership_source_stats.13,
+    };
     let p315_new_alpha_candidate_sources =
         phase7_new_alpha_candidate_sources_with_block_trade_status(
-            phase7_new_alpha_candidate_sources_with_market_status(
-                &market_level_source_stats,
-                &market_level_sync_tasks,
-                Utc::now().date_naive(),
+            phase7_new_alpha_candidate_sources_with_industry_membership_status(
+                phase7_new_alpha_candidate_sources_with_market_status(
+                    &market_level_source_stats,
+                    &market_level_sync_tasks,
+                    Utc::now().date_naive(),
+                ),
+                &industry_membership_source_stats,
             ),
             &block_trade_source_stats,
         );
@@ -4972,7 +6108,7 @@ mod tests {
         );
         assert_eq!(
             by_source["industry_prosperity_proxy"]["readiness"],
-            "requires_pit_industry_history_or_proxy"
+            "industry_membership_permission_probe_required"
         );
         assert_eq!(
             by_source["block_trade_supply_demand"]["readiness"],
@@ -4988,7 +6124,24 @@ mod tests {
         );
         assert_eq!(
             by_source["industry_prosperity_proxy"]["next_step"],
-            "design_broad_base_pit_proxy_before_factor_backfill"
+            "run_industry_membership_permission_smoke_then_schema_available_at_audit"
+        );
+        assert_eq!(
+            by_source["industry_prosperity_proxy"]["why_not_trainable_now"],
+            "行业 PIT 原始源接入后仍需通过全历史 membership snapshot/coverage 审计和 P3.10 诊断，不能直接进入训练"
+        );
+        assert_eq!(
+            by_source["industry_prosperity_proxy"]["alpha_admission_gate"]["gate_id"],
+            "phase7_industry_membership_market_scope_gate_v1"
+        );
+        assert_eq!(
+            by_source["industry_prosperity_proxy"]["alpha_admission_gate"]
+                ["required_universe_profile"],
+            "main_chinext_non_st"
+        );
+        assert_eq!(
+            by_source["industry_prosperity_proxy"]["alpha_admission_gate"]["excluded_markets"][0],
+            "科创板"
         );
     }
 
@@ -5070,6 +6223,214 @@ mod tests {
             "repair_available_at_before_any_diagnostics"
         );
         assert_eq!(block_trade["raw_source_status"]["pit_violation_rows"], 2);
+    }
+
+    #[test]
+    fn phase7_industry_membership_status_requires_bounded_sync_before_factor_design() {
+        let sources = phase7_new_alpha_candidate_sources_with_industry_membership_status(
+            phase7_new_alpha_candidate_sources(),
+            &Phase7IndustryMembershipSourceAudit {
+                data_rows: 0,
+                symbols: 0,
+                index_codes: 0,
+                current_active_stock_symbols: 0,
+                current_covered_stock_symbols: 0,
+                min_in_date: None,
+                latest_in_date: None,
+                min_out_date: None,
+                latest_out_date: None,
+                min_available_at: None,
+                latest_available_at: None,
+                pit_violation_rows: 0,
+                invalid_interval_rows: 0,
+                duplicate_key_rows: 0,
+            },
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+        let industry = by_source["industry_prosperity_proxy"];
+
+        assert_eq!(
+            industry["readiness"],
+            "industry_membership_schema_ready_needs_bounded_sync"
+        );
+        assert_eq!(
+            industry["next_step"],
+            "run_bounded_industry_membership_sync"
+        );
+    }
+
+    #[test]
+    fn phase7_industry_membership_status_blocks_interval_and_pit_violations() {
+        let sources = phase7_new_alpha_candidate_sources_with_industry_membership_status(
+            phase7_new_alpha_candidate_sources(),
+            &Phase7IndustryMembershipSourceAudit {
+                data_rows: 10,
+                symbols: 8,
+                index_codes: 1,
+                current_active_stock_symbols: 10,
+                current_covered_stock_symbols: 10,
+                min_in_date: Some(NaiveDate::from_ymd_opt(2007, 7, 3).unwrap()),
+                latest_in_date: Some(NaiveDate::from_ymd_opt(2025, 8, 13).unwrap()),
+                min_out_date: Some(NaiveDate::from_ymd_opt(2009, 6, 1).unwrap()),
+                latest_out_date: Some(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()),
+                min_available_at: Some(NaiveDate::from_ymd_opt(2007, 7, 3).unwrap()),
+                latest_available_at: Some(NaiveDate::from_ymd_opt(2025, 8, 13).unwrap()),
+                pit_violation_rows: 0,
+                invalid_interval_rows: 1,
+                duplicate_key_rows: 0,
+            },
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+        let industry = by_source["industry_prosperity_proxy"];
+
+        assert_eq!(
+            industry["readiness"],
+            "industry_membership_raw_source_pit_failed"
+        );
+        assert_eq!(
+            industry["next_step"],
+            "repair_industry_membership_intervals_before_factor_design"
+        );
+    }
+
+    #[test]
+    fn phase7_industry_membership_status_blocks_current_coverage_under_threshold() {
+        let sources = phase7_new_alpha_candidate_sources_with_industry_membership_status(
+            phase7_new_alpha_candidate_sources(),
+            &Phase7IndustryMembershipSourceAudit {
+                data_rows: 10,
+                symbols: 8,
+                index_codes: 1,
+                current_active_stock_symbols: 100,
+                current_covered_stock_symbols: 80,
+                min_in_date: Some(NaiveDate::from_ymd_opt(2007, 7, 3).unwrap()),
+                latest_in_date: Some(NaiveDate::from_ymd_opt(2025, 8, 13).unwrap()),
+                min_out_date: Some(NaiveDate::from_ymd_opt(2009, 6, 1).unwrap()),
+                latest_out_date: Some(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()),
+                min_available_at: Some(NaiveDate::from_ymd_opt(2007, 7, 3).unwrap()),
+                latest_available_at: Some(NaiveDate::from_ymd_opt(2025, 8, 13).unwrap()),
+                pit_violation_rows: 0,
+                invalid_interval_rows: 0,
+                duplicate_key_rows: 0,
+            },
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| {
+                (
+                    source["source"]
+                        .as_str()
+                        .expect("candidate source has source"),
+                    source,
+                )
+            })
+            .collect();
+        let industry = by_source["industry_prosperity_proxy"];
+
+        assert_eq!(
+            industry["readiness"],
+            "industry_membership_current_coverage_undercovered"
+        );
+        assert_eq!(
+            industry["next_step"],
+            "run_full_l1_membership_sync_or_repair_missing_symbols"
+        );
+        assert_eq!(
+            industry["raw_source_status"]["current_active_stock_symbols"],
+            100
+        );
+        assert_eq!(
+            industry["raw_source_status"]["current_covered_stock_symbols"],
+            80
+        );
+        assert_eq!(
+            industry["raw_source_status"]["current_missing_stock_symbols"],
+            20
+        );
+        assert_eq!(
+            industry["raw_source_status"]["current_stock_coverage_ratio"],
+            json!(0.8)
+        );
+    }
+
+    #[test]
+    fn phase7_industry_membership_snapshot_readiness_blocks_multi_membership_before_coverage() {
+        assert_eq!(
+            phase7_industry_membership_snapshot_readiness(100, 99, 1, 2, 0, 0, 0, 0),
+            "snapshot_multi_membership_blocked"
+        );
+        assert_eq!(
+            phase7_industry_membership_snapshot_readiness(100, 94, 6, 0, 0, 0, 0, 0),
+            "snapshot_coverage_gaps_need_review"
+        );
+        assert_eq!(
+            phase7_industry_membership_snapshot_readiness(100, 100, 0, 0, 0, 0, 0, 0),
+            "snapshot_ready_for_p310_diagnostics"
+        );
+    }
+
+    #[test]
+    fn phase7_industry_membership_snapshot_sql_uses_pit_interval_contract() {
+        let sql = phase7_industry_membership_snapshot_summary_sql();
+
+        assert!(sql.contains("DATE '2021-12-13'"));
+        assert!(sql.contains("THEN 'SW2014'"));
+        assert!(sql.contains("ELSE 'SW2021'"));
+        assert!(sql.contains("membership.available_at <= days.trade_date"));
+        assert!(sql.contains("membership.exit_available_at > days.trade_date"));
+        assert!(!sql.contains("market_stock.industry"));
+    }
+
+    #[test]
+    fn phase7_industry_membership_breakdown_sql_uses_same_source_version_gate() {
+        for sql in [
+            phase7_industry_membership_year_breakdown_sql(),
+            phase7_industry_membership_market_breakdown_sql(),
+        ] {
+            assert!(sql.contains("DATE '2021-12-13'"));
+            assert!(sql.contains("THEN 'SW2014'"));
+            assert!(sql.contains("ELSE 'SW2021'"));
+            assert!(sql.contains("membership.available_at <= days.trade_date"));
+            assert!(sql.contains("membership.exit_available_at > days.trade_date"));
+            assert!(!sql.contains("market_stock.industry"));
+        }
+    }
+
+    #[test]
+    fn phase7_industry_membership_market_scope_gate_requires_high_coverage_and_no_multi_membership()
+    {
+        assert!(phase7_industry_membership_market_scope_eligible(
+            Some(0.995),
+            0
+        ));
+        assert!(!phase7_industry_membership_market_scope_eligible(
+            Some(0.9949),
+            0
+        ));
+        assert!(!phase7_industry_membership_market_scope_eligible(
+            Some(0.999),
+            1
+        ));
     }
 
     #[test]
@@ -5568,6 +6929,21 @@ mod tests {
         assert_eq!(
             phase7_permission_smoke_sources(&requested),
             vec!["cashflow", "dividend", "repurchase"]
+        );
+    }
+
+    #[test]
+    fn phase7_permission_smoke_allowlists_industry_membership_probe() {
+        assert!(PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED.contains(&"industry_membership"));
+        assert!(!PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS.contains(&"industry_membership"));
+
+        let requested = vec![
+            " Industry_Membership ".to_string(),
+            "industry_membership".to_string(),
+        ];
+        assert_eq!(
+            phase7_permission_smoke_sources(&requested),
+            vec!["industry_membership"]
         );
     }
 

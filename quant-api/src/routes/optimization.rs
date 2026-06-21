@@ -20,6 +20,9 @@ use std::time::Instant;
 use tracing::error;
 use uuid::Uuid;
 
+use crate::phase7_alpha_admission::{
+    validate_industry_prosperity_entrypoint_admission, validate_industry_prosperity_trial_admission,
+};
 use crate::routes::backtest::{
     execute_factor_backtest_with_caches, execute_prediction_backtest,
     prewarm_factor_signal_cache_for_requests, CostModelReq, EffectiveCoverageReq,
@@ -164,6 +167,10 @@ pub struct AlphaSourceDiagnosticsRequest {
     pub version: Option<String>,
     pub start_date: String,
     pub end_date: String,
+    #[serde(default)]
+    pub alpha_admission_gate_id: Option<String>,
+    #[serde(default)]
+    pub universe_profile: Option<String>,
     #[serde(default)]
     pub min_day_coverage_ratio: Option<f64>,
     #[serde(default)]
@@ -6520,6 +6527,7 @@ async fn build_alpha_source_diagnostics_report_from_request(
     req: &AlphaSourceDiagnosticsRequest,
 ) -> Result<Value, String> {
     let combo_name = alpha_source_diagnostics_combo_name(req)?;
+    validate_alpha_source_diagnostics_admission(req, &combo_name)?;
     let version = alpha_source_diagnostics_version(req);
     let start = parse_feature_profile_readiness_date(&req.start_date, "start_date")?;
     let end = parse_feature_profile_readiness_date(&req.end_date, "end_date")?;
@@ -6714,6 +6722,24 @@ async fn build_alpha_source_diagnostics_report(
             }
         }
     }))
+}
+
+fn validate_alpha_source_diagnostics_admission(
+    req: &AlphaSourceDiagnosticsRequest,
+    combo_name: &str,
+) -> Result<(), String> {
+    validate_industry_prosperity_entrypoint_admission(
+        combo_name,
+        req.alpha_admission_gate_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        req.universe_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        "P3.10 diagnostics",
+    )
 }
 
 #[derive(Debug)]
@@ -14271,6 +14297,7 @@ fn build_factor_trial_request(
     let params = parameters
         .as_object()
         .ok_or_else(|| "trial parameters must be a JSON object".to_string())?;
+    validate_industry_prosperity_trial_admission(params, template)?;
 
     let string_value = |name: &str, default: Option<&str>| -> Result<String, String> {
         if let Some(value) = params.get(name).or_else(|| template.get(name)) {
@@ -16479,6 +16506,8 @@ mod tests {
             version: None,
             start_date: "20260101".to_string(),
             end_date: "20260131".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: None,
             min_day_coverage_ratio: Some(2.0),
             min_daily_rows: Some(0),
             min_p95_daily_row_ratio: Some(-1.0),
@@ -16503,6 +16532,64 @@ mod tests {
         assert_eq!(thresholds.min_day_coverage_ratio, 1.0);
         assert_eq!(thresholds.min_daily_rows, 1);
         assert_eq!(thresholds.min_p95_daily_row_ratio, 0.05);
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_blocks_industry_prosperity_without_admission_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "phase7_industry_prosperity_proxy_v1".to_string(),
+            version: None,
+            start_date: "20260101".to_string(),
+            end_date: "20260131".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        let err = validate_alpha_source_diagnostics_admission(&req, &combo_name).unwrap_err();
+
+        assert!(err.contains("P3.10 diagnostics"));
+        assert!(err.contains("phase7_industry_membership_market_scope_gate_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("科创板"));
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_allows_industry_prosperity_with_market_scope_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "phase7_industry_prosperity_proxy_v1".to_string(),
+            version: None,
+            start_date: "20260101".to_string(),
+            end_date: "20260131".to_string(),
+            alpha_admission_gate_id: Some(
+                "phase7_industry_membership_market_scope_gate_v1".to_string(),
+            ),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        validate_alpha_source_diagnostics_admission(&req, &combo_name)
+            .expect("market-scope gated diagnostics request");
     }
 
     #[test]
@@ -16623,6 +16710,8 @@ mod tests {
             version: None,
             start_date: "20230101".to_string(),
             end_date: "20231231".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: None,
             min_day_coverage_ratio: None,
             min_daily_rows: None,
             min_p95_daily_row_ratio: None,
@@ -16647,6 +16736,8 @@ mod tests {
             version: None,
             start_date: "20230101".to_string(),
             end_date: "20231231".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: None,
             min_day_coverage_ratio: None,
             min_daily_rows: None,
             min_p95_daily_row_ratio: None,
@@ -16766,6 +16857,8 @@ mod tests {
             version: None,
             start_date: "20230101".to_string(),
             end_date: "20231231".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: None,
             min_day_coverage_ratio: None,
             min_daily_rows: None,
             min_p95_daily_row_ratio: None,
@@ -16788,6 +16881,8 @@ mod tests {
             version: None,
             start_date: "20230101".to_string(),
             end_date: "20231231".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: None,
             min_day_coverage_ratio: None,
             min_daily_rows: None,
             min_p95_daily_row_ratio: None,
@@ -19082,6 +19177,64 @@ mod tests {
             unique_pairs.len() >= 8,
             "expected broad choice coverage, got {unique_pairs:?}"
         );
+    }
+
+    #[test]
+    fn trial_backtest_request_blocks_industry_prosperity_without_market_scope_gate() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_industry_prosperity_proxy_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "monthly"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "top_n": 8,
+            "universe_profile": "listed_non_st"
+        });
+
+        let err = build_factor_trial_request(&task, &params).unwrap_err();
+
+        assert!(err.contains("phase7_industry_membership_market_scope_gate_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("科创板"));
+    }
+
+    #[test]
+    fn trial_backtest_request_allows_industry_prosperity_with_market_scope_gate_profile() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "phase7_industry_prosperity_proxy_v1",
+                "version": "1.0.0",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "monthly"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "top_n": 8,
+            "universe_profile": "main_chinext_non_st",
+            "alpha_admission_gate_id": "phase7_industry_membership_market_scope_gate_v1"
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("market-scope gated request");
+
+        assert_eq!(req.combo_name, "phase7_industry_prosperity_proxy_v1");
+        assert_eq!(req.universe_profile.as_deref(), Some("main_chinext_non_st"));
     }
 
     #[test]

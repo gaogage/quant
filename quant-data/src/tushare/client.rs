@@ -47,6 +47,48 @@ impl Default for TushareConfig {
     }
 }
 
+const INDEX_CLASSIFY_FIELDS: &[&str] = &[
+    "index_code",
+    "industry_name",
+    "parent_code",
+    "level",
+    "industry_code",
+    "is_pub",
+    "src",
+];
+const INDEX_MEMBER_FIELDS: &[&str] = &[
+    "index_code",
+    "index_name",
+    "con_code",
+    "con_name",
+    "in_date",
+    "out_date",
+    "is_new",
+];
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn industry_membership_specs_keep_pit_audit_fields() {
+        assert_eq!(
+            INDEX_CLASSIFY_FIELDS,
+            &[
+                "index_code",
+                "industry_name",
+                "parent_code",
+                "level",
+                "industry_code",
+                "is_pub",
+                "src",
+            ]
+        );
+        assert!(INDEX_MEMBER_FIELDS.contains(&"in_date"));
+        assert!(INDEX_MEMBER_FIELDS.contains(&"out_date"));
+        assert!(INDEX_MEMBER_FIELDS.contains(&"is_new"));
+    }
+}
+
 /// Tushare API 客户端（带速率限制）
 #[derive(Clone)]
 pub struct TushareClient {
@@ -640,6 +682,65 @@ impl TushareClient {
             params.push(("end_date", ed));
         }
         self.call_api::<Vec<serde_json::Value>>("index_daily", params, &[])
+            .await
+    }
+
+    /// 申万行业分类。用于 PIT 行业成员源接入前的权限与字段探针。
+    pub async fn index_classify(
+        &self,
+        index_code: Option<&str>,
+        level: Option<&str>,
+        parent_code: Option<&str>,
+        src: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = index_code {
+            params.push(("index_code", code));
+        }
+        if let Some(value) = level {
+            params.push(("level", value));
+        }
+        if let Some(code) = parent_code {
+            params.push(("parent_code", code));
+        }
+        if let Some(value) = src {
+            params.push(("src", value));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("index_classify", params, INDEX_CLASSIFY_FIELDS)
+            .await
+    }
+
+    /// 申万行业成分。`in_date/out_date/is_new` 是后续 PIT membership 审计的关键字段。
+    pub async fn index_member(
+        &self,
+        index_code: Option<&str>,
+        ts_code: Option<&str>,
+        is_new: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_value = limit.map(|value| value.to_string());
+        let offset_value = offset.map(|value| value.to_string());
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = index_code {
+            params.push(("index_code", code));
+        }
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(value) = is_new {
+            params.push(("is_new", value));
+        }
+        if let Some(value) = limit_value.as_deref() {
+            params.push(("limit", value));
+        }
+        if let Some(value) = offset_value.as_deref() {
+            params.push(("offset", value));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("index_member", params, INDEX_MEMBER_FIELDS)
             .await
     }
 

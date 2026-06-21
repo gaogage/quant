@@ -3899,6 +3899,7 @@ pub enum TradableUniverseProfile {
     All,
     ListedNonSt,
     MainBoardNonSt,
+    MainChinextNonSt,
 }
 
 impl TradableUniverseProfile {
@@ -3907,6 +3908,7 @@ impl TradableUniverseProfile {
             "all" | "full" => Ok(Self::All),
             "listed_non_st" | "listed-non-st" => Ok(Self::ListedNonSt),
             "main_board_non_st" | "main-board-non-st" => Ok(Self::MainBoardNonSt),
+            "main_chinext_non_st" | "main-chinext-non-st" => Ok(Self::MainChinextNonSt),
             other => Err(format!("unsupported universe_profile: {}", other)),
         }
     }
@@ -7966,7 +7968,9 @@ fn combo_score_load_dates_sql(
 fn tradable_universe_join_sql(profile: TradableUniverseProfile) -> &'static str {
     match profile {
         TradableUniverseProfile::All => "",
-        TradableUniverseProfile::ListedNonSt | TradableUniverseProfile::MainBoardNonSt => {
+        TradableUniverseProfile::ListedNonSt
+        | TradableUniverseProfile::MainBoardNonSt
+        | TradableUniverseProfile::MainChinextNonSt => {
             "\n         JOIN market_stock ms ON ms.symbol = mfv.symbol"
         }
     }
@@ -7984,6 +7988,15 @@ fn tradable_universe_filter_sql(profile: TradableUniverseProfile) -> Option<&'st
            AND ms.exchange IN ('SSE', 'SZSE')
            AND ms.market = '主板'
            AND COALESCE(ms.market, '') NOT ILIKE '%创业%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%北交%'",
+        ),
+        TradableUniverseProfile::MainChinextNonSt => Some(
+            "ms.list_status = 'L'
+           AND COALESCE(ms.is_st, false) = false
+           AND ms.exchange IN ('SSE', 'SZSE')
+           AND ms.market IN ('主板', '创业板')
+           AND ms.symbol NOT LIKE '688%SH'
            AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
            AND COALESCE(ms.market, '') NOT ILIKE '%北交%'",
         ),
@@ -21217,6 +21230,34 @@ mod tests {
         assert!(sql.contains("COALESCE(ms.is_st, false) = false"));
         assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
         assert!(sql.contains("ms.market = '主板'"));
+    }
+
+    #[test]
+    fn combo_score_query_filters_main_chinext_universe_and_excludes_star_market() {
+        let sql = combo_score_load_sql(
+            ScoreDirection::Descending,
+            Some(200),
+            TradableUniverseProfile::MainChinextNonSt,
+        );
+
+        assert!(sql.contains("JOIN market_stock ms ON ms.symbol = mfv.symbol"));
+        assert!(sql.contains("ms.list_status = 'L'"));
+        assert!(sql.contains("COALESCE(ms.is_st, false) = false"));
+        assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+    }
+
+    #[test]
+    fn tradable_universe_profile_parses_main_chinext_non_st_aliases() {
+        assert_eq!(
+            TradableUniverseProfile::parse("main_chinext_non_st").unwrap(),
+            TradableUniverseProfile::MainChinextNonSt
+        );
+        assert_eq!(
+            TradableUniverseProfile::parse("main-chinext-non-st").unwrap(),
+            TradableUniverseProfile::MainChinextNonSt
+        );
     }
 
     #[test]

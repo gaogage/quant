@@ -16,6 +16,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod auth;
+mod phase7_alpha_admission;
 mod routes;
 
 pub struct AppState {
@@ -220,6 +221,11 @@ async fn main() {
             "/api/v1/quant/data/cleanup/expired-stats",
             get(routes::cleanup::expired_stats),
         )
+        // 蓝图进度
+        .route(
+            "/api/v1/quant/blueprint/progress",
+            get(routes::blueprint::blueprint_progress),
+        )
         .route("/api/v1/quant/data/stats", get(routes::sync::data_stats))
         .route(
             "/api/v1/quant/data/phase7-feasibility-audit",
@@ -244,6 +250,10 @@ async fn main() {
         .route(
             "/api/v1/quant/data/phase7-share-float-readiness-audit",
             post(routes::sync::phase7_share_float_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/phase7-industry-membership-coverage-audit",
+            get(routes::sync::phase7_industry_membership_coverage_audit),
         )
         .route(
             "/api/v1/quant/data/tushare/permission-smoke",
@@ -382,6 +392,18 @@ async fn main() {
         .route(
             "/api/v1/quant/factors/phase7-supply-float-shock-backfill/background",
             post(routes::factors::backfill_phase7_supply_float_shock_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-liquidity-quality-backfill/background",
+            post(routes::factors::backfill_phase7_liquidity_quality_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-market-residual-risk-backfill/background",
+            post(routes::factors::backfill_phase7_market_residual_risk_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-industry-prosperity-backfill/background",
+            post(routes::factors::backfill_phase7_industry_prosperity_background),
         )
         .route(
             "/api/v1/quant/factors/phase7-event-window-alpha-backfill/background",

@@ -20,6 +20,10 @@ use quant_factor::factors::price_volume::*;
 use quant_factor::neutralize::NeutralizeConfig;
 use quant_factor::*;
 
+use crate::phase7_alpha_admission::{
+    validate_industry_prosperity_entrypoint_admission,
+    validate_industry_prosperity_factor_builder_admission, INDUSTRY_PROSPERITY_SOURCE,
+};
 use crate::AppState;
 
 // ─── Request/Response types ───────────────────────────────────────
@@ -266,6 +270,35 @@ pub struct Phase7UnlockSupplyPressureBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7LiquidityQualityBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7MarketResidualRiskBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7IndustryProsperityBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub alpha_admission_gate_id: Option<String>,
+    pub universe_profile: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7AlphaBlendSourceRequest {
     pub combo_name: String,
     pub version: Option<String>,
@@ -340,6 +373,9 @@ type Phase7ForecastRevisionSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7RepurchaseSupplyShockBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7BlockTradeSupplyDemandBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7UnlockSupplyPressureBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7LiquidityQualityBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7MarketResidualRiskBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7IndustryProsperityBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +389,29 @@ enum FinancialAnnualChangeMode {
 enum SupplyFloatShockMode {
     GrowthInverse,
     ChurnInverse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiquidityQualitySignal {
+    ImpactImprovement,
+    AmountTrend,
+    AmountStability,
+    TurnoverStability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarketResidualRiskSignal {
+    LowBeta,
+    LowDownsideBeta,
+    LowResidualVolatility,
+    ResidualReversal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndustryProsperitySignal {
+    ReturnMomentum,
+    PositiveBreadth,
+    AmountTrend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +469,21 @@ enum Phase7BackfillFactorKind {
     },
     UnlockPressure {
         horizon_days: i32,
+    },
+    LiquidityQuality {
+        signal: LiquidityQualitySignal,
+        short_window: i32,
+        long_window: i32,
+    },
+    MarketResidualRisk {
+        signal: MarketResidualRiskSignal,
+        short_window: i32,
+        long_window: i32,
+    },
+    IndustryProsperity {
+        signal: IndustryProsperitySignal,
+        short_window: i32,
+        long_window: i32,
     },
     ForecastRevision {
         value_expression: &'static str,
@@ -1563,6 +1637,166 @@ impl Phase7UnlockSupplyPressureBackfillRequest {
     }
 }
 
+impl Phase7LiquidityQualityBackfillRequest {
+    fn into_plan(self) -> Result<Phase7LiquidityQualityBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_liquidity_quality_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7LiquidityQualityBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_liquidity_quality_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_liquidity_quality_v1",
+            category: "liquidity_quality_alpha",
+            phase: "7-P3.16",
+            dependencies: &["market_stock_daily_bar_adj", "market_stock_daily_basic"],
+            combo_method: "weighted_liquidity_quality",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7MarketResidualRiskBackfillRequest {
+    fn into_plan(self) -> Result<Phase7MarketResidualRiskBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "phase7_market_residual_risk_v1",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7MarketResidualRiskBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_market_residual_risk_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_market_residual_risk_v1",
+            category: "market_residual_risk_alpha",
+            phase: "7-P3.17",
+            dependencies: &["market_stock_daily_bar_adj", "market_index_daily_bar"],
+            combo_method: "weighted_market_residual",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7IndustryProsperityBackfillRequest {
+    fn into_plan(self) -> Result<Phase7IndustryProsperityBackfillPlan, String> {
+        validate_industry_prosperity_entrypoint_admission(
+            INDUSTRY_PROSPERITY_SOURCE,
+            self.alpha_admission_gate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            self.universe_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "factor builder",
+        )?;
+
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "phase7_industry_prosperity_proxy_v1",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7IndustryProsperityBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_industry_prosperity_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_industry_prosperity_proxy_v1",
+            category: "industry_prosperity_alpha",
+            phase: "7-P3.18G",
+            dependencies: &[
+                "market_stock_industry_membership_pit",
+                "market_stock_daily_bar_adj",
+                "market_stock_daily_basic",
+                "market_stock",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_ind_prosperity",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
 impl Phase7AlphaBlendBackfillRequest {
     fn into_plan(self) -> Result<Phase7AlphaBlendBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
@@ -1594,6 +1828,7 @@ impl Phase7AlphaBlendBackfillRequest {
         if combo_name.len() > 128 {
             return Err("combo_name must be <= 128 chars".to_string());
         }
+        validate_industry_prosperity_factor_builder_admission(&combo_name)?;
 
         let allow_signed_weights = self.allow_signed_weights;
         let mut source_combos = Vec::with_capacity(self.sources.len());
@@ -1612,6 +1847,7 @@ impl Phase7AlphaBlendBackfillRequest {
             if combo_name.len() > 128 {
                 return Err("source.combo_name must be <= 128 chars".to_string());
             }
+            validate_industry_prosperity_factor_builder_admission(&combo_name)?;
             let version = trim_or_default(source.version, "1.0.0", "source.version")?;
             if version.len() > 32 {
                 return Err("source.version must be <= 32 chars".to_string());
@@ -3196,6 +3432,142 @@ fn phase7_unlock_supply_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpe
             period: 180,
             kind: Phase7BackfillFactorKind::UnlockPressure { horizon_days: 180 },
             weight: 0.20,
+        },
+    ]
+}
+
+fn phase7_liquidity_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "liq_impact_improve_20v120_std",
+            name: "Phase 7 PIT liquidity impact improvement 20d versus 120d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::LiquidityQuality {
+                signal: LiquidityQualitySignal::ImpactImprovement,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "liq_amount_trend_20v120_std",
+            name: "Phase 7 PIT traded amount trend 20d versus 120d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::LiquidityQuality {
+                signal: LiquidityQualitySignal::AmountTrend,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "liq_amount_stability_60d_std",
+            name: "Phase 7 PIT traded amount stability 60d",
+            period: 60,
+            kind: Phase7BackfillFactorKind::LiquidityQuality {
+                signal: LiquidityQualitySignal::AmountStability,
+                short_window: 60,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "liq_turnover_stability_60d_std",
+            name: "Phase 7 PIT turnover proxy stability 60d",
+            period: 60,
+            kind: Phase7BackfillFactorKind::LiquidityQuality {
+                signal: LiquidityQualitySignal::TurnoverStability,
+                short_window: 60,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+    ]
+}
+
+fn phase7_market_residual_risk_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "mkt_low_beta_120d_std",
+            name: "Phase 7 PIT low market beta 120d rank",
+            period: 120,
+            kind: Phase7BackfillFactorKind::MarketResidualRisk {
+                signal: MarketResidualRiskSignal::LowBeta,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "mkt_downside_beta_120d_std",
+            name: "Phase 7 PIT low downside market beta 120d rank",
+            period: 120,
+            kind: Phase7BackfillFactorKind::MarketResidualRisk {
+                signal: MarketResidualRiskSignal::LowDownsideBeta,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "resid_low_vol_120d_std",
+            name: "Phase 7 PIT low market-residual volatility 120d rank",
+            period: 120,
+            kind: Phase7BackfillFactorKind::MarketResidualRisk {
+                signal: MarketResidualRiskSignal::LowResidualVolatility,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "resid_reversal_20d_std",
+            name: "Phase 7 PIT market-residual 20d reversal rank",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MarketResidualRisk {
+                signal: MarketResidualRiskSignal::ResidualReversal,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.25,
+        },
+    ]
+}
+
+fn phase7_industry_prosperity_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "ind_pros_ret_mom_20v120_std",
+            name: "Phase 7 PIT industry prosperity return momentum 20d versus 120d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::IndustryProsperity {
+                signal: IndustryProsperitySignal::ReturnMomentum,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.34,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ind_pros_breadth_60d_std",
+            name: "Phase 7 PIT industry prosperity positive breadth 60d",
+            period: 60,
+            kind: Phase7BackfillFactorKind::IndustryProsperity {
+                signal: IndustryProsperitySignal::PositiveBreadth,
+                short_window: 60,
+                long_window: 120,
+            },
+            weight: 0.33,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ind_pros_amount_trend_20v120_std",
+            name: "Phase 7 PIT industry prosperity traded amount trend 20d versus 120d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::IndustryProsperity {
+                signal: IndustryProsperitySignal::AmountTrend,
+                short_window: 20,
+                long_window: 120,
+            },
+            weight: 0.33,
         },
     ]
 }
@@ -6895,6 +7267,385 @@ pub async fn backfill_phase7_supply_float_shock_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-liquidity-quality-backfill/background
+///
+/// Set-based PIT broad-base liquidity-quality alpha from daily price, traded
+/// amount, and same-day float market value snapshots.
+pub async fn backfill_phase7_liquidity_quality_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7LiquidityQualityBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 liquidity quality backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_liquidity_quality_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_liquidity_quality_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 liquidity quality backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 liquidity quality backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 liquidity quality backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-market-residual-risk-backfill/background
+///
+/// Set-based PIT broad-base market beta and residual-risk alpha from stock
+/// daily returns and same-day CSI 300 index returns.
+pub async fn backfill_phase7_market_residual_risk_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7MarketResidualRiskBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 market residual risk backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_market_residual_risk_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_market_residual_risk_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 market residual risk backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 market residual risk backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 market residual risk backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-industry-prosperity-backfill/background
+///
+/// Dedicated PIT market-scope industry prosperity proxy. It only runs with the
+/// alpha admission gate and uses PIT industry membership to restrict evaluation
+/// to the main-board + ChiNext scope approved by coverage audit.
+pub async fn backfill_phase7_industry_prosperity_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7IndustryProsperityBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 industry prosperity backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_industry_prosperity_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_industry_prosperity_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 industry prosperity backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 industry prosperity backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 industry prosperity backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-event-window-alpha-backfill/background
 ///
 /// Set-based PIT event-window alpha backfill from forecast, express, and
@@ -7495,6 +8246,35 @@ async fn run_phase7_supply_float_shock_backfill(
     run_set_based_factor_backfill(db, task_id, job).await
 }
 
+async fn run_phase7_liquidity_quality_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7LiquidityQualityBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_liquidity_quality_backfill_specs();
+    run_segmented_set_based_factor_backfill(db, task_id, plan, &specs, phase7_factor_backfill_sql)
+        .await
+}
+
+async fn run_phase7_market_residual_risk_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7MarketResidualRiskBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_market_residual_risk_backfill_specs();
+    run_segmented_set_based_factor_backfill(db, task_id, plan, &specs, phase7_factor_backfill_sql)
+        .await
+}
+
+async fn run_phase7_industry_prosperity_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7IndustryProsperityBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_industry_prosperity_backfill_specs();
+    run_segmented_industry_prosperity_backfill(db, task_id, plan, &specs).await
+}
+
 async fn run_phase7_event_window_alpha_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -7820,6 +8600,140 @@ async fn run_segmented_set_based_factor_backfill(
         report,
         elapsed_millis(started_at),
     ))
+}
+
+async fn run_segmented_industry_prosperity_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let started_at = Instant::now();
+    let segments = quarterly_backfill_segments(plan.start_date, plan.end_date);
+    let total_steps = segments.len().saturating_mul(2);
+    let mut completed_steps = 0usize;
+    let mut factor_rows = 0usize;
+    let mut combo_rows = 0usize;
+    let mut factor_row_totals: HashMap<String, usize> = HashMap::new();
+
+    for spec in specs {
+        upsert_set_based_factor_definition(db, spec, plan).await?;
+        factor_row_totals.insert(spec.factor_code.to_string(), 0);
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report =
+                industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_industry_prosperity_factor_backfill(db, &segment_plan).await?;
+        for (factor_code, row_count) in rows {
+            *factor_row_totals.entry(factor_code).or_insert(0) += row_count;
+            factor_rows = factor_rows.saturating_add(row_count);
+        }
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(db, task_id, completed_steps, total_steps, factor_rows)
+            .await?;
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report =
+                industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_set_based_combo_backfill(db, specs, &segment_plan).await?;
+        combo_rows = combo_rows.saturating_add(rows);
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(
+            db,
+            task_id,
+            completed_steps,
+            total_steps,
+            factor_rows.saturating_add(combo_rows),
+        )
+        .await?;
+    }
+
+    let report = industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
+fn industry_prosperity_report(
+    factor_rows: usize,
+    combo_rows: usize,
+    factor_row_totals: &HashMap<String, usize>,
+    specs: &[SetBasedFactorSpec],
+) -> SetBasedFactorBackfillReport {
+    let factor_rows_by_code = specs
+        .iter()
+        .map(|spec| {
+            (
+                spec.factor_code.to_string(),
+                *factor_row_totals.get(spec.factor_code).unwrap_or(&0),
+            )
+        })
+        .collect();
+    SetBasedFactorBackfillReport {
+        factor_rows,
+        combo_rows,
+        factor_rows_by_code,
+    }
+}
+
+async fn execute_industry_prosperity_factor_backfill(
+    db: &sqlx::PgPool,
+    plan: &SetBasedFactorBackfillPlan,
+) -> Result<Vec<(String, usize)>, String> {
+    let mut tx = db.begin().await.map_err(|error| {
+        format!(
+            "Failed to start industry prosperity backfill transaction: {}",
+            error
+        )
+    })?;
+    set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(&phase7_industry_prosperity_multi_backfill_sql())
+        .bind("ind_pros_ret_mom_20v120_std")
+        .bind("ind_pros_breadth_60d_std")
+        .bind("ind_pros_amount_trend_20v120_std")
+        .bind(&plan.version)
+        .bind(plan.start_date)
+        .bind(plan.end_date)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to backfill industry prosperity factors for {}..{}: {}",
+                plan.start_date, plan.end_date, error
+            )
+        })?;
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "Failed to commit industry prosperity backfill transaction: {}",
+            error
+        )
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(factor_code, row_count)| (factor_code, row_count.max(0) as usize))
+        .collect())
 }
 
 async fn upsert_set_based_factor_definition(
@@ -8288,6 +9202,21 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
         Phase7BackfillFactorKind::UnlockPressure { horizon_days } => {
             phase7_unlock_pressure_backfill_sql(horizon_days)
         }
+        Phase7BackfillFactorKind::LiquidityQuality {
+            signal,
+            short_window,
+            long_window,
+        } => phase7_liquidity_quality_backfill_sql(signal, short_window, long_window),
+        Phase7BackfillFactorKind::MarketResidualRisk {
+            signal,
+            short_window,
+            long_window,
+        } => phase7_market_residual_risk_backfill_sql(signal, short_window, long_window),
+        Phase7BackfillFactorKind::IndustryProsperity {
+            signal,
+            short_window,
+            long_window,
+        } => phase7_industry_prosperity_backfill_sql(signal, short_window, long_window),
         Phase7BackfillFactorKind::ForecastRevision {
             value_expression,
             higher_is_better,
@@ -9502,6 +10431,383 @@ fn phase7_supply_float_shock_backfill_sql(
     )
 }
 
+fn phase7_liquidity_quality_backfill_sql(
+    signal: LiquidityQualitySignal,
+    short_window: i32,
+    long_window: i32,
+) -> String {
+    let short_window = short_window.max(2);
+    let long_window = long_window.max(short_window + 1);
+    let short_preceding = short_window - 1;
+    let long_preceding = long_window - 1;
+    let warmup_days = ((long_window * 3) / 2).max(180);
+    let raw_value_expression = match signal {
+        LiquidityQualitySignal::ImpactImprovement => {
+            "LN((long_illiq + 1e-12) / (short_illiq + 1e-12)) AS raw_value".to_string()
+        }
+        LiquidityQualitySignal::AmountTrend => {
+            "LN((short_amount + 1.0) / (long_amount + 1.0)) AS raw_value".to_string()
+        }
+        LiquidityQualitySignal::AmountStability => {
+            format!("-COALESCE(std_log_amount_{short_window}, 0.0) AS raw_value")
+        }
+        LiquidityQualitySignal::TurnoverStability => {
+            format!(
+                "-ABS((turnover_proxy - avg_turnover_{short_window}) / NULLIF(std_turnover_{short_window}, 0.0))
+                 - COALESCE(std_turnover_{short_window}, 0.0) AS raw_value"
+            )
+        }
+    };
+    let raw_filter = match signal {
+        LiquidityQualitySignal::ImpactImprovement => {
+            format!(
+                "illiq_obs_count_{short_window} = {short_window}
+              AND illiq_obs_count_{long_window} = {long_window}
+              AND short_illiq IS NOT NULL
+              AND long_illiq IS NOT NULL"
+            )
+        }
+        LiquidityQualitySignal::AmountTrend => {
+            format!(
+                "amount_obs_count_{short_window} = {short_window}
+              AND amount_obs_count_{long_window} = {long_window}
+              AND short_amount IS NOT NULL
+              AND long_amount IS NOT NULL"
+            )
+        }
+        LiquidityQualitySignal::AmountStability => {
+            format!(
+                "amount_obs_count_{short_window} = {short_window}
+              AND std_log_amount_{short_window} IS NOT NULL"
+            )
+        }
+        LiquidityQualitySignal::TurnoverStability => {
+            format!(
+                "turnover_obs_count_{short_window} = {short_window}
+              AND avg_turnover_{short_window} IS NOT NULL
+              AND std_turnover_{short_window} IS NOT NULL"
+            )
+        }
+    };
+
+    format!(
+        "WITH joined AS (
+            SELECT
+                bar.symbol,
+                bar.trade_date,
+                bar.close::double precision AS close,
+                bar.amount::double precision AS amount,
+                basic.circ_mv::double precision AS circ_mv,
+                LAG(close::double precision) OVER (
+                    PARTITION BY bar.symbol ORDER BY bar.trade_date
+                ) AS prev_close
+            FROM market_stock_daily_bar_adj bar
+            JOIN market_stock_daily_basic basic
+              ON basic.symbol = bar.symbol
+             AND basic.trade_date = bar.trade_date
+            WHERE bar.trade_date <= $4
+              AND bar.trade_date >= ($3::date - INTERVAL '{warmup_days} days')
+              AND bar.close IS NOT NULL
+              AND bar.amount IS NOT NULL
+              AND basic.circ_mv IS NOT NULL
+        ),
+        observations AS (
+            SELECT
+                symbol,
+                trade_date,
+                amount,
+                CASE
+                    WHEN prev_close > 0.0 AND close > 0.0 AND amount > 0.0
+                    THEN ABS((close - prev_close) / prev_close) / amount * 1000000000.0
+                    ELSE NULL
+                END AS illiquidity,
+                CASE WHEN amount > 0.0 THEN LN(1.0 + amount) ELSE NULL END AS log_amount,
+                CASE
+                    WHEN amount > 0.0 AND circ_mv > 0.0 THEN amount / NULLIF(circ_mv, 0.0)
+                    ELSE NULL
+                END AS turnover_proxy
+            FROM joined
+        ),
+        rolling AS (
+            SELECT
+                symbol,
+                trade_date,
+                amount,
+                turnover_proxy,
+                AVG(illiquidity) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS short_illiq,
+                AVG(illiquidity) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS long_illiq,
+                COUNT(illiquidity) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS illiq_obs_count_{short_window},
+                COUNT(illiquidity) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS illiq_obs_count_{long_window},
+                AVG(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS short_amount,
+                AVG(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS long_amount,
+                COUNT(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS amount_obs_count_{short_window},
+                COUNT(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS amount_obs_count_{long_window},
+                STDDEV_SAMP(log_amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS std_log_amount_{short_window},
+                AVG(turnover_proxy) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS avg_turnover_{short_window},
+                STDDEV_SAMP(turnover_proxy) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS std_turnover_{short_window},
+                COUNT(turnover_proxy) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS turnover_obs_count_{short_window}
+            FROM observations
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                trade_date AS available_at,
+                {raw_value_expression}
+            FROM rolling
+            WHERE trade_date BETWEEN $3 AND $4
+              AND {raw_filter}
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value) AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_market_residual_risk_backfill_sql(
+    signal: MarketResidualRiskSignal,
+    short_window: i32,
+    long_window: i32,
+) -> String {
+    let short_window = short_window.max(2);
+    let long_window = long_window.max(short_window + 1);
+    let short_preceding = short_window - 1;
+    let long_preceding = long_window - 1;
+    let warmup_days = (long_window * 4).max(480);
+    let min_downside_observations = (long_window / 4).max(20);
+    let raw_value_expression = match signal {
+        MarketResidualRiskSignal::LowBeta => format!("-beta_{long_window} AS raw_value"),
+        MarketResidualRiskSignal::LowDownsideBeta => {
+            format!("-downside_beta_{long_window} AS raw_value")
+        }
+        MarketResidualRiskSignal::LowResidualVolatility => {
+            format!("-residual_vol_{long_window} AS raw_value")
+        }
+        MarketResidualRiskSignal::ResidualReversal => format!(
+            "-residual_mean_{short_window} / NULLIF(residual_vol_{long_window}, 0.0) AS raw_value"
+        ),
+    };
+    let raw_filter = match signal {
+        MarketResidualRiskSignal::LowBeta => {
+            format!("obs_count_{long_window} = {long_window} AND beta_{long_window} IS NOT NULL")
+        }
+        MarketResidualRiskSignal::LowDownsideBeta => format!(
+            "downside_obs_count_{long_window} >= {min_downside_observations}
+             AND downside_beta_{long_window} IS NOT NULL"
+        ),
+        MarketResidualRiskSignal::LowResidualVolatility => format!(
+            "residual_obs_count_{long_window} = {long_window}
+             AND residual_vol_{long_window} IS NOT NULL"
+        ),
+        MarketResidualRiskSignal::ResidualReversal => format!(
+            "residual_obs_count_{short_window} = {short_window}
+             AND residual_vol_{long_window} IS NOT NULL
+             AND residual_mean_{short_window} IS NOT NULL"
+        ),
+    };
+
+    format!(
+        "WITH market AS (
+            SELECT
+                idx.trade_date,
+                CASE
+                    WHEN idx.close > 0 AND idx.pre_close > 0
+                    THEN (idx.close::double precision / idx.pre_close::double precision) - 1.0
+                    ELSE NULL
+                END AS market_return
+            FROM market_index_daily_bar idx
+            WHERE idx.symbol = '000300.SH'
+              AND idx.trade_date <= $4
+              AND idx.trade_date >= ($3::date - INTERVAL '{warmup_days} days')
+              AND idx.close IS NOT NULL
+              AND idx.pre_close IS NOT NULL
+        ),
+        stock AS (
+            SELECT
+                bar.symbol,
+                bar.trade_date,
+                bar.close::double precision AS close,
+                LAG(bar.close::double precision) OVER (
+                    PARTITION BY bar.symbol ORDER BY bar.trade_date
+                ) AS prev_close
+            FROM market_stock_daily_bar_adj bar
+            WHERE bar.trade_date <= $4
+              AND bar.trade_date >= ($3::date - INTERVAL '{warmup_days} days')
+              AND bar.close IS NOT NULL
+        ),
+        joined AS (
+            SELECT
+                stock.symbol,
+                stock.trade_date,
+                CASE
+                    WHEN stock.prev_close > 0.0 AND stock.close > 0.0
+                    THEN stock.close / stock.prev_close - 1.0
+                    ELSE NULL
+                END AS stock_return,
+                market.market_return
+            FROM stock
+            JOIN market
+              ON market.trade_date = stock.trade_date
+            WHERE market.market_return IS NOT NULL
+        ),
+        rolling_beta AS (
+            SELECT
+                symbol,
+                trade_date,
+                stock_return,
+                market_return,
+                REGR_SLOPE(stock_return, market_return) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS beta_{long_window},
+                REGR_COUNT(stock_return, market_return) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS obs_count_{long_window},
+                REGR_SLOPE(
+                    CASE WHEN market_return < 0.0 THEN stock_return ELSE NULL END,
+                    CASE WHEN market_return < 0.0 THEN market_return ELSE NULL END
+                ) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS downside_beta_{long_window},
+                REGR_COUNT(
+                    CASE WHEN market_return < 0.0 THEN stock_return ELSE NULL END,
+                    CASE WHEN market_return < 0.0 THEN market_return ELSE NULL END
+                ) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS downside_obs_count_{long_window}
+            FROM joined
+            WHERE stock_return IS NOT NULL
+              AND market_return IS NOT NULL
+        ),
+        residualized AS (
+            SELECT
+                symbol,
+                trade_date,
+                stock_return,
+                market_return,
+                beta_{long_window},
+                downside_beta_{long_window},
+                obs_count_{long_window},
+                downside_obs_count_{long_window},
+                stock_return - beta_{long_window} * market_return AS residual_return
+            FROM rolling_beta
+            WHERE obs_count_{long_window} = {long_window}
+              AND beta_{long_window} IS NOT NULL
+        ),
+        rolling_residual AS (
+            SELECT
+                symbol,
+                trade_date,
+                beta_{long_window},
+                downside_beta_{long_window},
+                obs_count_{long_window},
+                downside_obs_count_{long_window},
+                residual_return,
+                STDDEV_SAMP(residual_return) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS residual_vol_{long_window},
+                COUNT(residual_return) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS residual_obs_count_{long_window},
+                AVG(residual_return) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS residual_mean_{short_window},
+                COUNT(residual_return) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS residual_obs_count_{short_window}
+            FROM residualized
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                trade_date AS available_at,
+                {raw_value_expression}
+            FROM rolling_residual
+            WHERE trade_date BETWEEN $3 AND $4
+              AND {raw_filter}
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value) AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
 fn phase7_cashflow_latest_backfill_sql(
     value_expression: &'static str,
     required_filter: &'static str,
@@ -9909,6 +11215,443 @@ fn phase7_unlock_pressure_backfill_sql(horizon_days: i32) -> String {
             normalized_value = EXCLUDED.normalized_value,
             available_at = EXCLUDED.available_at,
             created_at = NOW()"
+    )
+}
+
+fn phase7_industry_prosperity_backfill_sql(
+    signal: IndustryProsperitySignal,
+    short_window: i32,
+    long_window: i32,
+) -> String {
+    let short_window = short_window.max(2);
+    let long_window = long_window.max(short_window + 1);
+    let short_preceding = short_window - 1;
+    let long_preceding = long_window - 1;
+    let warmup_days = (long_window * 3).max(240);
+    let min_members = 20;
+    let raw_value_expression = match signal {
+        IndustryProsperitySignal::ReturnMomentum => {
+            "industry_ret_short - industry_ret_long AS raw_value"
+        }
+        IndustryProsperitySignal::PositiveBreadth => "positive_breadth_short AS raw_value",
+        IndustryProsperitySignal::AmountTrend => {
+            "LN((industry_amount_short + 1.0) / (industry_amount_long + 1.0)) AS raw_value"
+        }
+    };
+    let raw_filter = match signal {
+        IndustryProsperitySignal::ReturnMomentum => {
+            format!(
+                "ret_short_member_count >= {min_members}
+              AND ret_long_member_count >= {min_members}
+              AND industry_ret_short IS NOT NULL
+              AND industry_ret_long IS NOT NULL"
+            )
+        }
+        IndustryProsperitySignal::PositiveBreadth => {
+            format!(
+                "ret_short_member_count >= {min_members}
+              AND positive_breadth_short IS NOT NULL"
+            )
+        }
+        IndustryProsperitySignal::AmountTrend => {
+            format!(
+                "amount_member_count >= {min_members}
+              AND industry_amount_short IS NOT NULL
+              AND industry_amount_long IS NOT NULL"
+            )
+        }
+    };
+
+    format!(
+        "WITH eligible_universe AS (
+            SELECT
+                bar.symbol,
+                bar.trade_date,
+                bar.close::double precision AS close,
+                bar.amount::double precision AS amount
+            FROM market_stock_daily_bar_adj bar
+            JOIN market_stock ms
+              ON ms.symbol = bar.symbol
+            JOIN market_stock_daily_basic basic
+              ON basic.symbol = bar.symbol
+             AND basic.trade_date = bar.trade_date
+            WHERE bar.trade_date <= $4
+              AND bar.trade_date >= ($3::date - INTERVAL '{warmup_days} days')
+              AND bar.close IS NOT NULL
+              AND bar.close > 0
+              AND bar.amount IS NOT NULL
+              AND bar.amount > 0
+              AND basic.circ_mv IS NOT NULL
+              AND basic.circ_mv > 0
+              AND ms.list_status = 'L'
+              AND COALESCE(ms.is_st, false) = false
+              AND ms.exchange IN ('SSE', 'SZSE')
+              AND ms.market IN ('主板', '创业板')
+              AND ms.symbol NOT LIKE '688%SH'
+              AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+              AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+        ),
+        universe AS (
+            SELECT
+                universe.symbol,
+                universe.trade_date,
+                universe.close,
+                universe.amount,
+                membership.index_code,
+                membership.industry_name
+            FROM eligible_universe universe
+            JOIN market_stock_industry_membership_pit membership
+              ON membership.symbol = universe.symbol
+             AND membership.industry_level = 'L1'
+             AND membership.classification_source = CASE
+                 WHEN universe.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                 ELSE 'SW2021'
+             END
+             AND membership.available_at <= universe.trade_date
+             AND membership.in_date <= universe.trade_date
+             AND (
+                 membership.exit_available_at IS NULL
+                 OR membership.exit_available_at > universe.trade_date
+             )
+        ),
+        stock_roll AS (
+            SELECT
+                symbol,
+                trade_date,
+                index_code,
+                industry_name,
+                close,
+                amount,
+                LAG(close, {short_window}) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                ) AS prev_close_short,
+                LAG(close, {long_window}) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                ) AS prev_close_long,
+                AVG(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS amount_short,
+                AVG(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS amount_long,
+                COUNT(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {short_preceding} PRECEDING AND CURRENT ROW
+                ) AS amount_obs_count_short,
+                COUNT(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN {long_preceding} PRECEDING AND CURRENT ROW
+                ) AS amount_obs_count_long
+            FROM universe
+        ),
+        stock_features AS (
+            SELECT
+                symbol,
+                trade_date,
+                index_code,
+                industry_name,
+                CASE
+                    WHEN prev_close_short > 0.0 AND close > 0.0
+                    THEN close / prev_close_short - 1.0
+                    ELSE NULL
+                END AS ret_short,
+                CASE
+                    WHEN prev_close_long > 0.0 AND close > 0.0
+                    THEN close / prev_close_long - 1.0
+                    ELSE NULL
+                END AS ret_long,
+                CASE
+                    WHEN amount_obs_count_short = {short_window} THEN amount_short
+                    ELSE NULL
+                END AS amount_short,
+                CASE
+                    WHEN amount_obs_count_long = {long_window} THEN amount_long
+                    ELSE NULL
+                END AS amount_long
+            FROM stock_roll
+        ),
+        industry_daily AS (
+            SELECT
+                index_code,
+                industry_name,
+                trade_date,
+                AVG(ret_short) FILTER (WHERE ret_short IS NOT NULL) AS industry_ret_short,
+                AVG(ret_long) FILTER (WHERE ret_long IS NOT NULL) AS industry_ret_long,
+                AVG(
+                    CASE
+                        WHEN ret_short IS NULL THEN NULL
+                        WHEN ret_short > 0.0 THEN 1.0
+                        ELSE 0.0
+                    END
+                ) AS positive_breadth_short,
+                AVG(amount_short) FILTER (WHERE amount_short IS NOT NULL) AS industry_amount_short,
+                AVG(amount_long) FILTER (WHERE amount_long IS NOT NULL) AS industry_amount_long,
+                COUNT(*) FILTER (WHERE ret_short IS NOT NULL) AS ret_short_member_count,
+                COUNT(*) FILTER (WHERE ret_long IS NOT NULL) AS ret_long_member_count,
+                COUNT(*) FILTER (
+                    WHERE amount_short IS NOT NULL AND amount_long IS NOT NULL
+                ) AS amount_member_count
+            FROM stock_features
+            GROUP BY index_code, industry_name, trade_date
+        ),
+        raw AS (
+            SELECT
+                stock_features.symbol,
+                stock_features.trade_date,
+                stock_features.trade_date AS available_at,
+                {raw_value_expression}
+            FROM stock_features
+            JOIN industry_daily
+              ON industry_daily.index_code = stock_features.index_code
+             AND industry_daily.trade_date = stock_features.trade_date
+            WHERE stock_features.trade_date BETWEEN $3 AND $4
+              AND {raw_filter}
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value) AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_industry_prosperity_multi_backfill_sql() -> String {
+    let warmup_days = 360;
+    let min_members = 20;
+    format!(
+        "WITH eligible_universe AS (
+            SELECT
+                bar.symbol,
+                bar.trade_date,
+                bar.close::double precision AS close,
+                bar.amount::double precision AS amount
+            FROM market_stock_daily_bar_adj bar
+            JOIN market_stock ms
+              ON ms.symbol = bar.symbol
+            JOIN market_stock_daily_basic basic
+              ON basic.symbol = bar.symbol
+             AND basic.trade_date = bar.trade_date
+            WHERE bar.trade_date <= $6
+              AND bar.trade_date >= ($5::date - INTERVAL '{warmup_days} days')
+              AND bar.close IS NOT NULL
+              AND bar.close > 0
+              AND bar.amount IS NOT NULL
+              AND bar.amount > 0
+              AND basic.circ_mv IS NOT NULL
+              AND basic.circ_mv > 0
+              AND ms.list_status = 'L'
+              AND COALESCE(ms.is_st, false) = false
+              AND ms.exchange IN ('SSE', 'SZSE')
+              AND ms.market IN ('主板', '创业板')
+              AND ms.symbol NOT LIKE '688%SH'
+              AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+              AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+        ),
+        universe AS (
+            SELECT
+                universe.symbol,
+                universe.trade_date,
+                universe.close,
+                universe.amount,
+                membership.index_code,
+                membership.industry_name
+            FROM eligible_universe universe
+            JOIN market_stock_industry_membership_pit membership
+              ON membership.symbol = universe.symbol
+             AND membership.industry_level = 'L1'
+             AND membership.classification_source = CASE
+                 WHEN universe.trade_date < DATE '2021-12-13' THEN 'SW2014'
+                 ELSE 'SW2021'
+             END
+             AND membership.available_at <= universe.trade_date
+             AND membership.in_date <= universe.trade_date
+             AND (
+                 membership.exit_available_at IS NULL
+                 OR membership.exit_available_at > universe.trade_date
+             )
+        ),
+        stock_roll AS (
+            SELECT
+                symbol,
+                trade_date,
+                index_code,
+                industry_name,
+                close,
+                amount,
+                LAG(close, 20) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                ) AS prev_close_20,
+                LAG(close, 60) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                ) AS prev_close_60,
+                LAG(close, 120) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                ) AS prev_close_120,
+                AVG(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                ) AS amount_20,
+                AVG(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN 119 PRECEDING AND CURRENT ROW
+                ) AS amount_120,
+                COUNT(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                ) AS amount_obs_count_20,
+                COUNT(amount) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN 119 PRECEDING AND CURRENT ROW
+                ) AS amount_obs_count_120
+            FROM universe
+        ),
+        stock_features AS (
+            SELECT
+                symbol,
+                trade_date,
+                index_code,
+                industry_name,
+                CASE
+                    WHEN prev_close_20 > 0.0 AND close > 0.0
+                    THEN close / prev_close_20 - 1.0
+                    ELSE NULL
+                END AS ret_20,
+                CASE
+                    WHEN prev_close_60 > 0.0 AND close > 0.0
+                    THEN close / prev_close_60 - 1.0
+                    ELSE NULL
+                END AS ret_60,
+                CASE
+                    WHEN prev_close_120 > 0.0 AND close > 0.0
+                    THEN close / prev_close_120 - 1.0
+                    ELSE NULL
+                END AS ret_120,
+                CASE
+                    WHEN amount_obs_count_20 = 20 THEN amount_20
+                    ELSE NULL
+                END AS amount_20,
+                CASE
+                    WHEN amount_obs_count_120 = 120 THEN amount_120
+                    ELSE NULL
+                END AS amount_120
+            FROM stock_roll
+        ),
+        industry_daily AS (
+            SELECT
+                index_code,
+                industry_name,
+                trade_date,
+                AVG(ret_20) FILTER (WHERE ret_20 IS NOT NULL) AS industry_ret_20,
+                AVG(ret_120) FILTER (WHERE ret_120 IS NOT NULL) AS industry_ret_120,
+                AVG(
+                    CASE
+                        WHEN ret_60 IS NULL THEN NULL
+                        WHEN ret_60 > 0.0 THEN 1.0
+                        ELSE 0.0
+                    END
+                ) AS positive_breadth_60,
+                AVG(amount_20) FILTER (WHERE amount_20 IS NOT NULL) AS industry_amount_20,
+                AVG(amount_120) FILTER (WHERE amount_120 IS NOT NULL) AS industry_amount_120,
+                COUNT(*) FILTER (WHERE ret_20 IS NOT NULL) AS ret_20_member_count,
+                COUNT(*) FILTER (WHERE ret_60 IS NOT NULL) AS ret_60_member_count,
+                COUNT(*) FILTER (WHERE ret_120 IS NOT NULL) AS ret_120_member_count,
+                COUNT(*) FILTER (
+                    WHERE amount_20 IS NOT NULL AND amount_120 IS NOT NULL
+                ) AS amount_member_count
+            FROM stock_features
+            GROUP BY index_code, industry_name, trade_date
+        ),
+        raw AS (
+            SELECT
+                stock_features.symbol,
+                stock_features.trade_date,
+                stock_features.trade_date AS available_at,
+                signals.factor_code,
+                signals.raw_value
+            FROM stock_features
+            JOIN industry_daily
+              ON industry_daily.index_code = stock_features.index_code
+             AND industry_daily.trade_date = stock_features.trade_date
+            CROSS JOIN LATERAL (
+                VALUES
+                    (
+                        $1::varchar,
+                        CASE
+                            WHEN ret_20_member_count >= {min_members}
+                             AND ret_120_member_count >= {min_members}
+                             AND industry_ret_20 IS NOT NULL
+                             AND industry_ret_120 IS NOT NULL
+                            THEN industry_ret_20 - industry_ret_120
+                            ELSE NULL
+                        END
+                    ),
+                    (
+                        $2::varchar,
+                        CASE
+                            WHEN ret_60_member_count >= {min_members}
+                             AND positive_breadth_60 IS NOT NULL
+                            THEN positive_breadth_60
+                            ELSE NULL
+                        END
+                    ),
+                    (
+                        $3::varchar,
+                        CASE
+                            WHEN amount_member_count >= {min_members}
+                             AND industry_amount_20 IS NOT NULL
+                             AND industry_amount_120 IS NOT NULL
+                            THEN LN((industry_amount_20 + 1.0) / (industry_amount_120 + 1.0))
+                            ELSE NULL
+                        END
+                    )
+            ) AS signals(factor_code, raw_value)
+            WHERE stock_features.trade_date BETWEEN $5 AND $6
+        ),
+        ranked AS (
+            SELECT
+                factor_code,
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                percent_rank() OVER (
+                    PARTITION BY factor_code, trade_date ORDER BY raw_value
+                ) AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        ),
+        inserted AS (
+            INSERT INTO factor_value
+                (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+            SELECT factor_code, $4, symbol, trade_date, raw_value, normalized_value, available_at
+            FROM ranked
+            ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                raw_value = EXCLUDED.raw_value,
+                normalized_value = EXCLUDED.normalized_value,
+                available_at = EXCLUDED.available_at,
+                created_at = NOW()
+            RETURNING factor_code
+        )
+        SELECT factor_code, COUNT(*)::int8 AS row_count
+        FROM inserted
+        GROUP BY factor_code
+        ORDER BY factor_code"
     )
 }
 
@@ -12298,6 +14041,66 @@ mod tests {
     }
 
     #[test]
+    fn phase7_alpha_blend_rejects_industry_prosperity_without_dedicated_market_scope_builder() {
+        let req = Phase7AlphaBlendBackfillRequest {
+            start_date: None,
+            end_date: None,
+            version: None,
+            combo_name: Some("phase7_industry_prosperity_proxy_v1".to_string()),
+            statement_timeout_ms: None,
+            allow_signed_weights: false,
+            sources: vec![
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_financial_quality_change_v1".to_string(),
+                    version: None,
+                    weight: 0.5,
+                },
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_event_surprise_v1".to_string(),
+                    version: None,
+                    weight: 0.5,
+                },
+            ],
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("phase7_industry_membership_market_scope_gate_v1"));
+        assert!(err.contains("dedicated market-scope factor builder"));
+        assert!(err.contains("main_chinext_non_st"));
+    }
+
+    #[test]
+    fn phase7_alpha_blend_rejects_industry_prosperity_source_combo() {
+        let req = Phase7AlphaBlendBackfillRequest {
+            start_date: None,
+            end_date: None,
+            version: None,
+            combo_name: Some("phase7_generic_low_corr_test_v1".to_string()),
+            statement_timeout_ms: None,
+            allow_signed_weights: false,
+            sources: vec![
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_industry_prosperity_proxy_v1".to_string(),
+                    version: None,
+                    weight: 0.5,
+                },
+                Phase7AlphaBlendSourceRequest {
+                    combo_name: "phase7_event_surprise_v1".to_string(),
+                    version: None,
+                    weight: 0.5,
+                },
+            ],
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("phase7_industry_prosperity_proxy_v1"));
+        assert!(err.contains("phase7_industry_membership_market_scope_gate_v1"));
+        assert!(err.contains("generic alpha blend cannot enforce excluded markets"));
+    }
+
+    #[test]
     fn phase7_alpha_blend_request_allows_explicit_signed_weights() {
         let req = Phase7AlphaBlendBackfillRequest {
             start_date: Some("2016-04-05".to_string()),
@@ -12769,6 +14572,281 @@ mod tests {
             "multi_factor_weight.method is varchar(32)"
         );
         assert_eq!(plan.statement_timeout_ms, 240_000);
+    }
+
+    #[test]
+    fn phase7_liquidity_quality_backfill_request_builds_p316_broad_base_plan() {
+        let req = Phase7LiquidityQualityBackfillRequest {
+            start_date: Some("2017-01-03".to_string()),
+            end_date: Some("2026-06-17".to_string()),
+            version: Some("phase7-liq-quality-test".to_string()),
+            combo_name: None,
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid liquidity quality plan");
+
+        assert_eq!(plan.bundle_name, "phase7_liquidity_quality_v1");
+        assert_eq!(plan.combo_name, "phase7_liquidity_quality_v1");
+        assert_eq!(plan.task_type, "phase7_liquidity_quality_backfill");
+        assert_eq!(plan.category, "liquidity_quality_alpha");
+        assert_eq!(plan.phase, "7-P3.16");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_daily_bar_adj", "market_stock_daily_basic"]
+        );
+        assert_eq!(plan.combo_method, "weighted_liquidity_quality");
+        assert!(
+            plan.combo_method.len() <= 32,
+            "multi_factor_weight.method is varchar(32)"
+        );
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+    }
+
+    #[test]
+    fn phase7_liquidity_quality_specs_are_broad_base_not_moneyflow_or_static_industry() {
+        let specs = phase7_liquidity_quality_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "liq_impact_improve_20v120_std",
+                "liq_amount_trend_20v120_std",
+                "liq_amount_stability_60d_std",
+                "liq_turnover_stability_60d_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(specs.iter().all(|spec| (spec.weight - 0.25).abs() < 1e-12));
+        assert!(specs
+            .iter()
+            .all(|spec| matches!(spec.kind, Phase7BackfillFactorKind::LiquidityQuality { .. })));
+    }
+
+    #[test]
+    fn phase7_liquidity_quality_sql_uses_only_pit_daily_market_data() {
+        let specs = phase7_liquidity_quality_backfill_specs();
+        let impact = specs
+            .iter()
+            .find(|spec| spec.factor_code == "liq_impact_improve_20v120_std")
+            .expect("liquidity impact improvement spec");
+        let turnover = specs
+            .iter()
+            .find(|spec| spec.factor_code == "liq_turnover_stability_60d_std")
+            .expect("turnover stability spec");
+
+        let impact_sql = phase7_factor_backfill_sql(impact);
+        let turnover_sql = phase7_factor_backfill_sql(turnover);
+
+        assert!(impact_sql.contains("market_stock_daily_bar_adj bar"));
+        assert!(impact_sql.contains("JOIN market_stock_daily_basic basic"));
+        assert!(impact_sql.contains("bar.trade_date <= $4"));
+        assert!(impact_sql.contains("bar.trade_date >= ($3::date - INTERVAL '180 days')"));
+        assert!(impact_sql.contains("LAG(close::double precision)"));
+        assert!(impact_sql.contains("ROWS BETWEEN 19 PRECEDING AND CURRENT ROW"));
+        assert!(impact_sql.contains("ROWS BETWEEN 119 PRECEDING AND CURRENT ROW"));
+        assert!(impact_sql.contains("LN((long_illiq + 1e-12) / (short_illiq + 1e-12))"));
+        assert!(turnover_sql.contains("circ_mv"));
+        assert!(turnover_sql.contains("STDDEV_SAMP(turnover_proxy) OVER"));
+        assert!(turnover_sql.contains("-ABS((turnover_proxy - avg_turnover_60)"));
+        for sql in [impact_sql.as_str(), turnover_sql.as_str()] {
+            assert!(!sql.contains("market_stock ms"));
+            assert!(!sql.contains("industry"));
+            assert!(!sql.contains("market_stock_moneyflow"));
+            assert!(!sql.contains("market_stock_block_trade"));
+            assert!(!sql.contains("market_stock_share_float"));
+        }
+    }
+
+    #[test]
+    fn phase7_market_residual_risk_backfill_request_builds_p317_broad_base_plan() {
+        let req = Phase7MarketResidualRiskBackfillRequest {
+            start_date: Some("2017-01-03".to_string()),
+            end_date: Some("2026-06-18".to_string()),
+            version: Some("phase7-market-resid-risk-test".to_string()),
+            combo_name: None,
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid market residual risk plan");
+
+        assert_eq!(plan.bundle_name, "phase7_market_residual_risk_v1");
+        assert_eq!(plan.combo_name, "phase7_market_residual_risk_v1");
+        assert_eq!(plan.task_type, "phase7_market_residual_risk_backfill");
+        assert_eq!(plan.category, "market_residual_risk_alpha");
+        assert_eq!(plan.phase, "7-P3.17");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_daily_bar_adj", "market_index_daily_bar"]
+        );
+        assert_eq!(plan.combo_method, "weighted_market_residual");
+        assert!(
+            plan.combo_method.len() <= 32,
+            "multi_factor_weight.method is varchar(32)"
+        );
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+    }
+
+    #[test]
+    fn phase7_market_residual_risk_specs_are_low_correlation_broad_base() {
+        let specs = phase7_market_residual_risk_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "mkt_low_beta_120d_std",
+                "mkt_downside_beta_120d_std",
+                "resid_low_vol_120d_std",
+                "resid_reversal_20d_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(specs.iter().all(|spec| (spec.weight - 0.25).abs() < 1e-12));
+        assert!(specs.iter().all(|spec| matches!(
+            spec.kind,
+            Phase7BackfillFactorKind::MarketResidualRisk { .. }
+        )));
+    }
+
+    #[test]
+    fn phase7_market_residual_risk_sql_is_pit_and_uses_market_index_only() {
+        let specs = phase7_market_residual_risk_backfill_specs();
+        let low_beta = specs
+            .iter()
+            .find(|spec| spec.factor_code == "mkt_low_beta_120d_std")
+            .expect("low beta spec");
+        let residual_reversal = specs
+            .iter()
+            .find(|spec| spec.factor_code == "resid_reversal_20d_std")
+            .expect("residual reversal spec");
+
+        let low_beta_sql = phase7_factor_backfill_sql(low_beta);
+        let residual_reversal_sql = phase7_factor_backfill_sql(residual_reversal);
+
+        assert!(low_beta_sql.contains("market_stock_daily_bar_adj bar"));
+        assert!(low_beta_sql.contains("market_index_daily_bar"));
+        assert!(low_beta_sql.contains("idx.symbol = '000300.SH'"));
+        assert!(low_beta_sql.contains("bar.trade_date <= $4"));
+        assert!(low_beta_sql.contains("idx.trade_date <= $4"));
+        assert!(low_beta_sql.contains("ROWS BETWEEN 119 PRECEDING AND CURRENT ROW"));
+        assert!(low_beta_sql.contains("REGR_SLOPE(stock_return, market_return)"));
+        assert!(low_beta_sql.contains("trade_date AS available_at"));
+        assert!(residual_reversal_sql.contains("AVG(residual_return) OVER"));
+        assert!(residual_reversal_sql.contains("-residual_mean_20"));
+        for sql in [low_beta_sql.as_str(), residual_reversal_sql.as_str()] {
+            assert!(!sql.contains("market_stock ms"));
+            assert!(!sql.contains("industry"));
+            assert!(!sql.contains("market_stock_moneyflow"));
+            assert!(!sql.contains("market_stock_block_trade"));
+            assert!(!sql.contains("market_stock_share_float"));
+            assert!(!sql.contains("model_prediction"));
+        }
+    }
+
+    #[test]
+    fn phase7_industry_prosperity_request_requires_market_scope_gate() {
+        let req = Phase7IndustryProsperityBackfillRequest {
+            start_date: Some("2017-01-03".to_string()),
+            end_date: Some("2026-06-18".to_string()),
+            version: Some("phase7-industry-prosperity-test".to_string()),
+            combo_name: None,
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("phase7_industry_membership_market_scope_gate_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("factor builder"));
+    }
+
+    #[test]
+    fn phase7_industry_prosperity_request_builds_p318g_market_scope_plan() {
+        let req = Phase7IndustryProsperityBackfillRequest {
+            start_date: Some("2017-01-03".to_string()),
+            end_date: Some("2026-06-18".to_string()),
+            version: Some("phase7-industry-prosperity-test".to_string()),
+            combo_name: None,
+            alpha_admission_gate_id: Some(
+                "phase7_industry_membership_market_scope_gate_v1".to_string(),
+            ),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid industry prosperity plan");
+
+        assert_eq!(plan.combo_name, "phase7_industry_prosperity_proxy_v1");
+        assert_eq!(plan.bundle_name, "phase7_industry_prosperity_proxy_v1");
+        assert_eq!(plan.task_type, "phase7_industry_prosperity_backfill");
+        assert_eq!(plan.category, "industry_prosperity_alpha");
+        assert_eq!(plan.phase, "7-P3.18G");
+        assert_eq!(
+            plan.dependencies,
+            &[
+                "market_stock_industry_membership_pit",
+                "market_stock_daily_bar_adj",
+                "market_stock_daily_basic",
+                "market_stock",
+                "market_trade_calendar"
+            ]
+        );
+        assert_eq!(plan.combo_method, "weighted_ind_prosperity");
+        assert!(plan.combo_method.len() <= 32);
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+    }
+
+    #[test]
+    fn phase7_industry_prosperity_sql_uses_pit_membership_and_main_chinext_scope() {
+        let specs = phase7_industry_prosperity_backfill_specs();
+        let sql = phase7_factor_backfill_sql(&specs[0]);
+
+        assert!(sql.contains("market_stock_industry_membership_pit membership"));
+        assert!(sql.contains("WHEN universe.trade_date < DATE '2021-12-13'"));
+        assert!(sql.contains("THEN 'SW2014'"));
+        assert!(sql.contains("ELSE 'SW2021'"));
+        assert!(sql.contains("membership.available_at <= universe.trade_date"));
+        assert!(sql.contains("membership.exit_available_at > universe.trade_date"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(sql.contains("percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value)"));
+        assert!(!sql.contains("market_stock.industry"));
+        assert!(!sql.contains("stock_basic.industry"));
+        assert!(!sql.contains("concept_detail"));
+        assert!(!sql.contains("model_prediction"));
+    }
+
+    #[test]
+    fn phase7_industry_prosperity_multi_sql_writes_all_atoms_with_single_pit_universe() {
+        let sql = phase7_industry_prosperity_multi_backfill_sql();
+
+        assert!(sql.contains("market_stock_industry_membership_pit membership"));
+        assert_eq!(sql.matches("WITH eligible_universe AS").count(), 1);
+        assert!(sql.contains("WHEN universe.trade_date < DATE '2021-12-13'"));
+        assert!(sql.contains("THEN 'SW2014'"));
+        assert!(sql.contains("ELSE 'SW2021'"));
+        assert!(sql.contains("membership.available_at <= universe.trade_date"));
+        assert!(sql.contains("membership.exit_available_at > universe.trade_date"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(sql.contains("PARTITION BY factor_code, trade_date ORDER BY raw_value"));
+        assert!(sql.contains("RETURNING factor_code"));
+        assert!(!sql.contains("market_stock.industry"));
+        assert!(!sql.contains("stock_basic.industry"));
+        assert!(!sql.contains("concept_detail"));
+        assert!(!sql.contains("model_prediction"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod admin;
 pub mod backtest;
+pub mod blueprint;
 pub mod cleanup;
 pub mod data_validation;
 pub mod dingtalk;

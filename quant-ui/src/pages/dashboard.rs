@@ -14,6 +14,7 @@ pub fn DashboardContent() -> Element {
 
     let mut accounts = use_signal(|| Vec::<Value>::new());
     let mut strategies = use_signal(|| Vec::<Value>::new());
+    let mut blueprint = use_signal(|| Value::Null);
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| String::new());
 
@@ -22,9 +23,11 @@ pub fn DashboardContent() -> Element {
         spawn(async move {
             let acc_res = api::list_accounts("").await;
             let strat_res = api::list_strategies().await;
+            let blueprint_res = api::blueprint_progress().await;
 
             let mut accs = Vec::new();
             let mut strats = Vec::new();
+            let mut blueprint_data = Value::Null;
             let mut err = String::new();
 
             match acc_res {
@@ -45,8 +48,16 @@ pub fn DashboardContent() -> Element {
                 Err(e) => if err.is_empty() { err = e; }
             }
 
+            match blueprint_res {
+                Ok(v) => {
+                    blueprint_data = v["data"].clone();
+                }
+                Err(e) => if err.is_empty() { err = e; }
+            }
+
             accounts.set(accs);
             strategies.set(strats);
+            blueprint.set(blueprint_data);
             error.set(err);
             loading.set(false);
         });
@@ -104,6 +115,10 @@ pub fn DashboardContent() -> Element {
                     }
                     div { class: "text-sm text-gray-500 dark:text-gray-400 mt-1", "权限级别" }
                 }
+            }
+
+            if !blueprint.read().is_null() {
+                BlueprintProgressPanel { data: blueprint.read().clone() }
             }
 
             // 账号列表
@@ -185,6 +200,146 @@ fn AccountCard(data: Value) -> Element {
                 div { class: "text-sm text-gray-700 dark:text-gray-300", "¥{cap}" }
                 span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400", "{status}" }
             }
+        }
+    }
+}
+
+#[component]
+fn BlueprintProgressPanel(data: Value) -> Element {
+    let progress = &data["progress"];
+    let professional = &data["professional"];
+    let elite = &data["elite"];
+    let storage = &data["storage"];
+
+    let overall_pct = progress["overall_progress_pct"].as_f64().unwrap_or(0.0);
+    let professional_pct = progress["professional_metric_progress_pct"].as_f64().unwrap_or(0.0);
+    let elite_pct = progress["elite_metric_progress_pct"].as_f64().unwrap_or(0.0);
+    let system_pct = progress["system_build_progress_pct"].as_f64().unwrap_or(0.0);
+    let current_phase = progress["current_phase"].as_str().unwrap_or("-");
+    let pro_pass = professional["hard_gate_passed"].as_bool().unwrap_or(false);
+    let elite_pass = elite["hard_gate_passed"].as_bool().unwrap_or(false);
+    let storage_level = storage["pressure_level"].as_str().unwrap_or("unknown");
+    let storage_size = storage["top_cleanable_size_pretty"].as_str().unwrap_or("-");
+    let selected_name = data["selected_account"]["name"].as_str().unwrap_or("-");
+    let selected_annual = data["selected_account"]["annual_return_pct"].as_f64().unwrap_or(0.0);
+    let selected_sharpe = data["selected_account"]["sharpe_ratio"].as_f64().unwrap_or(0.0);
+    let selected_sortino = data["selected_account"]["sortino_ratio"].as_f64().unwrap_or(0.0);
+    let selected_drawdown = data["selected_account"]["max_drawdown_pct"].as_f64().unwrap_or(0.0);
+    let blockers: Vec<Value> = data["blockers"]
+        .as_array()
+        .map(|items| items.iter().take(6).cloned().collect())
+        .unwrap_or_default();
+    let top_tables: Vec<Value> = storage["top_tables"]
+        .as_array()
+        .map(|items| items.iter().take(4).cloned().collect())
+        .unwrap_or_default();
+    let pro_badge = if pro_pass { "通过" } else { "未通过" };
+    let elite_badge = if elite_pass { "通过" } else { "未通过" };
+    let storage_cls = match storage_level {
+        "red" => "text-red-600 dark:text-red-400",
+        "yellow" => "text-yellow-600 dark:text-yellow-400",
+        _ => "text-green-600 dark:text-green-400",
+    };
+
+    rsx! {
+        section { class: "mb-8 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-5",
+            div { class: "flex items-start justify-between gap-4 mb-5",
+                div {
+                    h2 { class: "text-lg font-semibold text-gray-900 dark:text-white", "蓝图进度" }
+                    div { class: "text-sm text-gray-500 dark:text-gray-400 mt-1", "{current_phase}" }
+                }
+                div { class: "text-right",
+                    div { class: "text-2xl font-bold text-gray-900 dark:text-white", "{overall_pct:.1}%" }
+                    div { class: "text-xs text-gray-500 dark:text-gray-400", "综合进度" }
+                }
+            }
+
+            div { class: "grid grid-cols-3 gap-4 mb-5",
+                ProgressTile { title: "工程成熟度".to_string(), value: system_pct, status: "门禁/调度/审计".to_string() }
+                ProgressTile { title: "专业目标".to_string(), value: professional_pct, status: pro_badge.to_string() }
+                ProgressTile { title: "精英目标".to_string(), value: elite_pct, status: elite_badge.to_string() }
+            }
+
+            div { class: "grid grid-cols-4 gap-3 mb-5",
+                MetricBox { label: "当前样本".to_string(), value: selected_name.to_string() }
+                MetricBox { label: "年化".to_string(), value: format!("{selected_annual:.2}%") }
+                MetricBox { label: "Sharpe / Sortino".to_string(), value: format!("{selected_sharpe:.2} / {selected_sortino:.2}") }
+                MetricBox { label: "最大回撤".to_string(), value: format!("{selected_drawdown:.2}%") }
+            }
+
+            div { class: "grid grid-cols-2 gap-5",
+                div {
+                    div { class: "text-sm font-medium text-gray-900 dark:text-white mb-2", "阻断项" }
+                    if blockers.is_empty() {
+                        div { class: "text-sm text-green-600 dark:text-green-400", "暂无阻断项" }
+                    } else {
+                        div { class: "space-y-2",
+                            for blocker in blockers {
+                                {
+                                    let scope = blocker["scope"].as_str().unwrap_or("-");
+                                    let name = blocker["name"].as_str().or_else(|| blocker["metric"].as_str()).unwrap_or("-");
+                                    let reason = blocker["reason"].as_str().unwrap_or("-");
+                                    rsx! {
+                                        div { class: "flex items-center justify-between gap-3 text-sm border border-gray-100 dark:border-gray-800 rounded-md px-3 py-2",
+                                            span { class: "text-gray-700 dark:text-gray-300 truncate", "{scope} · {name}" }
+                                            span { class: "text-xs text-red-600 dark:text-red-400 whitespace-nowrap", "{reason}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div {
+                    div { class: "flex items-center justify-between mb-2",
+                        div { class: "text-sm font-medium text-gray-900 dark:text-white", "存储压力" }
+                        div { class: "text-sm {storage_cls}", "{storage_level} · 可治理 {storage_size}" }
+                    }
+                    div { class: "space-y-2",
+                        for table in top_tables {
+                            {
+                                let name = table["table"].as_str().unwrap_or("-");
+                                let size = table["size_pretty"].as_str().unwrap_or("-");
+                                let category = table["category"].as_str().unwrap_or("-");
+                                rsx! {
+                                    div { class: "flex items-center justify-between gap-3 text-sm border border-gray-100 dark:border-gray-800 rounded-md px-3 py-2",
+                                        span { class: "text-gray-700 dark:text-gray-300 truncate", "{name}" }
+                                        span { class: "text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap", "{category} · {size}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ProgressTile(title: String, value: f64, status: String) -> Element {
+    let width = format!("width: {:.2}%;", value.clamp(0.0, 100.0));
+    rsx! {
+        div { class: "border border-gray-100 dark:border-gray-800 rounded-md p-3",
+            div { class: "flex items-center justify-between mb-2",
+                div { class: "text-sm font-medium text-gray-900 dark:text-white", "{title}" }
+                div { class: "text-sm font-semibold text-blue-600 dark:text-blue-400", "{value:.1}%" }
+            }
+            div { class: "h-2 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden",
+                div { class: "h-full bg-blue-600 dark:bg-blue-400 rounded-full", style: "{width}" }
+            }
+            div { class: "text-xs text-gray-500 dark:text-gray-400 mt-2", "{status}" }
+        }
+    }
+}
+
+#[component]
+fn MetricBox(label: String, value: String) -> Element {
+    rsx! {
+        div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-md p-3 min-w-0",
+            div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "{label}" }
+            div { class: "text-sm font-medium text-gray-900 dark:text-white truncate", "{value}" }
         }
     }
 }

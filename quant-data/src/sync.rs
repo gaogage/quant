@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::model::entities::{
     MarketAdjustmentFactor, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
-    MarketStockExpress, MarketStockForecast, MarketStockMoneyflow, MarketStockRepurchase,
-    MarketStockShareFloat, MarketTradeCalendar,
+    MarketStockExpress, MarketStockForecast, MarketStockIndustryMembershipPit,
+    MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat, MarketTradeCalendar,
 };
 use crate::repository;
 use crate::tushare::client::TushareClient;
@@ -3490,6 +3490,248 @@ pub async fn sync_share_float(
     Ok(total_rows)
 }
 
+// ─── sync_industry_membership (PIT 行业成员历史) ────────────────
+
+#[derive(Debug, Clone)]
+struct IndustryClassifyMeta {
+    classification_source: String,
+    industry_level: String,
+    index_code: String,
+    industry_code: String,
+    industry_name: String,
+    parent_code: String,
+}
+
+fn industry_classify_meta_from_map(
+    item: &Map<String, Value>,
+    fallback_source: &str,
+) -> Option<IndustryClassifyMeta> {
+    let index_code = get_str(item, "index_code");
+    if index_code.is_empty() {
+        return None;
+    }
+    Some(IndustryClassifyMeta {
+        classification_source: get_opt_str(item, "src").unwrap_or_else(|| fallback_source.into()),
+        industry_level: get_str(item, "level"),
+        index_code,
+        industry_code: get_str(item, "industry_code"),
+        industry_name: get_str(item, "industry_name"),
+        parent_code: get_opt_str(item, "parent_code").unwrap_or_default(),
+    })
+}
+
+fn industry_membership_raw_payload(
+    classify: &IndustryClassifyMeta,
+    item: &Map<String, Value>,
+) -> Value {
+    let mut payload = item.clone();
+    payload.insert(
+        "_classification_source".to_string(),
+        Value::String(classify.classification_source.clone()),
+    );
+    payload.insert(
+        "_industry_level".to_string(),
+        Value::String(classify.industry_level.clone()),
+    );
+    payload.insert(
+        "_industry_code".to_string(),
+        Value::String(classify.industry_code.clone()),
+    );
+    payload.insert(
+        "_industry_name".to_string(),
+        Value::String(classify.industry_name.clone()),
+    );
+    payload.insert(
+        "_parent_code".to_string(),
+        Value::String(classify.parent_code.clone()),
+    );
+    Value::Object(payload)
+}
+
+fn industry_membership_row_from_map(
+    classify: &IndustryClassifyMeta,
+    item: &Map<String, Value>,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Option<MarketStockIndustryMembershipPit> {
+    let symbol = get_str(item, "con_code");
+    let in_date = to_date(&get_str(item, "in_date"))?;
+    let out_date = to_date(&get_str(item, "out_date"));
+    if symbol.is_empty() || in_date > end || out_date.map(|date| date < start).unwrap_or(false) {
+        return None;
+    }
+    let index_code = get_opt_str(item, "index_code").unwrap_or_else(|| classify.index_code.clone());
+    let index_name = get_opt_str(item, "index_name").unwrap_or_default();
+    Some(MarketStockIndustryMembershipPit {
+        classification_source: classify.classification_source.clone(),
+        industry_level: classify.industry_level.clone(),
+        index_code,
+        index_name,
+        industry_code: classify.industry_code.clone(),
+        industry_name: classify.industry_name.clone(),
+        parent_code: classify.parent_code.clone(),
+        symbol,
+        symbol_name: get_opt_str(item, "con_name").unwrap_or_default(),
+        in_date,
+        out_date,
+        available_at: in_date,
+        exit_available_at: out_date,
+        is_new: get_opt_str(item, "is_new").unwrap_or_default(),
+        raw_payload: industry_membership_raw_payload(classify, item),
+    })
+}
+
+fn industry_membership_classification_sources() -> &'static [&'static str] {
+    &["SW2014", "SW2021"]
+}
+
+pub async fn sync_industry_membership(
+    pool: &PgPool,
+    client: &TushareClient,
+    task_id: &str,
+    index_codes: &[String],
+    start: &str,
+    end: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    let industry_level = "L1";
+
+    repository::create_data_version(
+        pool,
+        task_id,
+        "industry membership PIT sync",
+        "tushare",
+        &["market_stock_industry_membership_pit"],
+        s,
+        e,
+    )
+    .await?;
+
+    let requested_codes = if index_codes.is_empty() {
+        None
+    } else {
+        Some(
+            index_codes
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+    let mut metas = Vec::new();
+    for classification_source in industry_membership_classification_sources() {
+        let classify_resp = client
+            .index_classify(
+                None,
+                Some(industry_level),
+                None,
+                Some(classification_source),
+            )
+            .await?;
+        let classify_maps = classify_resp
+            .data
+            .map(|data| data.to_maps())
+            .unwrap_or_default();
+        metas.extend(
+            classify_maps
+                .iter()
+                .filter_map(|item| industry_classify_meta_from_map(item, classification_source))
+                .filter(|meta| {
+                    requested_codes
+                        .as_ref()
+                        .map(|codes| codes.contains(&meta.index_code))
+                        .unwrap_or(true)
+                }),
+        );
+    }
+
+    let total_indices = metas.len().max(1);
+    repository::heartbeat_sync_task(pool, task_id, total_indices as i32, 0, 0, 0).await?;
+
+    let mut total_rows = 0usize;
+    let mut failed = 0usize;
+    let page_limit = 5000usize;
+    for (idx, meta) in metas.iter().enumerate() {
+        let mut offset = 0usize;
+        loop {
+            match client
+                .index_member(
+                    Some(&meta.index_code),
+                    None,
+                    None,
+                    Some(page_limit),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    let row_count = maps.len();
+                    let rows: Vec<MarketStockIndustryMembershipPit> = maps
+                        .iter()
+                        .filter_map(|item| industry_membership_row_from_map(meta, item, s, e))
+                        .collect();
+                    if !rows.is_empty() {
+                        total_rows += repository::upsert_industry_membership_batch(
+                            pool, &rows, task_id, "tushare",
+                        )
+                        .await?;
+                    }
+                    if row_count < page_limit {
+                        break;
+                    }
+                    offset += page_limit;
+                }
+                Err(error) => {
+                    failed += 1;
+                    warn!(
+                        index_code = %meta.index_code,
+                        error = %error,
+                        "industry membership sync failed for index"
+                    );
+                    break;
+                }
+            }
+        }
+
+        let completed = idx + 1;
+        let progress = ((completed * 100) / total_indices).min(99) as i32;
+        repository::heartbeat_sync_task(
+            pool,
+            task_id,
+            total_indices as i32,
+            completed as i32,
+            failed as i32,
+            progress,
+        )
+        .await?;
+    }
+
+    if failed > 0 {
+        repository::update_sync_task_with_error(
+            pool,
+            task_id,
+            "partial",
+            total_indices as i32,
+            (total_indices.saturating_sub(failed)) as i32,
+            failed as i32,
+            "industry membership sync had failed index probes",
+        )
+        .await?;
+        return Err(format!(
+            "industry membership sync partial: rows_saved={}, failed_indices={}",
+            total_rows, failed
+        )
+        .into());
+    }
+
+    info!(
+        "industry membership PIT 同步完成: rows={}, failed_indices={}",
+        total_rows, failed
+    );
+    Ok(total_rows)
+}
+
 // ─── sync_namechange (ST 历史 PIT 合规) ──────────────────────────
 
 /// 同步股票名称变更历史，构建 PIT 合规的 ST 判断数据。
@@ -4645,6 +4887,53 @@ mod tests {
         assert_eq!(row.float_ratio, Decimal::from_f64_retain(2.5));
         assert_eq!(row.holder_name, "Sample Holder");
         assert_eq!(row.share_type, "首发原股东限售股份");
+    }
+
+    #[test]
+    fn industry_membership_row_uses_effective_dates_as_pit_boundaries() {
+        let classify = IndustryClassifyMeta {
+            classification_source: "SW2021".to_string(),
+            industry_level: "L1".to_string(),
+            index_code: "801010.SI".to_string(),
+            industry_code: "110000".to_string(),
+            industry_name: "农林牧渔".to_string(),
+            parent_code: "0".to_string(),
+        };
+        let mut item = Map::new();
+        item.insert("index_code".to_string(), json!("801010.SI"));
+        item.insert("index_name".to_string(), json!("农林牧渔(申万)"));
+        item.insert("con_code".to_string(), json!("000034.SZ"));
+        item.insert("con_name".to_string(), json!("神州数码"));
+        item.insert("in_date".to_string(), json!("20070703"));
+        item.insert("out_date".to_string(), json!("20090601"));
+        item.insert("is_new".to_string(), json!("N"));
+
+        let row = industry_membership_row_from_map(
+            &classify,
+            &item,
+            NaiveDate::from_ymd_opt(2006, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+        )
+        .expect("industry membership row");
+
+        assert_eq!(row.symbol, "000034.SZ");
+        assert_eq!(row.in_date, NaiveDate::from_ymd_opt(2007, 7, 3).unwrap());
+        assert_eq!(row.available_at, row.in_date);
+        assert_eq!(
+            row.out_date,
+            Some(NaiveDate::from_ymd_opt(2009, 6, 1).unwrap())
+        );
+        assert_eq!(row.exit_available_at, row.out_date);
+        assert_eq!(row.is_new, "N");
+        assert_eq!(row.industry_code, "110000");
+    }
+
+    #[test]
+    fn industry_membership_sync_defaults_to_sw2014_and_sw2021_sources() {
+        assert_eq!(
+            industry_membership_classification_sources(),
+            &["SW2014", "SW2021"]
+        );
     }
 
     #[test]
