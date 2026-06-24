@@ -214,6 +214,19 @@ const STK_HOLDER_TRADE_FIELDS: &[&str] = &[
     "begin_date",
     "close_date",
 ];
+const MARGIN_DETAIL_FIELDS: &[&str] = &[
+    "trade_date",
+    "ts_code",
+    "name",
+    "rzye",
+    "rqye",
+    "rzmre",
+    "rqyl",
+    "rzche",
+    "rqchl",
+    "rqmcl",
+    "rzrqye",
+];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +317,16 @@ mod tests {
         assert!(TOP10_FLOAT_HOLDERS_FIELDS.contains(&"hold_float_ratio"));
         assert!(STK_HOLDER_TRADE_FIELDS.contains(&"ann_date"));
         assert!(STK_HOLDER_TRADE_FIELDS.contains(&"in_de"));
+    }
+
+    #[test]
+    fn margin_detail_specs_keep_daily_security_level_leverage_fields() {
+        assert!(MARGIN_DETAIL_FIELDS.contains(&"trade_date"));
+        assert!(MARGIN_DETAIL_FIELDS.contains(&"ts_code"));
+        assert!(MARGIN_DETAIL_FIELDS.contains(&"rzye"));
+        assert!(MARGIN_DETAIL_FIELDS.contains(&"rqye"));
+        assert!(MARGIN_DETAIL_FIELDS.contains(&"rzmre"));
+        assert!(MARGIN_DETAIL_FIELDS.contains(&"rqmcl"));
     }
 }
 
@@ -1777,6 +1800,43 @@ impl TushareClient {
             params.push(("end_date", d));
         }
         self.call_api::<Vec<serde_json::Value>>("margin", params, &[])
+            .await
+    }
+
+    /// 个股融资融券交易明细（证券级，按日）
+    pub async fn margin_detail(
+        &self,
+        ts_code: Option<&str>,
+        trade_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code.to_string()));
+        }
+        if let Some(d) = trade_date {
+            params.push(("trade_date", d.to_string()));
+        }
+        if let Some(d) = start_date {
+            params.push(("start_date", d.to_string()));
+        }
+        if let Some(d) = end_date {
+            params.push(("end_date", d.to_string()));
+        }
+        if let Some(limit) = limit {
+            params.push(("limit", limit.to_string()));
+        }
+        if let Some(offset) = offset {
+            params.push(("offset", offset.to_string()));
+        }
+        let borrowed: Vec<(&str, &str)> = params
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        self.call_api::<Vec<serde_json::Value>>("margin_detail", borrowed, MARGIN_DETAIL_FIELDS)
             .await
     }
 

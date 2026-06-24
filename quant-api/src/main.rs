@@ -91,6 +91,10 @@ async fn main() {
             "/api/v1/quant/backtests/run-prediction",
             post(routes::backtest::run_prediction_backtest),
         )
+        .route(
+            "/api/v1/quant/backtests/cleanup-stale",
+            post(routes::backtest::cleanup_stale_backtest_tasks),
+        )
         // 数据同步
         .route(
             "/api/v1/quant/data/sync/stock-basic",
@@ -240,8 +244,28 @@ async fn main() {
             get(routes::sync::equity_pledge_pressure_schema_contract),
         )
         .route(
+            "/api/v1/quant/data/margin-detail/schema-contract",
+            get(routes::sync::margin_detail_schema_contract),
+        )
+        .route(
             "/api/v1/quant/data/shareholder-structure/schema-contract",
             get(routes::sync::shareholder_structure_schema_contract),
+        )
+        .route(
+            "/api/v1/quant/data/margin-detail/readiness-audit",
+            get(routes::sync::margin_detail_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/margin-detail/coverage-audit",
+            get(routes::sync::margin_detail_coverage_audit),
+        )
+        .route(
+            "/api/v1/quant/data/margin-detail/sync-plan",
+            get(routes::sync::margin_detail_sync_plan),
+        )
+        .route(
+            "/api/v1/quant/data/margin-detail/sync",
+            post(routes::sync::margin_detail_sync),
         )
         .route(
             "/api/v1/quant/data/shareholder-structure/readiness-audit",
@@ -492,6 +516,10 @@ async fn main() {
         .route(
             "/api/v1/quant/factors/phase7-shareholder-structure-backfill/background",
             post(routes::factors::backfill_phase7_shareholder_structure_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-margin-detail-backfill/background",
+            post(routes::factors::backfill_phase7_margin_detail_background),
         )
         .route(
             "/api/v1/quant/factors/phase7-event-window-alpha-backfill/background",

@@ -13,8 +13,8 @@ use crate::model::entities::{
     MarketFuturesWarehouseReceipt, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
     MarketStockExpress, MarketStockForecast, MarketStockIndustryMembershipPit,
-    MarketStockMainBusiness, MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat,
-    MarketTradeCalendar,
+    MarketStockMainBusiness, MarketStockMarginDetail, MarketStockMoneyflow, MarketStockRepurchase,
+    MarketStockShareFloat, MarketTradeCalendar,
 };
 
 // ─── market_stock ────────────────────────────────────────────────
@@ -388,6 +388,73 @@ pub async fn upsert_moneyflow_batch(
     }
 
     info!("批量 upsert {} 条每日资金流数据", saved);
+    Ok(saved)
+}
+
+// ─── market_stock_margin_detail ─────────────────────────────────
+
+pub async fn upsert_margin_detail_batch(
+    pool: &PgPool,
+    rows: &[MarketStockMarginDetail],
+    data_version_id: &str,
+    source: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut saved = 0usize;
+    for chunk in rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_stock_margin_detail \
+             (symbol, trade_date, name, rzye, rqye, rzmre, rqyl, rzche, rqchl, rqmcl, rzrqye, \
+              available_at, source_published_at, raw_payload, source, data_version_id) ",
+        );
+
+        builder.push_values(chunk, |mut row_builder, item| {
+            row_builder
+                .push_bind(&item.symbol)
+                .push_bind(item.trade_date)
+                .push_bind(&item.name)
+                .push_bind(item.rzye)
+                .push_bind(item.rqye)
+                .push_bind(item.rzmre)
+                .push_bind(item.rqyl)
+                .push_bind(item.rzche)
+                .push_bind(item.rqchl)
+                .push_bind(item.rqmcl)
+                .push_bind(item.rzrqye)
+                .push_bind(item.available_at)
+                .push_bind(item.source_published_at)
+                .push_bind(&item.raw_payload)
+                .push_bind(source)
+                .push_bind(data_version_id);
+        });
+
+        builder.push(
+            " ON CONFLICT (symbol, trade_date) DO UPDATE SET \
+              name = EXCLUDED.name, \
+              rzye = EXCLUDED.rzye, \
+              rqye = EXCLUDED.rqye, \
+              rzmre = EXCLUDED.rzmre, \
+              rqyl = EXCLUDED.rqyl, \
+              rzche = EXCLUDED.rzche, \
+              rqchl = EXCLUDED.rqchl, \
+              rqmcl = EXCLUDED.rqmcl, \
+              rzrqye = EXCLUDED.rzrqye, \
+              available_at = EXCLUDED.available_at, \
+              source_published_at = EXCLUDED.source_published_at, \
+              raw_payload = EXCLUDED.raw_payload, \
+              source = EXCLUDED.source, \
+              data_version_id = EXCLUDED.data_version_id, \
+              updated_at = now()",
+        );
+
+        let result = builder.build().execute(pool).await?;
+        saved += result.rows_affected() as usize;
+    }
+
+    info!("批量 upsert {} 条个股融资融券明细", saved);
     Ok(saved)
 }
 

@@ -189,11 +189,66 @@ impl ShareholderStructureSyncReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct MarginDetailSyncReq {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub data_version_id: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+}
+
+impl MarginDetailSyncReq {
+    fn into_sync_task_req(self) -> DataSyncTaskReq {
+        DataSyncTaskReq {
+            dataset: "margin_detail".to_string(),
+            source: "tushare:margin_detail".to_string(),
+            mode: Some("bounded_raw_sync".to_string()),
+            symbols: self.symbols,
+            source_filters: Vec::new(),
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: self.start_date,
+            end_date: self.end_date,
+            data_version_id: self.data_version_id,
+            background: self.background,
+            quality_check: false,
+            create_data_version: true,
+            retry_of_task_id: None,
+            reason: Some("p3.22 margin detail bounded raw sync".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ShareholderStructureSyncPlanReq {
     #[serde(default)]
     pub start_date: Option<String>,
     #[serde(default)]
     pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MarginDetailSyncPlanReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub batch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MarginDetailSyncPlanBatch {
+    label: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    open_day_count: i64,
+    observed_avg_rows_per_day: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +284,14 @@ pub struct EquityPledgeCoverageAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShareholderStructureCoverageAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MarginDetailCoverageAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
     #[serde(default)]
@@ -426,6 +489,7 @@ const PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED: &[&str] = &[
     "futures_price_chain",
     "equity_pledge_pressure",
     "shareholder_structure",
+    "margin_detail",
 ];
 const PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED: &[&str] = &[
     "cashflow",
@@ -1889,6 +1953,62 @@ fn phase7_equity_pledge_schema_contract() -> Value {
     })
 }
 
+fn phase7_margin_detail_schema_contract() -> Value {
+    json!({
+        "audit_version": "p3.22c-margin-detail-schema-contract-v1",
+        "source_id": "margin_detail_leverage_crowding",
+        "stage": "P3.22C",
+        "status": "permission_smoke_passed_schema_created_sync_smoke_passed",
+        "mode": "read_only_schema_available_at_quality_contract",
+        "ddl_path": "sql/phase7_margin_detail_source.sql",
+        "raw_sources": [
+            {
+                "api": "margin_detail",
+                "official_doc": "https://tushare.pro/document/2?doc_id=59",
+                "semantics": "security_level_margin_financing_and_short_selling_detail",
+                "native_time_key": "trade_date",
+                "official_publication_hint": "previous trading day data updates around next trading day 08:30",
+                "required_fields": ["trade_date", "ts_code", "name", "rzye", "rqye", "rzmre", "rqyl", "rzche", "rqchl", "rqmcl", "rzrqye"]
+            }
+        ],
+        "tables": [
+            {
+                "table": "market_stock_margin_detail",
+                "natural_key": ["symbol", "trade_date"],
+                "required_time_fields": ["trade_date", "available_at", "source_published_at"],
+                "required_value_fields": ["rzye", "rqye", "rzmre", "rqyl", "rzche", "rqchl", "rqmcl", "rzrqye"],
+                "pit_rule": "available_at must be the next open trading date after trade_date; downstream features and intraday trading must additionally require source_published_at <= decision timestamp",
+                "quality_rule": "rzche and rqchl may be negative vendor adjustment fields and must be preserved; balances/core activity fields must be nonnegative",
+                "raw_landing_policy": "raw sync preserves vendor rows and reports anomalies; admission gates decide factor eligibility"
+            }
+        ],
+        "available_at_policy": {
+            "default": "conservative next-session availability",
+            "source_published_at": "next open trading day 08:30 China time when native timestamp is unavailable",
+            "intraday_trading": "same-day margin_detail must not be used for intraday rebalance; only rows with source_published_at <= decision timestamp are usable"
+        },
+        "coverage_audit_required": [
+            "year_market_symbol_trade_date_breakdown",
+            "open_trade_day_coverage_ratio",
+            "available_at_pit_violation_rows",
+            "missing_source_published_at_rows",
+            "rzche_rqchl_negative_adjustment_breakdown",
+            "core_nonnegative_field_violation_rows",
+            "sync_attempt_success_failure_breakdown",
+            "correlation_vs_moneyflow_liquidity_price_volume"
+        ],
+        "promotion_gate": {
+            "schema_status": "created_or_review_required",
+            "bounded_sync": "allowed_only_as_raw_admission_sync",
+            "factor_builder": "blocked_until_full_history_coverage_pit_quality_and_correlation_pass",
+            "p310_status": "blocked_until_coverage_pit_quality_and_correlation_readiness_pass",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "run_full_history_bounded_sync_by_year_or_quarter_then_rerun_coverage_pit_quality_correlation_audit"
+    })
+}
+
 fn phase7_shareholder_structure_schema_contract() -> Value {
     json!({
         "audit_version": "p3.21b-shareholder-structure-schema-contract-v1",
@@ -2036,6 +2156,26 @@ fn shareholder_structure_expected_schema() -> Vec<(&'static str, Vec<&'static st
     ]
 }
 
+fn margin_detail_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![(
+        "market_stock_margin_detail",
+        vec![
+            "market_stock_margin_detail_pkey",
+            "market_stock_margin_detail_available_at_check",
+            "market_stock_margin_detail_core_nonnegative_check",
+        ],
+    )]
+}
+
+async fn table_exists(db: &sqlx::PgPool, table: &str) -> Result<bool, String> {
+    let regclass_name = format!("public.{table}");
+    sqlx::query_scalar("SELECT to_regclass($1)::text IS NOT NULL")
+        .bind(&regclass_name)
+        .fetch_one(db)
+        .await
+        .map_err(|error| format!("Failed to inspect table {table}: {error}"))
+}
+
 fn decide_equity_pledge_readiness(
     schema_passed: bool,
     stat_rows: i64,
@@ -2084,6 +2224,188 @@ fn decide_equity_pledge_readiness(
         "detail_rows": detail_rows,
         "raw_rows": raw_rows,
         "pit_violation_rows": pit_violation_rows,
+        "next_step": next_step,
+    })
+}
+
+fn decide_margin_detail_readiness(
+    schema_passed: bool,
+    raw_rows: i64,
+    pit_violation_rows: i64,
+    missing_source_published_at_rows: i64,
+    core_negative_rows: i64,
+) -> Value {
+    let (schema_status, sync_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "missing_or_invalid",
+            "blocked",
+            "apply_schema_before_sync",
+            "apply_sql_phase7_margin_detail_source_then_rerun_readiness_audit",
+        )
+    } else if raw_rows <= 0 {
+        (
+            "created",
+            "not_started",
+            "bounded_sync_required_before_coverage_audit",
+            "run_bounded_margin_detail_sync_then_readiness_audit",
+        )
+    } else if pit_violation_rows > 0 {
+        (
+            "created",
+            "raw_synced_pit_failed",
+            "raw_pit_failed",
+            "repair_available_at_or_delete_bad_margin_detail_rows_then_rerun_sync_and_audit",
+        )
+    } else if missing_source_published_at_rows > 0 {
+        (
+            "created",
+            "raw_synced_publication_time_incomplete",
+            "raw_publication_time_failed",
+            "repair_margin_detail_source_published_at_before_intraday_or_p310_use",
+        )
+    } else if core_negative_rows > 0 {
+        (
+            "created",
+            "raw_synced_quality_failed",
+            "raw_core_nonnegative_failed",
+            "inspect_core_negative_margin_detail_rows_then_repair_exclude_or_gate",
+        )
+    } else {
+        (
+            "created",
+            "raw_synced",
+            "coverage_correlation_readiness_audit_required_before_p310",
+            "run_year_market_symbol_negative_adjustment_and_correlation_audit_before_p310",
+        )
+    };
+
+    json!({
+        "schema_status": schema_status,
+        "sync_status": sync_status,
+        "admission_decision": admission_decision,
+        "p310_status": "blocked_until_coverage_pit_quality_and_correlation_readiness_pass",
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "raw_rows": raw_rows,
+        "pit_violation_rows": pit_violation_rows,
+        "missing_source_published_at_rows": missing_source_published_at_rows,
+        "core_negative_rows": core_negative_rows,
+        "negative_adjustment_policy": {
+            "rzche": "allowed_as_raw_vendor_adjustment_and_must_be_reported",
+            "rqchl": "allowed_as_raw_vendor_adjustment_and_must_be_reported",
+            "core_nonnegative_fields": ["rzye", "rqye", "rzmre", "rqyl", "rqmcl", "rzrqye"]
+        },
+        "next_step": next_step,
+    })
+}
+
+fn margin_detail_correlation_decision(max_abs_correlation: Option<f64>) -> &'static str {
+    match max_abs_correlation {
+        Some(value) if value >= 0.70 => "blocked_same_family_high_correlation",
+        Some(value) if value >= 0.50 => {
+            "caution_same_family_medium_correlation_requires_manual_review"
+        }
+        Some(_) => "passed_low_linear_correlation_screen",
+        None => "blocked_until_correlation_sample_available",
+    }
+}
+
+fn decide_margin_detail_coverage_audit(
+    schema_passed: bool,
+    raw_rows: i64,
+    covered_trade_days: i64,
+    open_trade_days: i64,
+    covered_trade_day_ratio: f64,
+    symbol_coverage_ratio: f64,
+    pit_violation_rows: i64,
+    missing_source_published_at_rows: i64,
+    core_negative_rows: i64,
+    missing_year_count: i64,
+    correlation_decision: &str,
+) -> Value {
+    const MIN_MARGINABLE_SYMBOL_COVERAGE: f64 = 0.20;
+    const MIN_RAW_ROWS_FOR_P310: i64 = 1_000_000;
+    let missing_open_trade_day_count = (open_trade_days - covered_trade_days).max(0);
+
+    let (coverage_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "schema_missing_or_invalid",
+            "apply_schema_before_sync",
+            "apply_sql_phase7_margin_detail_source_then_rerun_coverage_audit",
+        )
+    } else if raw_rows <= 0 {
+        (
+            "raw_missing",
+            "bounded_sync_required_before_coverage_audit",
+            "run_bounded_margin_detail_sync_then_coverage_audit",
+        )
+    } else if pit_violation_rows > 0 {
+        (
+            "raw_pit_failed",
+            "raw_pit_failed",
+            "repair_available_at_or_delete_bad_margin_detail_rows_then_rerun_audit",
+        )
+    } else if missing_source_published_at_rows > 0 {
+        (
+            "source_publication_time_failed",
+            "source_publication_time_failed",
+            "backfill_conservative_source_published_at_before_intraday_or_p310_use",
+        )
+    } else if core_negative_rows > 0 {
+        (
+            "raw_core_quality_failed",
+            "raw_core_quality_failed",
+            "inspect_core_negative_margin_detail_rows_then_repair_exclude_or_gate",
+        )
+    } else if open_trade_days <= 0 || missing_year_count > 0 || missing_open_trade_day_count > 0 {
+        (
+            "full_history_coverage_failed",
+            "full_history_coverage_failed",
+            "run_missing_year_quarter_or_trade_day_margin_detail_sync_then_rerun_coverage_audit",
+        )
+    } else if symbol_coverage_ratio < MIN_MARGINABLE_SYMBOL_COVERAGE
+        || raw_rows < MIN_RAW_ROWS_FOR_P310
+    {
+        (
+            "bounded_sample_or_undercovered",
+            "bounded_sample_passed_needs_full_history_sync",
+            "run_full_history_bounded_margin_detail_sync_then_rerun_coverage_audit",
+        )
+    } else if correlation_decision != "passed_low_linear_correlation_screen" {
+        (
+            "correlation_gate_failed_or_requires_review",
+            "correlation_readiness_not_passed",
+            "complete_moneyflow_liquidity_price_volume_correlation_review_before_p310",
+        )
+    } else {
+        (
+            "coverage_correlation_readiness_ready_for_p310_diagnostics",
+            "coverage_correlation_readiness_ready_for_p310_diagnostics",
+            "run_p310_rankic_group_decay_turnover_capacity_diagnostics",
+        )
+    };
+
+    json!({
+        "coverage_status": coverage_status,
+        "admission_decision": admission_decision,
+        "p310_status": if admission_decision == "coverage_correlation_readiness_ready_for_p310_diagnostics" {
+            "ready_for_p310_diagnostics_only"
+        } else {
+            "blocked_until_coverage_pit_quality_and_correlation_readiness_pass"
+        },
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "raw_rows": raw_rows,
+        "covered_trade_days": covered_trade_days,
+        "open_trade_days": open_trade_days,
+        "missing_open_trade_day_count": missing_open_trade_day_count,
+        "covered_trade_day_ratio": covered_trade_day_ratio,
+        "symbol_coverage_ratio": symbol_coverage_ratio,
+        "pit_violation_rows": pit_violation_rows,
+        "missing_source_published_at_rows": missing_source_published_at_rows,
+        "core_negative_rows": core_negative_rows,
+        "missing_year_count": missing_year_count,
+        "correlation_decision": correlation_decision,
         "next_step": next_step,
     })
 }
@@ -2892,6 +3214,769 @@ async fn build_equity_pledge_pressure_coverage_audit(
         "decision": decision,
         "promotion_gate": {
             "factor_builder": "blocked_until_coverage_readiness_and_pit_pass",
+            "p310_status": decision["p310_status"].clone(),
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    }))
+}
+
+async fn build_margin_detail_readiness_audit(db: &sqlx::PgPool) -> Result<Value, String> {
+    let mut table_results = Vec::new();
+    let mut schema_passed = true;
+    let mut raw_rows = 0_i64;
+    let mut pit_violation_rows = 0_i64;
+    let mut missing_source_published_at_rows = 0_i64;
+    let mut core_negative_rows = 0_i64;
+    let mut negative_rzche_rows = 0_i64;
+    let mut negative_rqchl_rows = 0_i64;
+
+    for (table, required_constraints) in margin_detail_expected_schema() {
+        let regclass_name = format!("public.{table}");
+        let exists = table_exists(db, table).await?;
+
+        let row_count = if exists {
+            sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*)::bigint FROM {table}"))
+                .fetch_one(db)
+                .await
+                .map_err(|error| format!("Failed to count {table}: {error}"))?
+        } else {
+            0
+        };
+
+        let (
+            table_pit_violations,
+            table_missing_published_at,
+            table_core_negative_rows,
+            table_negative_rzche_rows,
+            table_negative_rqchl_rows,
+        ): (i64, i64, i64, i64, i64) = if exists {
+            sqlx::query_as(
+                r#"
+                SELECT COUNT(*) FILTER (WHERE available_at <= trade_date)::bigint AS pit_violation_rows,
+                       COUNT(*) FILTER (WHERE source_published_at IS NULL)::bigint AS missing_source_published_at_rows,
+                       COUNT(*) FILTER (
+                           WHERE (rzye IS NOT NULL AND rzye < 0)
+                              OR (rqye IS NOT NULL AND rqye < 0)
+                              OR (rzmre IS NOT NULL AND rzmre < 0)
+                              OR (rqyl IS NOT NULL AND rqyl < 0)
+                              OR (rqmcl IS NOT NULL AND rqmcl < 0)
+                              OR (rzrqye IS NOT NULL AND rzrqye < 0)
+                       )::bigint AS core_negative_rows,
+                       COUNT(*) FILTER (WHERE rzche IS NOT NULL AND rzche < 0)::bigint AS negative_rzche_rows,
+                       COUNT(*) FILTER (WHERE rqchl IS NOT NULL AND rqchl < 0)::bigint AS negative_rqchl_rows
+                FROM market_stock_margin_detail
+                "#,
+            )
+            .fetch_one(db)
+            .await
+            .map_err(|error| format!("Failed to summarize margin_detail readiness: {error}"))?
+        } else {
+            (0, 0, 0, 0, 0)
+        };
+
+        let constraints: Vec<String> = if exists {
+            sqlx::query_scalar(
+                r#"
+                SELECT conname
+                FROM pg_constraint
+                WHERE conrelid = to_regclass($1)
+                ORDER BY conname
+                "#,
+            )
+            .bind(&regclass_name)
+            .fetch_all(db)
+            .await
+            .map_err(|error| format!("Failed to inspect constraints for {table}: {error}"))?
+        } else {
+            Vec::new()
+        };
+
+        let missing_constraints: Vec<&str> = required_constraints
+            .iter()
+            .copied()
+            .filter(|constraint| !constraints.iter().any(|existing| existing == constraint))
+            .collect();
+
+        let passed = exists && missing_constraints.is_empty();
+        schema_passed &= passed;
+        raw_rows += row_count;
+        pit_violation_rows += table_pit_violations;
+        missing_source_published_at_rows += table_missing_published_at;
+        core_negative_rows += table_core_negative_rows;
+        negative_rzche_rows += table_negative_rzche_rows;
+        negative_rqchl_rows += table_negative_rqchl_rows;
+
+        table_results.push(json!({
+            "table": table,
+            "table_exists": exists,
+            "row_count": row_count,
+            "pit_violation_rows": table_pit_violations,
+            "missing_source_published_at_rows": table_missing_published_at,
+            "core_negative_rows": table_core_negative_rows,
+            "negative_adjustment_rows": {
+                "rzche_negative_rows": table_negative_rzche_rows,
+                "rqchl_negative_rows": table_negative_rqchl_rows,
+            },
+            "required_constraints": required_constraints,
+            "missing_constraints": missing_constraints,
+            "passed": passed,
+        }));
+    }
+
+    let attempt_breakdown: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT source,
+               COUNT(*)::bigint AS attempts,
+               COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_attempts,
+               COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempts
+        FROM data_sync_attempt
+        WHERE source = 'tushare:margin_detail'
+           OR source = 'margin_detail'
+        GROUP BY source
+        ORDER BY source
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let decision = decide_margin_detail_readiness(
+        schema_passed,
+        raw_rows,
+        pit_violation_rows,
+        missing_source_published_at_rows,
+        core_negative_rows,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.22d-margin-detail-readiness-v1",
+        "source_id": "margin_detail_leverage_crowding",
+        "mode": "read_only_schema_raw_pit_quality_rowcount_audit",
+        "schema_passed": schema_passed,
+        "tables": table_results,
+        "sync_attempt_breakdown": attempt_breakdown
+            .into_iter()
+            .map(|(source, attempts, completed_attempts, failed_attempts)| json!({
+                "source": source,
+                "attempts": attempts,
+                "completed_attempts": completed_attempts,
+                "failed_attempts": failed_attempts,
+            }))
+            .collect::<Vec<_>>(),
+        "decision": decision,
+        "pit_policy": {
+            "raw_available_at": "conservative next open trading date after trade_date",
+            "source_published_at": "conservative next-session 08:30 China time represented in UTC by sync layer",
+            "intraday_rule": "intraday trading may only use margin_detail rows whose source_published_at is <= decision timestamp; same-day trade_date rows are never available intraday"
+        },
+        "quality_policy": {
+            "negative_adjustments_are_allowed": ["rzche", "rqchl"],
+            "core_nonnegative_fields": ["rzye", "rqye", "rzmre", "rqyl", "rqmcl", "rzrqye"],
+            "negative_adjustment_rows": {
+                "rzche_negative_rows": negative_rzche_rows,
+                "rqchl_negative_rows": negative_rqchl_rows,
+            }
+        },
+        "prohibited": [
+            "factor_build_before_full_history_coverage_pit_quality_correlation_audit",
+            "p310_before_year_market_symbol_negative_adjustment_and_correlation_audit",
+            "bounded_wfa_or_v19_train_selection_before_p310_passes"
+        ]
+    }))
+}
+
+fn margin_detail_sync_plan_response(
+    start: NaiveDate,
+    end: NaiveDate,
+    batch_mode: &str,
+    batches: Vec<MarginDetailSyncPlanBatch>,
+) -> Value {
+    const DEFAULT_ESTIMATED_ROWS_PER_DAY: f64 = 4_500.0;
+
+    let batch_values = batches
+        .iter()
+        .map(|batch| {
+            let rows_per_day = batch
+                .observed_avg_rows_per_day
+                .unwrap_or(DEFAULT_ESTIMATED_ROWS_PER_DAY);
+            let estimated_rows = (rows_per_day * batch.open_day_count as f64).round() as i64;
+            json!({
+                "batch": batch.label,
+                "start_date": batch.start_date.format("%Y-%m-%d").to_string(),
+                "end_date": batch.end_date.format("%Y-%m-%d").to_string(),
+                "open_day_count": batch.open_day_count,
+                "estimated_rows": estimated_rows,
+                "estimated_rows_basis": if batch.observed_avg_rows_per_day.is_some() {
+                    "observed_market_stock_margin_detail_rows_per_open_day"
+                } else {
+                    "default_4500_rows_per_open_day_after_single_day_smoke"
+                },
+                "recommended_request": {
+                    "start_date": batch.start_date.format("%Y%m%d").to_string(),
+                    "end_date": batch.end_date.format("%Y%m%d").to_string(),
+                    "data_version_id": format!("margin-detail-{}", batch.label),
+                    "background": true
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let estimated_total_rows = batch_values
+        .iter()
+        .filter_map(|batch| batch.get("estimated_rows").and_then(Value::as_i64))
+        .sum::<i64>();
+
+    json!({
+        "audit_version": "p3.22d-margin-detail-sync-plan-v1",
+        "source_id": "margin_detail_leverage_crowding",
+        "mode": "read_only_bounded_sync_plan",
+        "date_range": {
+            "start_date": start.format("%Y-%m-%d").to_string(),
+            "end_date": end.format("%Y-%m-%d").to_string(),
+        },
+        "batch_mode": batch_mode,
+        "batch_count": batch_values.len(),
+        "estimated_total_rows": estimated_total_rows,
+        "recommended_batch_granularity": batch_mode,
+        "batches": batch_values,
+        "required_follow_up_after_each_batch": [
+            "GET /api/v1/quant/data/margin-detail/coverage-audit",
+            "check decision.p310_status remains blocked until full-history coverage and correlation pass",
+            "inspect negative_adjustment_rows for rzche and rqchl without deleting raw vendor adjustments"
+        ],
+        "prohibited": [
+            "do_not_run_p310_before_coverage_pit_quality_correlation_audit_passes",
+            "do_not_interpret_raw_sync_ready_as_trainable_ready"
+        ]
+    })
+}
+
+async fn build_margin_detail_sync_plan(
+    db: &sqlx::PgPool,
+    req: MarginDetailSyncPlanReq,
+) -> Result<Value, String> {
+    let start = parse_futures_price_chain_coverage_date(req.start_date.as_deref(), "start_date")?
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2014, 1, 1).unwrap());
+    let end = parse_futures_price_chain_coverage_date(req.end_date.as_deref(), "end_date")?
+        .unwrap_or_else(|| Utc::now().date_naive());
+    if start > end {
+        return Err("margin_detail sync-plan start_date cannot be after end_date".into());
+    }
+    let batch_mode = req.batch.unwrap_or_else(|| "year".to_string());
+    if !matches!(batch_mode.as_str(), "year" | "quarter") {
+        return Err("margin_detail sync-plan batch must be 'year' or 'quarter'".into());
+    }
+
+    let open_dates: Vec<NaiveDate> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT trade_date
+        FROM market_trade_calendar
+        WHERE is_open = true
+          AND trade_date >= $1
+          AND trade_date <= $2
+        ORDER BY trade_date
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load market open dates for margin_detail plan: {error}"))?;
+
+    let observed_avg_rows_per_day = if table_exists(db, "market_stock_margin_detail").await? {
+        sqlx::query_scalar::<_, Option<f64>>(
+            r#"
+            SELECT COUNT(*)::double precision / NULLIF(COUNT(DISTINCT trade_date), 0)::double precision
+            FROM market_stock_margin_detail
+            "#,
+        )
+        .fetch_one(db)
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
+    let mut grouped: BTreeMap<String, Vec<NaiveDate>> = BTreeMap::new();
+    for date in open_dates {
+        let label = if batch_mode == "quarter" {
+            format!("{}q{}", date.year(), ((date.month0() / 3) + 1))
+        } else {
+            date.year().to_string()
+        };
+        grouped.entry(label).or_default().push(date);
+    }
+
+    let batches = grouped
+        .into_iter()
+        .filter_map(|(label, dates)| {
+            let start_date = dates.first().copied()?;
+            let end_date = dates.last().copied()?;
+            Some(MarginDetailSyncPlanBatch {
+                label,
+                start_date,
+                end_date,
+                open_day_count: dates.len() as i64,
+                observed_avg_rows_per_day,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(margin_detail_sync_plan_response(
+        start,
+        end,
+        &batch_mode,
+        batches,
+    ))
+}
+
+async fn build_margin_detail_correlation_audit(
+    db: &sqlx::PgPool,
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+    margin_detail_exists: bool,
+) -> Result<Value, String> {
+    if !margin_detail_exists {
+        return Ok(json!({
+            "status": "blocked_until_margin_detail_table_exists",
+            "decision": "blocked_until_correlation_sample_available",
+            "sample_rows": 0,
+        }));
+    }
+    let daily_bar_exists = table_exists(db, "market_stock_daily_bar").await?;
+    let moneyflow_exists = table_exists(db, "market_stock_moneyflow").await?;
+    if !daily_bar_exists || !moneyflow_exists {
+        return Ok(json!({
+            "status": "blocked_missing_reference_tables",
+            "decision": "blocked_until_correlation_sample_available",
+            "reference_tables": {
+                "market_stock_daily_bar": daily_bar_exists,
+                "market_stock_moneyflow": moneyflow_exists,
+            },
+            "sample_rows": 0,
+        }));
+    }
+
+    let stats: (i64, Option<f64>, Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
+        r#"
+        WITH margin_features AS (
+            SELECT symbol,
+                   trade_date,
+                   rzmre::double precision AS rzmre,
+                   rzye::double precision AS rzye,
+                   LAG(rzye::double precision) OVER (PARTITION BY symbol ORDER BY trade_date) AS prev_rzye
+            FROM market_stock_margin_detail
+            WHERE ($1::date IS NULL OR trade_date >= $1)
+              AND ($2::date IS NULL OR trade_date <= $2)
+        ),
+        joined AS (
+            SELECT (mf.rzmre / NULLIF(bar.amount::double precision, 0)) AS margin_buy_to_amount,
+                   ((mf.rzye - mf.prev_rzye) / NULLIF(ABS(mf.prev_rzye), 0)) AS financing_balance_chg1,
+                   (money.net_mf_amount::double precision / NULLIF(bar.amount::double precision, 0)) AS moneyflow_net_to_amount,
+                   LN(NULLIF(bar.amount::double precision, 0)) AS ln_amount,
+                   ABS((bar.close::double precision - bar.pre_close::double precision)
+                       / NULLIF(bar.pre_close::double precision, 0)) AS abs_return
+            FROM margin_features mf
+            JOIN market_stock_daily_bar bar
+              ON bar.symbol = mf.symbol
+             AND bar.trade_date = mf.trade_date
+            LEFT JOIN market_stock_moneyflow money
+              ON money.symbol = mf.symbol
+             AND money.trade_date = mf.trade_date
+        )
+        SELECT COUNT(*)::bigint AS sample_rows,
+               CORR(margin_buy_to_amount, moneyflow_net_to_amount) AS corr_margin_buy_moneyflow,
+               CORR(margin_buy_to_amount, ln_amount) AS corr_margin_buy_ln_amount,
+               CORR(margin_buy_to_amount, abs_return) AS corr_margin_buy_abs_return,
+               CORR(financing_balance_chg1, moneyflow_net_to_amount) AS corr_balance_chg_moneyflow
+        FROM joined
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to build margin_detail correlation audit: {error}"))?;
+
+    let correlations = [stats.1, stats.2, stats.3, stats.4];
+    let max_abs_correlation = correlations
+        .into_iter()
+        .flatten()
+        .map(f64::abs)
+        .reduce(f64::max);
+    let decision = margin_detail_correlation_decision(max_abs_correlation);
+
+    Ok(json!({
+        "status": if decision == "passed_low_linear_correlation_screen" {
+            "completed_low_linear_correlation_screen_passed"
+        } else {
+            "completed_correlation_screen_not_passed_or_needs_review"
+        },
+        "decision": decision,
+        "sample_rows": stats.0,
+        "max_abs_correlation": max_abs_correlation,
+        "correlations": {
+            "margin_buy_to_amount_vs_moneyflow_net_to_amount": stats.1,
+            "margin_buy_to_amount_vs_ln_amount_liquidity": stats.2,
+            "margin_buy_to_amount_vs_abs_return_price_volume": stats.3,
+            "financing_balance_chg1_vs_moneyflow_net_to_amount": stats.4,
+        },
+        "gate_note": "linear screen only; even if passed, P3.10 RankIC/group/decay/turnover-capacity remains mandatory"
+    }))
+}
+
+async fn build_margin_detail_coverage_audit(
+    db: &sqlx::PgPool,
+    req: MarginDetailCoverageAuditReq,
+) -> Result<Value, String> {
+    let start = parse_futures_price_chain_coverage_date(req.start_date.as_deref(), "start_date")?;
+    let end = parse_futures_price_chain_coverage_date(req.end_date.as_deref(), "end_date")?;
+    if let (Some(start), Some(end)) = (start, end) {
+        if start > end {
+            return Err("margin_detail coverage start_date cannot be after end_date".into());
+        }
+    }
+
+    let readiness = build_margin_detail_readiness_audit(db).await?;
+    let schema_passed = readiness
+        .get("schema_passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let margin_detail_exists = table_exists(db, "market_stock_margin_detail").await?;
+
+    if !margin_detail_exists {
+        let decision = decide_margin_detail_coverage_audit(
+            schema_passed,
+            0,
+            0,
+            0,
+            0.0,
+            0.0,
+            0,
+            0,
+            0,
+            0,
+            "blocked_until_correlation_sample_available",
+        );
+        return Ok(json!({
+            "audit_version": "p3.22d-margin-detail-coverage-audit-v1",
+            "source_id": "margin_detail_leverage_crowding",
+            "mode": "read_only_year_market_symbol_pit_quality_correlation_audit",
+            "schema_passed": schema_passed,
+            "readiness": readiness,
+            "raw_summary": {
+                "raw_rows": 0,
+                "pit_violation_rows": 0,
+                "missing_source_published_at_rows": 0,
+                "core_negative_rows": 0
+            },
+            "correlation_audit": {
+                "status": "blocked_until_margin_detail_table_exists",
+                "decision": "blocked_until_correlation_sample_available"
+            },
+            "decision": decision,
+            "promotion_gate": {
+                "factor_builder": "blocked_until_coverage_pit_quality_and_correlation_pass",
+                "p310_status": decision["p310_status"].clone(),
+                "bounded_wfa": "blocked",
+                "v19_train_selection": "blocked"
+            }
+        }));
+    }
+
+    let summary: (
+        i64,
+        i64,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)::bigint AS rows,
+               COUNT(DISTINCT symbol)::bigint AS symbols,
+               COUNT(DISTINCT trade_date)::bigint AS covered_trade_days,
+               MIN(trade_date) AS min_trade_date,
+               MAX(trade_date) AS max_trade_date,
+               COUNT(*) FILTER (WHERE available_at <= trade_date)::bigint AS pit_violation_rows,
+               COUNT(*) FILTER (WHERE source_published_at IS NULL)::bigint AS missing_source_published_at_rows,
+               COUNT(*) FILTER (
+                   WHERE (rzye IS NOT NULL AND rzye < 0)
+                      OR (rqye IS NOT NULL AND rqye < 0)
+                      OR (rzmre IS NOT NULL AND rzmre < 0)
+                      OR (rqyl IS NOT NULL AND rqyl < 0)
+                      OR (rqmcl IS NOT NULL AND rqmcl < 0)
+                      OR (rzrqye IS NOT NULL AND rzrqye < 0)
+               )::bigint AS core_negative_rows,
+               COUNT(*) FILTER (WHERE rzche IS NOT NULL AND rzche < 0)::bigint AS rzche_negative_rows,
+               COUNT(*) FILTER (WHERE rqchl IS NOT NULL AND rqchl < 0)::bigint AS rqchl_negative_rows
+        FROM market_stock_margin_detail
+        WHERE ($1::date IS NULL OR trade_date >= $1)
+          AND ($2::date IS NULL OR trade_date <= $2)
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to summarize margin_detail coverage: {error}"))?;
+
+    let effective_start = start.or(summary.3);
+    let effective_end = end.or(summary.4);
+    let open_day_count: i64 = if let (Some(start), Some(end)) = (effective_start, effective_end) {
+        sqlx::query_scalar(
+            r#"
+            SELECT COUNT(DISTINCT trade_date)::bigint
+            FROM market_trade_calendar
+            WHERE is_open = true
+              AND trade_date >= $1
+              AND trade_date <= $2
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(db)
+        .await
+        .map_err(|error| format!("Failed to count open days for margin_detail coverage: {error}"))?
+    } else {
+        0
+    };
+
+    let reference_symbols: i64 = if let (Some(start), Some(end)) = (effective_start, effective_end)
+    {
+        sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM market_stock
+            WHERE symbol ~ '^[0-9]{6}\.(SH|SZ|BJ)$'
+              AND list_date IS NOT NULL
+              AND list_date <= $1
+              AND (delist_date IS NULL OR delist_date >= $2)
+            "#,
+        )
+        .bind(end)
+        .bind(start)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let year_rows: Vec<(
+        i32,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT EXTRACT(YEAR FROM trade_date)::int AS year,
+               COUNT(*)::bigint AS rows,
+               COUNT(DISTINCT symbol)::bigint AS symbols,
+               COUNT(DISTINCT trade_date)::bigint AS covered_trade_days,
+               COUNT(*) FILTER (WHERE rzche IS NOT NULL AND rzche < 0)::bigint AS rzche_negative_rows,
+               COUNT(*) FILTER (WHERE rqchl IS NOT NULL AND rqchl < 0)::bigint AS rqchl_negative_rows,
+               MIN(trade_date) AS min_trade_date,
+               MAX(trade_date) AS max_trade_date
+        FROM market_stock_margin_detail
+        WHERE ($1::date IS NULL OR trade_date >= $1)
+          AND ($2::date IS NULL OR trade_date <= $2)
+        GROUP BY 1
+        ORDER BY 1
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to build margin_detail year breakdown: {error}"))?;
+
+    let mut rows_by_year: BTreeMap<
+        i32,
+        (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+        ),
+    > = BTreeMap::new();
+    for (year, rows, symbols, covered_days, rzche_negative, rqchl_negative, min_date, max_date) in
+        year_rows
+    {
+        rows_by_year.insert(
+            year,
+            (
+                rows,
+                symbols,
+                covered_days,
+                rzche_negative,
+                rqchl_negative,
+                min_date,
+                max_date,
+            ),
+        );
+    }
+
+    let mut missing_year_count = 0_i64;
+    let mut year_breakdown = Vec::new();
+    if let (Some(start), Some(end)) = (effective_start, effective_end) {
+        for year in start.year()..=end.year() {
+            let (rows, symbols, covered_days, rzche_negative, rqchl_negative, min_date, max_date) =
+                rows_by_year
+                    .remove(&year)
+                    .unwrap_or((0, 0, 0, 0, 0, None, None));
+            if rows == 0 {
+                missing_year_count += 1;
+            }
+            year_breakdown.push(json!({
+                "year": year,
+                "rows": rows,
+                "symbols": symbols,
+                "covered_trade_days": covered_days,
+                "rzche_negative_rows": rzche_negative,
+                "rqchl_negative_rows": rqchl_negative,
+                "min_trade_date": phase7_date_json(min_date),
+                "max_trade_date": phase7_date_json(max_date),
+            }));
+        }
+    }
+
+    let market_breakdown: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT CASE
+                   WHEN symbol LIKE '%.SH' THEN 'SH'
+                   WHEN symbol LIKE '%.SZ' THEN 'SZ'
+                   WHEN symbol LIKE '%.BJ' THEN 'BJ'
+                   ELSE 'OTHER'
+               END AS market,
+               COUNT(*)::bigint AS rows,
+               COUNT(DISTINCT symbol)::bigint AS symbols,
+               COUNT(DISTINCT trade_date)::bigint AS covered_trade_days,
+               COUNT(*) FILTER (WHERE rzche IS NOT NULL AND rzche < 0)::bigint AS rzche_negative_rows,
+               COUNT(*) FILTER (WHERE rqchl IS NOT NULL AND rqchl < 0)::bigint AS rqchl_negative_rows
+        FROM market_stock_margin_detail
+        WHERE ($1::date IS NULL OR trade_date >= $1)
+          AND ($2::date IS NULL OR trade_date <= $2)
+        GROUP BY 1
+        ORDER BY 1
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to build margin_detail market breakdown: {error}"))?;
+
+    let attempt_breakdown: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT source,
+               COUNT(*)::bigint AS attempts,
+               COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_attempts,
+               COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempts
+        FROM data_sync_attempt
+        WHERE source = 'tushare:margin_detail'
+           OR source = 'margin_detail'
+        GROUP BY source
+        ORDER BY source
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let correlation_audit =
+        build_margin_detail_correlation_audit(db, start, end, margin_detail_exists).await?;
+    let correlation_decision = correlation_audit
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("blocked_until_correlation_sample_available");
+    let covered_trade_day_ratio = phase7_ratio(summary.2, open_day_count).unwrap_or(0.0);
+    let symbol_coverage_ratio = phase7_ratio(summary.1, reference_symbols).unwrap_or(0.0);
+    let decision = decide_margin_detail_coverage_audit(
+        schema_passed,
+        summary.0,
+        summary.2,
+        open_day_count,
+        covered_trade_day_ratio,
+        symbol_coverage_ratio,
+        summary.5,
+        summary.6,
+        summary.7,
+        missing_year_count,
+        correlation_decision,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.22d-margin-detail-coverage-audit-v1",
+        "source_id": "margin_detail_leverage_crowding",
+        "mode": "read_only_year_market_symbol_pit_quality_correlation_audit",
+        "date_range": {
+            "start_date": phase7_date_json(start),
+            "end_date": phase7_date_json(end),
+            "effective_start_date": phase7_date_json(effective_start),
+            "effective_end_date": phase7_date_json(effective_end),
+        },
+        "schema_passed": schema_passed,
+        "readiness": readiness,
+        "raw_summary": {
+            "raw_rows": summary.0,
+            "symbols": summary.1,
+            "covered_trade_days": summary.2,
+            "open_trade_days": open_day_count,
+            "covered_trade_day_ratio": covered_trade_day_ratio,
+            "min_trade_date": phase7_date_json(summary.3),
+            "max_trade_date": phase7_date_json(summary.4),
+            "pit_violation_rows": summary.5,
+            "missing_source_published_at_rows": summary.6,
+            "core_negative_rows": summary.7,
+            "negative_adjustment_rows": {
+                "rzche_negative_rows": summary.8,
+                "rqchl_negative_rows": summary.9,
+            }
+        },
+        "symbol_breadth_vs_listed_stock_universe": {
+            "reference_symbols": reference_symbols,
+            "covered_symbols": summary.1,
+            "coverage_ratio": symbol_coverage_ratio,
+            "note": "margin_detail is naturally limited to marginable securities; low ratio blocks trainable alpha until explicitly accepted as a market-scope gate"
+        },
+        "year_breakdown": year_breakdown,
+        "market_breakdown": market_breakdown
+            .into_iter()
+            .map(|(market, rows, symbols, covered_days, rzche_negative, rqchl_negative)| json!({
+                "market": market,
+                "rows": rows,
+                "symbols": symbols,
+                "covered_trade_days": covered_days,
+                "rzche_negative_rows": rzche_negative,
+                "rqchl_negative_rows": rqchl_negative,
+            }))
+            .collect::<Vec<_>>(),
+        "sync_attempt_breakdown": attempt_breakdown
+            .into_iter()
+            .map(|(source, attempts, completed_attempts, failed_attempts)| json!({
+                "source": source,
+                "attempts": attempts,
+                "completed_attempts": completed_attempts,
+                "failed_attempts": failed_attempts,
+            }))
+            .collect::<Vec<_>>(),
+        "correlation_audit": correlation_audit,
+        "decision": decision,
+        "promotion_gate": {
+            "factor_builder": "blocked_until_coverage_pit_quality_and_correlation_pass",
             "p310_status": decision["p310_status"].clone(),
             "bounded_wfa": "blocked",
             "v19_train_selection": "blocked"
@@ -5260,7 +6345,28 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
                 "candidate_raw_sources": [
                     "regulated_disclosure_or_exchange_feed_for_orders_capacity_price_chain",
                     "licensed_broad_base_analyst_revision_or_consensus_estimate_feed",
-                    "regulatory_or_exchange_equity_incentive_employee_stock_plan_execution_feed"
+                    "regulatory_or_exchange_equity_incentive_employee_stock_plan_execution_feed",
+                    "tushare:margin_detail_actionable_fallback"
+                ],
+                "ranked_candidates": [
+                    {
+                        "rank": 1,
+                        "source_id": "licensed_broad_base_consensus_revision",
+                        "status": "source_discovery_required",
+                        "reason": "best aligned with true expectation-revision economics, but current report_rc path is blocked and no licensed callable source is configured"
+                    },
+                    {
+                        "rank": 2,
+                        "source_id": "exchange_announcement_order_capacity_text",
+                        "status": "source_discovery_required",
+                        "reason": "closest to real operations/order/capacity information, but requires reliable announcement feed, parsing schema and available_at audit"
+                    },
+                    {
+                        "rank": 3,
+                        "source_id": "margin_detail_leverage_crowding",
+                        "status": "actionable_permission_smoke_candidate_lower_priority",
+                        "reason": "daily security-level margin financing/short data has clear PIT boundary and broad coverage, but it is a leverage/crowding microstructure source rather than true operating data and must prove low correlation"
+                    }
                 ],
                 "schema_status": "source_discovery_required",
                 "client_status": "not_started",
@@ -5272,6 +6378,37 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
                 "admission_decision": "source_discovery_required_before_permission_smoke",
                 "blocked_reason": "no_new_source_has_passed_permission_schema_available_at_audit_after_p321e",
                 "next_step": "rank_candidate_sources_by_breadth_pit_availability_permission_and_economic_hypothesis_then_run_permission_smoke_for_top_source"
+            },
+            {
+                "source_id": "margin_detail_leverage_crowding",
+                "source_family": "security_level_leverage_crowding_and_short_pressure",
+                "economic_hypothesis": "个股融资买入、偿还、融资余额、融券余量和融券卖出可能刻画杠杆资金拥挤、去杠杆压力和卖空约束；若与 moneyflow/price-volume 已有源相关性足够低，可能作为低优先级 broad-base 补充候选。",
+                "candidate_raw_sources": [
+                    "tushare:margin_detail"
+                ],
+                "source_discovery_evidence": [
+                    {
+                        "candidate": "tushare:margin_detail",
+                        "status": "client_added_permission_smoke_required",
+                        "official_doc": "https://tushare.pro/document/2?doc_id=59",
+                        "official_semantics": "security_level_margin_trading_detail_updated_next_day_around_0830",
+                        "observed_fields_from_doc": ["trade_date", "ts_code", "rzye", "rqye", "rzmre", "rqyl", "rzche", "rqchl", "rqmcl", "rzrqye"],
+                        "native_available_at_candidate": "next_session_after_exchange_publication",
+                        "decision": "permission_smoke_and_schema_available_at_audit_required_before_sync"
+                    }
+                ],
+                "current_tables": [],
+                "schema_status": "not_started",
+                "client_status": "read_only_permission_smoke_client_added",
+                "sync_status": "not_started",
+                "coverage_status": "not_started",
+                "correlation_status": "must_test_against_moneyflow_liquidity_price_volume_and_current_v19",
+                "p310_status": "not_started",
+                "pit_required": true,
+                "available_at_policy": "official source says prior-day data is updated around next trading day 08:30; intraday decisions must use only records whose source_published_at or conservative next-session available_at is <= decision time",
+                "admission_decision": "permission_smoke_required_before_schema_available_at_audit",
+                "blocked_reason": "actionable_fallback_candidate_but_same_broad_crowding_family_risk_requires_permission_schema_available_at_correlation_and_p310_before_any_factor_or_ml_training",
+                "next_step": "run_read_only_permission_smoke_for_margin_detail_then_design_schema_available_at_audit_if_available"
             },
             {
                 "source_id": "futures_price_chain",
@@ -6605,6 +7742,22 @@ async fn execute_sync_task(
                 json!({"task_id": task_id, "dataset": "margin", "status": "completed", "count": count}),
             )
         }
+        "margin_detail" | "market_stock_margin_detail" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_margin_detail(
+                &state.db,
+                &state.tushare,
+                &req.symbols,
+                start,
+                end,
+                &task_id,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "margin_detail", "status": "completed", "count": count}),
+            )
+        }
         "block_trade" | "market_stock_block_trade" => {
             let (start, end) = require_range(&req)?;
             let count =
@@ -7007,9 +8160,12 @@ pub async fn create_sync_task(
         }}));
     }
 
-    match execute_sync_task(state, task_id, req).await {
+    match execute_sync_task(state.clone(), task_id.clone(), req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
-        Err(message) => Json(json!({"code": 1, "message": message})),
+        Err(message) => {
+            let _ = quant_data::repository::fail_sync_task(&state.db, &task_id, &message).await;
+            Json(json!({"code": 1, "message": message, "task_id": task_id}))
+        }
     }
 }
 
@@ -7380,6 +8536,11 @@ pub async fn equity_pledge_pressure_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_equity_pledge_schema_contract()}))
 }
 
+/// GET /api/v1/quant/data/margin-detail/schema-contract
+pub async fn margin_detail_schema_contract() -> impl IntoResponse {
+    Json(json!({"code": 0, "data": phase7_margin_detail_schema_contract()}))
+}
+
 /// GET /api/v1/quant/data/shareholder-structure/schema-contract
 pub async fn shareholder_structure_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_shareholder_structure_schema_contract()}))
@@ -7498,6 +8659,92 @@ pub async fn shareholder_structure_readiness_audit(
     match build_shareholder_structure_readiness_audit(&state.db).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/margin-detail/readiness-audit
+pub async fn margin_detail_readiness_audit(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match build_margin_detail_readiness_audit(&state.db).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/margin-detail/coverage-audit
+pub async fn margin_detail_coverage_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<MarginDetailCoverageAuditReq>,
+) -> impl IntoResponse {
+    match build_margin_detail_coverage_audit(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/margin-detail/sync-plan
+pub async fn margin_detail_sync_plan(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<MarginDetailSyncPlanReq>,
+) -> impl IntoResponse {
+    match build_margin_detail_sync_plan(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/margin-detail/sync
+pub async fn margin_detail_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MarginDetailSyncReq>,
+) -> impl IntoResponse {
+    let sync_req = req.into_sync_task_req();
+    let task_id = sync_req
+        .data_version_id
+        .clone()
+        .unwrap_or_else(|| format!("margin-detail-sync-{}", Uuid::new_v4()));
+
+    if let Err(message) = register_sync_task(&state, &task_id, &sync_req, "running").await {
+        return Json(json!({"code": 1, "message": message}));
+    }
+
+    if sync_req.background {
+        let state_for_task = state.clone();
+        let task_id_for_task = task_id.clone();
+        let req_for_task = sync_req.clone();
+        tokio::spawn(async move {
+            if let Err(message) = execute_sync_task(
+                state_for_task.clone(),
+                task_id_for_task.clone(),
+                req_for_task,
+            )
+            .await
+            {
+                let _ = quant_data::repository::fail_sync_task(
+                    &state_for_task.db,
+                    &task_id_for_task,
+                    &message,
+                )
+                .await;
+            }
+        });
+        return Json(json!({
+            "code": 0,
+            "data": {
+                "task_id": task_id,
+                "dataset": "margin_detail",
+                "status": "running"
+            }
+        }));
+    }
+
+    match execute_sync_task(state.clone(), task_id.clone(), sync_req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => {
+            let _ = quant_data::repository::fail_sync_task(&state.db, &task_id, &message).await;
+            Json(json!({"code": 1, "message": message, "task_id": task_id}))
+        }
     }
 }
 
@@ -7816,6 +9063,7 @@ async fn build_tushare_permission_smoke(
             "futures_price_chain probes fut_daily/fut_wsr/fut_holding only; these remain blocked from schema/sync/factor work until permission, source publication timing, product-to-stock mapping, coverage and P3.10 diagnostics pass.",
             "equity_pledge_pressure probes pledge_stat and pledge_detail only; pledge_detail.ann_date is the native PIT candidate, while pledge_stat.end_date is a measurement date and must not be used alone as availability.",
             "shareholder_structure probes stk_holdernumber/top10_holders/top10_floatholders/stk_holdertrade only; ann_date is the native PIT candidate, and end_date must never be used as availability.",
+            "margin_detail probes security-level financing and short-selling detail only; official publication timing must be handled as conservative next-session availability before any intraday use.",
             "Use this result to decide whether an optional source should proceed to Rust schema/repository/sync implementation or stay blocked."
         ],
     }))
@@ -11121,6 +12369,37 @@ async fn run_tushare_permission_source_smoke(
                 "blocked_until": ["schema_contract_reviewed", "bounded_sync_plan_reviewed", "ann_date_coverage_verified", "holder_count_breadth_verified", "p310_diagnostics_passed"]
             })
         }
+        "margin_detail" => {
+            let result = state
+                .tushare
+                .margin_detail(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let probe =
+                phase7_tushare_probe_json(source, None, "margin_detail_trade_date_range", result);
+            let probes = vec![probe];
+            json!({
+                "source": source,
+                "query_scope": "security_level_margin_detail_trade_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "official_doc": "https://tushare.pro/document/2?doc_id=59",
+                "source_semantics": "security-level margin financing and short-selling detail by trade_date",
+                "pit_available_at": "official source publishes prior-day records around next trading day 08:30; use conservative next-session available_at unless source_published_at is audited",
+                "required_fields_for_schema_audit": [
+                    "trade_date", "ts_code", "rzye", "rqye", "rzmre", "rqyl", "rzche", "rqchl", "rqmcl", "rzrqye"
+                ],
+                "admission_gate": "permission_smoke_only_schema_available_at_correlation_and_full_history_coverage_audit_required_before_sync",
+                "blocked_until": ["permission_available", "source_publication_timing_audited", "full_history_coverage_verified", "correlation_to_existing_moneyflow_liquidity_price_volume_checked", "p310_diagnostics_passed"]
+            })
+        }
         unsupported => json!({
             "source": unsupported,
             "status": "unsupported_source",
@@ -12495,6 +13774,25 @@ mod tests {
             p322_inventory["next_step"],
             "rank_candidate_sources_by_breadth_pit_availability_permission_and_economic_hypothesis_then_run_permission_smoke_for_top_source"
         );
+        assert_eq!(
+            p322_inventory["ranked_candidates"][2]["source_id"],
+            "margin_detail_leverage_crowding"
+        );
+        assert_eq!(
+            p322_inventory["ranked_candidates"][2]["status"],
+            "actionable_permission_smoke_candidate_lower_priority"
+        );
+
+        let margin_detail = by_source["margin_detail_leverage_crowding"];
+        assert_eq!(
+            margin_detail["admission_decision"],
+            "permission_smoke_required_before_schema_available_at_audit"
+        );
+        assert_eq!(margin_detail["pit_required"], true);
+        assert_eq!(
+            margin_detail["correlation_status"],
+            "must_test_against_moneyflow_liquidity_price_volume_and_current_v19"
+        );
 
         let equity = by_source["equity_incentive_execution_quality"];
         assert_eq!(
@@ -13595,6 +14893,181 @@ mod tests {
         assert_eq!(
             phase7_permission_smoke_sources(&requested),
             vec!["shareholder_structure"]
+        );
+    }
+
+    #[test]
+    fn phase7_permission_smoke_allowlists_margin_detail_without_defaulting_it() {
+        assert!(PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED.contains(&"margin_detail"));
+        assert!(!PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS.contains(&"margin_detail"));
+
+        let requested = vec![" Margin_Detail ".to_string(), "margin_detail".to_string()];
+        assert_eq!(
+            phase7_permission_smoke_sources(&requested),
+            vec!["margin_detail"]
+        );
+    }
+
+    #[test]
+    fn margin_detail_schema_contract_blocks_training_until_coverage_and_correlation_pass() {
+        let contract = phase7_margin_detail_schema_contract();
+
+        assert_eq!(contract["source_id"], "margin_detail_leverage_crowding");
+        assert_eq!(contract["stage"], "P3.22C");
+        assert_eq!(contract["ddl_path"], "sql/phase7_margin_detail_source.sql");
+        assert_eq!(contract["raw_sources"][0]["api"], "margin_detail");
+        assert_eq!(contract["tables"][0]["table"], "market_stock_margin_detail");
+        assert_eq!(
+            contract["available_at_policy"]["default"],
+            "conservative next-session availability"
+        );
+        assert_eq!(
+            contract["tables"][0]["quality_rule"],
+            "rzche and rqchl may be negative vendor adjustment fields and must be preserved; balances/core activity fields must be nonnegative"
+        );
+        assert_eq!(
+            contract["promotion_gate"]["p310_status"],
+            "blocked_until_coverage_pit_quality_and_correlation_readiness_pass"
+        );
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+
+        let ddl = include_str!("../../../sql/phase7_margin_detail_source.sql");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS market_stock_margin_detail"));
+        assert!(ddl.contains("market_stock_margin_detail_available_at_check"));
+        assert!(ddl.contains("available_at > trade_date"));
+        assert!(ddl.contains("market_stock_margin_detail_core_nonnegative_check"));
+        assert!(!ddl.contains("rzche IS NULL OR rzche >= 0"));
+        assert!(!ddl.contains("rqchl IS NULL OR rqchl >= 0"));
+    }
+
+    #[test]
+    fn margin_detail_sync_request_forces_bounded_raw_dataset() {
+        let req = MarginDetailSyncReq {
+            symbols: vec!["000001.SZ".to_string()],
+            start_date: Some("20260623".to_string()),
+            end_date: Some("20260623".to_string()),
+            data_version_id: Some("margin-detail-smoke".to_string()),
+            background: true,
+        }
+        .into_sync_task_req();
+
+        assert_eq!(req.dataset, "margin_detail");
+        assert_eq!(req.source, "tushare:margin_detail");
+        assert_eq!(req.mode.as_deref(), Some("bounded_raw_sync"));
+        assert_eq!(req.symbols, vec!["000001.SZ".to_string()]);
+        assert_eq!(
+            req.reason.as_deref(),
+            Some("p3.22 margin detail bounded raw sync")
+        );
+        assert!(req.background);
+    }
+
+    #[test]
+    fn margin_detail_readiness_and_coverage_gate_before_p310() {
+        assert_eq!(
+            decide_margin_detail_readiness(false, 0, 0, 0, 0)["admission_decision"],
+            "apply_schema_before_sync"
+        );
+        assert_eq!(
+            decide_margin_detail_readiness(true, 0, 0, 0, 0)["admission_decision"],
+            "bounded_sync_required_before_coverage_audit"
+        );
+        assert_eq!(
+            decide_margin_detail_readiness(true, 4_000, 1, 0, 0)["admission_decision"],
+            "raw_pit_failed"
+        );
+        assert_eq!(
+            decide_margin_detail_readiness(true, 4_000, 0, 1, 0)["admission_decision"],
+            "raw_publication_time_failed"
+        );
+        assert_eq!(
+            decide_margin_detail_readiness(true, 4_000, 0, 0, 1)["admission_decision"],
+            "raw_core_nonnegative_failed"
+        );
+
+        assert_eq!(
+            decide_margin_detail_coverage_audit(
+                true,
+                1_500_000,
+                3_030,
+                3_030,
+                1.0,
+                0.35,
+                0,
+                0,
+                0,
+                0,
+                "blocked_same_family_high_correlation",
+            )["admission_decision"],
+            "correlation_readiness_not_passed"
+        );
+        assert_eq!(
+            decide_margin_detail_coverage_audit(
+                true,
+                1_500_000,
+                3_030,
+                3_030,
+                1.0,
+                0.35,
+                0,
+                0,
+                0,
+                1,
+                "passed_low_linear_correlation_screen",
+            )["admission_decision"],
+            "full_history_coverage_failed"
+        );
+        assert_eq!(
+            decide_margin_detail_coverage_audit(
+                true,
+                1_500_000,
+                2_920,
+                3_030,
+                0.9636963696369637,
+                0.35,
+                0,
+                0,
+                0,
+                0,
+                "passed_low_linear_correlation_screen",
+            )["admission_decision"],
+            "full_history_coverage_failed"
+        );
+        assert_eq!(
+            decide_margin_detail_coverage_audit(
+                true,
+                1_500_000,
+                3_030,
+                3_030,
+                1.0,
+                0.35,
+                0,
+                0,
+                0,
+                0,
+                "passed_low_linear_correlation_screen",
+            )["p310_status"],
+            "ready_for_p310_diagnostics_only"
+        );
+    }
+
+    #[test]
+    fn margin_detail_correlation_decision_blocks_same_family_signal() {
+        assert_eq!(
+            margin_detail_correlation_decision(Some(0.72)),
+            "blocked_same_family_high_correlation"
+        );
+        assert_eq!(
+            margin_detail_correlation_decision(Some(0.55)),
+            "caution_same_family_medium_correlation_requires_manual_review"
+        );
+        assert_eq!(
+            margin_detail_correlation_decision(Some(0.30)),
+            "passed_low_linear_correlation_screen"
+        );
+        assert_eq!(
+            margin_detail_correlation_decision(None),
+            "blocked_until_correlation_sample_available"
         );
     }
 

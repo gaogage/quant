@@ -24,8 +24,10 @@ use crate::phase7_alpha_admission::{
     validate_equity_pledge_entrypoint_admission, validate_futures_price_chain_entrypoint_admission,
     validate_industry_prosperity_entrypoint_admission,
     validate_industry_prosperity_factor_builder_admission,
+    validate_margin_detail_entrypoint_admission,
     validate_shareholder_structure_entrypoint_admission, EQUITY_PLEDGE_PRESSURE_SOURCE,
-    FUTURES_PRICE_CHAIN_SOURCE, INDUSTRY_PROSPERITY_SOURCE, SHAREHOLDER_STRUCTURE_SOURCE,
+    FUTURES_PRICE_CHAIN_SOURCE, INDUSTRY_PROSPERITY_SOURCE, MARGIN_DETAIL_SOURCE,
+    SHAREHOLDER_STRUCTURE_SOURCE,
 };
 use crate::AppState;
 
@@ -335,6 +337,17 @@ pub struct Phase7ShareholderStructureBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7MarginDetailBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub alpha_admission_gate_id: Option<String>,
+    pub universe_profile: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7AlphaBlendSourceRequest {
     pub combo_name: String,
     pub version: Option<String>,
@@ -415,6 +428,7 @@ type Phase7IndustryProsperityBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7FuturesPriceChainBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7EquityPledgePressureBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7ShareholderStructureBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7MarginDetailBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,6 +550,7 @@ enum Phase7BackfillFactorKind {
     },
     EquityPledgePressure,
     ShareholderStructure,
+    MarginDetailLeverageCrowding,
     ForecastRevision {
         value_expression: &'static str,
         higher_is_better: bool,
@@ -2041,6 +2056,74 @@ impl Phase7ShareholderStructureBackfillRequest {
                 "market_trade_calendar",
             ],
             combo_method: "weighted_shareholder_structure",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7MarginDetailBackfillRequest {
+    fn into_plan(self) -> Result<Phase7MarginDetailBackfillPlan, String> {
+        validate_margin_detail_entrypoint_admission(
+            MARGIN_DETAIL_SOURCE,
+            self.alpha_admission_gate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            self.universe_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "factor builder",
+        )?;
+
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2014, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "p322e-margin-leverage-v1", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "margin_detail_leverage_crowding",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7MarginDetailBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_margin_detail_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "margin_detail",
+            category: "margin_detail_leverage_crowding_alpha",
+            phase: "7-P3.22E",
+            dependencies: &[
+                "market_stock_margin_detail",
+                "market_stock_daily_bar",
+                "market_stock_daily_basic",
+                "market_stock",
+                "market_stock_name_history",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_margin_detail",
             experiment_type: "phase7_factor_backfill_profile",
             source_combos: Vec::new(),
         })
@@ -3889,6 +3972,32 @@ fn phase7_shareholder_structure_backfill_specs() -> Vec<Phase7BackfillFactorSpec
             period: 120,
             kind: Phase7BackfillFactorKind::ShareholderStructure,
             weight: 0.25,
+        },
+    ]
+}
+
+fn phase7_margin_detail_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "md_financing_buy_intensity_20d_std",
+            name: "P3.22 PIT margin-detail financing buy intensity over traded amount 20d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MarginDetailLeverageCrowding,
+            weight: 0.40,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "md_financing_balance_chg_20d_std",
+            name: "P3.22 PIT margin-detail financing balance change versus 20 sessions",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MarginDetailLeverageCrowding,
+            weight: 0.40,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "md_short_sell_pressure_relief_20d_std",
+            name: "P3.22 PIT margin-detail inverse short-selling pressure over 20 sessions",
+            period: 20,
+            kind: Phase7BackfillFactorKind::MarginDetailLeverageCrowding,
+            weight: 0.20,
         },
     ]
 }
@@ -8475,6 +8584,133 @@ pub async fn backfill_phase7_shareholder_structure_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-margin-detail-backfill/background
+///
+/// Dedicated PIT margin-detail leverage-crowding factor builder. It requires
+/// the margin-detail coverage gate and writes only a research-source combo for
+/// P3.10 diagnostics; WFA and v19 train selection remain separate gates.
+pub async fn backfill_phase7_margin_detail_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7MarginDetailBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 margin detail backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_margin_detail_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_margin_detail_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 margin detail backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 margin detail backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 margin detail backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-alpha-blend-backfill/background
 ///
 /// Combo-only backfill that blends existing multi-factor alpha scores by
@@ -9005,6 +9241,15 @@ async fn run_phase7_shareholder_structure_backfill(
     run_segmented_shareholder_structure_backfill(db, task_id, plan, &specs).await
 }
 
+async fn run_phase7_margin_detail_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7MarginDetailBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_margin_detail_backfill_specs();
+    run_segmented_margin_detail_backfill(db, task_id, plan, &specs).await
+}
+
 async fn run_phase7_event_window_alpha_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -9221,6 +9466,13 @@ fn quarterly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDa
         cursor = next_quarter_start(cursor);
     }
     segments
+}
+
+fn margin_detail_backfill_segments(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<(NaiveDate, NaiveDate)> {
+    quarterly_backfill_segments(start, end)
 }
 
 fn monthly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
@@ -9591,6 +9843,60 @@ async fn run_segmented_shareholder_structure_backfill(
     ))
 }
 
+async fn run_segmented_margin_detail_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let started_at = Instant::now();
+    let segments = margin_detail_backfill_segments(plan.start_date, plan.end_date);
+    let total_steps = segments.len();
+    let mut completed_steps = 0usize;
+    let mut combo_rows = 0usize;
+
+    for spec in specs {
+        upsert_set_based_factor_definition(db, spec, plan).await?;
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report = SetBasedFactorBackfillReport {
+                factor_rows: 0,
+                combo_rows,
+                factor_rows_by_code: specs
+                    .iter()
+                    .map(|spec| (spec.factor_code.to_string(), 0))
+                    .collect(),
+            };
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_margin_detail_backfill(db, &segment_plan, specs).await?;
+        combo_rows = combo_rows.saturating_add(rows);
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(db, task_id, completed_steps, total_steps, combo_rows)
+            .await?;
+    }
+
+    let report = SetBasedFactorBackfillReport {
+        factor_rows: 0,
+        combo_rows,
+        factor_rows_by_code: specs
+            .iter()
+            .map(|spec| (spec.factor_code.to_string(), 0))
+            .collect(),
+    };
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
 struct FuturesPriceChainSegmentBackfillRows {
     product_rows_by_code: Vec<(String, usize)>,
     combo_rows: usize,
@@ -9874,6 +10180,63 @@ async fn execute_shareholder_structure_backfill(
     tx.commit().await.map_err(|error| {
         format!(
             "Failed to commit shareholder structure backfill transaction: {}",
+            error
+        )
+    })?;
+
+    Ok(combo_rows)
+}
+
+async fn execute_margin_detail_backfill(
+    db: &sqlx::PgPool,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<usize, String> {
+    let weights_json = factor_backfill_combo_weights_json(specs)?;
+    let mut tx = db.begin().await.map_err(|error| {
+        format!(
+            "Failed to start margin detail backfill transaction: {}",
+            error
+        )
+    })?;
+    set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+
+    sqlx::query(
+        "INSERT INTO multi_factor_weight (combo_name, version, weights, method, status)
+         VALUES ($1, $2, $3, $4, 'active')
+         ON CONFLICT (combo_name, version) DO UPDATE SET
+           weights = EXCLUDED.weights,
+           method = EXCLUDED.method,
+           status = EXCLUDED.status,
+           created_at = NOW()",
+    )
+    .bind(&plan.combo_name)
+    .bind(&plan.version)
+    .bind(&weights_json)
+    .bind(plan.combo_method)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert margin detail combo weights: {}", error))?;
+
+    let combo_result = sqlx::query(phase7_margin_detail_backfill_sql())
+        .bind(&plan.combo_name)
+        .bind(&plan.version)
+        .bind(&weights_json)
+        .bind(plan.start_date)
+        .bind(plan.end_date)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to backfill margin detail combo for {}..{}: {}",
+                plan.start_date, plan.end_date, error
+            )
+        })?;
+    let combo_rows = combo_result.rows_affected() as usize;
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "Failed to commit margin detail backfill transaction: {}",
             error
         )
     })?;
@@ -10502,6 +10865,9 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             panic!(
                 "shareholder_structure must use the dedicated strict PIT low-fanout combo builder"
             )
+        }
+        Phase7BackfillFactorKind::MarginDetailLeverageCrowding => {
+            panic!("margin_detail must use the dedicated next-session PIT combo builder")
         }
         Phase7BackfillFactorKind::ForecastRevision {
             value_expression,
@@ -13777,6 +14143,270 @@ fn phase7_shareholder_structure_backfill_sql() -> &'static str {
         JOIN weights
           ON weights.factor_code = ranked.factor_code
         GROUP BY ranked.symbol, ranked.trade_date
+    ),
+    deleted AS (
+        DELETE FROM multi_factor_value
+        WHERE combo_name = $1
+          AND version = $2
+          AND trade_date BETWEEN $4 AND $5
+        RETURNING 1
+    )
+    INSERT INTO multi_factor_value
+        (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+    SELECT $1, $2, symbol, trade_date, raw_score, normalized_score, available_at
+    FROM scores
+    WHERE raw_score IS NOT NULL
+      AND normalized_score IS NOT NULL
+      AND available_at <= trade_date
+    ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        normalized_score = EXCLUDED.normalized_score,
+        available_at = EXCLUDED.available_at,
+        created_at = NOW()"
+}
+
+fn phase7_margin_detail_backfill_sql() -> &'static str {
+    "WITH weights AS (
+        SELECT key AS factor_code, value::double precision AS weight
+        FROM jsonb_each_text($3::jsonb)
+        WHERE key IN (
+            'md_financing_buy_intensity_20d_std',
+            'md_financing_balance_chg_20d_std',
+            'md_short_sell_pressure_relief_20d_std'
+        )
+    ),
+    weight_params AS (
+        SELECT
+            COALESCE(
+                MAX(weight) FILTER (
+                    WHERE factor_code = 'md_financing_buy_intensity_20d_std'
+                ),
+                0.0
+            ) AS financing_buy_weight,
+            COALESCE(
+                MAX(weight) FILTER (
+                    WHERE factor_code = 'md_financing_balance_chg_20d_std'
+                ),
+                0.0
+            ) AS financing_balance_weight,
+            COALESCE(
+                MAX(weight) FILTER (
+                    WHERE factor_code = 'md_short_sell_pressure_relief_20d_std'
+                ),
+                0.0
+            ) AS short_sell_relief_weight
+        FROM weights
+    ),
+    stock_days AS (
+        SELECT trade_date
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open = true
+          AND trade_date BETWEEN $4 AND $5
+    ),
+    eligible_universe AS MATERIALIZED (
+        SELECT
+            bar.symbol,
+            bar.trade_date
+        FROM stock_days td
+        JOIN market_stock_daily_bar bar
+          ON bar.trade_date = td.trade_date
+         AND bar.trade_date BETWEEN $4 AND $5
+        JOIN market_stock ms
+          ON ms.symbol = bar.symbol
+        JOIN market_stock_daily_basic basic
+          ON basic.symbol = bar.symbol
+         AND basic.trade_date = bar.trade_date
+         AND basic.trade_date BETWEEN $4 AND $5
+        WHERE bar.close IS NOT NULL
+          AND bar.close > 0
+          AND basic.circ_mv IS NOT NULL
+          AND basic.circ_mv > 0
+          AND ms.list_date IS NOT NULL
+          AND ms.list_date <= bar.trade_date
+          AND (
+              ms.delist_date IS NULL
+              OR ms.delist_date >= bar.trade_date
+          )
+          AND ms.exchange IN ('SSE', 'SZSE')
+          AND ms.market IN ('主板', '创业板')
+          AND ms.symbol NOT LIKE '688%SH'
+          AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+          AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM market_stock_name_history st_name
+              WHERE st_name.symbol = bar.symbol
+                AND st_name.is_st = true
+                AND st_name.start_date <= bar.trade_date
+                AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+          )
+    ),
+    margin_observations AS MATERIALIZED (
+        SELECT
+            md.symbol,
+            md.trade_date,
+            md.available_at,
+            md.rzmre::double precision AS rzmre,
+            md.rzye::double precision AS rzye,
+            md.rqmcl::double precision AS rqmcl,
+            bar.volume::double precision AS volume,
+            bar.amount::double precision AS amount,
+            basic.circ_mv::double precision AS circ_mv
+        FROM market_stock_margin_detail md
+        JOIN market_stock_daily_bar bar
+          ON bar.symbol = md.symbol
+         AND bar.trade_date = md.trade_date
+        JOIN market_stock_daily_basic basic
+          ON basic.symbol = md.symbol
+         AND basic.trade_date = md.trade_date
+        WHERE md.trade_date >= ($4::date - INTERVAL '90 days')
+          AND md.trade_date <= $5
+          AND md.available_at <= $5
+          AND md.available_at > md.trade_date
+          AND md.available_at IS NOT NULL
+          AND md.rzye IS NOT NULL
+          AND md.rzmre IS NOT NULL
+          AND bar.amount IS NOT NULL
+          AND bar.amount > 0
+          AND bar.volume IS NOT NULL
+          AND bar.volume > 0
+          AND basic.circ_mv IS NOT NULL
+          AND basic.circ_mv > 0
+    ),
+    rolling AS MATERIALIZED (
+        SELECT
+            symbol,
+            trade_date,
+            available_at,
+            SUM(md.rzmre::double precision) OVER (
+                PARTITION BY symbol ORDER BY trade_date
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) / NULLIF(
+                SUM(md.amount::double precision) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                ),
+                0.0
+            ) AS financing_buy_intensity_20d,
+            (
+                rzye::double precision
+                - LAG(md.rzye::double precision, 20) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                )
+            ) / NULLIF(circ_mv::double precision, 0.0) AS financing_balance_chg_20d,
+            -SUM(COALESCE(md.rqmcl::double precision, 0.0)) OVER (
+                PARTITION BY symbol ORDER BY trade_date
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) / NULLIF(
+                SUM(volume::double precision) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                    ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                ),
+                0.0
+            ) AS short_sell_pressure_relief_20d,
+            COUNT(md.rzmre) OVER (
+                PARTITION BY symbol ORDER BY trade_date
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) AS obs_count
+        FROM margin_observations md
+    ),
+    latest_signals AS (
+        SELECT DISTINCT ON (universe.symbol, universe.trade_date)
+            universe.symbol,
+            universe.trade_date,
+            rolling.available_at,
+            rolling.financing_buy_intensity_20d,
+            rolling.financing_balance_chg_20d,
+            rolling.short_sell_pressure_relief_20d,
+            GREATEST(
+                0,
+                (CASE WHEN rolling.financing_buy_intensity_20d IS NOT NULL THEN 1 ELSE 0 END)
+                + (CASE WHEN rolling.financing_balance_chg_20d IS NOT NULL THEN 1 ELSE 0 END)
+                + (CASE WHEN rolling.short_sell_pressure_relief_20d IS NOT NULL THEN 1 ELSE 0 END)
+            ) AS valid_signal_count
+        FROM eligible_universe universe
+        JOIN rolling
+          ON rolling.symbol = universe.symbol
+         AND rolling.available_at = universe.trade_date
+        WHERE rolling.obs_count >= 20
+          AND rolling.available_at <= universe.trade_date
+          AND GREATEST(
+                0,
+                (CASE WHEN rolling.financing_buy_intensity_20d IS NOT NULL THEN 1 ELSE 0 END)
+                + (CASE WHEN rolling.financing_balance_chg_20d IS NOT NULL THEN 1 ELSE 0 END)
+                + (CASE WHEN rolling.short_sell_pressure_relief_20d IS NOT NULL THEN 1 ELSE 0 END)
+          ) >= 3
+        ORDER BY universe.symbol, universe.trade_date, rolling.available_at DESC
+    ),
+    ranked_signals AS (
+        SELECT
+            symbol,
+            trade_date,
+            available_at,
+            financing_buy_intensity_20d,
+            financing_balance_chg_20d,
+            short_sell_pressure_relief_20d,
+            CASE
+                WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                ELSE percent_rank() OVER (
+                    PARTITION BY trade_date ORDER BY financing_buy_intensity_20d
+                )
+            END AS financing_buy_intensity_rank,
+            CASE
+                WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                ELSE percent_rank() OVER (
+                    PARTITION BY trade_date ORDER BY financing_balance_chg_20d
+                )
+            END AS financing_balance_chg_rank,
+            CASE
+                WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                ELSE percent_rank() OVER (
+                    PARTITION BY trade_date ORDER BY short_sell_pressure_relief_20d
+                )
+            END AS short_sell_pressure_relief_rank
+        FROM latest_signals
+        WHERE valid_signal_count >= 3
+          AND available_at <= trade_date
+    ),
+    scores AS (
+        SELECT
+            ranked_signals.symbol,
+            ranked_signals.trade_date,
+            (
+                ranked_signals.financing_buy_intensity_20d
+                    * weight_params.financing_buy_weight
+                + ranked_signals.financing_balance_chg_20d
+                    * weight_params.financing_balance_weight
+                + ranked_signals.short_sell_pressure_relief_20d
+                    * weight_params.short_sell_relief_weight
+            ) / NULLIF(
+                weight_params.financing_buy_weight
+                + weight_params.financing_balance_weight
+                + weight_params.short_sell_relief_weight,
+                0.0
+            ) AS raw_score,
+            (
+                ranked_signals.financing_buy_intensity_rank
+                    * weight_params.financing_buy_weight
+                + ranked_signals.financing_balance_chg_rank
+                    * weight_params.financing_balance_weight
+                + ranked_signals.short_sell_pressure_relief_rank
+                    * weight_params.short_sell_relief_weight
+            ) / NULLIF(
+                weight_params.financing_buy_weight
+                + weight_params.financing_balance_weight
+                + weight_params.short_sell_relief_weight,
+                0.0
+            ) AS normalized_score,
+            ranked_signals.available_at AS available_at
+        FROM ranked_signals
+        CROSS JOIN weight_params
+        WHERE (
+                weight_params.financing_buy_weight
+                + weight_params.financing_balance_weight
+                + weight_params.short_sell_relief_weight
+            ) > 0.0
     ),
     deleted AS (
         DELETE FROM multi_factor_value
@@ -17298,6 +17928,98 @@ mod tests {
     }
 
     #[test]
+    fn phase7_margin_detail_request_requires_coverage_gate() {
+        let req = Phase7MarginDetailBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-23".to_string()),
+            version: Some("p322e-margin-leverage-v1".to_string()),
+            combo_name: None,
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("margin_detail_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("factor builder"));
+    }
+
+    #[test]
+    fn phase7_margin_detail_request_builds_p322e_plan() {
+        let req = Phase7MarginDetailBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-23".to_string()),
+            version: None,
+            combo_name: None,
+            alpha_admission_gate_id: Some("margin_detail_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid margin detail plan");
+
+        assert_eq!(plan.combo_name, "margin_detail_leverage_crowding");
+        assert_eq!(plan.version, "p322e-margin-leverage-v1");
+        assert_eq!(plan.bundle_name, "margin_detail");
+        assert_eq!(plan.task_type, "phase7_margin_detail_backfill");
+        assert_eq!(plan.category, "margin_detail_leverage_crowding_alpha");
+        assert_eq!(plan.phase, "7-P3.22E");
+        assert_eq!(plan.combo_method, "weighted_margin_detail");
+        assert!(plan.combo_method.len() <= 32);
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+        assert!(plan.dependencies.contains(&"market_stock_margin_detail"));
+        assert!(plan.dependencies.contains(&"market_stock_daily_bar"));
+        assert!(plan.dependencies.contains(&"market_stock_daily_basic"));
+        assert!(plan.dependencies.contains(&"market_stock_name_history"));
+    }
+
+    #[test]
+    fn phase7_margin_detail_sql_is_pit_and_market_scope_gated() {
+        let sql = phase7_margin_detail_backfill_sql();
+
+        assert!(sql.contains("market_stock_margin_detail"));
+        assert!(sql.contains("rolling.available_at <= universe.trade_date"));
+        assert!(sql.contains("md.available_at > md.trade_date"));
+        assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(sql.contains("FROM market_stock_name_history st_name"));
+        assert!(sql.contains("st_name.start_date <= bar.trade_date"));
+        assert!(sql.contains("SUM(md.rzmre::double precision)"));
+        assert!(sql.contains("LAG(md.rzye::double precision, 20)"));
+        assert!(sql.contains("-SUM(COALESCE(md.rqmcl::double precision, 0.0))"));
+        assert!(sql.contains("ORDER BY financing_buy_intensity_20d"));
+        assert!(sql.contains("ORDER BY financing_balance_chg_20d"));
+        assert!(sql.contains("ORDER BY short_sell_pressure_relief_20d"));
+        assert!(sql.contains("INSERT INTO multi_factor_value"));
+        assert!(sql.contains("DELETE FROM multi_factor_value"));
+        assert!(sql.contains("available_at <= trade_date"));
+        assert!(!sql.contains("INSERT INTO factor_value"));
+        assert!(!sql.contains("model_prediction"));
+        assert!(!sql.contains("future_return"));
+    }
+
+    #[test]
+    fn phase7_margin_detail_sql_uses_wide_signal_scoring_shape() {
+        let sql = phase7_margin_detail_backfill_sql();
+
+        assert!(sql.contains("latest_signals AS"));
+        assert!(sql.contains("ranked_signals AS"));
+        assert!(sql.contains("weight_params AS"));
+        assert!(sql.contains("rolling.available_at = universe.trade_date"));
+        assert!(sql.contains("financing_buy_intensity_rank"));
+        assert!(sql.contains("financing_balance_chg_rank"));
+        assert!(sql.contains("short_sell_pressure_relief_rank"));
+        assert!(sql.contains("GREATEST("));
+        assert!(!sql.contains("universe.trade_date - INTERVAL '10 days'"));
+        assert!(!sql.contains("CROSS JOIN LATERAL"));
+        assert!(!sql.contains("latest_raw AS"));
+        assert!(!sql.contains("COUNT(DISTINCT ranked.factor_code)"));
+    }
+
+    #[test]
     fn phase7_supply_float_shock_sql_uses_actual_daily_basic_share_fields() {
         let specs = phase7_supply_float_shock_backfill_specs();
         let float_growth = specs
@@ -18256,6 +18978,32 @@ mod tests {
                 (
                     NaiveDate::from_ymd_opt(2023, 3, 1).unwrap(),
                     NaiveDate::from_ymd_opt(2023, 3, 8).unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn margin_detail_backfill_segments_use_quarter_boundaries() {
+        let start = NaiveDate::from_ymd_opt(2023, 1, 15).unwrap();
+        let end = NaiveDate::from_ymd_opt(2023, 8, 8).unwrap();
+
+        let segments = margin_detail_backfill_segments(start, end);
+
+        assert_eq!(
+            segments,
+            vec![
+                (
+                    NaiveDate::from_ymd_opt(2023, 1, 15).unwrap(),
+                    NaiveDate::from_ymd_opt(2023, 3, 31).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2023, 4, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2023, 6, 30).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2023, 8, 8).unwrap()
                 ),
             ]
         );

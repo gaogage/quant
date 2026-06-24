@@ -24,10 +24,10 @@ use crate::phase7_alpha_admission::{
     validate_equity_pledge_entrypoint_admission, validate_equity_pledge_trial_admission,
     validate_futures_price_chain_entrypoint_admission,
     validate_industry_prosperity_entrypoint_admission,
-    validate_industry_prosperity_trial_admission,
-    validate_shareholder_structure_entrypoint_admission,
+    validate_industry_prosperity_trial_admission, validate_margin_detail_entrypoint_admission,
+    validate_margin_detail_trial_admission, validate_shareholder_structure_entrypoint_admission,
     validate_shareholder_structure_trial_admission, FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID,
-    INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
+    INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE, MARGIN_DETAIL_COVERAGE_GATE_ID,
 };
 use crate::routes::backtest::{
     execute_factor_backtest_with_caches, execute_prediction_backtest,
@@ -6784,6 +6784,13 @@ fn alpha_source_market_scope_breadth_enabled(
             == Some(FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID)
         && req.universe_profile.as_deref().map(str::trim)
             == Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE)
+        || combo_name
+            .trim()
+            .eq_ignore_ascii_case("margin_detail_leverage_crowding")
+            && req.alpha_admission_gate_id.as_deref().map(str::trim)
+                == Some(MARGIN_DETAIL_COVERAGE_GATE_ID)
+            && req.universe_profile.as_deref().map(str::trim)
+                == Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8172,6 +8179,18 @@ fn validate_alpha_source_diagnostics_admission(
         "P3.10 diagnostics",
     )?;
     validate_shareholder_structure_entrypoint_admission(
+        combo_name,
+        req.alpha_admission_gate_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        req.universe_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        "P3.10 diagnostics",
+    )?;
+    validate_margin_detail_entrypoint_admission(
         combo_name,
         req.alpha_admission_gate_id
             .as_deref()
@@ -16189,6 +16208,7 @@ fn build_factor_trial_request(
     validate_industry_prosperity_trial_admission(params, template)?;
     validate_equity_pledge_trial_admission(params, template)?;
     validate_shareholder_structure_trial_admission(params, template)?;
+    validate_margin_detail_trial_admission(params, template)?;
 
     let string_value = |name: &str, default: Option<&str>| -> Result<String, String> {
         if let Some(value) = params.get(name).or_else(|| template.get(name)) {
@@ -18649,6 +18669,61 @@ mod tests {
 
         validate_alpha_source_diagnostics_admission(&req, &combo_name)
             .expect("strict-gated shareholder structure diagnostics request");
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_blocks_margin_detail_without_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "margin_detail_leverage_crowding".to_string(),
+            version: Some("p322e-margin-leverage-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260623".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        let err = validate_alpha_source_diagnostics_admission(&req, &combo_name).unwrap_err();
+
+        assert!(err.contains("P3.10 diagnostics"));
+        assert!(err.contains("margin_detail_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_allows_margin_detail_with_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "margin_detail_leverage_crowding".to_string(),
+            version: Some("p322e-margin-leverage-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260623".to_string(),
+            alpha_admission_gate_id: Some("margin_detail_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        validate_alpha_source_diagnostics_admission(&req, &combo_name)
+            .expect("coverage-gated margin detail diagnostics request");
     }
 
     #[test]

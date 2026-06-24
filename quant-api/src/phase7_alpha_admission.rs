@@ -13,6 +13,8 @@ pub(crate) const EQUITY_PLEDGE_COVERAGE_GATE_ID: &str = "equity_pledge_coverage_
 pub(crate) const SHAREHOLDER_STRUCTURE_SOURCE: &str = "shareholder_structure";
 pub(crate) const SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID: &str =
     "shareholder_structure_low_fanout_strict_pit_gate_v1";
+pub(crate) const MARGIN_DETAIL_SOURCE: &str = "margin_detail_leverage_crowding";
+pub(crate) const MARGIN_DETAIL_COVERAGE_GATE_ID: &str = "margin_detail_coverage_ready_v1";
 
 pub(crate) fn industry_prosperity_alpha_admission_policy(
     eligible_markets: Vec<String>,
@@ -82,6 +84,16 @@ pub(crate) fn identifier_requires_shareholder_structure_gate(value: &str) -> boo
         || normalized.contains("holder-number")
         || normalized.contains("holder_trade")
         || normalized.contains("holder-trade")
+}
+
+pub(crate) fn identifier_requires_margin_detail_gate(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized == MARGIN_DETAIL_SOURCE
+        || normalized == "margin_detail"
+        || normalized.contains("margin_detail")
+        || normalized.contains("margin-detail")
+        || normalized.contains("leverage_crowding")
+        || normalized.contains("leverage-crowding")
 }
 
 fn optional_string_from_maps<'a>(
@@ -160,6 +172,29 @@ pub(crate) fn validate_shareholder_structure_trial_admission(
     let universe_profile = optional_string_from_maps(params, template, "universe_profile");
     validate_shareholder_structure_entrypoint_admission(
         SHAREHOLDER_STRUCTURE_SOURCE,
+        gate_id,
+        universe_profile,
+        "optimization trial",
+    )
+}
+
+pub(crate) fn validate_margin_detail_trial_admission(
+    params: &Map<String, Value>,
+    template: &Map<String, Value>,
+) -> Result<(), String> {
+    let requires_gate = ["combo_name", "source", "candidate_source", "factor_code"]
+        .iter()
+        .filter_map(|name| optional_string_from_maps(params, template, name))
+        .any(identifier_requires_margin_detail_gate);
+
+    if !requires_gate {
+        return Ok(());
+    }
+
+    let gate_id = optional_string_from_maps(params, template, "alpha_admission_gate_id");
+    let universe_profile = optional_string_from_maps(params, template, "universe_profile");
+    validate_margin_detail_entrypoint_admission(
+        MARGIN_DETAIL_SOURCE,
         gate_id,
         universe_profile,
         "optimization trial",
@@ -261,6 +296,31 @@ pub(crate) fn validate_shareholder_structure_entrypoint_admission(
         "{} requires alpha_admission_gate_id={} and universe_profile={} at {} so shareholder_structure uses only strict low-fanout PIT rows: holder_number available_at >= end_date with positive holder_num, holder_trade ratio/interval anomalies excluded, and raw top10 data cannot be bypassed before separate coverage admission",
         identifier.trim(),
         SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID,
+        INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
+        entrypoint
+    ))
+}
+
+pub(crate) fn validate_margin_detail_entrypoint_admission(
+    identifier: &str,
+    gate_id: Option<&str>,
+    universe_profile: Option<&str>,
+    entrypoint: &str,
+) -> Result<(), String> {
+    if !identifier_requires_margin_detail_gate(identifier) {
+        return Ok(());
+    }
+
+    if gate_id == Some(MARGIN_DETAIL_COVERAGE_GATE_ID)
+        && universe_profile == Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE)
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} requires alpha_admission_gate_id={} and universe_profile={} at {} so margin_detail uses only full-history PIT rows with next-session availability, source_published_at present, low same-family correlation, and main/ChiNext non-ST scope before factor builder, P3.10 diagnostics, bounded WFA, or v19 train selection",
+        identifier.trim(),
+        MARGIN_DETAIL_COVERAGE_GATE_ID,
         INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
         entrypoint
     ))

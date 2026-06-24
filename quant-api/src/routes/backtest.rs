@@ -58,6 +58,32 @@ impl BacktestListQuery {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct CleanupStaleBacktestTasksReq {
+    pub dry_run: Option<bool>,
+    pub default_timeout_seconds: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+fn cleanup_backtest_dry_run_default(value: Option<bool>) -> bool {
+    value.unwrap_or(true)
+}
+
+fn cleanup_backtest_default_timeout_seconds(value: Option<i64>) -> i64 {
+    value.unwrap_or(600).clamp(60, 86_400)
+}
+
+fn cleanup_backtest_limit(value: Option<i64>) -> i64 {
+    value.unwrap_or(100).clamp(1, 1000)
+}
+
+fn stale_backtest_cleanup_terminal_status(status: &str) -> &'static str {
+    match status {
+        "cancel_requested" => "cancelled",
+        _ => "timeout",
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct EquityCurveQuery {
     pub start_date: Option<String>,
@@ -743,6 +769,134 @@ pub async fn list_backtests(
             }
         })).collect::<Vec<_>>(),
     }}))
+}
+
+/// POST /api/v1/quant/backtests/cleanup-stale
+///
+/// 清理 heartbeat 超时的 backtest_task 元数据。默认 dry_run=true；实际清理必须显式传
+/// dry_run=false。该接口只更新任务终态和审计错误信息，不删除回测曲线、交易、持仓或结果。
+pub async fn cleanup_stale_backtest_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CleanupStaleBacktestTasksReq>,
+) -> impl IntoResponse {
+    match cleanup_stale_backtest_tasks_inner(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => Json(json!({"code": 1, "message": message})),
+    }
+}
+
+async fn cleanup_stale_backtest_tasks_inner(
+    db: &sqlx::PgPool,
+    req: CleanupStaleBacktestTasksReq,
+) -> Result<Value, String> {
+    let dry_run = cleanup_backtest_dry_run_default(req.dry_run);
+    let default_timeout_seconds =
+        cleanup_backtest_default_timeout_seconds(req.default_timeout_seconds);
+    let limit = cleanup_backtest_limit(req.limit);
+
+    let rows: Vec<(
+        String,
+        String,
+        i32,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<i32>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT task_id, status, progress, last_heartbeat_at,
+                heartbeat_timeout_seconds, started_at, created_at
+         FROM backtest_task
+         WHERE status IN ('running', 'cancel_requested')
+           AND COALESCE(last_heartbeat_at, started_at, created_at)
+               < now() - (COALESCE(heartbeat_timeout_seconds, $1)::text || ' seconds')::interval
+         ORDER BY COALESCE(last_heartbeat_at, started_at, created_at) ASC
+         LIMIT $2",
+    )
+    .bind(default_timeout_seconds as i32)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("cleanup stale backtest tasks query failed: {error}"))?;
+
+    let candidates = rows
+        .iter()
+        .map(
+            |(
+                task_id,
+                status,
+                progress,
+                last_heartbeat_at,
+                heartbeat_timeout_seconds,
+                started_at,
+                created_at,
+            )| {
+                let observed_at = last_heartbeat_at.or(*started_at).unwrap_or(*created_at);
+                let timeout_seconds = heartbeat_timeout_seconds
+                    .map(i64::from)
+                    .unwrap_or(default_timeout_seconds);
+                json!({
+                    "task_id": task_id,
+                    "status": status,
+                    "next_status": stale_backtest_cleanup_terminal_status(status),
+                    "progress": progress,
+                    "last_heartbeat_at": last_heartbeat_at.map(|ts| ts.to_rfc3339()),
+                    "started_at": started_at.map(|ts| ts.to_rfc3339()),
+                    "created_at": created_at.to_rfc3339(),
+                    "observed_at": observed_at.to_rfc3339(),
+                    "heartbeat_timeout_seconds": timeout_seconds,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+
+    if dry_run || rows.is_empty() {
+        return Ok(json!({
+            "dry_run": dry_run,
+            "candidate_count": candidates.len(),
+            "updated_task_count": 0,
+            "candidates": candidates,
+        }));
+    }
+
+    let task_ids = rows
+        .iter()
+        .map(|(task_id, ..)| task_id.clone())
+        .collect::<Vec<_>>();
+
+    let result = sqlx::query(
+        "UPDATE backtest_task
+         SET status = CASE
+                 WHEN status = 'cancel_requested' THEN 'cancelled'
+                 ELSE 'timeout'
+             END,
+             progress = CASE
+                 WHEN status = 'cancel_requested' THEN progress
+                 ELSE GREATEST(progress, 0)
+             END,
+             completed_at = now(),
+             last_heartbeat_at = now(),
+             error_message = CONCAT(
+                 COALESCE(NULLIF(error_message, '') || '; ', ''),
+                 CASE
+                     WHEN status = 'cancel_requested' THEN
+                         'stale cancel_requested backtest finalized by cleanup-stale: no worker acknowledgement within configured timeout'
+                     ELSE
+                         'stale running backtest timed out by cleanup-stale: no heartbeat within configured timeout'
+                 END
+             )
+         WHERE task_id = ANY($1) AND status IN ('running', 'cancel_requested')",
+    )
+    .bind(&task_ids)
+    .execute(db)
+    .await
+    .map_err(|error| format!("cleanup stale backtest tasks update failed: {error}"))?;
+
+    Ok(json!({
+        "dry_run": false,
+        "candidate_count": candidates.len(),
+        "updated_task_count": result.rows_affected(),
+        "candidates": candidates,
+    }))
 }
 
 pub async fn backtest_summary(
@@ -2854,6 +3008,30 @@ mod tests {
     fn parse_yyyymmdd_rejects_invalid_date() {
         let err = parse_yyyymmdd("2024-01-01", "start_date").unwrap_err();
         assert!(err.contains("start_date"));
+    }
+
+    #[test]
+    fn cleanup_backtest_defaults_are_conservative() {
+        assert!(cleanup_backtest_dry_run_default(None));
+        assert!(!cleanup_backtest_dry_run_default(Some(false)));
+        assert_eq!(cleanup_backtest_default_timeout_seconds(None), 600);
+        assert_eq!(cleanup_backtest_default_timeout_seconds(Some(10)), 60);
+        assert_eq!(
+            cleanup_backtest_default_timeout_seconds(Some(100_000)),
+            86_400
+        );
+        assert_eq!(cleanup_backtest_limit(None), 100);
+        assert_eq!(cleanup_backtest_limit(Some(0)), 1);
+        assert_eq!(cleanup_backtest_limit(Some(2_000)), 1_000);
+    }
+
+    #[test]
+    fn stale_backtest_cleanup_status_transition_is_terminal() {
+        assert_eq!(stale_backtest_cleanup_terminal_status("running"), "timeout");
+        assert_eq!(
+            stale_backtest_cleanup_terminal_status("cancel_requested"),
+            "cancelled"
+        );
     }
 
     #[test]

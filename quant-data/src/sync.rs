@@ -15,8 +15,8 @@ use crate::model::entities::{
     MarketFuturesWarehouseReceipt, MarketIndexDailyBar, MarketStock, MarketStockCashflow,
     MarketStockDailyBar, MarketStockDailyBasic, MarketStockDisclosureDate, MarketStockDividend,
     MarketStockExpress, MarketStockForecast, MarketStockIndustryMembershipPit,
-    MarketStockMainBusiness, MarketStockMoneyflow, MarketStockRepurchase, MarketStockShareFloat,
-    MarketTradeCalendar,
+    MarketStockMainBusiness, MarketStockMarginDetail, MarketStockMoneyflow, MarketStockRepurchase,
+    MarketStockShareFloat, MarketTradeCalendar,
 };
 use crate::repository;
 use crate::tushare::client::TushareClient;
@@ -1407,6 +1407,272 @@ pub async fn sync_moneyflow(
 
     info!(
         "moneyflow 同步完成: rows={}, ok={}, failed={}",
+        total_rows, ok, failed
+    );
+    Ok(total_rows)
+}
+
+// ─── sync_margin_detail (个股融资融券明细) ─────────────────────
+
+fn margin_detail_available_at_from_open_dates(
+    trade_date: NaiveDate,
+    open_dates: &[NaiveDate],
+) -> NaiveDate {
+    open_dates
+        .iter()
+        .copied()
+        .find(|date| *date > trade_date)
+        .unwrap_or_else(|| trade_date + Duration::days(1))
+}
+
+fn margin_detail_source_published_at(
+    available_at: NaiveDate,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    available_at
+        .and_hms_opt(0, 30, 0)
+        .map(|published_at| published_at.and_utc())
+}
+
+fn margin_detail_row_from_map(
+    item: &Map<String, Value>,
+    open_dates: &[NaiveDate],
+) -> Option<MarketStockMarginDetail> {
+    let symbol = get_str(item, "ts_code");
+    if symbol.trim().is_empty() {
+        return None;
+    }
+    let trade_date = to_date(&get_str(item, "trade_date"))?;
+    let available_at = margin_detail_available_at_from_open_dates(trade_date, open_dates);
+    Some(MarketStockMarginDetail {
+        symbol,
+        trade_date,
+        name: non_empty_opt_str(get_str(item, "name")),
+        rzye: to_opt_decimal(get_f64(item, "rzye")),
+        rqye: to_opt_decimal(get_f64(item, "rqye")),
+        rzmre: to_opt_decimal(get_f64(item, "rzmre")),
+        rqyl: to_opt_decimal(get_f64(item, "rqyl")),
+        rzche: to_opt_decimal(get_f64(item, "rzche")),
+        rqchl: to_opt_decimal(get_f64(item, "rqchl")),
+        rqmcl: to_opt_decimal(get_f64(item, "rqmcl")),
+        rzrqye: to_opt_decimal(get_f64(item, "rzrqye")),
+        available_at,
+        source_published_at: margin_detail_source_published_at(available_at),
+        raw_payload: raw_payload(item),
+    })
+}
+
+async fn load_margin_detail_available_open_dates(
+    pool: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<NaiveDate>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT trade_date
+         FROM market_trade_calendar
+         WHERE is_open = true
+           AND trade_date > $1
+           AND trade_date <= $2
+         ORDER BY trade_date",
+    )
+    .bind(start)
+    .bind(end + Duration::days(14))
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn sync_margin_detail(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let task_id = dv_id.to_string();
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    if s > e {
+        return Err("margin_detail start_date cannot be after end_date".into());
+    }
+
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "margin_detail",
+        "tushare:margin_detail",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        dv_id,
+        "security-level margin detail raw PIT sync",
+        "tushare:margin_detail",
+        &["market_stock_margin_detail"],
+        s,
+        e,
+    )
+    .await?;
+
+    let page_limit = 6_000usize;
+    let open_dates = load_margin_detail_available_open_dates(pool, s, e).await?;
+    let mut total_rows = 0usize;
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+
+    if symbols.is_empty() {
+        let trade_dates = load_moneyflow_full_market_trade_dates(pool, s, e).await?;
+        let total = trade_dates.len() as i32;
+        repository::heartbeat_sync_task(pool, &task_id, total, 0, 0, 0).await?;
+        for trade_day in &trade_dates {
+            let trade_date = trade_day.format("%Y%m%d").to_string();
+            let mut offset = 0usize;
+            let mut day_failed = false;
+            loop {
+                match client
+                    .margin_detail(
+                        None,
+                        Some(&trade_date),
+                        None,
+                        None,
+                        Some(page_limit),
+                        Some(offset),
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        let rows: Vec<MarketStockMarginDetail> = maps
+                            .iter()
+                            .filter_map(|item| margin_detail_row_from_map(item, &open_dates))
+                            .collect();
+                        if !rows.is_empty() {
+                            total_rows += rows.len();
+                            repository::upsert_margin_detail_batch(
+                                pool,
+                                &rows,
+                                dv_id,
+                                "tushare:margin_detail",
+                            )
+                            .await?;
+                        }
+                        if row_count < page_limit {
+                            break;
+                        }
+                        offset += page_limit;
+                    }
+                    Err(error) => {
+                        warn!("margin_detail {} failed: {}", trade_date, error);
+                        failed += 1;
+                        day_failed = true;
+                        break;
+                    }
+                }
+            }
+            if !day_failed {
+                ok += 1;
+            }
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                total,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+        }
+        repository::update_sync_task(
+            pool,
+            &task_id,
+            if failed > 0 { "partial" } else { "completed" },
+            total,
+            ok as i32,
+            failed as i32,
+        )
+        .await?;
+    } else {
+        repository::heartbeat_sync_task(pool, &task_id, symbols.len() as i32, 0, 0, 0).await?;
+        for symbol in symbols {
+            let mut offset = 0usize;
+            let mut symbol_failed = false;
+            loop {
+                match client
+                    .margin_detail(
+                        Some(symbol),
+                        None,
+                        Some(start),
+                        Some(end),
+                        Some(page_limit),
+                        Some(offset),
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        let rows: Vec<MarketStockMarginDetail> = maps
+                            .iter()
+                            .filter_map(|item| margin_detail_row_from_map(item, &open_dates))
+                            .collect();
+                        if !rows.is_empty() {
+                            total_rows += rows.len();
+                            repository::upsert_margin_detail_batch(
+                                pool,
+                                &rows,
+                                dv_id,
+                                "tushare:margin_detail",
+                            )
+                            .await?;
+                        }
+                        if row_count < page_limit {
+                            break;
+                        }
+                        offset += page_limit;
+                    }
+                    Err(error) => {
+                        warn!("{} margin_detail failed: {}", symbol, error);
+                        failed += 1;
+                        symbol_failed = true;
+                        break;
+                    }
+                }
+            }
+            if !symbol_failed {
+                ok += 1;
+            }
+            repository::update_sync_task(
+                pool,
+                &task_id,
+                "running",
+                symbols.len() as i32,
+                ok as i32,
+                failed as i32,
+            )
+            .await?;
+        }
+        repository::update_sync_task(
+            pool,
+            &task_id,
+            if failed > 0 { "partial" } else { "completed" },
+            symbols.len() as i32,
+            ok as i32,
+            failed as i32,
+        )
+        .await?;
+    }
+
+    info!(
+        "margin_detail 同步完成: rows={}, ok={}, failed={}",
         total_rows, ok, failed
     );
     Ok(total_rows)
@@ -7270,6 +7536,54 @@ mod tests {
         assert_eq!(row.buy_elg_amount, Decimal::from_f64_retain(789.0));
         assert_eq!(row.sell_elg_amount, Decimal::from_f64_retain(654.3));
         assert_eq!(row.net_mf_amount, Decimal::from_f64_retain(293.5));
+    }
+
+    #[test]
+    fn margin_detail_row_uses_next_open_day_available_at() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("trade_date".to_string(), json!("20260619"));
+        item.insert("name".to_string(), json!("平安银行"));
+        item.insert("rzye".to_string(), json!(5231404083.0));
+        item.insert("rqye".to_string(), json!(18014220.0));
+        item.insert("rzmre".to_string(), json!(81747812.0));
+        item.insert("rqyl".to_string(), json!(1682000.0));
+        let open_dates = vec![
+            NaiveDate::from_ymd_opt(2026, 6, 19).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+        ];
+
+        let row = margin_detail_row_from_map(&item, &open_dates).expect("margin detail row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(
+            row.trade_date,
+            NaiveDate::from_ymd_opt(2026, 6, 19).unwrap()
+        );
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap()
+        );
+        assert_eq!(
+            row.source_published_at
+                .expect("source published at")
+                .to_rfc3339(),
+            "2026-06-22T00:30:00+00:00"
+        );
+        assert_eq!(row.rzye, Decimal::from_f64_retain(5231404083.0));
+        assert_eq!(row.rqye, Decimal::from_f64_retain(18014220.0));
+        assert_eq!(row.rzmre, Decimal::from_f64_retain(81747812.0));
+        assert_eq!(row.rqyl, Decimal::from_f64_retain(1682000.0));
+    }
+
+    #[test]
+    fn margin_detail_available_at_falls_back_to_next_calendar_day_without_calendar() {
+        let trade_date = NaiveDate::from_ymd_opt(2026, 6, 19).unwrap();
+
+        assert_eq!(
+            margin_detail_available_at_from_open_dates(trade_date, &[]),
+            NaiveDate::from_ymd_opt(2026, 6, 20).unwrap()
+        );
     }
 
     #[test]

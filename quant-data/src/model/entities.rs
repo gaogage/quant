@@ -88,6 +88,25 @@ pub struct MarketStockMoneyflow {
     pub net_mf_amount: Option<Decimal>,
 }
 
+/// 个股融资融券明细 (market_stock_margin_detail)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketStockMarginDetail {
+    pub symbol: String,
+    pub trade_date: NaiveDate,
+    pub name: Option<String>,
+    pub rzye: Option<Decimal>,
+    pub rqye: Option<Decimal>,
+    pub rzmre: Option<Decimal>,
+    pub rqyl: Option<Decimal>,
+    pub rzche: Option<Decimal>,
+    pub rqchl: Option<Decimal>,
+    pub rqmcl: Option<Decimal>,
+    pub rzrqye: Option<Decimal>,
+    pub available_at: NaiveDate,
+    pub source_published_at: Option<DateTime<Utc>>,
+    pub raw_payload: Value,
+}
+
 /// 业绩预告 (market_stock_forecast)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketStockForecast {
