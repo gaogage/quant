@@ -21,7 +21,13 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::phase7_alpha_admission::{
-    validate_industry_prosperity_entrypoint_admission, validate_industry_prosperity_trial_admission,
+    validate_equity_pledge_entrypoint_admission, validate_equity_pledge_trial_admission,
+    validate_futures_price_chain_entrypoint_admission,
+    validate_industry_prosperity_entrypoint_admission,
+    validate_industry_prosperity_trial_admission,
+    validate_shareholder_structure_entrypoint_admission,
+    validate_shareholder_structure_trial_admission, FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID,
+    INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
 };
 use crate::routes::backtest::{
     execute_factor_backtest_with_caches, execute_prediction_backtest,
@@ -968,6 +974,10 @@ fn default_oos_train_selection_gate_policy_for_search_profile(
         | "v19_forecast_revision_sleeve"
         | "phase7_v19_forecast_revision_sleeve"
         | "phase7_p313_forecast_revision_sleeve"
+        | "professional_v19_shareholder_structure_sleeve_admission"
+        | "v19_shareholder_structure_sleeve"
+        | "phase7_v19_shareholder_structure_sleeve"
+        | "phase7_p321e_shareholder_structure_sleeve"
         | "professional_v19_event_post_return_overlay_admission"
         | "v19_event_post_return_overlay_admission"
         | "v19_event_post_return_overlay"
@@ -2211,6 +2221,13 @@ fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchC
             "professional_v19_forecast_revision_sleeve_admission".to_string(),
             LayeredSearchConfig::professional_v19_forecast_revision_sleeve_default(),
         ),
+        "professional_v19_shareholder_structure_sleeve_admission"
+        | "v19_shareholder_structure_sleeve"
+        | "phase7_v19_shareholder_structure_sleeve"
+        | "phase7_p321e_shareholder_structure_sleeve" => (
+            "professional_v19_shareholder_structure_sleeve_admission".to_string(),
+            LayeredSearchConfig::professional_v19_shareholder_structure_sleeve_default(),
+        ),
         "professional_v19_event_post_return_overlay_admission"
         | "v19_event_post_return_overlay_admission"
         | "v19_event_post_return_overlay"
@@ -2601,6 +2618,7 @@ fn profile_accepts_prediction_set_override(search_profile: &str) -> bool {
             | "professional_v19_supply_float_sleeve_admission"
             | "professional_v19_unlock_pressure_sleeve_admission"
             | "professional_v19_forecast_revision_sleeve_admission"
+            | "professional_v19_shareholder_structure_sleeve_admission"
             | "professional_v19_execution_repair_admission"
             | "professional_v19_train_window_ml_alpha_rebuild"
             | "professional_v19_train_window_ml_simple_excess_rebuild"
@@ -6387,6 +6405,154 @@ fn alpha_source_diagnostics_level(passed: bool) -> &'static str {
     }
 }
 
+fn alpha_source_research_economic_admission(research_metrics: &Value) -> Value {
+    if !research_metrics["included"].as_bool().unwrap_or(false) {
+        return json!({
+            "status": "not_evaluated",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked",
+            "reason": "include_research_metrics=true is required before economic admission",
+        });
+    }
+
+    let rank_by_horizon = research_metrics["rank_ic_by_horizon"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let group_by_horizon = research_metrics["group_return_by_horizon"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let turnover_by_horizon = research_metrics["turnover_capacity_by_horizon"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut passed_horizons = Vec::new();
+    let mut failed_horizons = Vec::new();
+
+    for rank in rank_by_horizon {
+        let horizon = rank["horizon_days"].as_i64().unwrap_or_default();
+        let mean_rank_ic = rank["mean_rank_ic"].as_f64().unwrap_or_default();
+        let positive_day_ratio = rank["positive_day_ratio"].as_f64().unwrap_or_default();
+        let group = group_by_horizon
+            .iter()
+            .find(|item| item["horizon_days"].as_i64() == Some(horizon))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let turnover = turnover_by_horizon
+            .iter()
+            .find(|item| item["horizon_days"].as_i64() == Some(horizon))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let high_minus_low_spread = group["high_minus_low_spread"].as_f64().unwrap_or_default();
+        let monotonicity_score = group["monotonicity_score"].as_f64().unwrap_or_default();
+        let avg_turnover = turnover["avg_high_score_bucket_turnover"]
+            .as_f64()
+            .unwrap_or_default();
+        let horizon_passed = mean_rank_ic >= 0.01
+            && positive_day_ratio >= 0.52
+            && high_minus_low_spread > 0.0
+            && monotonicity_score >= 0.55
+            && avg_turnover <= 0.75;
+        let item = json!({
+            "horizon_days": horizon,
+            "mean_rank_ic": mean_rank_ic,
+            "positive_day_ratio": positive_day_ratio,
+            "high_minus_low_spread": high_minus_low_spread,
+            "monotonicity_score": monotonicity_score,
+            "avg_high_score_bucket_turnover": avg_turnover,
+            "passed": horizon_passed,
+        });
+        if horizon_passed {
+            passed_horizons.push(item);
+        } else {
+            failed_horizons.push(item);
+        }
+    }
+
+    let passed = passed_horizons.len() >= 2;
+    json!({
+        "status": if passed {
+            "candidate_ready_for_bounded_wfa"
+        } else {
+            "blocked_by_p310_economics"
+        },
+        "passed": passed,
+        "bounded_wfa": if passed { "eligible" } else { "blocked" },
+        "v19_train_selection": "blocked_until_bounded_wfa_passes",
+        "criteria": {
+            "min_passing_horizons": 2,
+            "mean_rank_ic": ">= 0.01",
+            "positive_day_ratio": ">= 0.52",
+            "high_minus_low_spread": "> 0",
+            "monotonicity_score": ">= 0.55",
+            "avg_high_score_bucket_turnover": "<= 0.75"
+        },
+        "passed_horizon_count": passed_horizons.len(),
+        "passed_horizons": passed_horizons,
+        "failed_horizons": failed_horizons,
+    })
+}
+
+fn futures_price_chain_component_orientation_contract_json(
+    include_research_metrics: bool,
+) -> Value {
+    if !include_research_metrics {
+        return json!({
+            "included": false,
+            "reason": "set include_research_metrics=true to expose futures_price_chain component orientation diagnostics",
+            "admission": {
+                "status": "not_evaluated",
+                "bounded_wfa": "blocked",
+                "v19_train_selection": "blocked"
+            }
+        });
+    }
+
+    json!({
+        "included": true,
+        "research_only": true,
+        "scope": {
+            "component_source": "market_futures_product_signal_pit -> PIT product exposure mapping -> PIT stock industry membership",
+            "point_in_time": "raw futures signals require available_at >= source trade_date and are joined only when every mapping/membership available_at <= stock trade_date",
+            "label_policy": "forward stock returns are diagnostics labels only; component direction changes cannot be inferred from full-period test labels",
+            "persistence": "does_not_write_multi_factor_value"
+        },
+        "components": [
+            {
+                "component": "price_momentum",
+                "signal_code": "fpc_price_mom_20v60_std",
+                "economic_link": "commodity main-contract price momentum is a producer revenue / input-cost pressure proxy after product->industry mapping direction is applied",
+                "default_orientation": "higher mapped score is expected to be favorable for the mapped industry only under the pre-registered mapping direction",
+                "failure_interpretation": "negative RankIC/spread may mean price momentum benefits downstream cost relief or marks crowded late-cycle input inflation",
+                "sign_flip_policy": "blocked: no full-period sign flip; any orientation change requires train-only pre-registration and fresh bounded WFA"
+            },
+            {
+                "component": "inventory_tightness",
+                "signal_code": "fpc_inventory_tight_20v60_std",
+                "economic_link": "falling warehouse receipts versus the medium-term baseline proxy supply tightness and near-term price support",
+                "default_orientation": "higher mapped score is expected to favor producer/price beneficiaries after mapping direction is applied",
+                "failure_interpretation": "negative RankIC/spread may mean tight inventory is already priced, demand destruction dominates, or downstream margin pressure matters more",
+                "sign_flip_policy": "blocked: no full-period sign flip; any orientation change requires train-only pre-registration and fresh bounded WFA"
+            },
+            {
+                "component": "net_position_trend",
+                "signal_code": "fpc_net_position_20v60_std",
+                "economic_link": "member long-short positioning trend proxies futures-market conviction and possible positioning crowding around the product",
+                "default_orientation": "higher mapped score is expected to favor the mapped industry only if positioning trend is not crowded/late-cycle",
+                "failure_interpretation": "negative RankIC/spread may mean positioning trend is a crowding/reversal signal rather than a fundamentals signal",
+                "sign_flip_policy": "blocked: no full-period sign flip; any orientation change requires train-only pre-registration and fresh bounded WFA"
+            }
+        ],
+        "admission": {
+            "status": "blocked_until_component_economics_pass",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked",
+            "required_next_step": "run pre-registered train-only component RankIC/group-return/decay/turnover-capacity diagnostics; stop the source if no component has robust positive economics"
+        }
+    })
+}
+
 #[derive(Debug, Clone)]
 struct AlphaSourceDailyBreadthStatus {
     passed: bool,
@@ -6398,6 +6564,24 @@ struct AlphaSourceDailyBreadthStatus {
     weak_day_min_to_threshold_ratio: f64,
     weak_day_ratio: f64,
     weak_day_region_end_ratio: f64,
+    first_weak_day: Option<NaiveDate>,
+    last_weak_day: Option<NaiveDate>,
+}
+
+#[derive(Debug, Clone)]
+struct AlphaSourceMarketScopeBreadthStatus {
+    passed: bool,
+    status: &'static str,
+    eligible_days: usize,
+    joined_days: usize,
+    missing_eligible_days: usize,
+    min_ratio: f64,
+    p10_ratio: f64,
+    p50_ratio: f64,
+    p95_ratio: f64,
+    max_ratio: f64,
+    weak_day_count: usize,
+    weak_day_threshold_ratio: f64,
     first_weak_day: Option<NaiveDate>,
     last_weak_day: Option<NaiveDate>,
 }
@@ -6473,6 +6657,85 @@ fn alpha_source_daily_breadth_status(
     }
 }
 
+fn alpha_source_market_scope_breadth_status(
+    daily_rows: &[(NaiveDate, i64)],
+    eligible_rows: &[(NaiveDate, i64)],
+) -> AlphaSourceMarketScopeBreadthStatus {
+    let eligible_by_day = eligible_rows
+        .iter()
+        .copied()
+        .collect::<BTreeMap<NaiveDate, i64>>();
+    let mut ratios = Vec::new();
+    let mut dated_ratios = Vec::new();
+    let mut missing_eligible_days = 0usize;
+    for (trade_date, scored_count) in daily_rows {
+        let Some(eligible_count) = eligible_by_day.get(trade_date).copied() else {
+            missing_eligible_days += 1;
+            continue;
+        };
+        if eligible_count <= 0 {
+            missing_eligible_days += 1;
+            continue;
+        }
+        let ratio = (*scored_count).max(0) as f64 / eligible_count as f64;
+        if ratio.is_finite() {
+            ratios.push(ratio);
+            dated_ratios.push((*trade_date, ratio));
+        }
+    }
+    ratios.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let p50_ratio = percentile(&ratios, 0.50);
+    let weak_day_threshold_ratio = 0.10_f64.max(p50_ratio * 0.50);
+    let weak_days = dated_ratios
+        .iter()
+        .copied()
+        .filter(|(_, ratio)| *ratio < weak_day_threshold_ratio)
+        .collect::<Vec<_>>();
+    let passed = !ratios.is_empty() && missing_eligible_days == 0 && weak_days.is_empty();
+    AlphaSourceMarketScopeBreadthStatus {
+        passed,
+        status: if passed {
+            "stable_market_scope_ratio"
+        } else if ratios.is_empty() || missing_eligible_days > 0 {
+            "eligible_universe_missing"
+        } else {
+            "market_scope_ratio_cliff"
+        },
+        eligible_days: eligible_rows.len(),
+        joined_days: dated_ratios.len(),
+        missing_eligible_days,
+        min_ratio: ratios.first().copied().unwrap_or(0.0),
+        p10_ratio: percentile(&ratios, 0.10),
+        p50_ratio,
+        p95_ratio: percentile(&ratios, 0.95),
+        max_ratio: ratios.last().copied().unwrap_or(0.0),
+        weak_day_count: weak_days.len(),
+        weak_day_threshold_ratio,
+        first_weak_day: weak_days.first().map(|(trade_date, _)| *trade_date),
+        last_weak_day: weak_days.last().map(|(trade_date, _)| *trade_date),
+    }
+}
+
+fn alpha_source_market_scope_breadth_json(status: &AlphaSourceMarketScopeBreadthStatus) -> Value {
+    json!({
+        "status": status.status,
+        "passed": status.passed,
+        "eligible_days": status.eligible_days,
+        "joined_days": status.joined_days,
+        "missing_eligible_days": status.missing_eligible_days,
+        "min_ratio": status.min_ratio,
+        "p10_ratio": status.p10_ratio,
+        "p50_ratio": status.p50_ratio,
+        "p95_ratio": status.p95_ratio,
+        "max_ratio": status.max_ratio,
+        "weak_day_count": status.weak_day_count,
+        "weak_day_threshold_ratio": status.weak_day_threshold_ratio,
+        "first_weak_day": status.first_weak_day,
+        "last_weak_day": status.last_weak_day,
+        "policy": "market-scope gated alpha sources are checked for stable scored/eligible coverage ratio; minimum daily rows, PIT and economic diagnostics remain separate gates"
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AlphaSourceResearchDiagnosticsOptions {
     include_research_metrics: bool,
@@ -6508,6 +6771,19 @@ fn alpha_source_research_diagnostics_options(
         max_rank_ic_days: req.max_rank_ic_days.unwrap_or(260).clamp(1, 520),
         max_exposure_regime_days: req.max_exposure_regime_days.unwrap_or(260).clamp(1, 520),
     }
+}
+
+fn alpha_source_market_scope_breadth_enabled(
+    req: &AlphaSourceDiagnosticsRequest,
+    combo_name: &str,
+) -> bool {
+    combo_name
+        .trim()
+        .eq_ignore_ascii_case("futures_price_chain")
+        && req.alpha_admission_gate_id.as_deref().map(str::trim)
+            == Some(FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID)
+        && req.universe_profile.as_deref().map(str::trim)
+            == Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6780,6 +7056,7 @@ async fn build_alpha_source_diagnostics_report_from_request(
     }
     let thresholds = alpha_source_diagnostics_thresholds(req);
     let research_options = alpha_source_research_diagnostics_options(req);
+    let use_market_scope_breadth = alpha_source_market_scope_breadth_enabled(req, &combo_name);
     let report = build_alpha_source_diagnostics_report(
         db,
         &combo_name,
@@ -6788,6 +7065,7 @@ async fn build_alpha_source_diagnostics_report_from_request(
         end,
         thresholds,
         research_options,
+        use_market_scope_breadth,
     )
     .await?;
     let experiment_run_id = if alpha_source_diagnostics_persist_default(req.persist_report) {
@@ -6809,6 +7087,7 @@ async fn build_alpha_source_diagnostics_report(
     end: NaiveDate,
     thresholds: ReadinessThresholds,
     research_options: AlphaSourceResearchDiagnosticsOptions,
+    use_market_scope_breadth: bool,
 ) -> Result<Value, String> {
     let summary =
         load_alpha_source_diagnostics_summary(db, combo_name, version, start, end).await?;
@@ -6822,6 +7101,20 @@ async fn build_alpha_source_diagnostics_report(
         .collect::<Vec<_>>();
     let distribution = daily_count_distribution(&daily_counts, thresholds);
     let breadth_status = alpha_source_daily_breadth_status(&daily_rows, &distribution);
+    let market_scope_breadth_status = if use_market_scope_breadth {
+        let eligible_rows = load_main_chinext_non_st_eligible_daily_rows(db, start, end).await?;
+        Some(alpha_source_market_scope_breadth_status(
+            &daily_rows,
+            &eligible_rows,
+        ))
+    } else {
+        None
+    };
+    let breadth_gate_passed = breadth_status.passed
+        || market_scope_breadth_status
+            .as_ref()
+            .map(|status| status.passed)
+            .unwrap_or(false);
     let day_coverage_ratio = if expected_days <= 0 {
         1.0
     } else {
@@ -6851,7 +7144,7 @@ async fn build_alpha_source_diagnostics_report(
         ),
         profile_readiness_gate(
             "alpha_source_daily_symbol_cliff",
-            breadth_status.passed,
+            breadth_gate_passed,
             json!({
                 "status": breadth_status.status,
                 "raw_weak_day_count": breadth_status.raw_weak_day_count,
@@ -6864,9 +7157,12 @@ async fn build_alpha_source_diagnostics_report(
                 "weak_day_min_to_threshold_ratio": breadth_status.weak_day_min_to_threshold_ratio,
                 "first_weak_day": breadth_status.first_weak_day,
                 "last_weak_day": breadth_status.last_weak_day,
+                "market_scope_ratio": market_scope_breadth_status
+                    .as_ref()
+                    .map(alpha_source_market_scope_breadth_json),
             }),
-            json!("unexplained_weak_day_count = 0"),
-            "alpha source daily breadth must not have unexplained symbol-count cliffs; small leading-prefix ramps are tracked but not treated as missing data",
+            json!("unexplained_weak_day_count = 0 or stable market-scope scored/eligible ratio"),
+            "alpha source daily breadth must not have unexplained symbol-count cliffs; gated market-scope sources may explain raw breadth changes with stable scored/eligible coverage ratio",
         ),
         profile_readiness_gate(
             "alpha_source_future_leak_rows",
@@ -6900,6 +7196,21 @@ async fn build_alpha_source_diagnostics_report(
         &research_options,
     )
     .await?;
+    let research_economic_admission = alpha_source_research_economic_admission(&research_metrics);
+    let research_next_stage = research_economic_admission["status"]
+        .as_str()
+        .unwrap_or("rank_ic_group_return_turnover_capacity_diagnostics")
+        .to_string();
+    let component_orientation_diagnostics =
+        build_futures_price_chain_component_orientation_diagnostics(
+            db,
+            combo_name,
+            version,
+            thresholds,
+            &daily_rows,
+            &research_options,
+        )
+        .await?;
 
     Ok(json!({
         "diagnostics_type": "alpha_source",
@@ -6942,10 +7253,15 @@ async fn build_alpha_source_diagnostics_report(
                 "weak_day_min_to_threshold_ratio": breadth_status.weak_day_min_to_threshold_ratio,
                 "first_weak_day": breadth_status.first_weak_day,
                 "last_weak_day": breadth_status.last_weak_day,
+                "market_scope_ratio": market_scope_breadth_status
+                    .as_ref()
+                    .map(alpha_source_market_scope_breadth_json),
             }
         },
         "gates": gates,
         "research_metrics": research_metrics,
+        "research_economic_admission": research_economic_admission,
+        "component_orientation_diagnostics": component_orientation_diagnostics,
         "repair": alpha_source_diagnostics_repair_hint(passed, &summary),
         "scope": {
             "point_in_time": "multi_factor_value.available_at <= trade_date",
@@ -6960,9 +7276,9 @@ async fn build_alpha_source_diagnostics_report(
                 "not requested"
             },
             "next_stage": if research_options.include_research_metrics {
-                "exposure_regime_diagnostics_or_new_low_correlation_alpha_build"
+                research_next_stage
             } else {
-                "rank_ic_group_return_turnover_capacity_diagnostics"
+                "rank_ic_group_return_turnover_capacity_diagnostics".to_string()
             }
         }
     }))
@@ -7830,6 +8146,42 @@ fn validate_alpha_source_diagnostics_admission(
             .map(str::trim)
             .filter(|value| !value.is_empty()),
         "P3.10 diagnostics",
+    )?;
+    validate_futures_price_chain_entrypoint_admission(
+        combo_name,
+        req.alpha_admission_gate_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        req.universe_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        "P3.10 diagnostics",
+    )?;
+    validate_equity_pledge_entrypoint_admission(
+        combo_name,
+        req.alpha_admission_gate_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        req.universe_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        "P3.10 diagnostics",
+    )?;
+    validate_shareholder_structure_entrypoint_admission(
+        combo_name,
+        req.alpha_admission_gate_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        req.universe_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        "P3.10 diagnostics",
     )
 }
 
@@ -7899,6 +8251,13 @@ impl AlphaSourceBucketReturn {
             "sample_count": self.sample_count,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct AlphaSourceScoreRow {
+    trade_date: NaiveDate,
+    symbol: String,
+    score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -8283,6 +8642,65 @@ async fn load_alpha_source_diagnostics_daily_rows(
     .map_err(|error| format!("Failed to load alpha source diagnostics daily rows: {error}"))
 }
 
+async fn load_main_chinext_non_st_eligible_daily_rows(
+    db: &sqlx::PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<(NaiveDate, i64)>, String> {
+    sqlx::query_as::<_, (NaiveDate, i64)>(
+        "WITH stock_days AS (
+             SELECT trade_date
+             FROM market_trade_calendar
+             WHERE exchange = 'SSE'
+               AND is_open = true
+               AND trade_date BETWEEN $1 AND $2
+         )
+         SELECT
+             bar.trade_date,
+             COUNT(*)::int8 AS eligible_symbols
+         FROM stock_days td
+         JOIN market_stock_daily_bar bar
+           ON bar.trade_date = td.trade_date
+          AND bar.trade_date BETWEEN $1 AND $2
+         JOIN market_stock ms
+           ON ms.symbol = bar.symbol
+         JOIN market_stock_daily_basic basic
+           ON basic.symbol = bar.symbol
+          AND basic.trade_date = bar.trade_date
+          AND basic.trade_date BETWEEN $1 AND $2
+         WHERE bar.close IS NOT NULL
+           AND bar.close > 0
+           AND basic.circ_mv IS NOT NULL
+           AND basic.circ_mv > 0
+           AND ms.list_date IS NOT NULL
+           AND ms.list_date <= bar.trade_date
+           AND (
+               ms.delist_date IS NULL
+               OR ms.delist_date >= bar.trade_date
+           )
+           AND ms.exchange IN ('SSE', 'SZSE')
+           AND ms.market IN ('主板', '创业板')
+           AND ms.symbol NOT LIKE '688%SH'
+           AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+           AND NOT EXISTS (
+               SELECT 1
+               FROM market_stock_name_history st_name
+               WHERE st_name.symbol = bar.symbol
+                 AND st_name.is_st = true
+                 AND st_name.start_date <= bar.trade_date
+                 AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+           )
+         GROUP BY bar.trade_date
+         ORDER BY bar.trade_date",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load main_chinext_non_st eligible daily rows: {error}"))
+}
+
 async fn build_alpha_source_research_diagnostics(
     db: &sqlx::PgPool,
     combo_name: &str,
@@ -8450,6 +8868,143 @@ async fn build_alpha_source_research_diagnostics(
         "turnover_capacity_by_horizon": turnover_capacity_by_horizon,
         "exposure_regime_metrics": exposure_regime_metrics,
     }))
+}
+
+async fn build_futures_price_chain_component_orientation_diagnostics(
+    db: &sqlx::PgPool,
+    combo_name: &str,
+    version: &str,
+    thresholds: ReadinessThresholds,
+    daily_rows: &[(NaiveDate, i64)],
+    options: &AlphaSourceResearchDiagnosticsOptions,
+) -> Result<Value, String> {
+    if combo_name != "futures_price_chain" {
+        return Ok(json!({
+            "included": false,
+            "reason": "component orientation diagnostics are currently defined only for futures_price_chain"
+        }));
+    }
+    let mut report =
+        futures_price_chain_component_orientation_contract_json(options.include_research_metrics);
+    if !options.include_research_metrics || daily_rows.is_empty() {
+        return Ok(report);
+    }
+
+    let min_daily_sample_size = thresholds.min_daily_rows.max(100);
+    let sampled_trade_dates =
+        sample_alpha_source_research_days(daily_rows, options.max_rank_ic_days);
+    let mut component_reports = Vec::new();
+    for component in report["components"].as_array().cloned().unwrap_or_default() {
+        let signal_code = component["signal_code"]
+            .as_str()
+            .ok_or_else(|| "futures_price_chain component missing signal_code".to_string())?;
+        let score_rows = load_futures_price_chain_component_score_rows(
+            db,
+            signal_code,
+            version,
+            &sampled_trade_dates,
+        )
+        .await?;
+        let mut rank_ic_by_horizon = Vec::new();
+        let mut group_return_by_horizon = Vec::new();
+        let mut turnover_capacity_by_horizon = Vec::new();
+        let mut decay_curve = Vec::new();
+        for horizon_days in &options.return_horizons {
+            let labeled_rows =
+                label_alpha_source_score_rows(db, &score_rows, &sampled_trade_dates, *horizon_days)
+                    .await?;
+            let rank_ic_rows = daily_rank_ic_from_labeled_rows(
+                *horizon_days,
+                &labeled_rows,
+                min_daily_sample_size,
+            );
+            let rank_ic_summary = summarize_rank_ic_samples(*horizon_days, &rank_ic_rows);
+            let bucket_rows = group_return_rows_from_labeled_rows(
+                &labeled_rows,
+                min_daily_sample_size,
+                options.bucket_count,
+            );
+            let group_summary =
+                summarize_group_return_buckets(*horizon_days, options.bucket_count, &bucket_rows);
+            let turnover_capacity_summary = turnover_capacity_summary_from_labeled_rows(
+                *horizon_days,
+                &labeled_rows,
+                min_daily_sample_size,
+                options.bucket_count,
+            );
+            decay_curve.push(json!({
+                "horizon_days": horizon_days,
+                "mean_rank_ic": rank_ic_summary.mean_rank_ic,
+                "median_rank_ic": rank_ic_summary.median_rank_ic,
+                "high_minus_low_spread": group_summary.high_minus_low_spread,
+                "sampled_days": rank_ic_summary.sampled_days.min(turnover_capacity_summary.sampled_days),
+            }));
+            rank_ic_by_horizon.push(rank_ic_summary.to_json());
+            group_return_by_horizon.push(group_summary.to_json());
+            turnover_capacity_by_horizon.push(turnover_capacity_summary.to_json());
+        }
+        let metrics = json!({
+            "included": true,
+            "research_only": true,
+            "label_policy": "Forward returns are diagnostics labels only; component scores are reconstructed PIT from market_futures_product_signal_pit and are not persisted.",
+            "score_rows": score_rows.len(),
+            "rank_ic_by_horizon": rank_ic_by_horizon,
+            "group_return_by_horizon": group_return_by_horizon,
+            "decay_curve": decay_curve,
+            "turnover_capacity_by_horizon": turnover_capacity_by_horizon,
+        });
+        let admission = alpha_source_research_economic_admission(&metrics);
+        let mut component_report = component;
+        if let Some(object) = component_report.as_object_mut() {
+            object.insert("score_rows".to_string(), json!(score_rows.len()));
+            object.insert("research_metrics".to_string(), metrics);
+            object.insert("research_economic_admission".to_string(), admission);
+        }
+        component_reports.push(component_report);
+    }
+
+    let passed_component_count = component_reports
+        .iter()
+        .filter(|component| {
+            component["research_economic_admission"]["status"].as_str()
+                == Some("candidate_ready_for_bounded_wfa")
+        })
+        .count();
+    let admission = if passed_component_count > 0 {
+        json!({
+            "status": "component_candidate_ready_for_bounded_wfa_profile",
+            "passed": true,
+            "bounded_wfa": "eligible_for_pre_registered_component_sleeve_or_gate_design",
+            "v19_train_selection": "blocked_until_bounded_wfa_passes",
+            "passed_component_count": passed_component_count,
+            "warning": "component pass does not authorize sign flip, weight tuning, or direct v19 admission"
+        })
+    } else {
+        json!({
+            "status": "blocked_until_component_economics_pass",
+            "passed": false,
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked",
+            "passed_component_count": passed_component_count,
+            "required_next_step": "stop this source or pre-register a train-only economic-link test; do not rescue by full-period sign flip"
+        })
+    };
+
+    if let Some(object) = report.as_object_mut() {
+        object.insert("components".to_string(), json!(component_reports));
+        object.insert("admission".to_string(), admission);
+        object.insert(
+            "options".to_string(),
+            json!({
+                "return_horizons": options.return_horizons,
+                "bucket_count": options.bucket_count,
+                "max_rank_ic_days": options.max_rank_ic_days,
+                "sampled_trade_dates": sampled_trade_dates,
+                "min_daily_sample_size": min_daily_sample_size,
+            }),
+        );
+    }
+    Ok(report)
 }
 
 fn sample_alpha_source_research_days(
@@ -9016,6 +9571,222 @@ async fn load_alpha_source_labeled_rows(
     sampled_trade_dates: &[NaiveDate],
     horizon_days: i64,
 ) -> Result<Vec<AlphaSourceLabeledRow>, String> {
+    let score_rows =
+        load_alpha_source_score_rows(db, combo_name, version, sampled_trade_dates).await?;
+    label_alpha_source_score_rows(db, &score_rows, sampled_trade_dates, horizon_days).await
+}
+
+async fn load_alpha_source_score_rows(
+    db: &sqlx::PgPool,
+    combo_name: &str,
+    version: &str,
+    sampled_trade_dates: &[NaiveDate],
+) -> Result<Vec<AlphaSourceScoreRow>, String> {
+    if sampled_trade_dates.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, (NaiveDate, String, f64)>(
+        "SELECT trade_date, symbol, normalized_score::float8
+         FROM multi_factor_value
+         WHERE combo_name = $1
+           AND version = $2
+           AND trade_date = ANY($3::date[])
+           AND normalized_score IS NOT NULL
+           AND available_at IS NOT NULL
+           AND available_at <= trade_date",
+    )
+    .bind(combo_name)
+    .bind(version)
+    .bind(sampled_trade_dates)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load alpha diagnostics score rows: {error}"))
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(trade_date, symbol, score)| AlphaSourceScoreRow {
+                trade_date,
+                symbol,
+                score,
+            })
+            .collect()
+    })
+}
+
+fn futures_price_chain_component_score_rows_sql() -> &'static str {
+    "WITH requested_days AS (
+         SELECT unnest($3::date[])::date AS trade_date
+     ),
+     request_bounds AS (
+         SELECT MIN(trade_date) AS min_trade_date, MAX(trade_date) AS max_trade_date
+         FROM requested_days
+     ),
+     eligible_universe AS MATERIALIZED (
+         SELECT
+             bar.symbol,
+             bar.trade_date
+         FROM requested_days rd
+         JOIN market_stock_daily_bar bar
+           ON bar.trade_date = rd.trade_date
+         JOIN market_stock ms
+           ON ms.symbol = bar.symbol
+         JOIN market_stock_daily_basic basic
+           ON basic.symbol = bar.symbol
+          AND basic.trade_date = bar.trade_date
+         WHERE bar.close IS NOT NULL
+           AND bar.close > 0
+           AND basic.circ_mv IS NOT NULL
+           AND basic.circ_mv > 0
+           AND ms.list_date IS NOT NULL
+           AND ms.list_date <= bar.trade_date
+           AND (
+               ms.delist_date IS NULL
+               OR ms.delist_date >= bar.trade_date
+           )
+           AND ms.exchange IN ('SSE', 'SZSE')
+           AND ms.market IN ('主板', '创业板')
+           AND ms.symbol NOT LIKE '688%SH'
+           AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+           AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+           AND NOT EXISTS (
+               SELECT 1
+               FROM market_stock_name_history st_name
+               WHERE st_name.symbol = bar.symbol
+                 AND st_name.is_st = true
+                 AND st_name.start_date <= bar.trade_date
+                 AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+           )
+     ),
+     stock_membership AS MATERIALIZED (
+         SELECT
+             universe.symbol,
+             universe.trade_date,
+             membership.index_code,
+             membership.available_at AS membership_available_at
+         FROM eligible_universe universe
+         JOIN market_stock_industry_membership_pit membership
+           ON membership.symbol = universe.symbol
+          AND membership.industry_level = 'L1'
+          AND membership.classification_source = CASE
+              WHEN universe.trade_date < DATE '2021-12-13' THEN 'SW2014'
+              ELSE 'SW2021'
+          END
+          AND membership.available_at <= universe.trade_date
+          AND membership.in_date <= universe.trade_date
+          AND (
+              membership.exit_available_at IS NULL
+              OR membership.exit_available_at > universe.trade_date
+          )
+     ),
+     signal_intervals AS (
+         SELECT
+             signal.signal_code,
+             signal.product_symbol,
+             signal.trade_date AS source_trade_date,
+             signal.available_at,
+             LEAD(signal.available_at) OVER (
+                 PARTITION BY signal.signal_code, signal.product_symbol
+                 ORDER BY signal.available_at, signal.trade_date
+             ) AS next_available_at,
+             signal.raw_value
+         FROM market_futures_product_signal_pit signal
+         CROSS JOIN request_bounds bounds
+         WHERE signal.source_version = $2
+           AND signal.signal_code = $1
+           AND signal.trade_date <= bounds.max_trade_date
+           AND signal.available_at <= bounds.max_trade_date
+           AND signal.available_at >= signal.trade_date
+           AND signal.raw_value IS NOT NULL
+           AND signal.product_symbol IS NOT NULL
+           AND signal.product_symbol <> ''
+     ),
+     industry_signal AS MATERIALIZED (
+         SELECT
+             rd.trade_date,
+             mapping.exposure_code AS index_code,
+             GREATEST(MAX(signal.available_at), MAX(mapping.available_at)) AS available_at,
+             SUM(signal.raw_value * mapping.direction::double precision * mapping.weight::double precision)
+                 / NULLIF(SUM(ABS(mapping.weight::double precision)), 0.0) AS raw_value
+         FROM requested_days rd
+         JOIN signal_intervals signal
+           ON rd.trade_date >= signal.available_at
+          AND rd.trade_date < COALESCE(signal.next_available_at, rd.trade_date + INTERVAL '1 day')
+         JOIN market_futures_product_exposure_mapping_pit mapping
+           ON upper(mapping.product_symbol) = signal.product_symbol
+          AND mapping.exposure_type = 'sw_industry'
+          AND mapping.available_at <= rd.trade_date
+          AND mapping.valid_from <= signal.source_trade_date
+          AND (
+              mapping.valid_to IS NULL
+              OR mapping.valid_to >= signal.source_trade_date
+          )
+         GROUP BY rd.trade_date, mapping.exposure_code
+     ),
+     raw AS (
+         SELECT
+             stock_membership.symbol,
+             stock_membership.trade_date,
+             GREATEST(industry_signal.available_at, stock_membership.membership_available_at) AS available_at,
+             industry_signal.raw_value
+         FROM stock_membership
+         JOIN industry_signal
+           ON industry_signal.index_code = stock_membership.index_code
+          AND industry_signal.trade_date = stock_membership.trade_date
+         WHERE industry_signal.raw_value IS NOT NULL
+           AND industry_signal.available_at <= stock_membership.trade_date
+     ),
+     ranked AS (
+         SELECT
+             trade_date,
+             symbol,
+             CASE
+                 WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                 ELSE percent_rank() OVER (PARTITION BY trade_date ORDER BY raw_value)
+             END AS normalized_score
+         FROM raw
+         WHERE raw_value IS NOT NULL
+           AND available_at <= trade_date
+     )
+     SELECT trade_date, symbol, normalized_score::float8
+     FROM ranked
+     WHERE normalized_score IS NOT NULL
+     ORDER BY trade_date, symbol"
+}
+
+async fn load_futures_price_chain_component_score_rows(
+    db: &sqlx::PgPool,
+    signal_code: &str,
+    source_version: &str,
+    sampled_trade_dates: &[NaiveDate],
+) -> Result<Vec<AlphaSourceScoreRow>, String> {
+    if sampled_trade_dates.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, (NaiveDate, String, f64)>(futures_price_chain_component_score_rows_sql())
+        .bind(signal_code)
+        .bind(source_version)
+        .bind(sampled_trade_dates)
+        .fetch_all(db)
+        .await
+        .map_err(|error| {
+            format!("Failed to load futures_price_chain component score rows for {signal_code}: {error}")
+        })
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(trade_date, symbol, score)| AlphaSourceScoreRow {
+                    trade_date,
+                    symbol,
+                    score,
+                })
+                .collect()
+        })
+}
+
+async fn label_alpha_source_score_rows(
+    db: &sqlx::PgPool,
+    score_rows: &[AlphaSourceScoreRow],
+    sampled_trade_dates: &[NaiveDate],
+    horizon_days: i64,
+) -> Result<Vec<AlphaSourceLabeledRow>, String> {
     if sampled_trade_dates.is_empty() {
         return Ok(Vec::new());
     }
@@ -9072,23 +9843,6 @@ async fn load_alpha_source_labeled_rows(
     }
     let needed_bar_dates = needed_bar_dates.into_iter().collect::<Vec<_>>();
 
-    let score_rows = sqlx::query_as::<_, (NaiveDate, String, f64)>(
-        "SELECT trade_date, symbol, normalized_score::float8
-         FROM multi_factor_value
-         WHERE combo_name = $1
-           AND version = $2
-           AND trade_date = ANY($3::date[])
-           AND normalized_score IS NOT NULL
-           AND available_at IS NOT NULL
-           AND available_at <= trade_date",
-    )
-    .bind(combo_name)
-    .bind(version)
-    .bind(sampled_trade_dates)
-    .fetch_all(db)
-    .await
-    .map_err(|error| format!("Failed to load alpha diagnostics score rows: {error}"))?;
-
     let bar_rows = sqlx::query_as::<_, (NaiveDate, String, Option<f64>, Option<f64>)>(
         "SELECT trade_date, symbol, pct_change::float8, amount::float8
          FROM market_stock_daily_bar
@@ -9120,7 +9874,9 @@ async fn load_alpha_source_labeled_rows(
         .collect::<HashMap<_, _>>();
 
     let mut labeled_rows = Vec::new();
-    for (trade_date, symbol, score) in score_rows {
+    for score_row in score_rows {
+        let trade_date = score_row.trade_date;
+        let symbol = score_row.symbol.clone();
         let Some(future_dates) = future_dates_by_sample.get(&trade_date) else {
             continue;
         };
@@ -9150,7 +9906,7 @@ async fn load_alpha_source_labeled_rows(
         labeled_rows.push(AlphaSourceLabeledRow {
             trade_date,
             symbol,
-            score,
+            score: score_row.score,
             forward_return: compounded - 1.0,
             amount,
             circ_mv,
@@ -15431,6 +16187,8 @@ fn build_factor_trial_request(
         .as_object()
         .ok_or_else(|| "trial parameters must be a JSON object".to_string())?;
     validate_industry_prosperity_trial_admission(params, template)?;
+    validate_equity_pledge_trial_admission(params, template)?;
+    validate_shareholder_structure_trial_admission(params, template)?;
 
     let string_value = |name: &str, default: Option<&str>| -> Result<String, String> {
         if let Some(value) = params.get(name).or_else(|| template.get(name)) {
@@ -17726,6 +18484,228 @@ mod tests {
     }
 
     #[test]
+    fn alpha_source_diagnostics_blocks_futures_price_chain_without_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "futures_price_chain".to_string(),
+            version: Some("p319q-sw2021-l1-price-chain-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260618".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        let err = validate_alpha_source_diagnostics_admission(&req, &combo_name).unwrap_err();
+
+        assert!(err.contains("P3.10 diagnostics"));
+        assert!(err.contains("futures_price_chain_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_allows_futures_price_chain_with_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "futures_price_chain".to_string(),
+            version: Some("p319q-sw2021-l1-price-chain-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260618".to_string(),
+            alpha_admission_gate_id: Some("futures_price_chain_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        validate_alpha_source_diagnostics_admission(&req, &combo_name)
+            .expect("coverage-gated futures price-chain diagnostics request");
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_blocks_equity_pledge_without_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "equity_pledge_pressure".to_string(),
+            version: Some("p320f-equity-pledge-pressure-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260623".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        let err = validate_alpha_source_diagnostics_admission(&req, &combo_name).unwrap_err();
+
+        assert!(err.contains("P3.10 diagnostics"));
+        assert!(err.contains("equity_pledge_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_allows_equity_pledge_with_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "equity_pledge_pressure".to_string(),
+            version: Some("p320f-equity-pledge-pressure-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260623".to_string(),
+            alpha_admission_gate_id: Some("equity_pledge_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        validate_alpha_source_diagnostics_admission(&req, &combo_name)
+            .expect("coverage-gated equity pledge diagnostics request");
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_blocks_shareholder_structure_without_strict_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "shareholder_structure".to_string(),
+            version: Some("p321c-low-fanout-strict-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260623".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        let err = validate_alpha_source_diagnostics_admission(&req, &combo_name).unwrap_err();
+
+        assert!(err.contains("P3.10 diagnostics"));
+        assert!(err.contains("shareholder_structure_low_fanout_strict_pit_gate_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("holder_number available_at >= end_date"));
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_allows_shareholder_structure_with_strict_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "shareholder_structure".to_string(),
+            version: Some("p321c-low-fanout-strict-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260623".to_string(),
+            alpha_admission_gate_id: Some(
+                "shareholder_structure_low_fanout_strict_pit_gate_v1".to_string(),
+            ),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        validate_alpha_source_diagnostics_admission(&req, &combo_name)
+            .expect("strict-gated shareholder structure diagnostics request");
+    }
+
+    #[test]
+    fn futures_price_chain_component_orientation_contract_blocks_direct_wfa() {
+        let report = futures_price_chain_component_orientation_contract_json(true);
+
+        assert_eq!(report["included"], true);
+        assert_eq!(report["research_only"], true);
+        assert_eq!(
+            report["admission"]["status"],
+            "blocked_until_component_economics_pass"
+        );
+        assert_eq!(report["admission"]["bounded_wfa"], "blocked");
+        assert_eq!(report["admission"]["v19_train_selection"], "blocked");
+        assert_eq!(
+            report["scope"]["component_source"],
+            "market_futures_product_signal_pit -> PIT product exposure mapping -> PIT stock industry membership"
+        );
+
+        let components = report["components"].as_array().unwrap();
+        assert_eq!(components.len(), 3);
+        let component_codes = components
+            .iter()
+            .map(|component| component["signal_code"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            component_codes,
+            vec![
+                "fpc_price_mom_20v60_std",
+                "fpc_inventory_tight_20v60_std",
+                "fpc_net_position_20v60_std"
+            ]
+        );
+        assert!(components
+            .iter()
+            .all(|component| component["sign_flip_policy"]
+                .as_str()
+                .unwrap()
+                .contains("blocked")));
+    }
+
+    #[test]
+    fn futures_price_chain_component_score_sql_is_pit_and_read_only() {
+        let sql = futures_price_chain_component_score_rows_sql();
+
+        assert!(sql.contains("FROM market_futures_product_signal_pit"));
+        assert!(sql.contains("mapping.available_at <= rd.trade_date"));
+        assert!(sql.contains("membership.available_at <= universe.trade_date"));
+        assert!(sql.contains("industry_signal.available_at <= stock_membership.trade_date"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("market_stock_name_history"));
+        assert!(!sql.contains("INSERT INTO"));
+        assert!(!sql.contains("DELETE FROM"));
+        assert!(!sql.contains("UPDATE "));
+    }
+
+    #[test]
     fn alpha_source_diagnostics_gates_require_all_checks_to_pass() {
         let passing_gates = vec![
             profile_readiness_gate("coverage", true, json!(1.0), json!(0.98), "ok"),
@@ -17834,6 +18814,133 @@ mod tests {
         assert_eq!(status.unexplained_weak_day_count, 1);
         assert_eq!(status.status, "unexplained_cliff");
         assert!(!status.passed);
+    }
+
+    #[test]
+    fn alpha_source_market_scope_breadth_status_allows_stable_restricted_ratio() {
+        let start = NaiveDate::from_ymd_opt(2014, 4, 3).unwrap();
+        let daily_rows = (0..120)
+            .map(|offset| {
+                let eligible = 2_000 + offset as i64 * 5;
+                (
+                    start + Duration::days(offset),
+                    (eligible as f64 * 0.27) as i64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let eligible_rows = (0..120)
+            .map(|offset| (start + Duration::days(offset), 2_000 + offset as i64 * 5))
+            .collect::<Vec<_>>();
+
+        let status = alpha_source_market_scope_breadth_status(&daily_rows, &eligible_rows);
+
+        assert!(status.passed);
+        assert_eq!(status.status, "stable_market_scope_ratio");
+        assert_eq!(status.missing_eligible_days, 0);
+        assert_eq!(status.weak_day_count, 0);
+        assert!(status.p50_ratio > 0.26);
+    }
+
+    #[test]
+    fn alpha_source_market_scope_breadth_status_rejects_ratio_cliffs() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let mut daily_rows = (0..100)
+            .map(|offset| (start + Duration::days(offset), 300))
+            .collect::<Vec<_>>();
+        daily_rows[70].1 = 20;
+        let eligible_rows = (0..100)
+            .map(|offset| (start + Duration::days(offset), 1_000))
+            .collect::<Vec<_>>();
+
+        let status = alpha_source_market_scope_breadth_status(&daily_rows, &eligible_rows);
+
+        assert!(!status.passed);
+        assert_eq!(status.status, "market_scope_ratio_cliff");
+        assert_eq!(status.weak_day_count, 1);
+        assert_eq!(status.first_weak_day, Some(start + Duration::days(70)));
+    }
+
+    #[test]
+    fn alpha_source_market_scope_breadth_requires_registered_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "futures_price_chain".to_string(),
+            version: Some("p319q-sw2021-l1-price-chain-v1".to_string()),
+            start_date: "20140403".to_string(),
+            end_date: "20260618".to_string(),
+            alpha_admission_gate_id: Some(FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID.to_string()),
+            universe_profile: Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE.to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: None,
+            include_research_metrics: None,
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        assert!(alpha_source_market_scope_breadth_enabled(
+            &req,
+            "futures_price_chain"
+        ));
+
+        let mut missing_gate_req = req;
+        missing_gate_req.alpha_admission_gate_id = None;
+        assert!(!alpha_source_market_scope_breadth_enabled(
+            &missing_gate_req,
+            "futures_price_chain"
+        ));
+    }
+
+    #[test]
+    fn alpha_source_research_economic_admission_blocks_negative_spreads() {
+        let metrics = json!({
+            "included": true,
+            "rank_ic_by_horizon": [
+                {"horizon_days": 20, "mean_rank_ic": -0.01, "positive_day_ratio": 0.45},
+                {"horizon_days": 60, "mean_rank_ic": 0.005, "positive_day_ratio": 0.50}
+            ],
+            "group_return_by_horizon": [
+                {"horizon_days": 20, "high_minus_low_spread": -0.01, "monotonicity_score": 0.44},
+                {"horizon_days": 60, "high_minus_low_spread": -0.002, "monotonicity_score": 0.55}
+            ],
+            "turnover_capacity_by_horizon": [
+                {"horizon_days": 20, "avg_high_score_bucket_turnover": 0.65},
+                {"horizon_days": 60, "avg_high_score_bucket_turnover": 0.65}
+            ]
+        });
+
+        let admission = alpha_source_research_economic_admission(&metrics);
+
+        assert_eq!(admission["status"], "blocked_by_p310_economics");
+        assert_eq!(admission["bounded_wfa"], "blocked");
+        assert_eq!(admission["passed_horizon_count"], 0);
+    }
+
+    #[test]
+    fn alpha_source_research_economic_admission_requires_two_good_horizons() {
+        let metrics = json!({
+            "included": true,
+            "rank_ic_by_horizon": [
+                {"horizon_days": 20, "mean_rank_ic": 0.012, "positive_day_ratio": 0.55},
+                {"horizon_days": 60, "mean_rank_ic": 0.018, "positive_day_ratio": 0.57}
+            ],
+            "group_return_by_horizon": [
+                {"horizon_days": 20, "high_minus_low_spread": 0.006, "monotonicity_score": 0.56},
+                {"horizon_days": 60, "high_minus_low_spread": 0.011, "monotonicity_score": 0.62}
+            ],
+            "turnover_capacity_by_horizon": [
+                {"horizon_days": 20, "avg_high_score_bucket_turnover": 0.40},
+                {"horizon_days": 60, "avg_high_score_bucket_turnover": 0.50}
+            ]
+        });
+
+        let admission = alpha_source_research_economic_admission(&metrics);
+
+        assert_eq!(admission["status"], "candidate_ready_for_bounded_wfa");
+        assert_eq!(admission["bounded_wfa"], "eligible");
+        assert_eq!(admission["passed_horizon_count"], 2);
     }
 
     #[test]
@@ -20367,6 +21474,63 @@ mod tests {
         let req = build_factor_trial_request(&task, &params).expect("market-scope gated request");
 
         assert_eq!(req.combo_name, "phase7_industry_prosperity_proxy_v1");
+        assert_eq!(req.universe_profile.as_deref(), Some("main_chinext_non_st"));
+    }
+
+    #[test]
+    fn trial_backtest_request_blocks_equity_pledge_without_coverage_gate() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "equity_pledge_pressure",
+                "version": "p320f-equity-pledge-pressure-v1",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "monthly"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "top_n": 8,
+            "universe_profile": "listed_non_st"
+        });
+
+        let err = build_factor_trial_request(&task, &params).unwrap_err();
+
+        assert!(err.contains("equity_pledge_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+    }
+
+    #[test]
+    fn trial_backtest_request_allows_equity_pledge_with_coverage_gate_profile() {
+        let task = OptimizationTaskExecutionContext {
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "perf-db-smoke-data-v1".into(),
+            backtest_template: json!({
+                "combo_name": "equity_pledge_pressure",
+                "version": "p320f-equity-pledge-pressure-v1",
+                "start_date": "20250109",
+                "end_date": "20250131",
+                "benchmark": "000300.SH",
+                "top_n": 20,
+                "rebalance": "monthly"
+            }),
+            objective: json!({"type": "risk_adjusted", "maximize": true}),
+            constraints: None,
+        };
+        let params = json!({
+            "top_n": 8,
+            "universe_profile": "main_chinext_non_st",
+            "alpha_admission_gate_id": "equity_pledge_coverage_ready_v1"
+        });
+
+        let req = build_factor_trial_request(&task, &params).expect("coverage-gated request");
+
+        assert_eq!(req.combo_name, "equity_pledge_pressure");
         assert_eq!(req.universe_profile.as_deref(), Some("main_chinext_non_st"));
     }
 
@@ -27414,6 +28578,73 @@ mod tests {
         }));
         assert!(bundle.plan.trials.iter().take(12).any(|trial| {
             trial.parameters["combo_name"] == "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
+        }));
+        assert!(!bundle.plan.trials.iter().take(12).any(|trial| {
+            let serialized = trial.parameters.to_string();
+            serialized.contains("phase7_moneyflow_congestion_interaction_v1")
+                || serialized.contains("phase7_event_post_return_curve_20d_v1")
+                || serialized.contains("pred-")
+        }));
+    }
+
+    #[test]
+    fn phase7_layered_request_accepts_v19_shareholder_structure_sleeve_profile() {
+        let req = Phase7LayeredOptimizationRequest {
+            strategy_version_id: "phase7-professional-v1".to_string(),
+            data_version_id: "dv-v19-audit-ready-20260615".to_string(),
+            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
+            constraints: None,
+            walk_forward: None,
+            backtest_template: Some(json!({
+                "start_date": "20151022",
+                "end_date": "20260623",
+                "initial_capital": 1000000.0
+            })),
+            prediction_set_ids: Some(vec![
+                "must-not-override-shareholder-structure-sleeve".to_string()
+            ]),
+            max_trials: Some(12),
+            search_profile: Some("phase7_v19_shareholder_structure_sleeve".to_string()),
+        };
+        let resource_plan = quant_common::phase7::LocalResourcePlan::for_machine(10, 32);
+
+        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
+
+        assert_eq!(
+            bundle.search_space["search_profile"],
+            "professional_v19_shareholder_structure_sleeve_admission"
+        );
+        let gate_policy = default_oos_train_selection_gate_policy_for_search_profile(Some(
+            "phase7_v19_shareholder_structure_sleeve",
+        ));
+        assert_eq!(
+            gate_policy["train_stress_score_profile"],
+            "capacity_stress_return_score_v1"
+        );
+        assert_eq!(
+            gate_policy["min_train_cost_capacity_perturbation_pass_ratio"],
+            json!(0.80)
+        );
+        assert!(!profile_accepts_prediction_set_override(
+            "professional_v19_shareholder_structure_sleeve_admission"
+        ));
+        assert!(bundle.plan.trials.iter().take(12).all(|trial| {
+            trial.parameters["signal_source"] == "factor_combo"
+                && trial.parameters["shareholder_structure_sleeve_profile"]
+                    == "v19_p321e_fq_change_shareholder_structure_sleeve_v1"
+                && trial.parameters["shareholder_structure_sleeve_control"]
+                    == "phase7_financial_quality_change_v1"
+                && trial.parameters["alpha_admission_gate_id"]
+                    == "shareholder_structure_low_fanout_strict_pit_gate_v1"
+                && trial.parameters["universe_profile"] == "main_chinext_non_st"
+                && trial.parameters["market_regime"] == "off"
+                && trial.parameters["oos_policy"] == "evaluation_only"
+        }));
+        assert!(bundle.plan.trials.iter().take(12).any(|trial| {
+            trial.parameters["combo_name"]
+                == "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
+                && trial.parameters["shareholder_structure_sleeve_variant"]
+                    == "shareholder_structure_sleeve_10pct"
         }));
         assert!(!bundle.plan.trials.iter().take(12).any(|trial| {
             let serialized = trial.parameters.to_string();

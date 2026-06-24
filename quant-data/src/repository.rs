@@ -1622,6 +1622,17 @@ pub async fn create_sync_task_with_context(
     Ok(())
 }
 
+pub fn update_sync_task_sql() -> &'static str {
+    r#"UPDATE data_sync_task
+           SET status = $2, total_count = $3, success_count = $4, failed_count = $5,
+               error_message = CASE WHEN $2 = 'completed' THEN NULL ELSE error_message END,
+               progress = CASE WHEN $3 > 0 THEN ($4 * 100 / $3) ELSE 0 END,
+               last_heartbeat_at = now(),
+               started_at = COALESCE(started_at, now()),
+               completed_at = CASE WHEN $2 IN ('completed','partial','failed') THEN now() ELSE completed_at END
+           WHERE task_id = $1"#
+}
+
 pub async fn update_sync_task(
     pool: &PgPool,
     task_id: &str,
@@ -1630,22 +1641,14 @@ pub async fn update_sync_task(
     success: i32,
     failed: i32,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"UPDATE data_sync_task
-           SET status = $2, total_count = $3, success_count = $4, failed_count = $5,
-               progress = CASE WHEN $3 > 0 THEN ($4 * 100 / $3) ELSE 0 END,
-               last_heartbeat_at = now(),
-               started_at = COALESCE(started_at, now()),
-               completed_at = CASE WHEN $2 IN ('completed','partial','failed') THEN now() ELSE completed_at END
-           WHERE task_id = $1"#,
-    )
-    .bind(task_id)
-    .bind(status)
-    .bind(total)
-    .bind(success)
-    .bind(failed)
-    .execute(pool)
-    .await?;
+    sqlx::query(update_sync_task_sql())
+        .bind(task_id)
+        .bind(status)
+        .bind(total)
+        .bind(success)
+        .bind(failed)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1803,6 +1806,15 @@ mod tests {
         assert!(sql.contains("status"));
         assert!(sql.contains("ON CONFLICT (source, symbol, start_date, end_date)"));
         assert!(sql.contains("task_id = EXCLUDED.task_id"));
+    }
+
+    #[test]
+    fn update_sync_task_sql_clears_stale_error_on_completed_status() {
+        let sql = update_sync_task_sql();
+
+        assert!(sql.contains("error_message = CASE WHEN $2 = 'completed' THEN NULL"));
+        assert!(sql.contains("status = $2"));
+        assert!(sql.contains("completed_at = CASE WHEN $2 IN ('completed','partial','failed')"));
     }
 
     #[test]

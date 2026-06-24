@@ -21,8 +21,11 @@ use quant_factor::neutralize::NeutralizeConfig;
 use quant_factor::*;
 
 use crate::phase7_alpha_admission::{
+    validate_equity_pledge_entrypoint_admission, validate_futures_price_chain_entrypoint_admission,
     validate_industry_prosperity_entrypoint_admission,
-    validate_industry_prosperity_factor_builder_admission, INDUSTRY_PROSPERITY_SOURCE,
+    validate_industry_prosperity_factor_builder_admission,
+    validate_shareholder_structure_entrypoint_admission, EQUITY_PLEDGE_PRESSURE_SOURCE,
+    FUTURES_PRICE_CHAIN_SOURCE, INDUSTRY_PROSPERITY_SOURCE, SHAREHOLDER_STRUCTURE_SOURCE,
 };
 use crate::AppState;
 
@@ -299,6 +302,39 @@ pub struct Phase7IndustryProsperityBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7FuturesPriceChainBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub alpha_admission_gate_id: Option<String>,
+    pub universe_profile: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7EquityPledgePressureBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub alpha_admission_gate_id: Option<String>,
+    pub universe_profile: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Phase7ShareholderStructureBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub alpha_admission_gate_id: Option<String>,
+    pub universe_profile: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7AlphaBlendSourceRequest {
     pub combo_name: String,
     pub version: Option<String>,
@@ -376,6 +412,9 @@ type Phase7UnlockSupplyPressureBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7LiquidityQualityBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7MarketResidualRiskBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7IndustryProsperityBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7FuturesPriceChainBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7EquityPledgePressureBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7ShareholderStructureBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +451,13 @@ enum IndustryProsperitySignal {
     ReturnMomentum,
     PositiveBreadth,
     AmountTrend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FuturesPriceChainSignal {
+    PriceMomentum,
+    InventoryTightness,
+    NetPositionTrend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,6 +531,11 @@ enum Phase7BackfillFactorKind {
         short_window: i32,
         long_window: i32,
     },
+    FuturesPriceChain {
+        signal: FuturesPriceChainSignal,
+    },
+    EquityPledgePressure,
+    ShareholderStructure,
     ForecastRevision {
         value_expression: &'static str,
         higher_is_better: bool,
@@ -1797,6 +1848,205 @@ impl Phase7IndustryProsperityBackfillRequest {
     }
 }
 
+impl Phase7FuturesPriceChainBackfillRequest {
+    fn into_plan(self) -> Result<Phase7FuturesPriceChainBackfillPlan, String> {
+        validate_futures_price_chain_entrypoint_admission(
+            FUTURES_PRICE_CHAIN_SOURCE,
+            self.alpha_admission_gate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            self.universe_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "factor builder",
+        )?;
+
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2014, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "p319q-sw2021-l1-price-chain-v1", "version")?;
+        let combo_name = trim_or_default(self.combo_name, "futures_price_chain", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7FuturesPriceChainBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_futures_price_chain_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "futures_price_chain",
+            category: "futures_price_chain_alpha",
+            phase: "7-P3.19Q",
+            dependencies: &[
+                "market_futures_daily",
+                "market_futures_warehouse_receipt",
+                "market_futures_holding_rank",
+                "market_futures_product_exposure_mapping_pit",
+                "market_futures_product_exclusion_gate_pit",
+                "market_stock_industry_membership_pit",
+                "market_stock_name_history",
+                "market_stock_daily_bar",
+                "market_stock_daily_basic",
+                "market_stock",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_futures_price_chain",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7EquityPledgePressureBackfillRequest {
+    fn into_plan(self) -> Result<Phase7EquityPledgePressureBackfillPlan, String> {
+        validate_equity_pledge_entrypoint_admission(
+            EQUITY_PLEDGE_PRESSURE_SOURCE,
+            self.alpha_admission_gate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            self.universe_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "factor builder",
+        )?;
+
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2014, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "p320f-equity-pledge-pressure-v1", "version")?;
+        let combo_name = trim_or_default(self.combo_name, "equity_pledge_pressure", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7EquityPledgePressureBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_equity_pledge_pressure_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "equity_pledge_pressure",
+            category: "equity_pledge_pressure_alpha",
+            phase: "7-P3.20F",
+            dependencies: &[
+                "market_stock_pledge_stat",
+                "market_stock_pledge_detail",
+                "market_stock_daily_bar",
+                "market_stock_daily_basic",
+                "market_stock",
+                "market_stock_name_history",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_equity_pledge_pressure",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7ShareholderStructureBackfillRequest {
+    fn into_plan(self) -> Result<Phase7ShareholderStructureBackfillPlan, String> {
+        validate_shareholder_structure_entrypoint_admission(
+            SHAREHOLDER_STRUCTURE_SOURCE,
+            self.alpha_admission_gate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            self.universe_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "factor builder",
+        )?;
+
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2014, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "p321d-shareholder-low-fanout-v1", "version")?;
+        let combo_name = trim_or_default(self.combo_name, "shareholder_structure", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7ShareholderStructureBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_shareholder_structure_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "shareholder_structure",
+            category: "shareholder_structure_alpha",
+            phase: "7-P3.21D",
+            dependencies: &[
+                "market_stock_holder_number",
+                "market_stock_holder_trade",
+                "market_stock_daily_bar",
+                "market_stock_daily_basic",
+                "market_stock",
+                "market_stock_name_history",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_shareholder_structure",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
 impl Phase7AlphaBlendBackfillRequest {
     fn into_plan(self) -> Result<Phase7AlphaBlendBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
@@ -1975,6 +2225,9 @@ impl Phase7AlphaBlendProfilesBackfillRequest {
                     | "phase7_fq_change_forecast_revision_sleeve_05pct_v1"
                     | "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
                     | "phase7_fq_change_forecast_revision_sleeve_15pct_v1"
+                    | "phase7_fq_change_shareholder_structure_sleeve_05pct_v1"
+                    | "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
+                    | "phase7_fq_change_shareholder_structure_sleeve_15pct_v1"
                     | "phase7_quality_event_reaction_segments_overlay_v1"
                     | "phase7_quality_event_reaction_reversal_overlay_v1"
             ) {
@@ -3568,6 +3821,74 @@ fn phase7_industry_prosperity_backfill_specs() -> Vec<Phase7BackfillFactorSpec> 
                 long_window: 120,
             },
             weight: 0.33,
+        },
+    ]
+}
+
+fn phase7_futures_price_chain_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "fpc_price_mom_20v60_std",
+            name: "P3.19 PIT futures price-chain product momentum 20d versus 60d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::FuturesPriceChain {
+                signal: FuturesPriceChainSignal::PriceMomentum,
+            },
+            weight: 0.50,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fpc_inventory_tight_20v60_std",
+            name: "P3.19 PIT futures warehouse inventory tightness 20d versus 60d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::FuturesPriceChain {
+                signal: FuturesPriceChainSignal::InventoryTightness,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "fpc_net_position_20v60_std",
+            name: "P3.19 PIT futures holding net-position trend 20d versus 60d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::FuturesPriceChain {
+                signal: FuturesPriceChainSignal::NetPositionTrend,
+            },
+            weight: 0.25,
+        },
+    ]
+}
+
+fn phase7_equity_pledge_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![Phase7BackfillFactorSpec {
+        factor_code: "eq_pledge_low_ratio_std",
+        name: "P3.20 PIT equity pledge low pressure ratio",
+        period: 0,
+        kind: Phase7BackfillFactorKind::EquityPledgePressure,
+        weight: 1.0,
+    }]
+}
+
+fn phase7_shareholder_structure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "sh_holder_count_decline_1y_std",
+            name: "P3.21 PIT shareholder holder-count decline versus prior-year snapshot",
+            period: 252,
+            kind: Phase7BackfillFactorKind::ShareholderStructure,
+            weight: 0.40,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "sh_holder_count_decline_prev_std",
+            name: "P3.21 PIT shareholder holder-count decline versus previous snapshot",
+            period: 63,
+            kind: Phase7BackfillFactorKind::ShareholderStructure,
+            weight: 0.35,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "sh_holder_trade_net_increase_120d_std",
+            name: "P3.21 PIT shareholder net increase event intensity over 120 calendar days",
+            period: 120,
+            kind: Phase7BackfillFactorKind::ShareholderStructure,
+            weight: 0.25,
         },
     ]
 }
@@ -7646,6 +7967,260 @@ pub async fn backfill_phase7_industry_prosperity_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-futures-price-chain-backfill/background
+///
+/// Dedicated PIT futures price-chain factor builder. It requires the coverage
+/// admission gate and only writes research-source factor/multi-factor rows for
+/// P3.10 diagnostics; WFA and v19 train selection remain separate gates.
+pub async fn backfill_phase7_futures_price_chain_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7FuturesPriceChainBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 futures price-chain backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_futures_price_chain_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_futures_price_chain_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 futures price-chain backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 futures price-chain backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 futures price-chain backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-equity-pledge-pressure-backfill/background
+///
+/// Dedicated PIT equity pledge pressure factor builder. It requires the raw
+/// coverage admission gate and only writes a research-source combo for P3.10
+/// diagnostics; WFA and v19 train selection remain separate gates.
+pub async fn backfill_phase7_equity_pledge_pressure_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7EquityPledgePressureBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 equity pledge pressure backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_equity_pledge_pressure_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_equity_pledge_pressure_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 equity pledge pressure backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 equity pledge pressure backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 equity pledge pressure backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-event-window-alpha-backfill/background
 ///
 /// Set-based PIT event-window alpha backfill from forecast, express, and
@@ -7742,6 +8317,133 @@ pub async fn backfill_phase7_event_window_alpha_background(
             }
             Err(error) => {
                 tracing::error!(task_id = %tid, error = %error, "Phase 7 event-window alpha backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+/// POST /api/v1/quant/factors/phase7-shareholder-structure-backfill/background
+///
+/// Dedicated PIT shareholder-structure low-fanout factor builder. It requires
+/// the strict low-fanout admission gate and writes only a research-source combo
+/// for P3.10 diagnostics; WFA and v19 train selection remain separate gates.
+pub async fn backfill_phase7_shareholder_structure_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7ShareholderStructureBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 shareholder structure backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_shareholder_structure_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_shareholder_structure_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 shareholder structure backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 shareholder structure backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 shareholder structure backfill failed");
                 let _ = sqlx::query(
                     "UPDATE data_sync_task
                      SET status='failed',
@@ -8275,6 +8977,34 @@ async fn run_phase7_industry_prosperity_backfill(
     run_segmented_industry_prosperity_backfill(db, task_id, plan, &specs).await
 }
 
+async fn run_phase7_futures_price_chain_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7FuturesPriceChainBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    ensure_futures_price_chain_factor_readiness(db).await?;
+    let specs = phase7_futures_price_chain_backfill_specs();
+    run_segmented_futures_price_chain_backfill(db, task_id, plan, &specs).await
+}
+
+async fn run_phase7_equity_pledge_pressure_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7EquityPledgePressureBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_equity_pledge_pressure_backfill_specs();
+    run_segmented_equity_pledge_pressure_backfill(db, task_id, plan, &specs).await
+}
+
+async fn run_phase7_shareholder_structure_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7ShareholderStructureBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_shareholder_structure_backfill_specs();
+    run_segmented_shareholder_structure_backfill(db, task_id, plan, &specs).await
+}
+
 async fn run_phase7_event_window_alpha_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -8433,7 +9163,6 @@ async fn run_set_based_factor_backfill(
     ))
 }
 
-#[cfg(test)]
 fn yearly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
     if start > end {
         return Vec::new();
@@ -8490,6 +9219,33 @@ fn quarterly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDa
             break;
         }
         cursor = next_quarter_start(cursor);
+    }
+    segments
+}
+
+fn monthly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+    if start > end {
+        return Vec::new();
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        let next_month_start = if cursor.month() == 12 {
+            NaiveDate::from_ymd_opt(cursor.year() + 1, 1, 1).expect("valid next year start")
+        } else {
+            NaiveDate::from_ymd_opt(cursor.year(), cursor.month() + 1, 1)
+                .expect("valid next month start")
+        };
+        let segment_end = next_month_start
+            .pred_opt()
+            .expect("month start must have previous day")
+            .min(end);
+        segments.push((cursor, segment_end));
+        if segment_end == end {
+            break;
+        }
+        cursor = next_month_start;
     }
     segments
 }
@@ -8673,6 +9429,173 @@ async fn run_segmented_industry_prosperity_backfill(
     ))
 }
 
+async fn run_segmented_futures_price_chain_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let started_at = Instant::now();
+    let segments = quarterly_backfill_segments(plan.start_date, plan.end_date);
+    let total_steps = segments.len();
+    let mut completed_steps = 0usize;
+    let mut factor_rows = 0usize;
+    let mut combo_rows = 0usize;
+    let mut factor_row_totals: HashMap<String, usize> = HashMap::new();
+
+    for spec in specs {
+        upsert_set_based_factor_definition(db, spec, plan).await?;
+        factor_row_totals.insert(spec.factor_code.to_string(), 0);
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report =
+                industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_futures_price_chain_factor_backfill(db, &segment_plan, specs).await?;
+        for (factor_code, row_count) in rows.product_rows_by_code {
+            *factor_row_totals.entry(factor_code).or_insert(0) += row_count;
+            factor_rows = factor_rows.saturating_add(row_count);
+        }
+        combo_rows = combo_rows.saturating_add(rows.combo_rows);
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(
+            db,
+            task_id,
+            completed_steps,
+            total_steps,
+            factor_rows.saturating_add(combo_rows),
+        )
+        .await?;
+    }
+
+    let report = industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
+async fn run_segmented_equity_pledge_pressure_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let started_at = Instant::now();
+    let segments = monthly_backfill_segments(plan.start_date, plan.end_date);
+    let total_steps = segments.len();
+    let mut completed_steps = 0usize;
+    let mut combo_rows = 0usize;
+
+    for spec in specs {
+        upsert_set_based_factor_definition(db, spec, plan).await?;
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report = SetBasedFactorBackfillReport {
+                factor_rows: 0,
+                combo_rows,
+                factor_rows_by_code: specs
+                    .iter()
+                    .map(|spec| (spec.factor_code.to_string(), 0))
+                    .collect(),
+            };
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_equity_pledge_pressure_backfill(db, &segment_plan, specs).await?;
+        combo_rows = combo_rows.saturating_add(rows);
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(db, task_id, completed_steps, total_steps, combo_rows)
+            .await?;
+    }
+
+    let report = SetBasedFactorBackfillReport {
+        factor_rows: 0,
+        combo_rows,
+        factor_rows_by_code: specs
+            .iter()
+            .map(|spec| (spec.factor_code.to_string(), 0))
+            .collect(),
+    };
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
+async fn run_segmented_shareholder_structure_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let started_at = Instant::now();
+    let segments = yearly_backfill_segments(plan.start_date, plan.end_date);
+    let total_steps = segments.len();
+    let mut completed_steps = 0usize;
+    let mut combo_rows = 0usize;
+
+    for spec in specs {
+        upsert_set_based_factor_definition(db, spec, plan).await?;
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report = SetBasedFactorBackfillReport {
+                factor_rows: 0,
+                combo_rows,
+                factor_rows_by_code: specs
+                    .iter()
+                    .map(|spec| (spec.factor_code.to_string(), 0))
+                    .collect(),
+            };
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_shareholder_structure_backfill(db, &segment_plan, specs).await?;
+        combo_rows = combo_rows.saturating_add(rows);
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(db, task_id, completed_steps, total_steps, combo_rows)
+            .await?;
+    }
+
+    let report = SetBasedFactorBackfillReport {
+        factor_rows: 0,
+        combo_rows,
+        factor_rows_by_code: specs
+            .iter()
+            .map(|spec| (spec.factor_code.to_string(), 0))
+            .collect(),
+    };
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
+struct FuturesPriceChainSegmentBackfillRows {
+    product_rows_by_code: Vec<(String, usize)>,
+    combo_rows: usize,
+}
+
 fn industry_prosperity_report(
     factor_rows: usize,
     combo_rows: usize,
@@ -8734,6 +9657,357 @@ async fn execute_industry_prosperity_factor_backfill(
         .into_iter()
         .map(|(factor_code, row_count)| (factor_code, row_count.max(0) as usize))
         .collect())
+}
+
+async fn execute_futures_price_chain_factor_backfill(
+    db: &sqlx::PgPool,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<FuturesPriceChainSegmentBackfillRows, String> {
+    let weights_json = factor_backfill_combo_weights_json(specs)?;
+    let mut tx = db.begin().await.map_err(|error| {
+        format!(
+            "Failed to start futures price-chain backfill transaction: {}",
+            error
+        )
+    })?;
+    set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+
+    let product_rows: Vec<(String, i64)> =
+        sqlx::query_as(phase7_futures_price_chain_product_signal_backfill_sql())
+            .bind("fpc_price_mom_20v60_std")
+            .bind("fpc_inventory_tight_20v60_std")
+            .bind("fpc_net_position_20v60_std")
+            .bind(&plan.version)
+            .bind(plan.start_date)
+            .bind(plan.end_date)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to backfill futures price-chain product signals for {}..{}: {}",
+                    plan.start_date, plan.end_date, error
+                )
+            })?;
+    tracing::info!(
+        start_date = %plan.start_date,
+        end_date = %plan.end_date,
+        product_signal_rows = ?product_rows,
+        "Futures price-chain product signals backfilled"
+    );
+
+    sqlx::query(
+        "INSERT INTO multi_factor_weight (combo_name, version, weights, method, status)
+         VALUES ($1, $2, $3, $4, 'active')
+         ON CONFLICT (combo_name, version) DO UPDATE SET
+           weights = EXCLUDED.weights,
+           method = EXCLUDED.method,
+           status = EXCLUDED.status,
+           created_at = NOW()",
+    )
+    .bind(&plan.combo_name)
+    .bind(&plan.version)
+    .bind(&weights_json)
+    .bind(plan.combo_method)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to upsert futures price-chain combo weights: {}",
+            error
+        )
+    })?;
+
+    let combo_result = sqlx::query(phase7_futures_price_chain_combo_backfill_sql())
+        .bind(&plan.combo_name)
+        .bind(&plan.version)
+        .bind(&weights_json)
+        .bind(plan.start_date)
+        .bind(plan.end_date)
+        .bind(phase7_combo_required_factor_count(specs, plan))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to backfill futures price-chain combo for {}..{}: {}",
+                plan.start_date, plan.end_date, error
+            )
+        })?;
+    let combo_rows = combo_result.rows_affected() as usize;
+    tracing::info!(
+        start_date = %plan.start_date,
+        end_date = %plan.end_date,
+        combo_rows,
+        "Futures price-chain combo backfilled"
+    );
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "Failed to commit futures price-chain backfill transaction: {}",
+            error
+        )
+    })?;
+
+    Ok(FuturesPriceChainSegmentBackfillRows {
+        product_rows_by_code: product_rows
+            .into_iter()
+            .map(|(factor_code, row_count)| (factor_code, row_count.max(0) as usize))
+            .collect(),
+        combo_rows,
+    })
+}
+
+async fn execute_equity_pledge_pressure_backfill(
+    db: &sqlx::PgPool,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<usize, String> {
+    let weights_json = factor_backfill_combo_weights_json(specs)?;
+    let mut tx = db.begin().await.map_err(|error| {
+        format!(
+            "Failed to start equity pledge pressure backfill transaction: {}",
+            error
+        )
+    })?;
+    set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+
+    sqlx::query(
+        "INSERT INTO multi_factor_weight (combo_name, version, weights, method, status)
+         VALUES ($1, $2, $3, $4, 'active')
+         ON CONFLICT (combo_name, version) DO UPDATE SET
+           weights = EXCLUDED.weights,
+           method = EXCLUDED.method,
+           status = EXCLUDED.status,
+           created_at = NOW()",
+    )
+    .bind(&plan.combo_name)
+    .bind(&plan.version)
+    .bind(&weights_json)
+    .bind(plan.combo_method)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to upsert equity pledge pressure combo weights: {}",
+            error
+        )
+    })?;
+
+    let combo_result = sqlx::query(phase7_equity_pledge_pressure_backfill_sql())
+        .bind(&plan.combo_name)
+        .bind(&plan.version)
+        .bind(&weights_json)
+        .bind(plan.start_date)
+        .bind(plan.end_date)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to backfill equity pledge pressure combo for {}..{}: {}",
+                plan.start_date, plan.end_date, error
+            )
+        })?;
+    let combo_rows = combo_result.rows_affected() as usize;
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "Failed to commit equity pledge pressure backfill transaction: {}",
+            error
+        )
+    })?;
+
+    Ok(combo_rows)
+}
+
+async fn execute_shareholder_structure_backfill(
+    db: &sqlx::PgPool,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<usize, String> {
+    let weights_json = factor_backfill_combo_weights_json(specs)?;
+    let mut tx = db.begin().await.map_err(|error| {
+        format!(
+            "Failed to start shareholder structure backfill transaction: {}",
+            error
+        )
+    })?;
+    set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+
+    sqlx::query(
+        "INSERT INTO multi_factor_weight (combo_name, version, weights, method, status)
+         VALUES ($1, $2, $3, $4, 'active')
+         ON CONFLICT (combo_name, version) DO UPDATE SET
+           weights = EXCLUDED.weights,
+           method = EXCLUDED.method,
+           status = EXCLUDED.status,
+           created_at = NOW()",
+    )
+    .bind(&plan.combo_name)
+    .bind(&plan.version)
+    .bind(&weights_json)
+    .bind(plan.combo_method)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to upsert shareholder structure combo weights: {}",
+            error
+        )
+    })?;
+
+    let combo_result = sqlx::query(phase7_shareholder_structure_backfill_sql())
+        .bind(&plan.combo_name)
+        .bind(&plan.version)
+        .bind(&weights_json)
+        .bind(plan.start_date)
+        .bind(plan.end_date)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to backfill shareholder structure combo for {}..{}: {}",
+                plan.start_date, plan.end_date, error
+            )
+        })?;
+    let combo_rows = combo_result.rows_affected() as usize;
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "Failed to commit shareholder structure backfill transaction: {}",
+            error
+        )
+    })?;
+
+    Ok(combo_rows)
+}
+
+async fn ensure_futures_price_chain_factor_readiness(db: &sqlx::PgPool) -> Result<(), String> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
+        r#"
+        WITH raw_symbol AS (
+            SELECT
+                upper(substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.')) AS product_symbol_raw,
+                available_at,
+                trade_date
+            FROM market_futures_daily
+            WHERE substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.') IS NOT NULL
+            UNION ALL
+            SELECT
+                upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+                available_at,
+                trade_date
+            FROM market_futures_warehouse_receipt
+            WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+            UNION ALL
+            SELECT
+                upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+                available_at,
+                trade_date
+            FROM market_futures_holding_rank
+            WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+        ),
+        raw AS (
+            SELECT
+                CASE
+                    WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                    WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                    THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                    WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                    THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                    ELSE product_symbol_raw
+                END AS product_symbol,
+                available_at,
+                trade_date
+            FROM raw_symbol
+        ),
+        raw_products AS (
+            SELECT DISTINCT product_symbol
+            FROM raw
+            WHERE product_symbol IS NOT NULL AND product_symbol <> ''
+        ),
+        covered_products AS (
+            SELECT DISTINCT upper(product_symbol) AS product_symbol
+            FROM market_futures_product_exposure_mapping_pit
+            WHERE exposure_type = 'sw_industry'
+            UNION
+            SELECT DISTINCT upper(product_symbol) AS product_symbol
+            FROM market_futures_product_exclusion_gate_pit
+            WHERE gate_scope = 'futures_price_chain_factor'
+        ),
+        missing_products AS (
+            SELECT raw_products.product_symbol
+            FROM raw_products
+            LEFT JOIN covered_products
+              ON covered_products.product_symbol = raw_products.product_symbol
+            WHERE covered_products.product_symbol IS NULL
+        ),
+        mapping_quality AS (
+            SELECT COUNT(*)::int8 AS bad_rows
+            FROM market_futures_product_exposure_mapping_pit
+            WHERE exposure_type <> 'sw_industry'
+               OR direction NOT IN (-1, 1)
+               OR weight <= 0
+               OR weight > 1
+               OR available_at < valid_from
+               OR (valid_to IS NOT NULL AND valid_to < valid_from)
+               OR NULLIF(trim(source), '') IS NULL
+               OR evidence IS NULL
+               OR evidence = '{}'::jsonb
+        ),
+        exclusion_quality AS (
+            SELECT COUNT(*)::int8 AS bad_rows
+            FROM market_futures_product_exclusion_gate_pit
+            WHERE gate_scope <> 'futures_price_chain_factor'
+               OR available_at < valid_from
+               OR (valid_to IS NOT NULL AND valid_to < valid_from)
+               OR NULLIF(trim(source), '') IS NULL
+               OR evidence IS NULL
+               OR evidence = '{}'::jsonb
+        )
+        SELECT
+            (SELECT COUNT(*)::int8 FROM raw) AS raw_rows,
+            (SELECT COUNT(*)::int8 FROM raw_products) AS raw_product_count,
+            (SELECT COUNT(*)::int8 FROM covered_products) AS covered_product_count,
+            (SELECT COUNT(*)::int8 FROM missing_products) AS missing_product_count,
+            (SELECT COUNT(*)::int8 FROM raw WHERE available_at < trade_date) AS raw_pit_violation_rows,
+            (SELECT bad_rows FROM mapping_quality) AS mapping_bad_rows,
+            (SELECT bad_rows FROM exclusion_quality) AS exclusion_bad_rows
+        "#,
+    )
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to verify futures price-chain readiness: {error}"))?;
+
+    let (
+        raw_rows,
+        raw_product_count,
+        covered_product_count,
+        missing_product_count,
+        raw_pit_violation_rows,
+        mapping_bad_rows,
+        exclusion_bad_rows,
+    ) = row;
+
+    if raw_rows <= 0
+        || raw_product_count <= 0
+        || missing_product_count != 0
+        || raw_pit_violation_rows != 0
+        || mapping_bad_rows != 0
+        || exclusion_bad_rows != 0
+    {
+        return Err(format!(
+            "futures_price_chain coverage gate is not ready: raw_rows={}, raw_product_count={}, covered_product_count={}, missing_product_count={}, raw_pit_violation_rows={}, mapping_bad_rows={}, exclusion_bad_rows={}",
+            raw_rows,
+            raw_product_count,
+            covered_product_count,
+            missing_product_count,
+            raw_pit_violation_rows,
+            mapping_bad_rows,
+            exclusion_bad_rows
+        ));
+    }
+
+    Ok(())
 }
 
 async fn upsert_set_based_factor_definition(
@@ -8870,6 +10144,7 @@ fn phase7_combo_required_factor_count(
         | "weighted_repurchase_supply_shock"
         | "weighted_block_trade_sd"
         | "weighted_unlock_supply_pressure" => 1,
+        "weighted_futures_price_chain" => 1,
         _ => specs.len() as i64,
     }
 }
@@ -9217,6 +10492,17 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             short_window,
             long_window,
         } => phase7_industry_prosperity_backfill_sql(signal, short_window, long_window),
+        Phase7BackfillFactorKind::FuturesPriceChain { signal } => {
+            phase7_futures_price_chain_backfill_sql(signal)
+        }
+        Phase7BackfillFactorKind::EquityPledgePressure => {
+            panic!("equity_pledge_pressure must use the dedicated PIT combo builder")
+        }
+        Phase7BackfillFactorKind::ShareholderStructure => {
+            panic!(
+                "shareholder_structure must use the dedicated strict PIT low-fanout combo builder"
+            )
+        }
         Phase7BackfillFactorKind::ForecastRevision {
             value_expression,
             higher_is_better,
@@ -11653,6 +12939,864 @@ fn phase7_industry_prosperity_multi_backfill_sql() -> String {
         GROUP BY factor_code
         ORDER BY factor_code"
     )
+}
+
+fn phase7_futures_price_chain_backfill_sql(_signal: FuturesPriceChainSignal) -> String {
+    panic!("futures_price_chain factors must use the shared multi-signal builder to avoid repeated raw-table scans")
+}
+
+fn phase7_futures_price_chain_product_signal_backfill_sql() -> &'static str {
+    "WITH daily_raw_symbol AS (
+        SELECT
+            ts_code,
+            upper(substring(ts_code from '^([A-Za-z]+)[0-9]{4}\\.')) AS product_symbol_raw,
+            trade_date,
+            available_at,
+            close::double precision AS close,
+            amount::double precision AS amount,
+            oi::double precision AS oi
+        FROM market_futures_daily
+        WHERE trade_date >= ($5::date - INTERVAL '180 days')
+          AND trade_date <= $6
+          AND available_at <= $6
+          AND close IS NOT NULL
+          AND close > 0
+          AND substring(ts_code from '^([A-Za-z]+)[0-9]{4}\\.') IS NOT NULL
+    ),
+    daily_contracts AS (
+        SELECT
+            CASE
+                WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                ELSE product_symbol_raw
+            END AS product_symbol,
+            trade_date,
+            available_at,
+            close,
+            amount,
+            oi,
+            ROW_NUMBER() OVER (
+                PARTITION BY
+                    CASE
+                        WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                        WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                        THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                        WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                        THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                        ELSE product_symbol_raw
+                    END,
+                    trade_date
+                ORDER BY COALESCE(amount, 0.0) DESC, COALESCE(oi, 0.0) DESC, ts_code
+            ) AS contract_rank
+        FROM daily_raw_symbol
+    ),
+    main_contract AS (
+        SELECT product_symbol, trade_date, available_at, close
+        FROM daily_contracts
+        WHERE contract_rank = 1
+          AND product_symbol IS NOT NULL
+          AND product_symbol <> ''
+    ),
+    price_roll AS (
+        SELECT
+            product_symbol,
+            trade_date,
+            available_at,
+            close,
+            LAG(close, 20) OVER (PARTITION BY product_symbol ORDER BY trade_date) AS close_20,
+            LAG(close, 60) OVER (PARTITION BY product_symbol ORDER BY trade_date) AS close_60
+        FROM main_contract
+    ),
+    price_signal AS (
+        SELECT
+            product_symbol,
+            trade_date,
+            available_at,
+            CASE
+                WHEN close_20 > 0.0 AND close_60 > 0.0
+                THEN (close / close_20 - 1.0) - (close / close_60 - 1.0)
+                ELSE NULL
+            END AS raw_value
+        FROM price_roll
+    ),
+    wsr_raw_symbol AS (
+        SELECT
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            trade_date,
+            available_at,
+            vol::double precision AS vol
+        FROM market_futures_warehouse_receipt
+        WHERE trade_date >= ($5::date - INTERVAL '180 days')
+          AND trade_date <= $6
+          AND available_at <= $6
+          AND vol IS NOT NULL
+          AND vol >= 0
+          AND substring(symbol from '^[A-Za-z]+') IS NOT NULL
+    ),
+    wsr_daily AS (
+        SELECT
+            CASE
+                WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                ELSE product_symbol_raw
+            END AS product_symbol,
+            trade_date,
+            MAX(available_at) AS available_at,
+            SUM(vol) AS inventory_vol
+        FROM wsr_raw_symbol
+        GROUP BY 1, trade_date
+    ),
+    wsr_roll AS (
+        SELECT
+            product_symbol,
+            trade_date,
+            available_at,
+            AVG(inventory_vol) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) AS inventory_20,
+            AVG(inventory_vol) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+            ) AS inventory_60,
+            COUNT(inventory_vol) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) AS inventory_obs_20,
+            COUNT(inventory_vol) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+            ) AS inventory_obs_60
+        FROM wsr_daily
+        WHERE product_symbol IS NOT NULL
+          AND product_symbol <> ''
+    ),
+    inventory_signal AS (
+        SELECT
+            product_symbol,
+            trade_date,
+            available_at,
+            CASE
+                WHEN inventory_obs_20 = 20
+                 AND inventory_obs_60 = 60
+                 AND inventory_20 IS NOT NULL
+                 AND inventory_60 IS NOT NULL
+                THEN -LN((inventory_20 + 1.0) / (inventory_60 + 1.0))
+                ELSE NULL
+            END AS raw_value
+        FROM wsr_roll
+    ),
+    holding_raw_symbol AS (
+        SELECT
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            trade_date,
+            available_at,
+            long_hld::double precision AS long_hld,
+            short_hld::double precision AS short_hld
+        FROM market_futures_holding_rank
+        WHERE trade_date >= ($5::date - INTERVAL '180 days')
+          AND trade_date <= $6
+          AND available_at <= $6
+          AND substring(symbol from '^[A-Za-z]+') IS NOT NULL
+          AND (long_hld IS NOT NULL OR short_hld IS NOT NULL)
+    ),
+    holding_daily AS (
+        SELECT
+            CASE
+                WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                ELSE product_symbol_raw
+            END AS product_symbol,
+            trade_date,
+            MAX(available_at) AS available_at,
+            SUM(COALESCE(long_hld, 0.0)) AS long_hld,
+            SUM(COALESCE(short_hld, 0.0)) AS short_hld
+        FROM holding_raw_symbol
+        GROUP BY 1, trade_date
+    ),
+    holding_features AS (
+        SELECT
+            product_symbol,
+            trade_date,
+            available_at,
+            CASE
+                WHEN long_hld + short_hld > 0.0
+                THEN (long_hld - short_hld) / NULLIF(long_hld + short_hld, 0.0)
+                ELSE NULL
+            END AS net_position_ratio
+        FROM holding_daily
+        WHERE product_symbol IS NOT NULL
+          AND product_symbol <> ''
+    ),
+    holding_roll AS (
+        SELECT
+            product_symbol,
+            trade_date,
+            available_at,
+            AVG(net_position_ratio) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) AS net_ratio_20,
+            AVG(net_position_ratio) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+            ) AS net_ratio_60,
+            COUNT(net_position_ratio) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+            ) AS net_obs_20,
+            COUNT(net_position_ratio) OVER (
+                PARTITION BY product_symbol ORDER BY trade_date
+                ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+            ) AS net_obs_60
+        FROM holding_features
+    ),
+    holding_signal AS (
+        SELECT
+            product_symbol,
+            trade_date,
+            available_at,
+            CASE
+                WHEN net_obs_20 = 20
+                 AND net_obs_60 = 60
+                 AND net_ratio_20 IS NOT NULL
+                 AND net_ratio_60 IS NOT NULL
+                THEN net_ratio_20 - net_ratio_60
+                ELSE NULL
+            END AS raw_value
+        FROM holding_roll
+    ),
+    product_signal AS (
+        SELECT $1::varchar AS factor_code, product_symbol, trade_date, available_at, raw_value
+        FROM price_signal
+        WHERE raw_value IS NOT NULL
+        UNION ALL
+        SELECT $2::varchar AS factor_code, product_symbol, trade_date, available_at, raw_value
+        FROM inventory_signal
+        WHERE raw_value IS NOT NULL
+        UNION ALL
+        SELECT $3::varchar AS factor_code, product_symbol, trade_date, available_at, raw_value
+        FROM holding_signal
+        WHERE raw_value IS NOT NULL
+    ),
+    inserted AS (
+        INSERT INTO market_futures_product_signal_pit
+            (signal_code, source_version, product_symbol, trade_date, available_at, raw_value)
+        SELECT factor_code, $4, product_symbol, trade_date, available_at, raw_value
+        FROM product_signal
+        WHERE product_symbol IS NOT NULL
+          AND product_symbol <> ''
+          AND trade_date >= ($5::date - INTERVAL '180 days')
+          AND trade_date <= $6
+          AND available_at IS NOT NULL
+          AND available_at >= trade_date
+          AND available_at <= ($6::date + INTERVAL '7 days')
+        ON CONFLICT (signal_code, source_version, product_symbol, trade_date) DO UPDATE SET
+            available_at = EXCLUDED.available_at,
+            raw_value = EXCLUDED.raw_value,
+            updated_at = NOW()
+        RETURNING signal_code
+    )
+    SELECT signal_code, COUNT(*)::int8 AS row_count
+    FROM inserted
+    GROUP BY signal_code
+    ORDER BY signal_code"
+}
+
+fn phase7_futures_price_chain_combo_backfill_sql() -> &'static str {
+    "WITH weights AS (
+        SELECT key AS factor_code, value::double precision AS weight
+        FROM jsonb_each_text($3::jsonb)
+    ),
+    stock_days AS (
+        SELECT trade_date
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open = true
+          AND trade_date BETWEEN $4 AND $5
+    ),
+    eligible_universe AS MATERIALIZED (
+        SELECT
+            bar.symbol,
+            bar.trade_date
+        FROM stock_days td
+        JOIN market_stock_daily_bar bar
+          ON bar.trade_date = td.trade_date
+         AND bar.trade_date BETWEEN $4 AND $5
+        JOIN market_stock ms
+          ON ms.symbol = bar.symbol
+        JOIN market_stock_daily_basic basic
+          ON basic.symbol = bar.symbol
+         AND basic.trade_date = bar.trade_date
+         AND basic.trade_date BETWEEN $4 AND $5
+        WHERE bar.close IS NOT NULL
+          AND bar.close > 0
+          AND basic.circ_mv IS NOT NULL
+          AND basic.circ_mv > 0
+          AND ms.list_date IS NOT NULL
+          AND ms.list_date <= bar.trade_date
+          AND (
+              ms.delist_date IS NULL
+              OR ms.delist_date >= bar.trade_date
+          )
+          AND ms.exchange IN ('SSE', 'SZSE')
+          AND ms.market IN ('主板', '创业板')
+          AND ms.symbol NOT LIKE '688%SH'
+          AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+          AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM market_stock_name_history st_name
+              WHERE st_name.symbol = bar.symbol
+                AND st_name.is_st = true
+                AND st_name.start_date <= bar.trade_date
+                AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+          )
+    ),
+    stock_membership AS MATERIALIZED (
+        SELECT
+            universe.symbol,
+            universe.trade_date,
+            membership.index_code,
+            membership.available_at AS membership_available_at
+        FROM eligible_universe universe
+        JOIN market_stock_industry_membership_pit membership
+          ON membership.symbol = universe.symbol
+         AND membership.industry_level = 'L1'
+         AND membership.classification_source = CASE
+             WHEN universe.trade_date < DATE '2021-12-13' THEN 'SW2014'
+             ELSE 'SW2021'
+         END
+         AND membership.available_at <= universe.trade_date
+         AND membership.in_date <= universe.trade_date
+         AND (
+             membership.exit_available_at IS NULL
+             OR membership.exit_available_at > universe.trade_date
+         )
+    ),
+    signal_intervals AS (
+        SELECT
+            signal_code AS factor_code,
+            product_symbol,
+            trade_date,
+            available_at,
+            LEAD(available_at) OVER (
+                PARTITION BY signal_code, product_symbol ORDER BY available_at, trade_date
+            ) AS next_available_at,
+            raw_value
+        FROM market_futures_product_signal_pit
+        WHERE source_version = $2
+          AND signal_code IN (SELECT factor_code FROM weights)
+          AND trade_date >= ($4::date - INTERVAL '180 days')
+          AND trade_date <= $5
+          AND available_at <= $5
+          AND raw_value IS NOT NULL
+          AND product_symbol IS NOT NULL
+          AND product_symbol <> ''
+          AND available_at >= trade_date
+    ),
+    signal_window AS (
+        SELECT *
+        FROM signal_intervals
+        WHERE available_at IS NOT NULL
+          AND available_at <= $5
+    ),
+    industry_signal AS MATERIALIZED (
+        SELECT
+            signal_window.factor_code,
+            td.trade_date,
+            mapping.exposure_code AS index_code,
+            GREATEST(MAX(signal_window.available_at), MAX(mapping.available_at)) AS available_at,
+            SUM(signal_window.raw_value * mapping.direction::double precision * mapping.weight::double precision)
+                / NULLIF(SUM(ABS(mapping.weight::double precision)), 0.0) AS raw_value
+        FROM stock_days td
+        JOIN signal_window
+          ON td.trade_date >= signal_window.available_at
+         AND td.trade_date < COALESCE(signal_window.next_available_at, ($5::date + INTERVAL '1 day'))
+        JOIN market_futures_product_exposure_mapping_pit mapping
+          ON upper(mapping.product_symbol) = signal_window.product_symbol
+         AND mapping.exposure_type = 'sw_industry'
+         AND mapping.available_at <= td.trade_date
+         AND mapping.valid_from <= signal_window.trade_date
+         AND (
+             mapping.valid_to IS NULL
+             OR mapping.valid_to >= signal_window.trade_date
+         )
+        WHERE td.trade_date BETWEEN $4 AND $5
+        GROUP BY signal_window.factor_code, td.trade_date, mapping.exposure_code
+    ),
+    raw AS (
+        SELECT
+            stock_membership.symbol,
+            stock_membership.trade_date,
+            GREATEST(industry_signal.available_at, stock_membership.membership_available_at) AS available_at,
+            industry_signal.factor_code,
+            industry_signal.raw_value
+        FROM stock_membership
+        JOIN industry_signal
+          ON industry_signal.index_code = stock_membership.index_code
+         AND industry_signal.trade_date = stock_membership.trade_date
+        WHERE industry_signal.raw_value IS NOT NULL
+          AND industry_signal.available_at <= stock_membership.trade_date
+    ),
+    ranked AS (
+        SELECT
+            factor_code,
+            symbol,
+            trade_date,
+            available_at,
+            raw_value,
+            CASE
+                WHEN COUNT(*) OVER (PARTITION BY factor_code, trade_date) = 1 THEN 1.0
+                ELSE percent_rank() OVER (
+                    PARTITION BY factor_code, trade_date ORDER BY raw_value
+                )
+            END AS normalized_value
+        FROM raw
+        WHERE raw_value IS NOT NULL
+          AND available_at <= trade_date
+    ),
+    scores AS (
+        SELECT
+            ranked.symbol,
+            ranked.trade_date,
+            SUM(ranked.normalized_value::double precision * weights.weight)
+                / NULLIF(SUM(weights.weight), 0.0) AS raw_score,
+            MAX(ranked.available_at) AS available_at
+        FROM ranked
+        JOIN weights
+          ON weights.factor_code = ranked.factor_code
+        GROUP BY ranked.symbol, ranked.trade_date
+        HAVING COUNT(DISTINCT ranked.factor_code) >= $6
+    ),
+    deleted AS (
+        DELETE FROM multi_factor_value
+        WHERE combo_name = $1
+          AND version = $2
+          AND trade_date BETWEEN $4 AND $5
+        RETURNING 1
+    )
+    INSERT INTO multi_factor_value
+        (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+    SELECT $1, $2, symbol, trade_date, raw_score, raw_score, available_at
+    FROM scores
+    WHERE raw_score IS NOT NULL
+      AND available_at <= trade_date
+    ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        normalized_score = EXCLUDED.normalized_score,
+        available_at = EXCLUDED.available_at,
+        created_at = NOW()"
+}
+
+fn phase7_equity_pledge_pressure_backfill_sql() -> &'static str {
+    "WITH weights AS (
+        SELECT key AS factor_code, value::double precision AS weight
+        FROM jsonb_each_text($3::jsonb)
+        WHERE key = 'eq_pledge_low_ratio_std'
+    ),
+    stock_days AS (
+        SELECT trade_date
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open = true
+          AND trade_date BETWEEN $4 AND $5
+    ),
+    eligible_universe AS MATERIALIZED (
+        SELECT
+            bar.symbol,
+            bar.trade_date
+        FROM stock_days td
+        JOIN market_stock_daily_bar bar
+          ON bar.trade_date = td.trade_date
+         AND bar.trade_date BETWEEN $4 AND $5
+        JOIN market_stock ms
+          ON ms.symbol = bar.symbol
+        JOIN market_stock_daily_basic basic
+          ON basic.symbol = bar.symbol
+         AND basic.trade_date = bar.trade_date
+         AND basic.trade_date BETWEEN $4 AND $5
+        WHERE bar.close IS NOT NULL
+          AND bar.close > 0
+          AND basic.circ_mv IS NOT NULL
+          AND basic.circ_mv > 0
+          AND ms.list_date IS NOT NULL
+          AND ms.list_date <= bar.trade_date
+          AND (
+              ms.delist_date IS NULL
+              OR ms.delist_date >= bar.trade_date
+          )
+          AND ms.exchange IN ('SSE', 'SZSE')
+          AND ms.market IN ('主板', '创业板')
+          AND ms.symbol NOT LIKE '688%SH'
+          AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+          AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM market_stock_name_history st_name
+              WHERE st_name.symbol = bar.symbol
+                AND st_name.is_st = true
+                AND st_name.start_date <= bar.trade_date
+                AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+          )
+    ),
+    latest_stat AS MATERIALIZED (
+        SELECT
+            universe.symbol,
+            universe.trade_date,
+            stat.available_at,
+            COALESCE(
+                stat.pledge_ratio::double precision,
+                (
+                    (COALESCE(stat.unrest_pledge, 0)::double precision
+                     + COALESCE(stat.rest_pledge, 0)::double precision)
+                    / NULLIF(stat.total_share::double precision, 0.0)
+                ) * 100.0
+            ) AS pledge_ratio
+        FROM eligible_universe universe
+        JOIN LATERAL (
+            SELECT
+                stat.end_date,
+                stat.available_at,
+                stat.pledge_ratio,
+                stat.unrest_pledge,
+                stat.rest_pledge,
+                stat.total_share
+            FROM market_stock_pledge_stat stat
+            WHERE stat.symbol = universe.symbol
+              AND stat.available_at <= universe.trade_date
+              AND stat.end_date <= universe.trade_date
+            ORDER BY stat.available_at DESC, stat.end_date DESC
+            LIMIT 1
+        ) stat ON true
+    ),
+    raw AS (
+        SELECT
+            symbol,
+            trade_date,
+            available_at,
+            'eq_pledge_low_ratio_std'::varchar AS factor_code,
+            -pledge_ratio AS raw_value
+        FROM latest_stat
+        WHERE pledge_ratio BETWEEN 0.0 AND 100.0
+          AND available_at <= trade_date
+    ),
+    ranked AS (
+        SELECT
+            factor_code,
+            symbol,
+            trade_date,
+            available_at,
+            raw_value,
+            CASE
+                WHEN COUNT(*) OVER (PARTITION BY factor_code, trade_date) = 1 THEN 1.0
+                ELSE percent_rank() OVER (
+                    PARTITION BY factor_code, trade_date ORDER BY raw_value
+                )
+            END AS normalized_score
+        FROM raw
+        WHERE raw_value IS NOT NULL
+          AND available_at <= trade_date
+    ),
+    scores AS (
+        SELECT
+            ranked.symbol,
+            ranked.trade_date,
+            SUM(ranked.raw_value::double precision * weights.weight)
+                / NULLIF(SUM(weights.weight), 0.0) AS raw_score,
+            SUM(ranked.normalized_score::double precision * weights.weight)
+                / NULLIF(SUM(weights.weight), 0.0) AS normalized_score,
+            MAX(ranked.available_at) AS available_at
+        FROM ranked
+        JOIN weights
+          ON weights.factor_code = ranked.factor_code
+        GROUP BY ranked.symbol, ranked.trade_date
+    ),
+    deleted AS (
+        DELETE FROM multi_factor_value
+        WHERE combo_name = $1
+          AND version = $2
+          AND trade_date BETWEEN $4 AND $5
+        RETURNING 1
+    )
+    INSERT INTO multi_factor_value
+        (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+    SELECT $1, $2, symbol, trade_date, raw_score, normalized_score, available_at
+    FROM scores
+    WHERE raw_score IS NOT NULL
+      AND normalized_score IS NOT NULL
+      AND available_at <= trade_date
+    ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        normalized_score = EXCLUDED.normalized_score,
+        available_at = EXCLUDED.available_at,
+        created_at = NOW()"
+}
+
+fn phase7_shareholder_structure_backfill_sql() -> &'static str {
+    "WITH weights AS (
+        SELECT key AS factor_code, value::double precision AS weight
+        FROM jsonb_each_text($3::jsonb)
+        WHERE key IN (
+            'sh_holder_count_decline_1y_std',
+            'sh_holder_count_decline_prev_std',
+            'sh_holder_trade_net_increase_120d_std'
+        )
+    ),
+    stock_days AS (
+        SELECT trade_date
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open = true
+          AND trade_date BETWEEN $4 AND $5
+    ),
+    eligible_universe AS MATERIALIZED (
+        SELECT
+            bar.symbol,
+            bar.trade_date
+        FROM stock_days td
+        JOIN market_stock_daily_bar bar
+          ON bar.trade_date = td.trade_date
+         AND bar.trade_date BETWEEN $4 AND $5
+        JOIN market_stock ms
+          ON ms.symbol = bar.symbol
+        JOIN market_stock_daily_basic basic
+          ON basic.symbol = bar.symbol
+         AND basic.trade_date = bar.trade_date
+         AND basic.trade_date BETWEEN $4 AND $5
+        WHERE bar.close IS NOT NULL
+          AND bar.close > 0
+          AND basic.circ_mv IS NOT NULL
+          AND basic.circ_mv > 0
+          AND ms.list_date IS NOT NULL
+          AND ms.list_date <= bar.trade_date
+          AND (
+              ms.delist_date IS NULL
+              OR ms.delist_date >= bar.trade_date
+          )
+          AND ms.exchange IN ('SSE', 'SZSE')
+          AND ms.market IN ('主板', '创业板')
+          AND ms.symbol NOT LIKE '688%SH'
+          AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+          AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM market_stock_name_history st_name
+              WHERE st_name.symbol = bar.symbol
+                AND st_name.is_st = true
+                AND st_name.start_date <= bar.trade_date
+                AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+          )
+    ),
+    holder_number_candidates AS MATERIALIZED (
+        SELECT DISTINCT ON (hn.symbol)
+            hn.symbol,
+            hn.available_at,
+            hn.end_date,
+            hn.holder_num::double precision AS holder_num,
+            hn.source_row_hash
+        FROM market_stock_holder_number hn
+        WHERE hn.available_at < $4
+          AND hn.available_at <= $5
+          AND hn.available_at >= hn.ann_date
+          AND hn.available_at >= hn.end_date
+          AND hn.holder_num IS NOT NULL
+          AND hn.holder_num > 0
+        ORDER BY hn.symbol, hn.available_at DESC, hn.end_date DESC, hn.source_row_hash DESC
+    ),
+    holder_number_segment_events AS MATERIALIZED (
+        SELECT
+            hn.symbol,
+            hn.available_at,
+            hn.end_date,
+            hn.holder_num::double precision AS holder_num,
+            hn.source_row_hash
+        FROM market_stock_holder_number hn
+        WHERE hn.available_at >= $4
+          AND hn.available_at <= $5
+          AND hn.available_at >= hn.ann_date
+          AND hn.available_at >= hn.end_date
+          AND hn.holder_num IS NOT NULL
+          AND hn.holder_num > 0
+    ),
+    holder_number_base AS MATERIALIZED (
+        SELECT symbol, available_at, end_date, holder_num, source_row_hash
+        FROM holder_number_candidates
+        UNION ALL
+        SELECT symbol, available_at, end_date, holder_num, source_row_hash
+        FROM holder_number_segment_events
+    ),
+    holder_number_events AS MATERIALIZED (
+        SELECT
+            base.symbol,
+            base.available_at,
+            base.end_date,
+            LEAD(base.available_at) OVER (
+                PARTITION BY base.symbol
+                ORDER BY base.available_at, base.end_date, base.source_row_hash
+            ) AS next_available_at,
+            base.holder_num,
+            prev.holder_num AS prev_holder_num,
+            prior_yoy.holder_num AS prior_yoy_holder_num
+        FROM holder_number_base base
+        LEFT JOIN LATERAL (
+            SELECT hn.holder_num::double precision AS holder_num
+            FROM market_stock_holder_number hn
+            WHERE hn.symbol = base.symbol
+              AND hn.available_at <= base.available_at
+              AND hn.available_at >= hn.ann_date
+              AND hn.available_at >= hn.end_date
+              AND hn.holder_num IS NOT NULL
+              AND hn.holder_num > 0
+              AND (
+                  hn.end_date < base.end_date
+                  OR (
+                      hn.end_date = base.end_date
+                      AND hn.available_at < base.available_at
+                  )
+              )
+            ORDER BY hn.end_date DESC, hn.available_at DESC, hn.source_row_hash DESC
+            LIMIT 1
+        ) prev ON true
+        LEFT JOIN LATERAL (
+            SELECT hn.holder_num::double precision AS holder_num
+            FROM market_stock_holder_number hn
+            WHERE hn.symbol = base.symbol
+              AND hn.end_date <= base.end_date - INTERVAL '300 days'
+              AND hn.available_at <= base.available_at
+              AND hn.available_at >= hn.ann_date
+              AND hn.available_at >= hn.end_date
+              AND hn.holder_num IS NOT NULL
+              AND hn.holder_num > 0
+            ORDER BY hn.end_date DESC, hn.available_at DESC, hn.source_row_hash DESC
+            LIMIT 1
+        ) prior_yoy ON true
+    ),
+    holder_number_raw AS (
+        SELECT
+            universe.symbol,
+            universe.trade_date,
+            event.available_at,
+            factor.factor_code,
+            factor.raw_value
+        FROM eligible_universe universe
+        JOIN holder_number_events event
+          ON event.symbol = universe.symbol
+         AND event.available_at <= universe.trade_date
+         AND universe.trade_date < COALESCE(event.next_available_at, DATE '9999-12-31')
+        CROSS JOIN LATERAL (
+            VALUES
+                (
+                    'sh_holder_count_decline_prev_std'::varchar,
+                    CASE
+                        WHEN event.prev_holder_num > 0
+                        THEN -1.0 * ((event.holder_num / NULLIF(event.prev_holder_num, 0.0)) - 1.0)
+                        ELSE NULL
+                    END
+                ),
+                (
+                    'sh_holder_count_decline_1y_std'::varchar,
+                    CASE
+                        WHEN event.prior_yoy_holder_num > 0
+                        THEN -1.0 * ((event.holder_num / NULLIF(event.prior_yoy_holder_num, 0.0)) - 1.0)
+                        ELSE NULL
+                    END
+                )
+        ) AS factor(factor_code, raw_value)
+        WHERE event.available_at <= universe.trade_date
+    ),
+    holder_trade_raw AS (
+        SELECT
+            universe.symbol,
+            universe.trade_date,
+            MAX(trade.available_at) AS available_at,
+            'sh_holder_trade_net_increase_120d_std'::varchar AS factor_code,
+            SUM(
+                CASE
+                    WHEN UPPER(COALESCE(trade.in_de, '')) = 'IN'
+                        THEN ABS(COALESCE(trade.change_ratio::double precision, 0.0))
+                    WHEN UPPER(COALESCE(trade.in_de, '')) = 'DE'
+                        THEN -ABS(COALESCE(trade.change_ratio::double precision, 0.0))
+                    ELSE COALESCE(trade.change_ratio::double precision, 0.0)
+                END
+            ) AS raw_value
+        FROM eligible_universe universe
+        JOIN market_stock_holder_trade trade
+          ON trade.symbol = universe.symbol
+         AND trade.available_at <= universe.trade_date
+         AND trade.available_at > universe.trade_date - INTERVAL '120 days'
+        WHERE trade.available_at >= trade.ann_date
+          AND (trade.change_ratio IS NULL OR (trade.change_ratio >= -100 AND trade.change_ratio <= 100))
+          AND (trade.after_ratio IS NULL OR (trade.after_ratio >= 0 AND trade.after_ratio <= 100))
+          AND (trade.begin_date IS NULL OR trade.close_date IS NULL OR trade.close_date >= trade.begin_date)
+        GROUP BY universe.symbol, universe.trade_date
+    ),
+    raw AS (
+        SELECT symbol, trade_date, available_at, factor_code, raw_value
+        FROM holder_number_raw
+        UNION ALL
+        SELECT symbol, trade_date, available_at, factor_code, raw_value
+        FROM holder_trade_raw
+    ),
+    ranked AS (
+        SELECT
+            factor_code,
+            symbol,
+            trade_date,
+            available_at,
+            raw_value,
+            CASE
+                WHEN COUNT(*) OVER (PARTITION BY factor_code, trade_date) = 1 THEN 1.0
+                ELSE percent_rank() OVER (
+                    PARTITION BY factor_code, trade_date ORDER BY raw_value
+                )
+            END AS normalized_score
+        FROM raw
+        WHERE raw_value IS NOT NULL
+          AND available_at <= trade_date
+    ),
+    scores AS (
+        SELECT
+            ranked.symbol,
+            ranked.trade_date,
+            SUM(ranked.raw_value::double precision * weights.weight)
+                / NULLIF(SUM(weights.weight), 0.0) AS raw_score,
+            SUM(ranked.normalized_score::double precision * weights.weight)
+                / NULLIF(SUM(weights.weight), 0.0) AS normalized_score,
+            MAX(ranked.available_at) AS available_at
+        FROM ranked
+        JOIN weights
+          ON weights.factor_code = ranked.factor_code
+        GROUP BY ranked.symbol, ranked.trade_date
+    ),
+    deleted AS (
+        DELETE FROM multi_factor_value
+        WHERE combo_name = $1
+          AND version = $2
+          AND trade_date BETWEEN $4 AND $5
+        RETURNING 1
+    )
+    INSERT INTO multi_factor_value
+        (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+    SELECT $1, $2, symbol, trade_date, raw_score, normalized_score, available_at
+    FROM scores
+    WHERE raw_score IS NOT NULL
+      AND normalized_score IS NOT NULL
+      AND available_at <= trade_date
+    ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+        raw_score = EXCLUDED.raw_score,
+        normalized_score = EXCLUDED.normalized_score,
+        available_at = EXCLUDED.available_at,
+        created_at = NOW()"
 }
 
 fn phase7_forecast_revision_backfill_sql(
@@ -14156,7 +16300,7 @@ mod tests {
             .map(|plan| plan.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(plans.len(), 31);
+        assert_eq!(plans.len(), 34);
         assert!(combo_names.contains("phase7_value_quality_growth_rel_v1"));
         assert!(combo_names.contains("phase7_blend_value_tilt_v1"));
         assert!(combo_names.contains("phase7_blend_quality_growth_v1"));
@@ -14182,6 +16326,9 @@ mod tests {
         assert!(combo_names.contains("phase7_fq_change_forecast_revision_sleeve_05pct_v1"));
         assert!(combo_names.contains("phase7_fq_change_forecast_revision_sleeve_10pct_v1"));
         assert!(combo_names.contains("phase7_fq_change_forecast_revision_sleeve_15pct_v1"));
+        assert!(combo_names.contains("phase7_fq_change_shareholder_structure_sleeve_05pct_v1"));
+        assert!(combo_names.contains("phase7_fq_change_shareholder_structure_sleeve_10pct_v1"));
+        assert!(combo_names.contains("phase7_fq_change_shareholder_structure_sleeve_15pct_v1"));
         assert!(combo_names.contains("phase7_quality_event_reaction_segments_overlay_v1"));
         assert!(combo_names.contains("phase7_quality_event_reaction_reversal_overlay_v1"));
         assert!(combo_names.contains("phase7_quality_residual_confirm_5pct_v1"));
@@ -14209,6 +16356,9 @@ mod tests {
                     | "phase7_fq_change_forecast_revision_sleeve_05pct_v1"
                     | "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
                     | "phase7_fq_change_forecast_revision_sleeve_15pct_v1"
+                    | "phase7_fq_change_shareholder_structure_sleeve_05pct_v1"
+                    | "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
+                    | "phase7_fq_change_shareholder_structure_sleeve_15pct_v1"
                     | "phase7_quality_event_reaction_segments_overlay_v1"
                     | "phase7_quality_event_reaction_reversal_overlay_v1"
             ) {
@@ -14228,6 +16378,34 @@ mod tests {
                     < 1e-9
             );
         }
+    }
+
+    #[test]
+    fn phase7_alpha_blend_profiles_request_preserves_shareholder_source_version() {
+        let req = Phase7AlphaBlendProfilesBackfillRequest {
+            start_date: Some("2016-02-01".to_string()),
+            end_date: Some("2016-02-05".to_string()),
+            version: None,
+            profile_names: Some(vec![
+                "phase7_fq_change_shareholder_structure_sleeve_10pct_v1".to_string(),
+            ]),
+            statement_timeout_ms: Some(0),
+        };
+
+        let plans = req.into_plans().expect("valid selected profile plans");
+
+        assert_eq!(plans.len(), 1);
+        let plan = plans.first().expect("selected shareholder sleeve plan");
+        assert_eq!(
+            plan.combo_name,
+            "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
+        );
+        assert_eq!(plan.combo_method, "weighted_combo_optional_overlay");
+        assert!(plan.source_combos.iter().any(|source| {
+            source.combo_name == "shareholder_structure"
+                && source.version == "p321d-shareholder-low-fanout-v1"
+                && (source.weight - 0.10).abs() < 1e-9
+        }));
     }
 
     #[test]
@@ -14846,6 +17024,276 @@ mod tests {
         assert!(!sql.contains("market_stock.industry"));
         assert!(!sql.contains("stock_basic.industry"));
         assert!(!sql.contains("concept_detail"));
+        assert!(!sql.contains("model_prediction"));
+    }
+
+    #[test]
+    fn phase7_futures_price_chain_request_requires_coverage_gate() {
+        let req = Phase7FuturesPriceChainBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-18".to_string()),
+            version: Some("p319q-sw2021-l1-price-chain-v1".to_string()),
+            combo_name: None,
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("futures_price_chain_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("factor builder"));
+    }
+
+    #[test]
+    fn phase7_futures_price_chain_request_builds_p319q_plan() {
+        let req = Phase7FuturesPriceChainBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-18".to_string()),
+            version: None,
+            combo_name: None,
+            alpha_admission_gate_id: Some("futures_price_chain_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid futures price-chain plan");
+
+        assert_eq!(plan.combo_name, "futures_price_chain");
+        assert_eq!(plan.version, "p319q-sw2021-l1-price-chain-v1");
+        assert_eq!(plan.bundle_name, "futures_price_chain");
+        assert_eq!(plan.task_type, "phase7_futures_price_chain_backfill");
+        assert_eq!(plan.category, "futures_price_chain_alpha");
+        assert_eq!(plan.phase, "7-P3.19Q");
+        assert_eq!(plan.combo_method, "weighted_futures_price_chain");
+        assert!(plan.combo_method.len() <= 32);
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+        assert!(plan
+            .dependencies
+            .contains(&"market_futures_product_exposure_mapping_pit"));
+        assert!(plan
+            .dependencies
+            .contains(&"market_stock_industry_membership_pit"));
+        assert!(plan.dependencies.contains(&"market_stock_name_history"));
+    }
+
+    #[test]
+    fn phase7_futures_price_chain_sql_is_pit_and_market_scope_gated() {
+        let product_sql = phase7_futures_price_chain_product_signal_backfill_sql();
+        let sql = phase7_futures_price_chain_combo_backfill_sql();
+
+        assert!(product_sql.contains("market_futures_daily"));
+        assert!(product_sql.contains("market_futures_warehouse_receipt"));
+        assert!(product_sql.contains("market_futures_holding_rank"));
+        assert!(product_sql.contains("INSERT INTO market_futures_product_signal_pit"));
+        assert!(product_sql.contains("available_at >= trade_date"));
+        assert!(product_sql
+            .contains("ON CONFLICT (signal_code, source_version, product_symbol, trade_date)"));
+        assert!(sql.contains("FROM market_futures_product_signal_pit"));
+        assert!(sql.contains("market_futures_product_exposure_mapping_pit mapping"));
+        assert!(sql.contains("eligible_universe AS MATERIALIZED"));
+        assert!(sql.contains("stock_membership AS MATERIALIZED"));
+        assert!(sql.contains("industry_signal AS MATERIALIZED"));
+        assert!(sql.contains("JOIN market_stock_daily_bar bar"));
+        assert!(sql.contains("bar.trade_date BETWEEN $4 AND $5"));
+        assert!(sql.contains("basic.trade_date BETWEEN $4 AND $5"));
+        assert!(!sql.contains("JOIN market_stock_daily_bar_adj bar"));
+        assert!(sql.contains("ms.list_date <= bar.trade_date"));
+        assert!(sql.contains("ms.delist_date >= bar.trade_date"));
+        assert!(sql.contains("FROM market_stock_name_history st_name"));
+        assert!(sql.contains("st_name.start_date <= bar.trade_date"));
+        assert!(!sql.contains("ms.list_status = 'L'"));
+        assert!(!sql.contains("ms.is_st"));
+        assert!(sql.contains("mapping.available_at <= td.trade_date"));
+        assert!(sql.contains("td.trade_date >= signal_window.available_at"));
+        assert!(sql.contains("available_at <= trade_date"));
+        assert!(sql.contains("market_stock_industry_membership_pit membership"));
+        assert!(sql.contains("WHEN universe.trade_date < DATE '2021-12-13'"));
+        assert!(sql.contains("THEN 'SW2014'"));
+        assert!(sql.contains("ELSE 'SW2021'"));
+        assert!(sql.contains("membership.available_at <= universe.trade_date"));
+        assert!(sql.contains("membership.exit_available_at > universe.trade_date"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(sql.contains("PARTITION BY factor_code, trade_date ORDER BY raw_value"));
+        assert!(sql.contains("jsonb_each_text($3::jsonb)"));
+        assert!(sql.contains("INSERT INTO multi_factor_value"));
+        assert!(sql.contains("DELETE FROM multi_factor_value"));
+        assert!(sql.contains("trade_date BETWEEN $4 AND $5"));
+        assert!(sql.contains("HAVING COUNT(DISTINCT ranked.factor_code) >= $6"));
+        assert!(!sql.contains("INSERT INTO factor_value"));
+        assert!(!sql.contains("model_prediction"));
+        assert!(!sql.contains("future_return"));
+    }
+
+    #[test]
+    fn phase7_futures_price_chain_combo_allows_sparse_supply_atoms() {
+        let specs = phase7_futures_price_chain_backfill_specs();
+        let plan = SetBasedFactorBackfillPlan {
+            start_date: NaiveDate::from_ymd_opt(2014, 1, 3).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2014, 3, 31).unwrap(),
+            version: "p319q-sw2021-l1-price-chain-v1".to_string(),
+            combo_name: "futures_price_chain".to_string(),
+            statement_timeout_ms: 0,
+            task_type: "phase7_futures_price_chain_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "futures_price_chain",
+            category: "futures_price_chain_alpha",
+            phase: "7-P3.19Q",
+            dependencies: &["market_futures_daily"],
+            combo_method: "weighted_futures_price_chain",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        };
+
+        assert_eq!(phase7_combo_required_factor_count(&specs, &plan), 1);
+    }
+
+    #[test]
+    fn phase7_equity_pledge_request_requires_coverage_gate() {
+        let req = Phase7EquityPledgePressureBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-23".to_string()),
+            version: Some("p320f-equity-pledge-pressure-v1".to_string()),
+            combo_name: None,
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("equity_pledge_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("factor builder"));
+    }
+
+    #[test]
+    fn phase7_equity_pledge_request_builds_p320f_plan() {
+        let req = Phase7EquityPledgePressureBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-23".to_string()),
+            version: None,
+            combo_name: None,
+            alpha_admission_gate_id: Some("equity_pledge_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid equity pledge pressure plan");
+
+        assert_eq!(plan.combo_name, "equity_pledge_pressure");
+        assert_eq!(plan.version, "p320f-equity-pledge-pressure-v1");
+        assert_eq!(plan.bundle_name, "equity_pledge_pressure");
+        assert_eq!(plan.task_type, "phase7_equity_pledge_pressure_backfill");
+        assert_eq!(plan.category, "equity_pledge_pressure_alpha");
+        assert_eq!(plan.phase, "7-P3.20F");
+        assert_eq!(plan.combo_method, "weighted_equity_pledge_pressure");
+        assert!(plan.combo_method.len() <= 32);
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+        assert!(plan.dependencies.contains(&"market_stock_pledge_stat"));
+        assert!(plan.dependencies.contains(&"market_stock_pledge_detail"));
+        assert!(plan.dependencies.contains(&"market_stock_name_history"));
+    }
+
+    #[test]
+    fn phase7_equity_pledge_sql_is_pit_and_market_scope_gated() {
+        let sql = phase7_equity_pledge_pressure_backfill_sql();
+
+        assert!(sql.contains("market_stock_pledge_stat"));
+        assert!(sql.contains("JOIN LATERAL"));
+        assert!(sql.contains("stat.available_at <= universe.trade_date"));
+        assert!(sql.contains("stat.end_date <= universe.trade_date"));
+        assert!(sql.contains("ms.exchange IN ('SSE', 'SZSE')"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(sql.contains("FROM market_stock_name_history st_name"));
+        assert!(sql.contains("st_name.start_date <= bar.trade_date"));
+        assert!(sql.contains("COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date"));
+        assert!(sql.contains("pledge_ratio BETWEEN 0.0 AND 100.0"));
+        assert!(sql.contains("ORDER BY raw_value"));
+        assert!(sql.contains("INSERT INTO multi_factor_value"));
+        assert!(sql.contains("DELETE FROM multi_factor_value"));
+        assert!(sql.contains("available_at <= trade_date"));
+        assert!(!sql.contains("model_prediction"));
+        assert!(!sql.contains("future_return"));
+    }
+
+    #[test]
+    fn phase7_shareholder_structure_request_requires_strict_low_fanout_gate() {
+        let req = Phase7ShareholderStructureBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-23".to_string()),
+            version: Some("p321d-shareholder-low-fanout-v1".to_string()),
+            combo_name: None,
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("shareholder_structure_low_fanout_strict_pit_gate_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("factor builder"));
+    }
+
+    #[test]
+    fn phase7_shareholder_structure_request_builds_p321d_plan() {
+        let req = Phase7ShareholderStructureBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-23".to_string()),
+            version: None,
+            combo_name: None,
+            alpha_admission_gate_id: Some(
+                "shareholder_structure_low_fanout_strict_pit_gate_v1".to_string(),
+            ),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid shareholder structure plan");
+
+        assert_eq!(plan.combo_name, "shareholder_structure");
+        assert_eq!(plan.version, "p321d-shareholder-low-fanout-v1");
+        assert_eq!(plan.bundle_name, "shareholder_structure");
+        assert_eq!(plan.task_type, "phase7_shareholder_structure_backfill");
+        assert_eq!(plan.category, "shareholder_structure_alpha");
+        assert_eq!(plan.phase, "7-P3.21D");
+        assert_eq!(plan.combo_method, "weighted_shareholder_structure");
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+        assert!(plan.dependencies.contains(&"market_stock_holder_number"));
+        assert!(plan.dependencies.contains(&"market_stock_holder_trade"));
+        assert!(plan.dependencies.contains(&"market_stock_name_history"));
+    }
+
+    #[test]
+    fn phase7_shareholder_structure_sql_is_strict_pit_low_fanout_only() {
+        let sql = phase7_shareholder_structure_backfill_sql();
+
+        assert!(sql.contains("market_stock_holder_number"));
+        assert!(sql.contains("market_stock_holder_trade"));
+        assert!(sql.contains("holder_number_candidates AS MATERIALIZED"));
+        assert!(sql.contains("SELECT DISTINCT ON (hn.symbol)"));
+        assert!(sql.contains("holder_number_segment_events AS MATERIALIZED"));
+        assert!(sql.contains("hn.available_at >= hn.ann_date"));
+        assert!(sql.contains("hn.available_at >= hn.end_date"));
+        assert!(sql.contains("hn.holder_num > 0"));
+        assert!(!sql.contains("LAG(hn.holder_num"));
+        assert!(sql.contains("trade.available_at <= universe.trade_date"));
+        assert!(sql.contains("trade.available_at >= trade.ann_date"));
+        assert!(sql.contains("trade.after_ratio >= 0"));
+        assert!(sql.contains("trade.close_date >= trade.begin_date"));
+        assert!(sql.contains("available_at <= trade_date"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(sql.contains("percent_rank() OVER"));
+        assert!(sql.contains("jsonb_each_text($3::jsonb)"));
+        assert!(!sql.contains("market_stock_top10_holders"));
+        assert!(!sql.contains("market_stock_top10_float_holders"));
+        assert!(!sql.contains("future_return"));
         assert!(!sql.contains("model_prediction"));
     }
 
@@ -15782,6 +18230,32 @@ mod tests {
                 (
                     NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
                     NaiveDate::from_ymd_opt(2024, 5, 15).unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn monthly_backfill_segments_split_cross_month_ranges() {
+        let start = NaiveDate::from_ymd_opt(2023, 1, 15).unwrap();
+        let end = NaiveDate::from_ymd_opt(2023, 3, 8).unwrap();
+
+        let segments = monthly_backfill_segments(start, end);
+
+        assert_eq!(
+            segments,
+            vec![
+                (
+                    NaiveDate::from_ymd_opt(2023, 1, 15).unwrap(),
+                    NaiveDate::from_ymd_opt(2023, 1, 31).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2023, 2, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2023, 2, 28).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2023, 3, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2023, 3, 8).unwrap()
                 ),
             ]
         );

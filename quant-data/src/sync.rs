@@ -4,7 +4,7 @@ use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::time::Duration as StdDuration;
 use tracing::{error, info, warn};
@@ -97,6 +97,11 @@ fn stable_source_row_hash(parts: &[String]) -> String {
     format!("{:016x}", hash)
 }
 
+fn non_empty_opt_str(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn main_business_attempt_source(symbols: &[String]) -> &'static str {
     if symbols.is_empty() {
         "main_business"
@@ -125,7 +130,7 @@ fn financial_sync_attempt_window() -> (NaiveDate, NaiveDate) {
 }
 
 fn tushare_symbol_call_timeout() -> StdDuration {
-    const DEFAULT_TIMEOUT_SECS: u64 = 20;
+    const DEFAULT_TIMEOUT_SECS: u64 = 30;
     const MAX_TIMEOUT_SECS: u64 = 120;
     let secs = std::env::var("PHASE7_TUSHARE_SYMBOL_TIMEOUT_SECS")
         .ok()
@@ -449,6 +454,26 @@ fn months_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDat
             1,
         )
         .unwrap_or(end + chrono::Duration::days(1));
+    }
+    result
+}
+
+/// Generate (start, end) tuples for each calendar quarter in a date range.
+fn quarters_in_range(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+    let mut result = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        let year = cursor.year();
+        let quarter_end_month = ((cursor.month() - 1) / 3 + 1) * 3;
+        let quarter_end = NaiveDate::from_ymd_opt(
+            year,
+            quarter_end_month,
+            days_in_month(year, quarter_end_month),
+        )
+        .unwrap_or(cursor);
+        let actual_end = quarter_end.min(end);
+        result.push((cursor, actual_end));
+        cursor = actual_end + chrono::Duration::days(1);
     }
     result
 }
@@ -1649,6 +1674,1550 @@ pub async fn sync_block_trade(
     }
 
     Ok(total)
+}
+
+#[derive(Debug, Clone)]
+struct EquityPledgeStatRow {
+    symbol: String,
+    end_date: NaiveDate,
+    pledge_count: Option<i32>,
+    unrest_pledge: Decimal,
+    rest_pledge: Decimal,
+    total_share: Decimal,
+    pledge_ratio: Decimal,
+    available_at: NaiveDate,
+    raw_payload: Value,
+}
+
+#[derive(Debug, Clone)]
+struct EquityPledgeDetailRow {
+    symbol: String,
+    ann_date: NaiveDate,
+    holder_name: String,
+    pledge_amount: Decimal,
+    pledge_start_date: Option<NaiveDate>,
+    pledge_end_date: Option<NaiveDate>,
+    is_release: Option<String>,
+    release_date: Option<NaiveDate>,
+    pledgor: String,
+    holding_amount: Option<Decimal>,
+    pledged_amount: Option<Decimal>,
+    p_total_ratio: Option<Decimal>,
+    h_total_ratio: Option<Decimal>,
+    is_buyback: Option<String>,
+    available_at: NaiveDate,
+    raw_payload: Value,
+    source_row_hash: String,
+}
+
+fn equity_pledge_stat_row_from_map(item: &Map<String, Value>) -> Option<EquityPledgeStatRow> {
+    let symbol = get_str(item, "ts_code");
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    if symbol.is_empty() {
+        return None;
+    }
+
+    Some(EquityPledgeStatRow {
+        symbol,
+        end_date,
+        pledge_count: get_i64(item, "pledge_count").map(|value| value as i32),
+        unrest_pledge: to_decimal(get_f64(item, "unrest_pledge")),
+        rest_pledge: to_decimal(get_f64(item, "rest_pledge")),
+        total_share: to_decimal(get_f64(item, "total_share")),
+        pledge_ratio: to_decimal(get_f64(item, "pledge_ratio")),
+        available_at: end_date + Duration::days(1),
+        raw_payload: raw_payload(item),
+    })
+}
+
+fn equity_pledge_detail_row_from_map(item: &Map<String, Value>) -> Option<EquityPledgeDetailRow> {
+    let symbol = get_str(item, "ts_code");
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    if symbol.is_empty() {
+        return None;
+    }
+
+    let holder_name = get_str(item, "holder_name");
+    let pledge_amount = to_decimal(get_f64(item, "pledge_amount"));
+    let pledge_start_date = to_date(&get_str(item, "start_date"));
+    let pledge_end_date = to_date(&get_str(item, "end_date"));
+    let pledgor = get_str(item, "pledgor");
+    let release_date = to_date(&get_str(item, "release_date"));
+    let source_row_hash = stable_source_row_hash(&[
+        symbol.clone(),
+        ann_date.format("%Y%m%d").to_string(),
+        holder_name.clone(),
+        value_key_part(item, "pledge_amount"),
+        value_key_part(item, "start_date"),
+        value_key_part(item, "end_date"),
+        value_key_part(item, "is_release"),
+        value_key_part(item, "release_date"),
+        pledgor.clone(),
+    ]);
+
+    Some(EquityPledgeDetailRow {
+        symbol,
+        ann_date,
+        holder_name,
+        pledge_amount,
+        pledge_start_date,
+        pledge_end_date,
+        is_release: non_empty_opt_str(get_str(item, "is_release")),
+        release_date,
+        pledgor,
+        holding_amount: to_opt_decimal(get_f64(item, "holding_amount")),
+        pledged_amount: to_opt_decimal(get_f64(item, "pledged_amount")),
+        p_total_ratio: to_opt_decimal(get_f64(item, "p_total_ratio")),
+        h_total_ratio: to_opt_decimal(get_f64(item, "h_total_ratio")),
+        is_buyback: non_empty_opt_str(get_str(item, "is_buyback")),
+        available_at: ann_date,
+        raw_payload: raw_payload(item),
+        source_row_hash,
+    })
+}
+
+async fn upsert_equity_pledge_stat_rows(
+    pool: &PgPool,
+    rows: &[EquityPledgeStatRow],
+    task_id: &str,
+    source: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut saved = 0usize;
+    for row in rows {
+        sqlx::query(
+            r#"
+            INSERT INTO market_stock_pledge_stat (
+                symbol, end_date, pledge_count, unrest_pledge, rest_pledge,
+                total_share, pledge_ratio, available_at, raw_payload, source, data_version_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (symbol, end_date)
+            DO UPDATE SET pledge_count = EXCLUDED.pledge_count,
+                          unrest_pledge = EXCLUDED.unrest_pledge,
+                          rest_pledge = EXCLUDED.rest_pledge,
+                          total_share = EXCLUDED.total_share,
+                          pledge_ratio = EXCLUDED.pledge_ratio,
+                          available_at = EXCLUDED.available_at,
+                          raw_payload = EXCLUDED.raw_payload,
+                          source = EXCLUDED.source,
+                          data_version_id = EXCLUDED.data_version_id,
+                          updated_at = now()
+            "#,
+        )
+        .bind(&row.symbol)
+        .bind(row.end_date)
+        .bind(row.pledge_count)
+        .bind(row.unrest_pledge)
+        .bind(row.rest_pledge)
+        .bind(row.total_share)
+        .bind(row.pledge_ratio)
+        .bind(row.available_at)
+        .bind(&row.raw_payload)
+        .bind(source)
+        .bind(task_id)
+        .execute(pool)
+        .await?;
+        saved += 1;
+    }
+    Ok(saved)
+}
+
+async fn upsert_equity_pledge_detail_rows(
+    pool: &PgPool,
+    rows: &[EquityPledgeDetailRow],
+    task_id: &str,
+    source: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut saved = 0usize;
+    for row in rows {
+        sqlx::query(
+            r#"
+            INSERT INTO market_stock_pledge_detail (
+                symbol, ann_date, holder_name, pledge_amount, pledge_start_date,
+                pledge_end_date, is_release, release_date, pledgor, holding_amount,
+                pledged_amount, p_total_ratio, h_total_ratio, is_buyback,
+                available_at, raw_payload, source, data_version_id, source_row_hash
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            ON CONFLICT (symbol, ann_date, source_row_hash)
+            DO UPDATE SET pledge_end_date = EXCLUDED.pledge_end_date,
+                          is_release = EXCLUDED.is_release,
+                          release_date = EXCLUDED.release_date,
+                          holding_amount = EXCLUDED.holding_amount,
+                          pledged_amount = EXCLUDED.pledged_amount,
+                          p_total_ratio = EXCLUDED.p_total_ratio,
+                          h_total_ratio = EXCLUDED.h_total_ratio,
+                          is_buyback = EXCLUDED.is_buyback,
+                          available_at = EXCLUDED.available_at,
+                          raw_payload = EXCLUDED.raw_payload,
+                          source = EXCLUDED.source,
+                          data_version_id = EXCLUDED.data_version_id,
+                          updated_at = now()
+            "#,
+        )
+        .bind(&row.symbol)
+        .bind(row.ann_date)
+        .bind(&row.holder_name)
+        .bind(row.pledge_amount)
+        .bind(row.pledge_start_date)
+        .bind(row.pledge_end_date)
+        .bind(&row.is_release)
+        .bind(row.release_date)
+        .bind(&row.pledgor)
+        .bind(row.holding_amount)
+        .bind(row.pledged_amount)
+        .bind(row.p_total_ratio)
+        .bind(row.h_total_ratio)
+        .bind(&row.is_buyback)
+        .bind(row.available_at)
+        .bind(&row.raw_payload)
+        .bind(source)
+        .bind(task_id)
+        .bind(&row.source_row_hash)
+        .execute(pool)
+        .await?;
+        saved += 1;
+    }
+    Ok(saved)
+}
+
+async fn equity_pledge_stat_dates(
+    pool: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<NaiveDate>, Box<dyn std::error::Error>> {
+    let dates: Vec<NaiveDate> = sqlx::query_scalar(
+        r#"
+        SELECT trade_date
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open
+          AND trade_date BETWEEN $1 AND $2
+        ORDER BY trade_date
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
+
+    if !dates.is_empty() {
+        return Ok(dates);
+    }
+
+    let mut fallback = Vec::new();
+    let mut current = start;
+    while current <= end {
+        fallback.push(current);
+        current += Duration::days(1);
+    }
+    Ok(fallback)
+}
+
+async fn fetch_equity_pledge_detail_rows(
+    client: &TushareClient,
+    symbol: Option<&str>,
+    target_label: &str,
+    window_start: NaiveDate,
+    window_end: NaiveDate,
+    call_timeout: StdDuration,
+    page_limit: usize,
+) -> Result<Vec<EquityPledgeDetailRow>, String> {
+    let start_date = window_start.format("%Y%m%d").to_string();
+    let end_date = window_end.format("%Y%m%d").to_string();
+    let mut offset = 0usize;
+    let mut rows = Vec::new();
+    loop {
+        let resp = bounded_tushare_symbol_call(
+            "equity_pledge_pressure/pledge_detail",
+            target_label,
+            call_timeout,
+            client.pledge_detail(
+                symbol,
+                None,
+                Some(&start_date),
+                Some(&end_date),
+                Some(page_limit),
+                Some(offset),
+            ),
+        )
+        .await?;
+        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+        let row_count = maps.len();
+        rows.extend(
+            maps.iter()
+                .filter_map(equity_pledge_detail_row_from_map)
+                .filter(|row| date_in_range(row.ann_date, window_start, window_end)),
+        );
+        if row_count < page_limit {
+            break;
+        }
+        offset += page_limit;
+    }
+    Ok(rows)
+}
+
+pub async fn sync_equity_pledge_pressure(
+    pool: &PgPool,
+    client: &TushareClient,
+    task_id: &str,
+    symbols: &[String],
+    start: &str,
+    end: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    if s > e {
+        return Err("equity_pledge_pressure start_date cannot be after end_date".into());
+    }
+
+    repository::create_sync_task_with_context(
+        pool,
+        task_id,
+        "equity_pledge_pressure",
+        "tushare:equity_pledge_pressure",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        task_id,
+        "equity pledge pressure raw PIT sync",
+        "tushare:equity_pledge_pressure",
+        &["market_stock_pledge_stat", "market_stock_pledge_detail"],
+        s,
+        e,
+    )
+    .await?;
+
+    const PAGE_LIMIT: usize = 5_000;
+    let call_timeout = tushare_symbol_call_timeout();
+    let stat_dates = if symbols.is_empty() {
+        equity_pledge_stat_dates(pool, s, e).await?
+    } else {
+        Vec::new()
+    };
+    let detail_windows = quarters_in_range(s, e);
+    let total_units = if symbols.is_empty() {
+        stat_dates.len() + detail_windows.len()
+    } else {
+        symbols.len() + symbols.len() * detail_windows.len()
+    };
+    let progress_interval = event_sync_progress_interval(total_units, 20);
+    repository::heartbeat_sync_task(pool, task_id, total_units as i32, 0, 0, 0).await?;
+
+    let mut total_rows = 0usize;
+    let mut completed_units = 0usize;
+    let mut failed_units = 0usize;
+
+    if symbols.is_empty() {
+        for end_date in stat_dates {
+            let end_date_str = end_date.format("%Y%m%d").to_string();
+            let mut offset = 0usize;
+            let mut rows = Vec::new();
+            loop {
+                let resp = bounded_tushare_symbol_call(
+                    "equity_pledge_pressure/pledge_stat",
+                    &end_date_str,
+                    call_timeout,
+                    client.pledge_stat(None, Some(&end_date_str), Some(PAGE_LIMIT), Some(offset)),
+                )
+                .await;
+                match resp {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        rows.extend(
+                            maps.iter()
+                                .filter_map(equity_pledge_stat_row_from_map)
+                                .filter(|row| date_in_range(row.end_date, s, e)),
+                        );
+                        if row_count < PAGE_LIMIT {
+                            break;
+                        }
+                        offset += PAGE_LIMIT;
+                    }
+                    Err(message) => {
+                        failed_units += 1;
+                        repository::upsert_sync_attempt(
+                            pool,
+                            "equity_pledge_stat_end_date",
+                            &end_date_str,
+                            end_date,
+                            end_date,
+                            task_id,
+                            "failed",
+                            rows.len() as i64,
+                            Some(message.as_str()),
+                        )
+                        .await?;
+                        repository::update_sync_task_with_error(
+                            pool,
+                            task_id,
+                            "partial",
+                            total_units as i32,
+                            completed_units as i32,
+                            failed_units as i32,
+                            &message,
+                        )
+                        .await?;
+                        return Err(format!(
+                            "equity_pledge_pressure pledge_stat {} failed: {}",
+                            end_date_str, message
+                        )
+                        .into());
+                    }
+                }
+            }
+            let saved =
+                upsert_equity_pledge_stat_rows(pool, &rows, task_id, "tushare:pledge_stat").await?;
+            total_rows += saved;
+            completed_units += 1;
+            repository::upsert_sync_attempt(
+                pool,
+                "equity_pledge_stat_end_date",
+                &end_date_str,
+                end_date,
+                end_date,
+                task_id,
+                "completed",
+                saved as i64,
+                None,
+            )
+            .await?;
+            if completed_units % progress_interval == 0 || completed_units == total_units {
+                let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
+                repository::heartbeat_sync_task(
+                    pool,
+                    task_id,
+                    total_units as i32,
+                    completed_units as i32,
+                    failed_units as i32,
+                    progress,
+                )
+                .await?;
+            }
+        }
+    } else {
+        for symbol in symbols {
+            let mut offset = 0usize;
+            let mut rows = Vec::new();
+            loop {
+                let resp = bounded_tushare_symbol_call(
+                    "equity_pledge_pressure/pledge_stat",
+                    symbol,
+                    call_timeout,
+                    client.pledge_stat(Some(symbol), None, Some(PAGE_LIMIT), Some(offset)),
+                )
+                .await;
+                match resp {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        rows.extend(
+                            maps.iter()
+                                .filter_map(equity_pledge_stat_row_from_map)
+                                .filter(|row| date_in_range(row.end_date, s, e)),
+                        );
+                        if row_count < PAGE_LIMIT {
+                            break;
+                        }
+                        offset += PAGE_LIMIT;
+                    }
+                    Err(message) => {
+                        failed_units += 1;
+                        repository::upsert_sync_attempt(
+                            pool,
+                            "equity_pledge_stat_symbol",
+                            symbol,
+                            s,
+                            e,
+                            task_id,
+                            "failed",
+                            rows.len() as i64,
+                            Some(message.as_str()),
+                        )
+                        .await?;
+                        repository::update_sync_task_with_error(
+                            pool,
+                            task_id,
+                            "partial",
+                            total_units as i32,
+                            completed_units as i32,
+                            failed_units as i32,
+                            &message,
+                        )
+                        .await?;
+                        return Err(format!(
+                            "equity_pledge_pressure pledge_stat {} failed: {}",
+                            symbol, message
+                        )
+                        .into());
+                    }
+                }
+            }
+            let saved =
+                upsert_equity_pledge_stat_rows(pool, &rows, task_id, "tushare:pledge_stat").await?;
+            total_rows += saved;
+            completed_units += 1;
+            repository::upsert_sync_attempt(
+                pool,
+                "equity_pledge_stat_symbol",
+                symbol,
+                s,
+                e,
+                task_id,
+                "completed",
+                saved as i64,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    let detail_scopes: Vec<Option<&str>> = if symbols.is_empty() {
+        vec![None]
+    } else {
+        symbols.iter().map(|symbol| Some(symbol.as_str())).collect()
+    };
+    for symbol in detail_scopes {
+        let attempt_key = symbol.unwrap_or("all");
+        for (window_start, window_end) in &detail_windows {
+            let start_date = window_start.format("%Y%m%d").to_string();
+            let end_date = window_end.format("%Y%m%d").to_string();
+            let target_label = format!("{}:{}-{}", attempt_key, start_date, end_date);
+            let rows = match fetch_equity_pledge_detail_rows(
+                client,
+                symbol,
+                &target_label,
+                *window_start,
+                *window_end,
+                call_timeout,
+                PAGE_LIMIT,
+            )
+            .await
+            {
+                Ok(rows) => rows,
+                Err(message) if message.contains("timed out") && window_start < window_end => {
+                    let mut fallback_rows = Vec::new();
+                    for (month_start, month_end) in months_in_range(*window_start, *window_end) {
+                        let month_label = format!(
+                            "{}:{}-{}",
+                            attempt_key,
+                            month_start.format("%Y%m%d"),
+                            month_end.format("%Y%m%d")
+                        );
+                        let month_result = fetch_equity_pledge_detail_rows(
+                            client,
+                            symbol,
+                            &month_label,
+                            month_start,
+                            month_end,
+                            call_timeout,
+                            PAGE_LIMIT,
+                        )
+                        .await;
+                        match month_result {
+                            Ok(mut month_rows) => fallback_rows.append(&mut month_rows),
+                            Err(month_message) => {
+                                let combined_message = format!(
+                                    "{}; monthly fallback {} failed: {}",
+                                    message, month_label, month_message
+                                );
+                                failed_units += 1;
+                                repository::upsert_sync_attempt(
+                                    pool,
+                                    "equity_pledge_detail_ann_date",
+                                    attempt_key,
+                                    *window_start,
+                                    *window_end,
+                                    task_id,
+                                    "failed",
+                                    fallback_rows.len() as i64,
+                                    Some(combined_message.as_str()),
+                                )
+                                .await?;
+                                repository::update_sync_task_with_error(
+                                    pool,
+                                    task_id,
+                                    "partial",
+                                    total_units as i32,
+                                    completed_units as i32,
+                                    failed_units as i32,
+                                    &combined_message,
+                                )
+                                .await?;
+                                return Err(format!(
+                                    "equity_pledge_pressure pledge_detail {} failed: {}",
+                                    target_label, combined_message
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                    fallback_rows
+                }
+                Err(message) => {
+                    failed_units += 1;
+                    repository::upsert_sync_attempt(
+                        pool,
+                        "equity_pledge_detail_ann_date",
+                        attempt_key,
+                        *window_start,
+                        *window_end,
+                        task_id,
+                        "failed",
+                        0,
+                        Some(message.as_str()),
+                    )
+                    .await?;
+                    repository::update_sync_task_with_error(
+                        pool,
+                        task_id,
+                        "partial",
+                        total_units as i32,
+                        completed_units as i32,
+                        failed_units as i32,
+                        &message,
+                    )
+                    .await?;
+                    return Err(format!(
+                        "equity_pledge_pressure pledge_detail {} failed: {}",
+                        target_label, message
+                    )
+                    .into());
+                }
+            };
+            let saved =
+                upsert_equity_pledge_detail_rows(pool, &rows, task_id, "tushare:pledge_detail")
+                    .await?;
+            total_rows += saved;
+            completed_units += 1;
+            repository::upsert_sync_attempt(
+                pool,
+                "equity_pledge_detail_ann_date",
+                attempt_key,
+                *window_start,
+                *window_end,
+                task_id,
+                "completed",
+                saved as i64,
+                None,
+            )
+            .await?;
+            let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
+            repository::heartbeat_sync_task(
+                pool,
+                task_id,
+                total_units as i32,
+                completed_units as i32,
+                failed_units as i32,
+                progress,
+            )
+            .await?;
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        task_id,
+        if failed_units > 0 {
+            "partial"
+        } else {
+            "completed"
+        },
+        total_units as i32,
+        completed_units as i32,
+        failed_units as i32,
+    )
+    .await?;
+    info!(
+        total_rows,
+        completed_units, failed_units, "equity_pledge_pressure 同步完成"
+    );
+    Ok(total_rows)
+}
+
+// ─── sync_shareholder_structure ─────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct ShareholderHolderNumberRow {
+    symbol: String,
+    ann_date: NaiveDate,
+    end_date: NaiveDate,
+    holder_num: Option<i64>,
+    available_at: NaiveDate,
+    raw_payload: Value,
+    source_row_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct ShareholderTop10HolderRow {
+    symbol: String,
+    ann_date: NaiveDate,
+    end_date: NaiveDate,
+    holder_name: String,
+    hold_amount: Option<Decimal>,
+    hold_ratio: Option<Decimal>,
+    hold_float_ratio: Option<Decimal>,
+    hold_change: Option<Decimal>,
+    holder_type: Option<String>,
+    available_at: NaiveDate,
+    raw_payload: Value,
+    source_row_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct ShareholderHolderTradeRow {
+    symbol: String,
+    ann_date: NaiveDate,
+    holder_name: String,
+    holder_type: Option<String>,
+    in_de: Option<String>,
+    change_vol: Option<Decimal>,
+    change_ratio: Option<Decimal>,
+    after_share: Option<Decimal>,
+    after_ratio: Option<Decimal>,
+    avg_price: Option<Decimal>,
+    total_share: Option<Decimal>,
+    begin_date: Option<NaiveDate>,
+    close_date: Option<NaiveDate>,
+    available_at: NaiveDate,
+    raw_payload: Value,
+    source_row_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct ShareholderStructureSourceFilterFlags {
+    holder_number: bool,
+    holder_trade: bool,
+    top10_holders: bool,
+    top10_float_holders: bool,
+}
+
+fn shareholder_structure_source_filter_flags(
+    source_filters: &[String],
+) -> Result<ShareholderStructureSourceFilterFlags, String> {
+    if source_filters.is_empty() {
+        return Ok(ShareholderStructureSourceFilterFlags {
+            holder_number: true,
+            holder_trade: true,
+            top10_holders: true,
+            top10_float_holders: true,
+        });
+    }
+
+    let mut flags = ShareholderStructureSourceFilterFlags {
+        holder_number: false,
+        holder_trade: false,
+        top10_holders: false,
+        top10_float_holders: false,
+    };
+    for source in source_filters {
+        match source.trim().to_ascii_lowercase().as_str() {
+            "holder_number" | "stk_holdernumber" | "shareholder_holder_number_ann_date" => {
+                flags.holder_number = true;
+            }
+            "holder_trade" | "stk_holdertrade" | "shareholder_holder_trade_ann_date" => {
+                flags.holder_trade = true;
+            }
+            "top10_holders" | "shareholder_top10_holders_ann_date" => {
+                flags.top10_holders = true;
+            }
+            "top10_float_holders"
+            | "top10_floatholders"
+            | "shareholder_top10_float_holders_ann_date" => {
+                flags.top10_float_holders = true;
+            }
+            other => {
+                return Err(format!(
+                    "unsupported shareholder_structure source_filter: {other}"
+                ));
+            }
+        }
+    }
+    Ok(flags)
+}
+
+fn shareholder_holder_number_row_from_map(
+    item: &Map<String, Value>,
+) -> Option<ShareholderHolderNumberRow> {
+    let symbol = required_text(item, "ts_code")?;
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    let source_row_hash = stable_source_row_hash(&[
+        symbol.clone(),
+        ann_date.format("%Y%m%d").to_string(),
+        end_date.format("%Y%m%d").to_string(),
+        value_key_part(item, "holder_num"),
+    ]);
+
+    Some(ShareholderHolderNumberRow {
+        symbol,
+        ann_date,
+        end_date,
+        holder_num: get_i64(item, "holder_num"),
+        available_at: ann_date,
+        raw_payload: raw_payload(item),
+        source_row_hash,
+    })
+}
+
+fn shareholder_top10_holder_row_from_map(
+    item: &Map<String, Value>,
+    _float_holder: bool,
+) -> Option<ShareholderTop10HolderRow> {
+    let symbol = required_text(item, "ts_code")?;
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let end_date = to_date(&get_str(item, "end_date"))?;
+    let holder_name = get_str(item, "holder_name");
+    let source_row_hash = stable_source_row_hash(&[
+        symbol.clone(),
+        ann_date.format("%Y%m%d").to_string(),
+        end_date.format("%Y%m%d").to_string(),
+        holder_name.clone(),
+        value_key_part(item, "hold_amount"),
+        value_key_part(item, "hold_ratio"),
+        value_key_part(item, "hold_float_ratio"),
+        value_key_part(item, "hold_change"),
+        value_key_part(item, "holder_type"),
+    ]);
+
+    Some(ShareholderTop10HolderRow {
+        symbol,
+        ann_date,
+        end_date,
+        holder_name,
+        hold_amount: to_opt_decimal(get_f64(item, "hold_amount")),
+        hold_ratio: to_opt_decimal(get_f64(item, "hold_ratio")),
+        hold_float_ratio: to_opt_decimal(get_f64(item, "hold_float_ratio")),
+        hold_change: to_opt_decimal(get_f64(item, "hold_change")),
+        holder_type: non_empty_opt_str(get_str(item, "holder_type")),
+        available_at: ann_date,
+        raw_payload: raw_payload(item),
+        source_row_hash,
+    })
+}
+
+fn shareholder_holder_trade_row_from_map(
+    item: &Map<String, Value>,
+) -> Option<ShareholderHolderTradeRow> {
+    let symbol = required_text(item, "ts_code")?;
+    let ann_date = to_date(&get_str(item, "ann_date"))?;
+    let holder_name = get_str(item, "holder_name");
+    let source_row_hash = stable_source_row_hash(&[
+        symbol.clone(),
+        ann_date.format("%Y%m%d").to_string(),
+        holder_name.clone(),
+        value_key_part(item, "holder_type"),
+        value_key_part(item, "in_de"),
+        value_key_part(item, "change_vol"),
+        value_key_part(item, "change_ratio"),
+        value_key_part(item, "after_share"),
+        value_key_part(item, "after_ratio"),
+        value_key_part(item, "avg_price"),
+        value_key_part(item, "total_share"),
+        value_key_part(item, "begin_date"),
+        value_key_part(item, "close_date"),
+    ]);
+
+    Some(ShareholderHolderTradeRow {
+        symbol,
+        ann_date,
+        holder_name,
+        holder_type: non_empty_opt_str(get_str(item, "holder_type")),
+        in_de: non_empty_opt_str(get_str(item, "in_de")),
+        change_vol: to_opt_decimal(get_f64(item, "change_vol")),
+        change_ratio: to_opt_decimal(get_f64(item, "change_ratio")),
+        after_share: to_opt_decimal(get_f64(item, "after_share")),
+        after_ratio: to_opt_decimal(get_f64(item, "after_ratio")),
+        avg_price: to_opt_decimal(get_f64(item, "avg_price")),
+        total_share: to_opt_decimal(get_f64(item, "total_share")),
+        begin_date: to_date(&get_str(item, "begin_date")),
+        close_date: to_date(&get_str(item, "close_date")),
+        available_at: ann_date,
+        raw_payload: raw_payload(item),
+        source_row_hash,
+    })
+}
+
+async fn upsert_shareholder_holder_number_rows(
+    pool: &PgPool,
+    rows: &[ShareholderHolderNumberRow],
+    task_id: &str,
+    source: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut saved = 0usize;
+    for row in rows {
+        sqlx::query(
+            r#"
+            INSERT INTO market_stock_holder_number (
+                symbol, ann_date, end_date, holder_num, available_at,
+                raw_payload, source, data_version_id, source_row_hash
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (symbol, ann_date, end_date)
+            DO UPDATE SET holder_num = EXCLUDED.holder_num,
+                          available_at = EXCLUDED.available_at,
+                          raw_payload = EXCLUDED.raw_payload,
+                          source = EXCLUDED.source,
+                          data_version_id = EXCLUDED.data_version_id,
+                          source_row_hash = EXCLUDED.source_row_hash,
+                          updated_at = now()
+            "#,
+        )
+        .bind(&row.symbol)
+        .bind(row.ann_date)
+        .bind(row.end_date)
+        .bind(row.holder_num)
+        .bind(row.available_at)
+        .bind(&row.raw_payload)
+        .bind(source)
+        .bind(task_id)
+        .bind(&row.source_row_hash)
+        .execute(pool)
+        .await?;
+        saved += 1;
+    }
+    Ok(saved)
+}
+
+async fn upsert_shareholder_top10_holder_rows(
+    pool: &PgPool,
+    table: &str,
+    rows: &[ShareholderTop10HolderRow],
+    task_id: &str,
+    source: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let table_name = match table {
+        "market_stock_top10_holders" => "market_stock_top10_holders",
+        "market_stock_top10_float_holders" => "market_stock_top10_float_holders",
+        _ => return Err(format!("unsupported shareholder top10 table: {table}").into()),
+    };
+    let sql = format!(
+        r#"
+        INSERT INTO {table_name} (
+            symbol, ann_date, end_date, holder_name, hold_amount, hold_ratio,
+            hold_float_ratio, hold_change, holder_type, available_at,
+            raw_payload, source, data_version_id, source_row_hash
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (symbol, ann_date, end_date, source_row_hash)
+        DO UPDATE SET holder_name = EXCLUDED.holder_name,
+                      hold_amount = EXCLUDED.hold_amount,
+                      hold_ratio = EXCLUDED.hold_ratio,
+                      hold_float_ratio = EXCLUDED.hold_float_ratio,
+                      hold_change = EXCLUDED.hold_change,
+                      holder_type = EXCLUDED.holder_type,
+                      available_at = EXCLUDED.available_at,
+                      raw_payload = EXCLUDED.raw_payload,
+                      source = EXCLUDED.source,
+                      data_version_id = EXCLUDED.data_version_id,
+                      updated_at = now()
+        "#
+    );
+
+    let mut saved = 0usize;
+    for row in rows {
+        sqlx::query(&sql)
+            .bind(&row.symbol)
+            .bind(row.ann_date)
+            .bind(row.end_date)
+            .bind(&row.holder_name)
+            .bind(row.hold_amount)
+            .bind(row.hold_ratio)
+            .bind(row.hold_float_ratio)
+            .bind(row.hold_change)
+            .bind(&row.holder_type)
+            .bind(row.available_at)
+            .bind(&row.raw_payload)
+            .bind(source)
+            .bind(task_id)
+            .bind(&row.source_row_hash)
+            .execute(pool)
+            .await?;
+        saved += 1;
+    }
+    Ok(saved)
+}
+
+async fn upsert_shareholder_holder_trade_rows(
+    pool: &PgPool,
+    rows: &[ShareholderHolderTradeRow],
+    task_id: &str,
+    source: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut saved = 0usize;
+    for row in rows {
+        sqlx::query(
+            r#"
+            INSERT INTO market_stock_holder_trade (
+                symbol, ann_date, holder_name, holder_type, in_de,
+                change_vol, change_ratio, after_share, after_ratio, avg_price,
+                total_share, begin_date, close_date, available_at,
+                raw_payload, source, data_version_id, source_row_hash
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            ON CONFLICT (symbol, ann_date, source_row_hash)
+            DO UPDATE SET holder_name = EXCLUDED.holder_name,
+                          holder_type = EXCLUDED.holder_type,
+                          in_de = EXCLUDED.in_de,
+                          change_vol = EXCLUDED.change_vol,
+                          change_ratio = EXCLUDED.change_ratio,
+                          after_share = EXCLUDED.after_share,
+                          after_ratio = EXCLUDED.after_ratio,
+                          avg_price = EXCLUDED.avg_price,
+                          total_share = EXCLUDED.total_share,
+                          begin_date = EXCLUDED.begin_date,
+                          close_date = EXCLUDED.close_date,
+                          available_at = EXCLUDED.available_at,
+                          raw_payload = EXCLUDED.raw_payload,
+                          source = EXCLUDED.source,
+                          data_version_id = EXCLUDED.data_version_id,
+                          updated_at = now()
+            "#,
+        )
+        .bind(&row.symbol)
+        .bind(row.ann_date)
+        .bind(&row.holder_name)
+        .bind(&row.holder_type)
+        .bind(&row.in_de)
+        .bind(row.change_vol)
+        .bind(row.change_ratio)
+        .bind(row.after_share)
+        .bind(row.after_ratio)
+        .bind(row.avg_price)
+        .bind(row.total_share)
+        .bind(row.begin_date)
+        .bind(row.close_date)
+        .bind(row.available_at)
+        .bind(&row.raw_payload)
+        .bind(source)
+        .bind(task_id)
+        .bind(&row.source_row_hash)
+        .execute(pool)
+        .await?;
+        saved += 1;
+    }
+    Ok(saved)
+}
+
+async fn load_shareholder_structure_symbols(
+    pool: &PgPool,
+    symbols: &[String],
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    if !symbols.is_empty() {
+        return Ok(symbols.to_vec());
+    }
+
+    let rows = sqlx::query_as::<_, (String,)>(
+        r#"
+        SELECT symbol
+        FROM market_stock
+        WHERE symbol ~ '^[036][0-9]{5}\.(SH|SZ)$'
+          AND list_date IS NOT NULL
+          AND list_date <= $1
+          AND (delist_date IS NULL OR delist_date >= $2)
+        ORDER BY symbol
+        "#,
+    )
+    .bind(end)
+    .bind(start)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(symbol,)| symbol).collect())
+}
+
+async fn fetch_shareholder_holder_number_rows(
+    client: &TushareClient,
+    window_start: NaiveDate,
+    window_end: NaiveDate,
+    call_timeout: StdDuration,
+    page_limit: usize,
+) -> Result<Vec<ShareholderHolderNumberRow>, String> {
+    let start_date = window_start.format("%Y%m%d").to_string();
+    let end_date = window_end.format("%Y%m%d").to_string();
+    let label = format!("{}-{}", start_date, end_date);
+    let mut offset = 0usize;
+    let mut rows = Vec::new();
+    loop {
+        let resp = bounded_tushare_symbol_call(
+            "shareholder_structure/stk_holdernumber",
+            &label,
+            call_timeout,
+            client.stk_holdernumber(
+                None,
+                None,
+                Some(&start_date),
+                Some(&end_date),
+                Some(page_limit),
+                Some(offset),
+            ),
+        )
+        .await?;
+        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+        let row_count = maps.len();
+        rows.extend(
+            maps.iter()
+                .filter_map(shareholder_holder_number_row_from_map)
+                .filter(|row| date_in_range(row.ann_date, window_start, window_end)),
+        );
+        if row_count < page_limit {
+            break;
+        }
+        offset += page_limit;
+    }
+    Ok(rows)
+}
+
+async fn fetch_shareholder_top10_holder_rows(
+    client: &TushareClient,
+    symbol: &str,
+    window_start: NaiveDate,
+    window_end: NaiveDate,
+    float_holder: bool,
+    call_timeout: StdDuration,
+    page_limit: usize,
+) -> Result<Vec<ShareholderTop10HolderRow>, String> {
+    let start_date = window_start.format("%Y%m%d").to_string();
+    let end_date = window_end.format("%Y%m%d").to_string();
+    let source = if float_holder {
+        "shareholder_structure/top10_floatholders"
+    } else {
+        "shareholder_structure/top10_holders"
+    };
+    let label = format!("{}:{}-{}", symbol, start_date, end_date);
+    let mut offset = 0usize;
+    let mut rows = Vec::new();
+    loop {
+        let resp = if float_holder {
+            bounded_tushare_symbol_call(
+                source,
+                &label,
+                call_timeout,
+                client.top10_floatholders(
+                    Some(symbol),
+                    None,
+                    Some(&start_date),
+                    Some(&end_date),
+                    Some(page_limit),
+                    Some(offset),
+                ),
+            )
+            .await?
+        } else {
+            bounded_tushare_symbol_call(
+                source,
+                &label,
+                call_timeout,
+                client.top10_holders(
+                    Some(symbol),
+                    None,
+                    Some(&start_date),
+                    Some(&end_date),
+                    Some(page_limit),
+                    Some(offset),
+                ),
+            )
+            .await?
+        };
+        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+        let row_count = maps.len();
+        rows.extend(
+            maps.iter()
+                .filter_map(|item| shareholder_top10_holder_row_from_map(item, float_holder))
+                .filter(|row| date_in_range(row.ann_date, window_start, window_end)),
+        );
+        if row_count < page_limit {
+            break;
+        }
+        offset += page_limit;
+    }
+    Ok(rows)
+}
+
+async fn fetch_shareholder_holder_trade_rows(
+    client: &TushareClient,
+    window_start: NaiveDate,
+    window_end: NaiveDate,
+    call_timeout: StdDuration,
+    page_limit: usize,
+) -> Result<Vec<ShareholderHolderTradeRow>, String> {
+    let start_date = window_start.format("%Y%m%d").to_string();
+    let end_date = window_end.format("%Y%m%d").to_string();
+    let label = format!("{}-{}", start_date, end_date);
+    let mut offset = 0usize;
+    let mut rows = Vec::new();
+    loop {
+        let resp = bounded_tushare_symbol_call(
+            "shareholder_structure/stk_holdertrade",
+            &label,
+            call_timeout,
+            client.stk_holdertrade(
+                None,
+                None,
+                Some(&start_date),
+                Some(&end_date),
+                Some(page_limit),
+                Some(offset),
+            ),
+        )
+        .await?;
+        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+        let row_count = maps.len();
+        rows.extend(
+            maps.iter()
+                .filter_map(shareholder_holder_trade_row_from_map)
+                .filter(|row| date_in_range(row.ann_date, window_start, window_end)),
+        );
+        if row_count < page_limit {
+            break;
+        }
+        offset += page_limit;
+    }
+    Ok(rows)
+}
+
+pub async fn sync_shareholder_structure(
+    pool: &PgPool,
+    client: &TushareClient,
+    task_id: &str,
+    symbols: &[String],
+    source_filters: &[String],
+    start: &str,
+    end: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d")?;
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d")?;
+    if s > e {
+        return Err("shareholder_structure start_date cannot be after end_date".into());
+    }
+
+    let source_flags = shareholder_structure_source_filter_flags(source_filters)?;
+    let needs_symbol_sources = source_flags.top10_holders || source_flags.top10_float_holders;
+    let sync_symbols = if needs_symbol_sources {
+        load_shareholder_structure_symbols(pool, symbols, s, e).await?
+    } else {
+        Vec::new()
+    };
+    let windows = quarters_in_range(s, e);
+    repository::create_sync_task_with_context(
+        pool,
+        task_id,
+        "shareholder_structure",
+        "tushare:shareholder_structure",
+        if symbols.is_empty() {
+            None
+        } else {
+            Some(symbols)
+        },
+        Some(s),
+        Some(e),
+        "running",
+        None,
+    )
+    .await?;
+    repository::create_data_version(
+        pool,
+        task_id,
+        "shareholder structure raw PIT sync",
+        "tushare:shareholder_structure",
+        &[
+            "market_stock_holder_number",
+            "market_stock_top10_holders",
+            "market_stock_top10_float_holders",
+            "market_stock_holder_trade",
+        ],
+        s,
+        e,
+    )
+    .await?;
+
+    const PAGE_LIMIT: usize = 5_000;
+    let call_timeout = tushare_symbol_call_timeout();
+    let global_units_per_window =
+        usize::from(source_flags.holder_number) + usize::from(source_flags.holder_trade);
+    let symbol_units_per_window =
+        usize::from(source_flags.top10_holders) + usize::from(source_flags.top10_float_holders);
+    let total_units = windows.len() * global_units_per_window
+        + sync_symbols.len() * windows.len() * symbol_units_per_window;
+    if total_units == 0 {
+        return Err("shareholder_structure source_filters selected no sync sources".into());
+    }
+    let progress_interval = event_sync_progress_interval(total_units, 20);
+    repository::heartbeat_sync_task(pool, task_id, total_units as i32, 0, 0, 0).await?;
+
+    let mut total_rows = 0usize;
+    let mut completed_units = 0usize;
+    let mut failed_units = 0usize;
+
+    for (window_start, window_end) in &windows {
+        if source_flags.holder_number {
+            let rows = match fetch_shareholder_holder_number_rows(
+                client,
+                *window_start,
+                *window_end,
+                call_timeout,
+                PAGE_LIMIT,
+            )
+            .await
+            {
+                Ok(rows) => rows,
+                Err(message) => {
+                    failed_units += 1;
+                    repository::upsert_sync_attempt(
+                        pool,
+                        "shareholder_holder_number_ann_date",
+                        "__ALL__",
+                        *window_start,
+                        *window_end,
+                        task_id,
+                        "failed",
+                        0,
+                        Some(message.as_str()),
+                    )
+                    .await?;
+                    repository::update_sync_task_with_error(
+                        pool,
+                        task_id,
+                        "partial",
+                        total_units as i32,
+                        completed_units as i32,
+                        failed_units as i32,
+                        &message,
+                    )
+                    .await?;
+                    return Err(
+                        format!("shareholder_structure holder_number failed: {message}").into(),
+                    );
+                }
+            };
+            let saved = upsert_shareholder_holder_number_rows(
+                pool,
+                &rows,
+                task_id,
+                "tushare:stk_holdernumber",
+            )
+            .await?;
+            total_rows += saved;
+            completed_units += 1;
+            repository::upsert_sync_attempt(
+                pool,
+                "shareholder_holder_number_ann_date",
+                "__ALL__",
+                *window_start,
+                *window_end,
+                task_id,
+                "completed",
+                saved as i64,
+                None,
+            )
+            .await?;
+        }
+
+        if source_flags.holder_trade {
+            let rows = match fetch_shareholder_holder_trade_rows(
+                client,
+                *window_start,
+                *window_end,
+                call_timeout,
+                PAGE_LIMIT,
+            )
+            .await
+            {
+                Ok(rows) => rows,
+                Err(message) => {
+                    failed_units += 1;
+                    repository::upsert_sync_attempt(
+                        pool,
+                        "shareholder_holder_trade_ann_date",
+                        "__ALL__",
+                        *window_start,
+                        *window_end,
+                        task_id,
+                        "failed",
+                        0,
+                        Some(message.as_str()),
+                    )
+                    .await?;
+                    repository::update_sync_task_with_error(
+                        pool,
+                        task_id,
+                        "partial",
+                        total_units as i32,
+                        completed_units as i32,
+                        failed_units as i32,
+                        &message,
+                    )
+                    .await?;
+                    return Err(
+                        format!("shareholder_structure holder_trade failed: {message}").into(),
+                    );
+                }
+            };
+            let saved = upsert_shareholder_holder_trade_rows(
+                pool,
+                &rows,
+                task_id,
+                "tushare:stk_holdertrade",
+            )
+            .await?;
+            total_rows += saved;
+            completed_units += 1;
+            repository::upsert_sync_attempt(
+                pool,
+                "shareholder_holder_trade_ann_date",
+                "__ALL__",
+                *window_start,
+                *window_end,
+                task_id,
+                "completed",
+                saved as i64,
+                None,
+            )
+            .await?;
+        }
+
+        if completed_units % progress_interval == 0 || completed_units == total_units {
+            let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
+            repository::heartbeat_sync_task(
+                pool,
+                task_id,
+                total_units as i32,
+                completed_units as i32,
+                failed_units as i32,
+                progress,
+            )
+            .await?;
+        }
+    }
+
+    for symbol in &sync_symbols {
+        for (window_start, window_end) in &windows {
+            for (float_holder, table, attempt_source, source_name) in [
+                (
+                    false,
+                    "market_stock_top10_holders",
+                    "shareholder_top10_holders_ann_date",
+                    "tushare:top10_holders",
+                ),
+                (
+                    true,
+                    "market_stock_top10_float_holders",
+                    "shareholder_top10_float_holders_ann_date",
+                    "tushare:top10_floatholders",
+                ),
+            ] {
+                if (!float_holder && !source_flags.top10_holders)
+                    || (float_holder && !source_flags.top10_float_holders)
+                {
+                    continue;
+                }
+                let rows = match fetch_shareholder_top10_holder_rows(
+                    client,
+                    symbol,
+                    *window_start,
+                    *window_end,
+                    float_holder,
+                    call_timeout,
+                    PAGE_LIMIT,
+                )
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(message) => {
+                        failed_units += 1;
+                        repository::upsert_sync_attempt(
+                            pool,
+                            attempt_source,
+                            symbol,
+                            *window_start,
+                            *window_end,
+                            task_id,
+                            "failed",
+                            0,
+                            Some(message.as_str()),
+                        )
+                        .await?;
+                        repository::update_sync_task_with_error(
+                            pool,
+                            task_id,
+                            "partial",
+                            total_units as i32,
+                            completed_units as i32,
+                            failed_units as i32,
+                            &message,
+                        )
+                        .await?;
+                        return Err(format!(
+                            "shareholder_structure {} {} failed: {}",
+                            attempt_source, symbol, message
+                        )
+                        .into());
+                    }
+                };
+                let saved =
+                    upsert_shareholder_top10_holder_rows(pool, table, &rows, task_id, source_name)
+                        .await?;
+                total_rows += saved;
+                completed_units += 1;
+                repository::upsert_sync_attempt(
+                    pool,
+                    attempt_source,
+                    symbol,
+                    *window_start,
+                    *window_end,
+                    task_id,
+                    "completed",
+                    saved as i64,
+                    None,
+                )
+                .await?;
+
+                if completed_units % progress_interval == 0 || completed_units == total_units {
+                    let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
+                    repository::heartbeat_sync_task(
+                        pool,
+                        task_id,
+                        total_units as i32,
+                        completed_units as i32,
+                        failed_units as i32,
+                        progress,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+
+    repository::update_sync_task(
+        pool,
+        task_id,
+        if failed_units > 0 {
+            "partial"
+        } else {
+            "completed"
+        },
+        total_units as i32,
+        completed_units as i32,
+        failed_units as i32,
+    )
+    .await?;
+    info!(
+        total_rows,
+        completed_units, failed_units, "shareholder_structure 同步完成"
+    );
+    Ok(total_rows)
 }
 
 // ─── sync_trade_calendar ─────────────────────────────────────────
@@ -3513,34 +5082,94 @@ fn futures_holding_rank_row_from_map(
     })
 }
 
-fn futures_price_chain_dates(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+fn futures_price_chain_trade_dates(
+    start: NaiveDate,
+    end: NaiveDate,
+    open_dates: Vec<NaiveDate>,
+) -> Result<Vec<NaiveDate>, String> {
     if start > end {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let mut dates = Vec::new();
-    let mut current = start;
-    while current <= end {
-        dates.push(current);
-        current += Duration::days(1);
+
+    let dates: Vec<_> = open_dates
+        .into_iter()
+        .filter(|date| *date >= start && *date <= end)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if dates.is_empty() {
+        return Err(format!(
+            "futures_price_chain requires market_trade_calendar open dates between {} and {}; sync trade_calendar before futures_price_chain raw sync",
+            start.format("%Y%m%d"),
+            end.format("%Y%m%d")
+        ));
     }
-    dates
+
+    Ok(dates)
+}
+
+fn futures_price_chain_trade_dates_sql() -> &'static str {
+    "WITH futures_calendar AS (
+         SELECT DISTINCT trade_date
+         FROM market_trade_calendar
+         WHERE is_open = true
+           AND exchange IN ('SHFE', 'DCE', 'CZCE', 'CFFEX', 'INE')
+           AND trade_date >= $1 AND trade_date <= $2
+     ),
+     fallback_calendar AS (
+         SELECT DISTINCT trade_date
+         FROM market_trade_calendar
+         WHERE is_open = true
+           AND trade_date >= $1 AND trade_date <= $2
+     )
+     SELECT trade_date
+     FROM futures_calendar
+     UNION
+     SELECT trade_date
+     FROM fallback_calendar
+     WHERE NOT EXISTS (SELECT 1 FROM futures_calendar)
+     ORDER BY trade_date"
+}
+
+async fn load_futures_price_chain_trade_dates(
+    pool: &PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<NaiveDate>, Box<dyn std::error::Error>> {
+    let open_dates: Vec<NaiveDate> = sqlx::query_scalar(futures_price_chain_trade_dates_sql())
+        .bind(start)
+        .bind(end)
+        .fetch_all(pool)
+        .await?;
+
+    futures_price_chain_trade_dates(start, end, open_dates)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message).into())
 }
 
 fn futures_price_chain_attempt_key(
-    trade_date: NaiveDate,
+    _trade_date: NaiveDate,
     symbol: Option<&str>,
     exchange: Option<&str>,
 ) -> String {
-    let mut key = format!("trade_date:{}", trade_date.format("%Y%m%d"));
-    if let Some(value) = symbol.filter(|value| !value.trim().is_empty()) {
-        key.push_str(":symbol:");
-        key.push_str(value.trim());
+    let symbol = symbol
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let exchange = exchange
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let key = match (symbol, exchange) {
+        (None, None) => "__ALL__".to_string(),
+        (Some(symbol), None) => symbol,
+        (None, Some(exchange)) => format!("EX:{exchange}"),
+        (Some(symbol), Some(exchange)) => format!("{symbol}@{exchange}"),
+    };
+    if key.len() <= 20 {
+        key
+    } else {
+        format!("fpc-{}", stable_source_row_hash(&[key]))
     }
-    if let Some(value) = exchange.filter(|value| !value.trim().is_empty()) {
-        key.push_str(":exchange:");
-        key.push_str(value.trim());
-    }
-    key
 }
 
 pub async fn sync_futures_price_chain(
@@ -3557,12 +5186,12 @@ pub async fn sync_futures_price_chain(
     if s > e {
         return Err("futures_price_chain start_date cannot be after end_date".into());
     }
-    let dates = futures_price_chain_dates(s, e);
+    let dates = load_futures_price_chain_trade_dates(pool, s, e).await?;
     repository::create_sync_task_with_context(
         pool,
         task_id,
         "futures_price_chain",
-        "tushare:fut_daily+fut_wsr+fut_holding",
+        "tushare:futures_price_chain",
         if symbols.is_empty() {
             None
         } else {
@@ -3604,6 +5233,7 @@ pub async fn sync_futures_price_chain(
     repository::heartbeat_sync_task(pool, task_id, total_units as i32, 0, 0, 0).await?;
 
     const PAGE_LIMIT: usize = 5_000;
+    let call_timeout = tushare_symbol_call_timeout();
     let mut completed_units = 0usize;
     let mut failed_units = 0usize;
     let mut total_rows = 0usize;
@@ -3618,8 +5248,11 @@ pub async fn sync_futures_price_chain(
                 let mut daily_rows = Vec::new();
                 let mut daily_offset = 0usize;
                 loop {
-                    let resp = client
-                        .fut_daily(
+                    let resp = bounded_tushare_symbol_call(
+                        "futures_price_chain/fut_daily",
+                        &attempt_key,
+                        call_timeout,
+                        client.fut_daily(
                             *symbol_filter,
                             Some(&trade_date_str),
                             *exchange_filter,
@@ -3627,8 +5260,9 @@ pub async fn sync_futures_price_chain(
                             None,
                             Some(PAGE_LIMIT),
                             Some(daily_offset),
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
                     match resp {
                         Ok(resp) => {
                             let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
@@ -3639,9 +5273,8 @@ pub async fn sync_futures_price_chain(
                             }
                             daily_offset += PAGE_LIMIT;
                         }
-                        Err(error) => {
+                        Err(message) => {
                             failed_units += 1;
-                            let message = error.to_string();
                             repository::upsert_sync_attempt(
                                 pool,
                                 "futures_price_chain_daily",
@@ -3697,8 +5330,11 @@ pub async fn sync_futures_price_chain(
                 let mut wsr_rows = Vec::new();
                 let mut wsr_offset = 0usize;
                 loop {
-                    let resp = client
-                        .fut_wsr(
+                    let resp = bounded_tushare_symbol_call(
+                        "futures_price_chain/fut_wsr",
+                        &attempt_key,
+                        call_timeout,
+                        client.fut_wsr(
                             Some(&trade_date_str),
                             *symbol_filter,
                             None,
@@ -3706,8 +5342,9 @@ pub async fn sync_futures_price_chain(
                             *exchange_filter,
                             Some(PAGE_LIMIT),
                             Some(wsr_offset),
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
                     match resp {
                         Ok(resp) => {
                             let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
@@ -3721,9 +5358,8 @@ pub async fn sync_futures_price_chain(
                             }
                             wsr_offset += PAGE_LIMIT;
                         }
-                        Err(error) => {
+                        Err(message) => {
                             failed_units += 1;
-                            let message = error.to_string();
                             repository::upsert_sync_attempt(
                                 pool,
                                 "futures_price_chain_wsr",
@@ -3779,8 +5415,11 @@ pub async fn sync_futures_price_chain(
                 let mut holding_rows = Vec::new();
                 let mut holding_offset = 0usize;
                 loop {
-                    let resp = client
-                        .fut_holding(
+                    let resp = bounded_tushare_symbol_call(
+                        "futures_price_chain/fut_holding",
+                        &attempt_key,
+                        call_timeout,
+                        client.fut_holding(
                             Some(&trade_date_str),
                             *symbol_filter,
                             None,
@@ -3788,8 +5427,9 @@ pub async fn sync_futures_price_chain(
                             *exchange_filter,
                             Some(PAGE_LIMIT),
                             Some(holding_offset),
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
                     match resp {
                         Ok(resp) => {
                             let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
@@ -3801,9 +5441,8 @@ pub async fn sync_futures_price_chain(
                             }
                             holding_offset += PAGE_LIMIT;
                         }
-                        Err(error) => {
+                        Err(message) => {
                             failed_units += 1;
-                            let message = error.to_string();
                             repository::upsert_sync_attempt(
                                 pool,
                                 "futures_price_chain_holding",
@@ -5430,6 +7069,32 @@ mod tests {
     }
 
     #[test]
+    fn quarters_in_range_splits_by_calendar_quarter() {
+        let start = NaiveDate::from_ymd_opt(2026, 2, 15).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 7, 2).unwrap();
+
+        let quarters = quarters_in_range(start, end);
+
+        assert_eq!(
+            quarters,
+            vec![
+                (
+                    NaiveDate::from_ymd_opt(2026, 2, 15).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 6, 30).unwrap()
+                ),
+                (
+                    NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 7, 2).unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn moneyflow_full_market_trade_dates_use_open_calendar_days() {
         let start = NaiveDate::from_ymd_opt(2026, 6, 13).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 17).unwrap();
@@ -5803,6 +7468,164 @@ mod tests {
     }
 
     #[test]
+    fn equity_pledge_stat_uses_conservative_next_day_available_at() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000001.SZ"));
+        item.insert("end_date".to_string(), json!("20260618"));
+        item.insert("pledge_count".to_string(), json!(9));
+        item.insert("unrest_pledge".to_string(), json!(2460.5));
+        item.insert("rest_pledge".to_string(), json!(0.0));
+        item.insert("total_share".to_string(), json!(1940591.82));
+        item.insert("pledge_ratio".to_string(), json!(0.13));
+
+        let row = equity_pledge_stat_row_from_map(&item).expect("pledge stat row");
+
+        assert_eq!(row.symbol, "000001.SZ");
+        assert_eq!(row.end_date, NaiveDate::from_ymd_opt(2026, 6, 18).unwrap());
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 6, 19).unwrap()
+        );
+        assert_eq!(row.pledge_count, Some(9));
+        assert_eq!(row.pledge_ratio, Decimal::from_f64_retain(0.13).unwrap());
+    }
+
+    #[test]
+    fn equity_pledge_detail_uses_ann_date_as_available_at_and_hashes_source_row() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000002.SZ"));
+        item.insert("ann_date".to_string(), json!("20170323"));
+        item.insert("holder_name".to_string(), json!("深圳市钜盛华股份有限公司"));
+        item.insert("pledge_amount".to_string(), json!(9100.0));
+        item.insert("start_date".to_string(), json!("20170321"));
+        item.insert("end_date".to_string(), Value::Null);
+        item.insert("is_release".to_string(), json!("0"));
+        item.insert("release_date".to_string(), Value::Null);
+        item.insert("pledgor".to_string(), json!("平安证券股份有限公司"));
+        item.insert("holding_amount".to_string(), json!(92607.0472));
+        item.insert("pledged_amount".to_string(), json!(92607.0462));
+        item.insert("p_total_ratio".to_string(), Value::Null);
+        item.insert("h_total_ratio".to_string(), json!(8.39));
+        item.insert("is_buyback".to_string(), json!("1"));
+
+        let row = equity_pledge_detail_row_from_map(&item).expect("pledge detail row");
+        let same_row = equity_pledge_detail_row_from_map(&item).expect("same pledge detail row");
+
+        assert_eq!(row.symbol, "000002.SZ");
+        assert_eq!(row.ann_date, NaiveDate::from_ymd_opt(2017, 3, 23).unwrap());
+        assert_eq!(row.available_at, row.ann_date);
+        assert_eq!(
+            row.pledge_start_date,
+            Some(NaiveDate::from_ymd_opt(2017, 3, 21).unwrap())
+        );
+        assert_eq!(row.holder_name, "深圳市钜盛华股份有限公司");
+        assert_eq!(row.pledgor, "平安证券股份有限公司");
+        assert_eq!(row.source_row_hash.len(), 16);
+        assert_eq!(row.source_row_hash, same_row.source_row_hash);
+    }
+
+    #[test]
+    fn equity_pledge_detail_allows_missing_source_start_date() {
+        let mut item = Map::new();
+        item.insert("ts_code".to_string(), json!("000040.SZ"));
+        item.insert("ann_date".to_string(), json!("20140107"));
+        item.insert("holder_name".to_string(), json!("中国宝安集团控股有限公司"));
+        item.insert("pledge_amount".to_string(), json!(4500.0));
+        item.insert("start_date".to_string(), Value::Null);
+        item.insert("end_date".to_string(), Value::Null);
+        item.insert("pledgor".to_string(), json!(""));
+
+        let row = equity_pledge_detail_row_from_map(&item).expect("pledge detail row");
+
+        assert_eq!(row.symbol, "000040.SZ");
+        assert_eq!(row.ann_date, NaiveDate::from_ymd_opt(2014, 1, 7).unwrap());
+        assert_eq!(row.available_at, row.ann_date);
+        assert_eq!(row.pledge_start_date, None);
+        assert_eq!(row.source_row_hash.len(), 16);
+    }
+
+    #[test]
+    fn shareholder_structure_rows_use_ann_date_as_available_at_and_hash_source_rows() {
+        let mut holder_number = Map::new();
+        holder_number.insert("ts_code".to_string(), json!("000001.SZ"));
+        holder_number.insert("ann_date".to_string(), json!("20260425"));
+        holder_number.insert("end_date".to_string(), json!("20260331"));
+        holder_number.insert("holder_num".to_string(), json!(543210));
+
+        let number_row =
+            shareholder_holder_number_row_from_map(&holder_number).expect("holder number row");
+        assert_eq!(number_row.symbol, "000001.SZ");
+        assert_eq!(
+            number_row.ann_date,
+            NaiveDate::from_ymd_opt(2026, 4, 25).unwrap()
+        );
+        assert_eq!(number_row.available_at, number_row.ann_date);
+        assert_eq!(
+            number_row.end_date,
+            NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()
+        );
+        assert_eq!(number_row.holder_num, Some(543210));
+
+        let mut top10 = Map::new();
+        top10.insert("ts_code".to_string(), json!("000001.SZ"));
+        top10.insert("ann_date".to_string(), json!("20260425"));
+        top10.insert("end_date".to_string(), json!("20260331"));
+        top10.insert(
+            "holder_name".to_string(),
+            json!("中央汇金资产管理有限责任公司"),
+        );
+        top10.insert("hold_amount".to_string(), json!(12345.67));
+        top10.insert("hold_ratio".to_string(), json!(1.23));
+        top10.insert("hold_change".to_string(), json!(-456.0));
+        top10.insert("holder_type".to_string(), json!("机构"));
+
+        let top10_row = shareholder_top10_holder_row_from_map(&top10, false).expect("top10 row");
+        let same_top10 =
+            shareholder_top10_holder_row_from_map(&top10, false).expect("same top10 row");
+        assert_eq!(top10_row.available_at, top10_row.ann_date);
+        assert_eq!(top10_row.source_row_hash.len(), 16);
+        assert_eq!(top10_row.source_row_hash, same_top10.source_row_hash);
+
+        let mut trade = Map::new();
+        trade.insert("ts_code".to_string(), json!("000002.SZ"));
+        trade.insert("ann_date".to_string(), json!("20250115"));
+        trade.insert("holder_name".to_string(), json!("董事张三"));
+        trade.insert("in_de".to_string(), json!("增持"));
+        trade.insert("change_vol".to_string(), json!(120.0));
+        trade.insert("change_ratio".to_string(), json!(0.02));
+        trade.insert("avg_price".to_string(), json!(11.8));
+
+        let trade_row = shareholder_holder_trade_row_from_map(&trade).expect("holder trade row");
+        assert_eq!(trade_row.symbol, "000002.SZ");
+        assert_eq!(trade_row.available_at, trade_row.ann_date);
+        assert_eq!(trade_row.in_de.as_deref(), Some("增持"));
+        assert_eq!(trade_row.source_row_hash.len(), 16);
+    }
+
+    #[test]
+    fn shareholder_structure_source_filters_allow_staged_low_fanout_sync() {
+        let low_fanout = shareholder_structure_source_filter_flags(&[
+            "holder_number".to_string(),
+            "holder_trade".to_string(),
+        ])
+        .expect("low fanout source filters");
+        assert!(low_fanout.holder_number);
+        assert!(low_fanout.holder_trade);
+        assert!(!low_fanout.top10_holders);
+        assert!(!low_fanout.top10_float_holders);
+
+        let all = shareholder_structure_source_filter_flags(&[]).expect("empty means all");
+        assert!(all.holder_number);
+        assert!(all.holder_trade);
+        assert!(all.top10_holders);
+        assert!(all.top10_float_holders);
+
+        let error = shareholder_structure_source_filter_flags(&["mystery".to_string()])
+            .expect_err("unknown source filter should fail");
+        assert!(error.contains("unsupported shareholder_structure source_filter"));
+    }
+
+    #[test]
     fn futures_price_chain_rows_use_next_day_available_at_for_pit_safety() {
         let mut daily = Map::new();
         daily.insert("ts_code".to_string(), json!("CU1811.SHF"));
@@ -5850,6 +7673,70 @@ mod tests {
         missing_broker.insert("symbol".to_string(), json!("CU"));
         missing_broker.insert("exchange".to_string(), json!("SHFE"));
         assert!(futures_holding_rank_row_from_map(&missing_broker).is_none());
+    }
+
+    #[test]
+    fn futures_price_chain_attempt_key_fits_sync_attempt_symbol_column() {
+        let trade_date = NaiveDate::from_ymd_opt(2018, 11, 13).unwrap();
+
+        assert!(futures_price_chain_attempt_key(trade_date, None, None).len() <= 20);
+        assert!(
+            futures_price_chain_attempt_key(
+                trade_date,
+                Some("VERY-LONG-FUTURES-CONTRACT-CODE"),
+                Some("SHFE")
+            )
+            .len()
+                <= 20
+        );
+    }
+
+    #[test]
+    fn futures_price_chain_trade_dates_use_open_calendar_days_without_weekends() {
+        let start = NaiveDate::from_ymd_opt(2026, 6, 13).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 17).unwrap();
+        let open_dates = vec![
+            NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 16).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 17).unwrap(),
+        ];
+
+        let dates = futures_price_chain_trade_dates(start, end, open_dates)
+            .expect("calendar-backed futures dates");
+
+        assert_eq!(
+            dates,
+            vec![
+                NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 16).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 17).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn futures_price_chain_trade_dates_error_when_calendar_is_missing() {
+        let start = NaiveDate::from_ymd_opt(2026, 6, 13).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 17).unwrap();
+
+        let error = futures_price_chain_trade_dates(start, end, Vec::new())
+            .expect_err("missing calendar must block raw sync");
+
+        assert!(error.contains("market_trade_calendar"));
+        assert!(error.contains("sync trade_calendar"));
+    }
+
+    #[test]
+    fn futures_price_chain_trade_dates_sql_prefers_futures_exchange_calendars() {
+        let sql = futures_price_chain_trade_dates_sql();
+
+        assert!(sql.contains("futures_calendar"));
+        assert!(sql.contains("'SHFE'"));
+        assert!(sql.contains("'DCE'"));
+        assert!(sql.contains("'CZCE'"));
+        assert!(sql.contains("'CFFEX'"));
+        assert!(sql.contains("'INE'"));
+        assert!(sql.contains("NOT EXISTS (SELECT 1 FROM futures_calendar)"));
     }
 
     #[test]

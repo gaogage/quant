@@ -151,6 +151,69 @@ const FUT_HOLDING_FIELDS: &[&str] = &[
     "short_chg",
     "exchange",
 ];
+const PLEDGE_STAT_FIELDS: &[&str] = &[
+    "ts_code",
+    "end_date",
+    "pledge_count",
+    "unrest_pledge",
+    "rest_pledge",
+    "total_share",
+    "pledge_ratio",
+];
+const PLEDGE_DETAIL_FIELDS: &[&str] = &[
+    "ts_code",
+    "ann_date",
+    "holder_name",
+    "pledge_amount",
+    "start_date",
+    "end_date",
+    "is_release",
+    "release_date",
+    "pledgor",
+    "holding_amount",
+    "pledged_amount",
+    "p_total_ratio",
+    "h_total_ratio",
+    "is_buyback",
+];
+const STK_HOLDER_NUMBER_FIELDS: &[&str] = &["ts_code", "ann_date", "end_date", "holder_num"];
+const TOP10_HOLDERS_FIELDS: &[&str] = &[
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "holder_name",
+    "hold_amount",
+    "hold_ratio",
+    "hold_float_ratio",
+    "hold_change",
+    "holder_type",
+];
+const TOP10_FLOAT_HOLDERS_FIELDS: &[&str] = &[
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "holder_name",
+    "hold_amount",
+    "hold_ratio",
+    "hold_float_ratio",
+    "holder_type",
+    "hold_change",
+];
+const STK_HOLDER_TRADE_FIELDS: &[&str] = &[
+    "ts_code",
+    "ann_date",
+    "holder_name",
+    "holder_type",
+    "in_de",
+    "change_vol",
+    "change_ratio",
+    "after_share",
+    "after_ratio",
+    "avg_price",
+    "total_share",
+    "begin_date",
+    "close_date",
+];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +283,27 @@ mod tests {
         assert!(FUT_WSR_FIELDS.contains(&"vol_chg"));
         assert!(FUT_HOLDING_FIELDS.contains(&"long_hld"));
         assert!(FUT_HOLDING_FIELDS.contains(&"short_hld"));
+    }
+
+    #[test]
+    fn pledge_pressure_specs_separate_detail_available_at_from_snapshot_date() {
+        assert!(PLEDGE_DETAIL_FIELDS.contains(&"ann_date"));
+        assert!(PLEDGE_DETAIL_FIELDS.contains(&"pledge_amount"));
+        assert!(PLEDGE_DETAIL_FIELDS.contains(&"release_date"));
+        assert!(PLEDGE_STAT_FIELDS.contains(&"end_date"));
+        assert!(!PLEDGE_STAT_FIELDS.contains(&"ann_date"));
+    }
+
+    #[test]
+    fn shareholder_structure_specs_keep_native_announcement_dates() {
+        assert!(STK_HOLDER_NUMBER_FIELDS.contains(&"ann_date"));
+        assert!(STK_HOLDER_NUMBER_FIELDS.contains(&"holder_num"));
+        assert!(TOP10_HOLDERS_FIELDS.contains(&"ann_date"));
+        assert!(TOP10_HOLDERS_FIELDS.contains(&"hold_change"));
+        assert!(TOP10_FLOAT_HOLDERS_FIELDS.contains(&"ann_date"));
+        assert!(TOP10_FLOAT_HOLDERS_FIELDS.contains(&"hold_float_ratio"));
+        assert!(STK_HOLDER_TRADE_FIELDS.contains(&"ann_date"));
+        assert!(STK_HOLDER_TRADE_FIELDS.contains(&"in_de"));
     }
 }
 
@@ -1152,6 +1236,74 @@ impl TushareClient {
             .await
     }
 
+    /// 股权质押统计。`end_date` 是统计截止日，不是公告可得日；进入因子前必须完成 available_at 审计。
+    pub async fn pledge_stat(
+        &self,
+        ts_code: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_s;
+        let offset_s;
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(value) = ts_code {
+            params.push(("ts_code", value));
+        }
+        if let Some(value) = end_date {
+            params.push(("end_date", value));
+        }
+        if let Some(value) = limit {
+            limit_s = value.to_string();
+            params.push(("limit", limit_s.as_str()));
+        }
+        if let Some(value) = offset {
+            offset_s = value.to_string();
+            params.push(("offset", offset_s.as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("pledge_stat", params, PLEDGE_STAT_FIELDS)
+            .await
+    }
+
+    /// 股权质押明细。`ann_date` 是原生 PIT 可得日候选，后续 schema 必须保留并按其过滤。
+    pub async fn pledge_detail(
+        &self,
+        ts_code: Option<&str>,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let limit_s;
+        let offset_s;
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(value) = ts_code {
+            params.push(("ts_code", value));
+        }
+        if let Some(value) = ann_date {
+            params.push(("ann_date", value));
+        }
+        if let Some(value) = start_date {
+            params.push(("start_date", value));
+        }
+        if let Some(value) = end_date {
+            params.push(("end_date", value));
+        }
+        if let Some(value) = limit {
+            limit_s = value.to_string();
+            params.push(("limit", limit_s.as_str()));
+        }
+        if let Some(value) = offset {
+            offset_s = value.to_string();
+            params.push(("offset", offset_s.as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("pledge_detail", params, PLEDGE_DETAIL_FIELDS)
+            .await
+    }
+
     /// 现金流量表，用于 Phase 7 数据权限 smoke 与后续现金流质量特征。
     pub async fn cashflow(
         &self,
@@ -1365,6 +1517,186 @@ impl TushareClient {
             ],
         )
         .await
+    }
+
+    /// 股东人数。`ann_date` 是原生 PIT 可得日，`end_date` 是统计截止日。
+    pub async fn stk_holdernumber(
+        &self,
+        ts_code: Option<&str>,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "stk_holdernumber",
+            params,
+            STK_HOLDER_NUMBER_FIELDS,
+        )
+        .await
+    }
+
+    /// 前十大股东。`ann_date` 是披露日，不能用 `end_date` 提前可得性。
+    pub async fn top10_holders(
+        &self,
+        ts_code: Option<&str>,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("top10_holders", params, TOP10_HOLDERS_FIELDS)
+            .await
+    }
+
+    /// 前十大流通股东。`ann_date` 是披露日。
+    pub async fn top10_floatholders(
+        &self,
+        ts_code: Option<&str>,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>(
+            "top10_floatholders",
+            params,
+            TOP10_FLOAT_HOLDERS_FIELDS,
+        )
+        .await
+    }
+
+    /// 股东增减持。事件型数据，只能作为 shareholder_structure 的辅助审计源。
+    pub async fn stk_holdertrade(
+        &self,
+        ts_code: Option<&str>,
+        ann_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(date) = ann_date {
+            params.push(("ann_date", date));
+        }
+        if let Some(s) = start_date {
+            params.push(("start_date", s));
+        }
+        if let Some(e) = end_date {
+            params.push(("end_date", e));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
+        }
+
+        self.call_api::<Vec<serde_json::Value>>("stk_holdertrade", params, STK_HOLDER_TRADE_FIELDS)
+            .await
     }
 
     /// 大宗交易。交易日后披露，使用时应按 available_at 做 PIT 过滤。

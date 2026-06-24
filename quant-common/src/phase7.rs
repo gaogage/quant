@@ -140,6 +140,10 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
         | "phase7_fq_change_forecast_revision_sleeve_05pct_v1"
         | "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
         | "phase7_fq_change_forecast_revision_sleeve_15pct_v1"
+        | "shareholder_structure"
+        | "phase7_fq_change_shareholder_structure_sleeve_05pct_v1"
+        | "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
+        | "phase7_fq_change_shareholder_structure_sleeve_15pct_v1"
         | "phase7_repurchase_supply_shock_v1" => (
             Phase7AlphaSourceRole::OptionalOverlayOnly,
             "optional overlay must preserve and audit a broad quality base before entering full-market training",
@@ -243,6 +247,16 @@ pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmis
             }
             "phase7_fq_change_forecast_revision_sleeve_15pct_v1" => {
                 "phase7_fq_change_forecast_revision_sleeve_15pct_v1"
+            }
+            "shareholder_structure" => "shareholder_structure",
+            "phase7_fq_change_shareholder_structure_sleeve_05pct_v1" => {
+                "phase7_fq_change_shareholder_structure_sleeve_05pct_v1"
+            }
+            "phase7_fq_change_shareholder_structure_sleeve_10pct_v1" => {
+                "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
+            }
+            "phase7_fq_change_shareholder_structure_sleeve_15pct_v1" => {
+                "phase7_fq_change_shareholder_structure_sleeve_15pct_v1"
             }
             "phase7_event_post_return_curve_20d_v1" => "phase7_event_post_return_curve_20d_v1",
             "phase7_event_reaction_segments_20d_v1" => "phase7_event_reaction_segments_20d_v1",
@@ -651,6 +665,8 @@ impl EventGateProfile {
 
 pub fn phase7_alpha_blend_profiles() -> Vec<AlphaBlendProfile> {
     let source = |combo: &str, weight: Decimal| AlphaBlendSource::new(combo, "1.0.0", weight);
+    let source_version =
+        |combo: &str, version: &str, weight: Decimal| AlphaBlendSource::new(combo, version, weight);
     vec![
         AlphaBlendProfile {
             profile_name: "balanced".to_string(),
@@ -926,6 +942,54 @@ pub fn phase7_alpha_blend_profiles() -> Vec<AlphaBlendProfile> {
             sources: vec![
                 source("phase7_financial_quality_change_v1", Decimal::new(85, 2)),
                 source("phase7_forecast_revision_surprise_v1", Decimal::new(15, 2)),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_shareholder_structure_sleeve_05pct".to_string(),
+            combo_name: "phase7_fq_change_shareholder_structure_sleeve_05pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 5% strict-PIT shareholder-structure sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(95, 2)),
+                source_version(
+                    "shareholder_structure",
+                    "p321d-shareholder-low-fanout-v1",
+                    Decimal::new(5, 2),
+                ),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_shareholder_structure_sleeve_10pct".to_string(),
+            combo_name: "phase7_fq_change_shareholder_structure_sleeve_10pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a bounded 10% strict-PIT shareholder-structure sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(90, 2)),
+                source_version(
+                    "shareholder_structure",
+                    "p321d-shareholder-low-fanout-v1",
+                    Decimal::new(10, 2),
+                ),
+            ],
+        },
+        AlphaBlendProfile {
+            profile_name: "fq_change_shareholder_structure_sleeve_15pct_boundary".to_string(),
+            combo_name: "phase7_fq_change_shareholder_structure_sleeve_15pct_v1".to_string(),
+            version: "1.0.0".to_string(),
+            description:
+                "Financial-quality-change acceleration with a 15% strict-PIT shareholder-structure boundary sleeve"
+                    .to_string(),
+            sources: vec![
+                source("phase7_financial_quality_change_v1", Decimal::new(85, 2)),
+                source_version(
+                    "shareholder_structure",
+                    "p321d-shareholder-low-fanout-v1",
+                    Decimal::new(15, 2),
+                ),
             ],
         },
         AlphaBlendProfile {
@@ -14907,6 +14971,102 @@ fn professional_v19_forecast_revision_sleeve_seed_trials() -> Vec<Value> {
     seeds
 }
 
+fn with_v19_shareholder_structure_sleeve_seed(
+    seed: Value,
+    variant_name: &str,
+    combo_name: &str,
+    top_n: usize,
+    rebalance_days: usize,
+    market_regime: &str,
+    candidate_ranking: &str,
+) -> Value {
+    let mut seed = with_v19_multi_alpha_sleeve_seed(
+        seed,
+        "shareholder_structure_sleeve",
+        combo_name,
+        ScoreDirection::Descending,
+        top_n,
+        rebalance_days,
+        market_regime,
+        candidate_ranking,
+    );
+    if let Some(object) = seed.as_object_mut() {
+        for key in [
+            "prediction_set_id",
+            "prediction_blend_weight",
+            "prediction_min_score",
+            "prediction_min_percentile",
+            "prediction_label_horizon_days",
+            "train_window_ml_policy",
+            "train_window_ml_profile",
+            "train_window_ml_feature_profile",
+            "multi_alpha_sleeve_profile",
+            "alpha_sleeve_family",
+            "event_gate_profile",
+            "event_gate_combo_name",
+            "event_gate_version",
+            "event_gate_mode",
+            "event_gate_min_score",
+            "event_gate_boost_weight",
+            "event_gate_score_direction",
+            "event_gate_active_regimes",
+        ] {
+            object.remove(key);
+        }
+    }
+    seed["shareholder_structure_sleeve_profile"] =
+        json!("v19_p321e_fq_change_shareholder_structure_sleeve_v1");
+    seed["shareholder_structure_sleeve_variant"] = json!(variant_name);
+    seed["shareholder_structure_sleeve_control"] = json!("phase7_financial_quality_change_v1");
+    seed["alpha_admission_gate_id"] = json!("shareholder_structure_low_fanout_strict_pit_gate_v1");
+    seed["universe_profile"] = json!("main_chinext_non_st");
+    seed["shareholder_structure_source_version"] = json!("p321d-shareholder-low-fanout-v1");
+    seed["shareholder_structure_regime_policy"] = json!("evaluation_only_no_reweight");
+    seed["oos_policy"] = json!("evaluation_only");
+    seed["alpha_source_family"] = json!("shareholder_structure_sleeve");
+    seed
+}
+
+fn professional_v19_shareholder_structure_sleeve_seed_trials() -> Vec<Value> {
+    let Some(anchor) = phase7_high_sharpe_boundary_base_seed() else {
+        return Vec::new();
+    };
+    let mut seeds = Vec::new();
+    let market_regime = "off";
+    let candidate_ranking = "alpha_first_low_impact_v1";
+
+    for (variant_name, combo_name) in [
+        ("fq_change_control", "phase7_financial_quality_change_v1"),
+        (
+            "shareholder_structure_sleeve_05pct",
+            "phase7_fq_change_shareholder_structure_sleeve_05pct_v1",
+        ),
+        (
+            "shareholder_structure_sleeve_10pct",
+            "phase7_fq_change_shareholder_structure_sleeve_10pct_v1",
+        ),
+        (
+            "shareholder_structure_sleeve_15pct_boundary",
+            "phase7_fq_change_shareholder_structure_sleeve_15pct_v1",
+        ),
+    ] {
+        append_unique_seeds(
+            &mut seeds,
+            vec![with_v19_shareholder_structure_sleeve_seed(
+                anchor.clone(),
+                variant_name,
+                combo_name,
+                100,
+                60,
+                market_regime,
+                candidate_ranking,
+            )],
+        );
+    }
+
+    seeds
+}
+
 #[allow(clippy::too_many_arguments)]
 fn with_v19_event_post_return_overlay_seed(
     seed: Value,
@@ -26694,6 +26854,16 @@ impl LayeredSearchConfig {
         config
     }
 
+    pub fn professional_v19_shareholder_structure_sleeve_default() -> Self {
+        let mut config = Self::professional_v19_multi_alpha_sleeve_admission_default();
+        config.combo_versions = Vec::new();
+        config.prediction_set_ids = Vec::new();
+        config.event_gate_profiles = vec![EventGateProfile::off()];
+        config.universe_profiles = vec!["main_chinext_non_st".to_string()];
+        config.seed_trials = professional_v19_shareholder_structure_sleeve_seed_trials();
+        config
+    }
+
     pub fn professional_v19_event_post_return_overlay_admission_default() -> Self {
         let mut config = Self::professional_v19_multi_alpha_sleeve_admission_default();
         config.combo_versions = vec![ComboVersion::new(
@@ -36851,6 +37021,67 @@ mod tests {
     }
 
     #[test]
+    fn phase7_fq_change_shareholder_structure_sleeves_are_bounded_optional_blends() {
+        let profiles = phase7_alpha_blend_profiles();
+        let expected = [
+            (
+                "fq_change_shareholder_structure_sleeve_05pct",
+                "phase7_fq_change_shareholder_structure_sleeve_05pct_v1",
+                Decimal::new(95, 2),
+                Decimal::new(5, 2),
+            ),
+            (
+                "fq_change_shareholder_structure_sleeve_10pct",
+                "phase7_fq_change_shareholder_structure_sleeve_10pct_v1",
+                Decimal::new(90, 2),
+                Decimal::new(10, 2),
+            ),
+            (
+                "fq_change_shareholder_structure_sleeve_15pct_boundary",
+                "phase7_fq_change_shareholder_structure_sleeve_15pct_v1",
+                Decimal::new(85, 2),
+                Decimal::new(15, 2),
+            ),
+        ];
+
+        for (profile_name, combo_name, fq_weight, shareholder_weight) in expected {
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.combo_name == combo_name)
+                .expect("P3.21E FQ-change/shareholder-structure sleeve blend profile");
+            let sources = profile
+                .sources
+                .iter()
+                .map(|source| (source.combo_name.as_str(), source))
+                .collect::<std::collections::BTreeMap<_, _>>();
+
+            assert_eq!(profile.profile_name, profile_name);
+            assert_eq!(
+                phase7_alpha_source_admission(combo_name).role,
+                Phase7AlphaSourceRole::OptionalOverlayOnly
+            );
+            assert_eq!(
+                sources
+                    .get("phase7_financial_quality_change_v1")
+                    .map(|source| source.weight),
+                Some(fq_weight)
+            );
+            let shareholder_source = sources
+                .get("shareholder_structure")
+                .expect("shareholder_structure source");
+            assert_eq!(shareholder_source.weight, shareholder_weight);
+            assert_eq!(
+                shareholder_source.version,
+                "p321d-shareholder-low-fanout-v1"
+            );
+        }
+        assert_eq!(
+            phase7_alpha_source_admission("shareholder_structure").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+    }
+
+    #[test]
     fn professional_v19_event_surprise_sleeve_gate_profile_is_seed_only_and_bounded() {
         let config = LayeredSearchConfig::professional_v19_event_surprise_sleeve_gate_default();
 
@@ -37045,6 +37276,55 @@ mod tests {
         assert!(config.seed_trials.iter().any(|trial| {
             trial["combo_name"] == "phase7_fq_change_forecast_revision_sleeve_10pct_v1"
                 && trial["forecast_revision_sleeve_variant"] == "forecast_revision_sleeve_10pct"
+        }));
+    }
+
+    #[test]
+    fn professional_v19_shareholder_structure_sleeve_profile_is_seed_only_and_gated() {
+        let config = LayeredSearchConfig::professional_v19_shareholder_structure_sleeve_default();
+
+        assert!(
+            config.combo_versions.is_empty(),
+            "bounded profile must not reopen cartesian combo search"
+        );
+        assert!(config.prediction_set_ids.is_empty());
+        assert_eq!(config.event_gate_profiles, vec![EventGateProfile::off()]);
+        assert_eq!(
+            config.universe_profiles,
+            vec!["main_chinext_non_st".to_string()]
+        );
+
+        let serialized = serde_json::to_string(&config.seed_trials).unwrap();
+        assert!(serialized.contains("v19_p321e_fq_change_shareholder_structure_sleeve_v1"));
+        assert!(serialized.contains("phase7_financial_quality_change_v1"));
+        assert!(serialized.contains("phase7_fq_change_shareholder_structure_sleeve_05pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_shareholder_structure_sleeve_10pct_v1"));
+        assert!(serialized.contains("phase7_fq_change_shareholder_structure_sleeve_15pct_v1"));
+        assert!(serialized.contains("shareholder_structure_low_fanout_strict_pit_gate_v1"));
+        assert!(serialized.contains("p321d-shareholder-low-fanout-v1"));
+        assert!(serialized.contains("\"universe_profile\":\"main_chinext_non_st\""));
+        assert!(serialized.contains("\"market_regime\":\"off\""));
+        assert!(!serialized.contains("quality_mixed_state_risk_memory_router_v14"));
+        assert!(!serialized.contains("phase7_moneyflow_congestion_interaction_v1"));
+        assert!(!serialized.contains("phase7_event_post_return_curve_20d_v1"));
+        assert!(!serialized.contains("pred-"));
+
+        assert!(config.seed_trials.iter().all(|trial| {
+            trial["signal_source"] == "factor_combo"
+                && trial["shareholder_structure_sleeve_profile"]
+                    == "v19_p321e_fq_change_shareholder_structure_sleeve_v1"
+                && trial["shareholder_structure_sleeve_control"]
+                    == "phase7_financial_quality_change_v1"
+                && trial["alpha_admission_gate_id"]
+                    == "shareholder_structure_low_fanout_strict_pit_gate_v1"
+                && trial["universe_profile"] == "main_chinext_non_st"
+                && trial["market_regime"] == "off"
+                && trial["oos_policy"] == "evaluation_only"
+        }));
+        assert!(config.seed_trials.iter().any(|trial| {
+            trial["combo_name"] == "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
+                && trial["shareholder_structure_sleeve_variant"]
+                    == "shareholder_structure_sleeve_10pct"
         }));
     }
 
@@ -37375,7 +37655,7 @@ mod tests {
             .map(|profile| profile.combo_name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(profiles.len(), 31);
+        assert_eq!(profiles.len(), 34);
         assert!(names.contains("phase7_value_quality_growth_rel_v1"));
         assert!(names.contains("phase7_blend_value_tilt_v1"));
         assert!(names.contains("phase7_blend_quality_growth_v1"));
@@ -37399,6 +37679,9 @@ mod tests {
         assert!(names.contains("phase7_fq_change_forecast_revision_sleeve_05pct_v1"));
         assert!(names.contains("phase7_fq_change_forecast_revision_sleeve_10pct_v1"));
         assert!(names.contains("phase7_fq_change_forecast_revision_sleeve_15pct_v1"));
+        assert!(names.contains("phase7_fq_change_shareholder_structure_sleeve_05pct_v1"));
+        assert!(names.contains("phase7_fq_change_shareholder_structure_sleeve_10pct_v1"));
+        assert!(names.contains("phase7_fq_change_shareholder_structure_sleeve_15pct_v1"));
         assert!(names.contains("phase7_quality_event_window_overlay_v1"));
         assert!(names.contains("phase7_quality_residual_confirm_5pct_v1"));
         assert!(names.contains("phase7_quality_residual_confirm_10pct_v1"));
@@ -37443,6 +37726,10 @@ mod tests {
         );
         assert_eq!(
             phase7_alpha_source_admission("phase7_unlock_supply_pressure_v1").role,
+            Phase7AlphaSourceRole::OptionalOverlayOnly
+        );
+        assert_eq!(
+            phase7_alpha_source_admission("shareholder_structure").role,
             Phase7AlphaSourceRole::OptionalOverlayOnly
         );
         assert_eq!(

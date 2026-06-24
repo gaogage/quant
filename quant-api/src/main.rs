@@ -236,8 +236,60 @@ async fn main() {
             get(routes::sync::futures_price_chain_schema_contract),
         )
         .route(
+            "/api/v1/quant/data/equity-pledge-pressure/schema-contract",
+            get(routes::sync::equity_pledge_pressure_schema_contract),
+        )
+        .route(
+            "/api/v1/quant/data/shareholder-structure/schema-contract",
+            get(routes::sync::shareholder_structure_schema_contract),
+        )
+        .route(
+            "/api/v1/quant/data/shareholder-structure/readiness-audit",
+            get(routes::sync::shareholder_structure_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/shareholder-structure/coverage-audit",
+            get(routes::sync::shareholder_structure_coverage_audit),
+        )
+        .route(
+            "/api/v1/quant/data/shareholder-structure/sync-plan",
+            get(routes::sync::shareholder_structure_sync_plan),
+        )
+        .route(
+            "/api/v1/quant/data/shareholder-structure/sync",
+            post(routes::sync::shareholder_structure_sync),
+        )
+        .route(
+            "/api/v1/quant/data/equity-pledge-pressure/readiness-audit",
+            get(routes::sync::equity_pledge_pressure_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/equity-pledge-pressure/coverage-audit",
+            get(routes::sync::equity_pledge_pressure_coverage_audit),
+        )
+        .route(
+            "/api/v1/quant/data/equity-pledge-pressure/sync",
+            post(routes::sync::equity_pledge_pressure_sync),
+        )
+        .route(
             "/api/v1/quant/data/futures-price-chain/readiness-audit",
             get(routes::sync::futures_price_chain_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/futures-price-chain/mapping-audit",
+            get(routes::sync::futures_price_chain_mapping_audit),
+        )
+        .route(
+            "/api/v1/quant/data/futures-price-chain/coverage-audit",
+            get(routes::sync::futures_price_chain_coverage_audit),
+        )
+        .route(
+            "/api/v1/quant/data/futures-price-chain/mapping-template",
+            get(routes::sync::futures_price_chain_mapping_template),
+        )
+        .route(
+            "/api/v1/quant/data/futures-price-chain/mapping-validate",
+            post(routes::sync::futures_price_chain_mapping_validate),
         )
         .route(
             "/api/v1/quant/data/futures-price-chain/sync",
@@ -428,6 +480,18 @@ async fn main() {
         .route(
             "/api/v1/quant/factors/phase7-industry-prosperity-backfill/background",
             post(routes::factors::backfill_phase7_industry_prosperity_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-futures-price-chain-backfill/background",
+            post(routes::factors::backfill_phase7_futures_price_chain_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-equity-pledge-pressure-backfill/background",
+            post(routes::factors::backfill_phase7_equity_pledge_pressure_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-shareholder-structure-backfill/background",
+            post(routes::factors::backfill_phase7_shareholder_structure_background),
         )
         .route(
             "/api/v1/quant/factors/phase7-event-window-alpha-backfill/background",

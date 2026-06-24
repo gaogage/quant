@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use chrono::{Datelike, Duration, NaiveDate, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::{
@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::phase7_alpha_admission::{
     industry_prosperity_alpha_admission_policy, industry_prosperity_alpha_admission_policy_static,
     INDUSTRY_MEMBERSHIP_COVERAGE_THRESHOLD, INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
+    SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID,
 };
 use crate::AppState;
 
@@ -31,6 +32,8 @@ pub struct DataSyncTaskReq {
     pub mode: Option<String>,
     #[serde(default)]
     pub symbols: Vec<String>,
+    #[serde(default)]
+    pub source_filters: Vec<String>,
     #[serde(default)]
     pub index_codes: Vec<String>,
     #[serde(default)]
@@ -96,6 +99,7 @@ impl FuturesPriceChainSyncReq {
             source: "tushare:futures_price_chain".to_string(),
             mode: Some("bounded_raw_sync".to_string()),
             symbols: self.symbols,
+            source_filters: Vec::new(),
             index_codes: Vec::new(),
             exchanges: self.exchanges,
             start_date: self.start_date,
@@ -108,6 +112,154 @@ impl FuturesPriceChainSyncReq {
             reason: Some("p3.19 futures price-chain bounded raw sync".to_string()),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EquityPledgePressureSyncReq {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub data_version_id: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+}
+
+impl EquityPledgePressureSyncReq {
+    fn into_sync_task_req(self) -> DataSyncTaskReq {
+        DataSyncTaskReq {
+            dataset: "equity_pledge_pressure".to_string(),
+            source: "tushare:equity_pledge_pressure".to_string(),
+            mode: Some("bounded_raw_sync".to_string()),
+            symbols: self.symbols,
+            source_filters: Vec::new(),
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: self.start_date,
+            end_date: self.end_date,
+            data_version_id: self.data_version_id,
+            background: self.background,
+            quality_check: false,
+            create_data_version: true,
+            retry_of_task_id: None,
+            reason: Some("p3.20 equity pledge pressure bounded raw sync".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShareholderStructureSyncReq {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub source_filters: Vec<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub data_version_id: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+}
+
+impl ShareholderStructureSyncReq {
+    fn into_sync_task_req(self) -> DataSyncTaskReq {
+        DataSyncTaskReq {
+            dataset: "shareholder_structure".to_string(),
+            source: "tushare:shareholder_structure".to_string(),
+            mode: Some("bounded_raw_sync".to_string()),
+            symbols: self.symbols,
+            source_filters: self.source_filters,
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: self.start_date,
+            end_date: self.end_date,
+            data_version_id: self.data_version_id,
+            background: self.background,
+            quality_check: false,
+            create_data_version: true,
+            retry_of_task_id: None,
+            reason: Some("p3.21 shareholder structure bounded raw sync".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShareholderStructureSyncPlanReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ShareholderStructureSyncPlanBatch {
+    year: i32,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    symbol_count: i64,
+    quarter_count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FuturesPriceChainMappingValidateReq {
+    #[serde(default)]
+    pub rows: Vec<FuturesPriceChainMappingCandidate>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FuturesPriceChainCoverageAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EquityPledgeCoverageAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShareholderStructureCoverageAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FuturesPriceChainMappingCandidate {
+    pub product_symbol: String,
+    pub exposure_type: String,
+    pub exposure_code: String,
+    pub direction: i16,
+    pub weight: f64,
+    pub valid_from: String,
+    #[serde(default)]
+    pub valid_to: Option<String>,
+    pub available_at: String,
+    pub source: String,
+    pub mapping_version: String,
+    #[serde(default)]
+    pub evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FuturesPriceChainMappingCandidateValidation {
+    product_symbol: String,
+    exposure_type: String,
+    exposure_code: String,
+    passed: bool,
+    errors: Vec<String>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -272,6 +424,8 @@ const PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED: &[&str] = &[
     "main_business",
     "report_rc",
     "futures_price_chain",
+    "equity_pledge_pressure",
+    "shareholder_structure",
 ];
 const PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED: &[&str] = &[
     "cashflow",
@@ -1541,11 +1695,21 @@ fn phase7_new_alpha_candidate_sources() -> Vec<Value> {
         json!({
             "source": "block_trade_supply_demand",
             "current_tables": ["market_stock_block_trade"],
-            "admission_scope": "raw_source_onboarding_required",
-            "readiness": "schema_and_client_ready_permission_smoke_passed",
+            "admission_scope": "stopped_same_family_after_p310",
+            "readiness": "stopped_after_p310_economics_weak",
             "pit_boundary": "must persist announcement/trade publication date as available_at before any event-window feature",
-            "why_not_trainable_now": "大宗交易原始源已接入，但尚未完成全历史分块补数、coverage/readiness 和 P3.10A-D 诊断",
-            "next_step": "run_bounded_sync_then_p310_diagnostics"
+            "why_not_trainable_now": "大宗交易供需源数据/PIT 可用，但 P3.10 显示覆盖偏窄、alpha economics 弱；不得继续同族扩参或直接 WFA",
+            "next_step": "do_not_expand_same_family_shift_to_p320_new_source_admission"
+        }),
+        json!({
+            "source": "equity_pledge_pressure",
+            "current_tables": [],
+            "candidate_raw_sources": ["tushare:pledge_stat", "tushare:pledge_detail"],
+            "admission_scope": "new_p320_schema_contract_candidate",
+            "readiness": "permission_smoke_passed_schema_contract_ready",
+            "pit_boundary": "pledge_detail.ann_date is native available_at candidate; pledge_stat.end_date is a measurement date and cannot be used alone as availability",
+            "why_not_trainable_now": "新候选源已完成生产 permission-smoke 和 schema contract，但尚未人工审查/应用 schema、全历史 bounded sync、coverage/readiness 或 P3.10",
+            "next_step": "review_apply_equity_pledge_schema_then_bounded_sync_plan"
         }),
         json!({
             "source": "equity_incentive_execution_quality",
@@ -1617,6 +1781,14 @@ fn phase7_futures_price_chain_schema_contract() -> Value {
                 "allowed_exposure_types": ["sw_industry", "stock_symbol"],
                 "pit_rule": "mapping.available_at <= stock_trade_date; mapping rows must be versioned and must not be derived from future stock returns or future factor performance",
                 "preferred_first_pass": "product-to-sw-industry mapping joined to market_stock_industry_membership_pit; direct stock_symbol mapping requires stronger evidence"
+            },
+            {
+                "table": "market_futures_product_exclusion_gate_pit",
+                "natural_key": ["product_symbol", "gate_scope", "valid_from", "gate_version"],
+                "required_fields": ["product_symbol", "gate_scope", "reason_code", "valid_from", "valid_to", "available_at", "source", "gate_version", "evidence"],
+                "allowed_reason_codes": ["financial_index_future", "interest_rate_future", "non_industry_derivative", "ambiguous_product_symbol", "insufficient_industry_evidence"],
+                "pit_rule": "exclusion gates are admission controls: excluded products must not be forced into product-to-industry mappings or downstream factors",
+                "preferred_first_pass": "pre-register non-industry derivatives such as equity index and treasury bond futures as excluded before product-to-SW-industry review"
             }
         ],
         "pit_policy": {
@@ -1645,6 +1817,1728 @@ fn phase7_futures_price_chain_schema_contract() -> Value {
         "ddl_path": "sql/phase7_futures_price_chain_source.sql",
         "next_step": "create_schema_then_run_bounded_full_history_sync_and_coverage_readiness_audit"
     })
+}
+
+fn phase7_equity_pledge_schema_contract() -> Value {
+    json!({
+        "audit_version": "p3.20b-equity-pledge-pressure-schema-contract-v1",
+        "source_id": "equity_pledge_pressure",
+        "stage": "P3.20B",
+        "status": "permission_smoke_passed_schema_review_required",
+        "mode": "read_only_schema_available_at_contract",
+        "ddl_path": "sql/phase7_equity_pledge_source.sql",
+        "raw_sources": [
+            {
+                "api": "pledge_stat",
+                "official_doc": "https://tushare.pro/wctapi/documents/110.md",
+                "semantics": "stock_equity_pledge_stat_snapshot",
+                "native_available_at_candidate": "not_native_end_date_is_measurement_date",
+                "required_fields": ["ts_code", "end_date", "pledge_count", "unrest_pledge", "rest_pledge", "total_share", "pledge_ratio"],
+                "minimum_points": 2000
+            },
+            {
+                "api": "pledge_detail",
+                "official_doc": "https://tushare.pro/wctapi/documents/111.md",
+                "semantics": "stock_equity_pledge_detail_events",
+                "native_available_at_candidate": "ann_date",
+                "required_fields": ["ts_code", "ann_date", "holder_name", "pledge_amount", "start_date", "end_date", "is_release", "release_date", "pledgor", "holding_amount", "pledged_amount", "p_total_ratio", "h_total_ratio", "is_buyback"],
+                "minimum_points": 2000
+            }
+        ],
+        "tables": [
+            {
+                "table": "market_stock_pledge_stat",
+                "natural_key": ["symbol", "end_date"],
+                "required_fields": ["symbol", "end_date", "pledge_count", "unrest_pledge", "rest_pledge", "total_share", "pledge_ratio", "available_at", "source_published_at", "raw_payload", "source", "data_version_id"],
+                "pit_rule": "available_at must be >= end_date. Default sync may only use conservative end_date+1day unless a source_published_at audit proves earlier availability.",
+                "training_gate": "stat snapshots cannot enter factor construction until joined to detail announcements or audited with a conservative availability lag."
+            },
+            {
+                "table": "market_stock_pledge_detail",
+                "natural_key": ["symbol", "ann_date", "source_row_hash"],
+                "required_fields": ["symbol", "ann_date", "holder_name", "pledge_amount", "pledge_start_date", "pledge_end_date", "is_release", "release_date", "pledgor", "holding_amount", "pledged_amount", "p_total_ratio", "h_total_ratio", "is_buyback", "available_at", "raw_payload", "source", "data_version_id", "source_row_hash"],
+                "pit_rule": "available_at equals ann_date. Downstream features must use available_at <= stock_trade_date and must preserve multiple pledge rows on the same announcement date.",
+                "nullable_source_fields": ["pledge_start_date", "pledge_end_date", "release_date", "holding_amount", "pledged_amount", "p_total_ratio", "h_total_ratio"],
+                "duplicate_policy": "preserve source rows by source_row_hash; do not collapse same-day multiple pledges before audit. Nullable source fields must remain nullable and must not be promoted into the primary key."
+            }
+        ],
+        "available_at_policy": {
+            "pledge_detail": "ann_date is native available_at candidate and must be persisted as available_at.",
+            "pledge_stat": "end_date is a measurement date, not disclosure availability; use only after conservative lag or detail-derived audit.",
+            "intraday_trading": "without verified source publication timestamps, same-day pledge updates are not available to intraday rebalancing."
+        },
+        "coverage_audit_required": [
+            "year_symbol_ann_date_breakdown",
+            "detail_available_at_null_or_future_leak_count",
+            "detail_release_before_start_count",
+            "detail_ratio_out_of_range_count",
+            "stat_pledge_ratio_out_of_range_count",
+            "stat_end_date_coverage_and_lag_policy",
+            "symbol_breadth_vs_main_chinext_non_st",
+            "duplicate_source_row_hash_count",
+            "sync_attempt_success_failure_breakdown"
+        ],
+        "promotion_gate": {
+            "schema_apply": "blocked_until_manual_review",
+            "bounded_sync": "blocked_until_schema_applied",
+            "factor_builder": "blocked_until_full_history_coverage_pit_passes",
+            "p310_status": "blocked_until_factor_builder_and_readiness_pass",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    })
+}
+
+fn phase7_shareholder_structure_schema_contract() -> Value {
+    json!({
+        "audit_version": "p3.21b-shareholder-structure-schema-contract-v1",
+        "source_id": "shareholder_structure",
+        "stage": "P3.21B",
+        "status": "permission_smoke_passed_schema_review_required",
+        "mode": "read_only_schema_available_at_contract",
+        "ddl_path": "sql/phase7_shareholder_structure_source.sql",
+        "raw_sources": [
+            {
+                "api": "stk_holdernumber",
+                "semantics": "stock_shareholder_count_snapshot",
+                "native_available_at_candidate": "ann_date",
+                "measurement_date": "end_date",
+                "required_fields": ["ts_code", "ann_date", "end_date", "holder_num"],
+                "minimum_points": 2000
+            },
+            {
+                "api": "top10_holders",
+                "semantics": "top10_shareholder_concentration_snapshot",
+                "native_available_at_candidate": "ann_date",
+                "measurement_date": "end_date",
+                "required_fields": ["ts_code", "ann_date", "end_date", "holder_name", "hold_amount", "hold_ratio", "hold_change", "holder_type"],
+                "minimum_points": 2000
+            },
+            {
+                "api": "top10_floatholders",
+                "semantics": "top10_float_shareholder_concentration_snapshot",
+                "native_available_at_candidate": "ann_date",
+                "measurement_date": "end_date",
+                "required_fields": ["ts_code", "ann_date", "end_date", "holder_name", "hold_amount", "hold_ratio", "hold_float_ratio", "hold_change", "holder_type"],
+                "minimum_points": 2000
+            },
+            {
+                "api": "stk_holdertrade",
+                "semantics": "major_holder_or_insider_increase_decrease_event",
+                "native_available_at_candidate": "ann_date",
+                "required_fields": ["ts_code", "ann_date", "holder_name", "holder_type", "in_de", "change_vol", "change_ratio", "after_share", "after_ratio", "avg_price", "begin_date", "close_date"],
+                "minimum_points": 2000
+            }
+        ],
+        "tables": [
+            {
+                "table": "market_stock_holder_number",
+                "natural_key": ["symbol", "ann_date", "end_date"],
+                "required_fields": ["symbol", "ann_date", "end_date", "holder_num", "available_at", "raw_payload", "source", "data_version_id", "source_row_hash"],
+                "pit_rule": "available_at equals ann_date; ann_date before end_date is retained as a raw source anomaly and blocks admission until repaired, excluded, or gated."
+            },
+            {
+                "table": "market_stock_top10_holders",
+                "natural_key": ["symbol", "ann_date", "end_date", "source_row_hash"],
+                "required_fields": ["symbol", "ann_date", "end_date", "holder_name", "hold_amount", "hold_ratio", "hold_float_ratio", "hold_change", "holder_type", "available_at", "raw_payload", "source", "data_version_id", "source_row_hash"],
+                "pit_rule": "available_at equals ann_date; downstream features must filter available_at <= stock_trade_date and exclude or gate ann_date before end_date anomalies."
+            },
+            {
+                "table": "market_stock_top10_float_holders",
+                "natural_key": ["symbol", "ann_date", "end_date", "source_row_hash"],
+                "required_fields": ["symbol", "ann_date", "end_date", "holder_name", "hold_amount", "hold_ratio", "hold_float_ratio", "hold_change", "holder_type", "available_at", "raw_payload", "source", "data_version_id", "source_row_hash"],
+                "pit_rule": "available_at equals ann_date; do not infer float-holder concentration before disclosure, and treat ann_date before end_date as a blocking raw anomaly."
+            },
+            {
+                "table": "market_stock_holder_trade",
+                "natural_key": ["symbol", "ann_date", "source_row_hash"],
+                "required_fields": ["symbol", "ann_date", "holder_name", "holder_type", "in_de", "change_vol", "change_ratio", "after_share", "after_ratio", "avg_price", "total_share", "begin_date", "close_date", "available_at", "raw_payload", "source", "data_version_id", "source_row_hash"],
+                "pit_rule": "available_at equals ann_date; begin_date/close_date are event attributes and must not move availability earlier."
+            }
+        ],
+        "available_at_policy": {
+            "default": "available_at equals native ann_date for all four shareholder_structure raw tables; end_date is a measurement period only.",
+            "period_snapshot_rule": "holdernumber/top10/top10_float rows with ann_date before end_date land as raw source anomalies, but block factor/P3.10/WFA until repaired, excluded, or gated.",
+            "raw_landing": "raw tables accept native source rows for auditability; admission gates, not insert constraints, decide whether rows can feed factor work.",
+            "intraday_trading": "without verified source publication timestamps, same-day shareholder disclosures are not available to intraday rebalancing."
+        },
+        "coverage_audit_required": [
+            "year_source_symbol_ann_date_breakdown",
+            "symbol_breadth_vs_main_chinext_non_st",
+            "ann_date_before_end_date_count",
+            "available_at_before_ann_date_count",
+            "holder_ratio_out_of_range_count",
+            "holder_trade_interval_violation_count",
+            "duplicate_source_row_hash_count",
+            "sync_attempt_success_failure_breakdown"
+        ],
+        "promotion_gate": {
+            "schema_apply": "blocked_until_manual_review",
+            "bounded_sync": "blocked_until_schema_applied",
+            "factor_builder": "blocked_until_full_history_coverage_pit_passes",
+            "p310_status": "blocked_until_factor_builder_and_readiness_pass",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    })
+}
+
+fn equity_pledge_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        (
+            "market_stock_pledge_stat",
+            vec![
+                "market_stock_pledge_stat_pkey",
+                "market_stock_pledge_stat_available_at_check",
+            ],
+        ),
+        (
+            "market_stock_pledge_detail",
+            vec![
+                "market_stock_pledge_detail_pkey",
+                "market_stock_pledge_detail_available_at_check",
+            ],
+        ),
+    ]
+}
+
+fn shareholder_structure_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        (
+            "market_stock_holder_number",
+            vec![
+                "market_stock_holder_number_pkey",
+                "market_stock_holder_number_available_at_check",
+            ],
+        ),
+        (
+            "market_stock_top10_holders",
+            vec![
+                "market_stock_top10_holders_pkey",
+                "market_stock_top10_holders_available_at_check",
+            ],
+        ),
+        (
+            "market_stock_top10_float_holders",
+            vec![
+                "market_stock_top10_float_holders_pkey",
+                "market_stock_top10_float_holders_available_at_check",
+            ],
+        ),
+        (
+            "market_stock_holder_trade",
+            vec![
+                "market_stock_holder_trade_pkey",
+                "market_stock_holder_trade_available_at_check",
+                "market_stock_holder_trade_interval_check",
+            ],
+        ),
+    ]
+}
+
+fn decide_equity_pledge_readiness(
+    schema_passed: bool,
+    stat_rows: i64,
+    detail_rows: i64,
+    pit_violation_rows: i64,
+) -> Value {
+    let raw_rows = stat_rows + detail_rows;
+    let (schema_status, sync_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "missing_or_invalid",
+            "blocked",
+            "apply_schema_before_sync",
+            "apply_sql_phase7_equity_pledge_source_then_rerun_readiness_audit",
+        )
+    } else if raw_rows == 0 {
+        (
+            "created",
+            "not_started",
+            "bounded_sync_required_before_coverage_audit",
+            "run_bounded_equity_pledge_pressure_sync_then_readiness_audit",
+        )
+    } else if pit_violation_rows > 0 {
+        (
+            "created",
+            "raw_synced_pit_failed",
+            "raw_pit_failed",
+            "fix_or_delete_bad_equity_pledge_rows_then_rerun_sync_and_audit",
+        )
+    } else {
+        (
+            "created",
+            "raw_synced",
+            "coverage_readiness_audit_required_before_p310",
+            "run_year_symbol_ann_date_coverage_and_duplicate_audit_before_factor_builder",
+        )
+    };
+
+    json!({
+        "schema_status": schema_status,
+        "sync_status": sync_status,
+        "admission_decision": admission_decision,
+        "p310_status": "blocked_until_coverage_readiness_passes",
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "stat_rows": stat_rows,
+        "detail_rows": detail_rows,
+        "raw_rows": raw_rows,
+        "pit_violation_rows": pit_violation_rows,
+        "next_step": next_step,
+    })
+}
+
+fn decide_shareholder_structure_readiness(
+    schema_passed: bool,
+    raw_rows: i64,
+    pit_violation_rows: i64,
+) -> Value {
+    let (schema_status, sync_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "missing_or_invalid",
+            "blocked",
+            "apply_schema_before_sync",
+            "apply_sql_phase7_shareholder_structure_source_then_rerun_readiness_audit",
+        )
+    } else if raw_rows <= 0 {
+        (
+            "created",
+            "not_started",
+            "bounded_sync_required_before_coverage_audit",
+            "run_bounded_shareholder_structure_sync_then_readiness_audit",
+        )
+    } else if pit_violation_rows > 0 {
+        (
+            "created",
+            "raw_synced_pit_failed",
+            "raw_pit_failed",
+            "review_period_snapshot_anomalies_then_repair_exclude_or_gate_before_factor_builder",
+        )
+    } else {
+        (
+            "created",
+            "raw_synced",
+            "coverage_readiness_audit_required_before_p310",
+            "run_year_symbol_ann_date_breadth_duplicate_audit_before_factor_builder",
+        )
+    };
+
+    json!({
+        "schema_status": schema_status,
+        "sync_status": sync_status,
+        "admission_decision": admission_decision,
+        "p310_status": "blocked_until_coverage_readiness_passes",
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "raw_rows": raw_rows,
+        "pit_violation_rows": pit_violation_rows,
+        "next_step": next_step,
+    })
+}
+
+fn decide_shareholder_structure_coverage_audit(
+    schema_passed: bool,
+    raw_rows: i64,
+    symbol_coverage_ratio: f64,
+    pit_violation_rows: i64,
+    duplicate_source_row_hash_count: i64,
+    data_quality_violation_rows: i64,
+    missing_year_count: i64,
+) -> Value {
+    const MIN_BROAD_BASE_SYMBOL_COVERAGE: f64 = 0.70;
+    const MIN_RAW_ROWS_FOR_P310: i64 = 250_000;
+
+    let (coverage_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "schema_missing_or_invalid",
+            "apply_schema_before_sync",
+            "apply_sql_phase7_shareholder_structure_source_then_rerun_coverage_audit",
+        )
+    } else if raw_rows <= 0 {
+        (
+            "raw_missing",
+            "bounded_sync_required_before_coverage_audit",
+            "run_bounded_shareholder_structure_sync_then_coverage_audit",
+        )
+    } else if pit_violation_rows > 0 {
+        (
+            "raw_pit_failed",
+            "raw_pit_failed",
+            "review_period_snapshot_anomalies_then_repair_exclude_or_gate_before_factor_builder",
+        )
+    } else if data_quality_violation_rows > 0 {
+        (
+            "raw_quality_failed",
+            "raw_quality_failed",
+            "review_ratio_and_interval_anomalies_then_repair_exclude_or_gate_before_factor_builder",
+        )
+    } else if duplicate_source_row_hash_count > 0 {
+        (
+            "duplicate_source_rows_failed",
+            "duplicate_source_rows_failed",
+            "inspect_shareholder_structure_source_row_hash_duplicates_before_feature_builder",
+        )
+    } else if missing_year_count > 0 {
+        (
+            "full_history_coverage_failed",
+            "full_history_coverage_failed",
+            "run_missing_year_shareholder_structure_sync_then_rerun_coverage_audit",
+        )
+    } else if symbol_coverage_ratio < MIN_BROAD_BASE_SYMBOL_COVERAGE
+        || raw_rows < MIN_RAW_ROWS_FOR_P310
+    {
+        (
+            "bounded_sample_or_undercovered",
+            "bounded_sample_passed_needs_full_history_sync",
+            "run_full_history_bounded_shareholder_structure_sync_then_coverage_audit",
+        )
+    } else {
+        (
+            "coverage_readiness_ready_for_p310_diagnostics",
+            "coverage_readiness_ready_for_p310_diagnostics",
+            "run_p310_rankic_group_decay_turnover_capacity_diagnostics",
+        )
+    };
+
+    json!({
+        "coverage_status": coverage_status,
+        "admission_decision": admission_decision,
+        "p310_status": if admission_decision == "coverage_readiness_ready_for_p310_diagnostics" {
+            "ready_for_p310_diagnostics_only"
+        } else {
+            "blocked_until_coverage_readiness_passes"
+        },
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "raw_rows": raw_rows,
+        "symbol_coverage_ratio": symbol_coverage_ratio,
+        "pit_violation_rows": pit_violation_rows,
+        "data_quality_violation_rows": data_quality_violation_rows,
+        "duplicate_source_row_hash_count": duplicate_source_row_hash_count,
+        "missing_year_count": missing_year_count,
+        "next_step": next_step,
+    })
+}
+
+fn decide_shareholder_structure_strict_low_fanout_gate(
+    schema_passed: bool,
+    admissible_rows: i64,
+    symbol_coverage_ratio: f64,
+    duplicate_source_row_hash_count: i64,
+    missing_year_count: i64,
+) -> Value {
+    const MIN_BROAD_BASE_SYMBOL_COVERAGE: f64 = 0.70;
+    const MIN_ADMISSIBLE_ROWS_FOR_P310: i64 = 250_000;
+
+    let (status, admission_decision, next_step) = if !schema_passed {
+        (
+            "schema_missing_or_invalid",
+            "apply_schema_before_strict_low_fanout_gate",
+            "apply_sql_phase7_shareholder_structure_source_then_rerun_coverage_audit",
+        )
+    } else if admissible_rows <= 0 {
+        (
+            "admissible_rows_missing",
+            "bounded_sync_required_before_strict_low_fanout_gate",
+            "run_low_fanout_shareholder_structure_sync_then_rerun_coverage_audit",
+        )
+    } else if duplicate_source_row_hash_count > 0 {
+        (
+            "duplicate_admissible_rows_failed",
+            "duplicate_admissible_rows_failed",
+            "inspect_strict_low_fanout_duplicate_source_hashes_before_p310",
+        )
+    } else if missing_year_count > 0 {
+        (
+            "full_history_coverage_failed",
+            "full_history_coverage_failed",
+            "run_missing_year_low_fanout_shareholder_structure_sync_then_rerun_coverage_audit",
+        )
+    } else if symbol_coverage_ratio < MIN_BROAD_BASE_SYMBOL_COVERAGE
+        || admissible_rows < MIN_ADMISSIBLE_ROWS_FOR_P310
+    {
+        (
+            "undercovered_or_too_sparse",
+            "bounded_sample_passed_needs_more_admissible_history",
+            "increase_strict_low_fanout_admissible_coverage_before_p310",
+        )
+    } else {
+        (
+            "strict_low_fanout_ready_for_p310_diagnostics",
+            "strict_low_fanout_ready_for_p310_diagnostics",
+            "run_p310_rankic_group_decay_turnover_capacity_diagnostics_with_shareholder_structure_gate",
+        )
+    };
+
+    json!({
+        "gate_id": SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID,
+        "source_scope": "low_fanout_holder_number_holder_trade",
+        "status": status,
+        "admission_decision": admission_decision,
+        "p310_status": if admission_decision == "strict_low_fanout_ready_for_p310_diagnostics" {
+            "ready_for_p310_diagnostics_only"
+        } else {
+            "blocked_until_strict_low_fanout_gate_passes"
+        },
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "admissible_rows": admissible_rows,
+        "symbol_coverage_ratio": symbol_coverage_ratio,
+        "duplicate_source_row_hash_count": duplicate_source_row_hash_count,
+        "missing_year_count": missing_year_count,
+        "next_step": next_step,
+    })
+}
+
+fn shareholder_structure_quarter_count(start: NaiveDate, end: NaiveDate) -> i64 {
+    if start > end {
+        return 0;
+    }
+    let quarter_start_month = ((start.month0() / 3) * 3) + 1;
+    let mut cursor =
+        NaiveDate::from_ymd_opt(start.year(), quarter_start_month, 1).expect("valid quarter start");
+    let mut count = 0_i64;
+    while cursor <= end {
+        count += 1;
+        let (next_year, next_month) = if cursor.month() >= 10 {
+            (cursor.year() + 1, 1)
+        } else {
+            (cursor.year(), cursor.month() + 3)
+        };
+        cursor = NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid quarter start");
+    }
+    count
+}
+
+fn shareholder_structure_sync_plan_response(
+    start: NaiveDate,
+    end: NaiveDate,
+    batches: Vec<ShareholderStructureSyncPlanBatch>,
+) -> Value {
+    const SAFE_FULL_RANGE_UNIT_LIMIT: i64 = 50_000;
+
+    let batch_values = batches
+        .iter()
+        .map(|batch| {
+            let global_ann_date_units = batch.quarter_count * 2;
+            let symbol_quarter_units = batch.symbol_count * batch.quarter_count * 2;
+            let estimated_units = global_ann_date_units + symbol_quarter_units;
+            json!({
+                "year": batch.year,
+                "start_date": batch.start_date.format("%Y-%m-%d").to_string(),
+                "end_date": batch.end_date.format("%Y-%m-%d").to_string(),
+                "symbol_count": batch.symbol_count,
+                "quarter_count": batch.quarter_count,
+                "global_ann_date_units": global_ann_date_units,
+                "symbol_quarter_units": symbol_quarter_units,
+                "estimated_units": estimated_units,
+                "recommended_request": {
+                    "start_date": batch.start_date.format("%Y%m%d").to_string(),
+                    "end_date": batch.end_date.format("%Y%m%d").to_string(),
+                    "data_version_id": format!("shareholder-structure-{}", batch.year),
+                    "background": true
+                },
+                "recommended_low_fanout_request": {
+                    "start_date": batch.start_date.format("%Y%m%d").to_string(),
+                    "end_date": batch.end_date.format("%Y%m%d").to_string(),
+                    "source_filters": ["holder_number", "holder_trade"],
+                    "data_version_id": format!("shareholder-structure-{}-low-fanout", batch.year),
+                    "background": true
+                },
+                "recommended_top10_request": {
+                    "start_date": batch.start_date.format("%Y%m%d").to_string(),
+                    "end_date": batch.end_date.format("%Y%m%d").to_string(),
+                    "source_filters": ["top10_holders", "top10_float_holders"],
+                    "data_version_id": format!("shareholder-structure-{}-top10", batch.year),
+                    "background": true
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let estimated_total_units = batches
+        .iter()
+        .map(|batch| batch.quarter_count * 2 + batch.symbol_count * batch.quarter_count * 2)
+        .sum::<i64>();
+    let safe_to_run_full_range = estimated_total_units <= SAFE_FULL_RANGE_UNIT_LIMIT;
+
+    json!({
+        "audit_version": "p3.21c-shareholder-structure-sync-plan-v1",
+        "source_id": "shareholder_structure",
+        "mode": "read_only_bounded_sync_plan",
+        "date_range": {
+            "start_date": start.format("%Y-%m-%d").to_string(),
+            "end_date": end.format("%Y-%m-%d").to_string(),
+        },
+        "batch_count": batch_values.len(),
+        "estimated_total_units": estimated_total_units,
+        "safe_full_range_unit_limit": SAFE_FULL_RANGE_UNIT_LIMIT,
+        "safe_to_run_full_range": safe_to_run_full_range,
+        "recommended_batch_granularity": if safe_to_run_full_range { "full_range" } else { "year" },
+        "unit_model": {
+            "global_ann_date_units": "quarter_count * 2 for holder_number and holder_trade",
+            "symbol_quarter_units": "symbol_count * quarter_count * 2 for top10_holders and top10_floatholders",
+            "warning": "plan is read-only and does not call Tushare"
+        },
+        "batches": batch_values,
+        "prohibited": [
+            "do_not_run_2014_2026_full_range_without_reviewing_estimated_units",
+            "do_not_enter_factor_p310_wfa_until_coverage_readiness_and_anomaly_gates_pass"
+        ]
+    })
+}
+
+async fn build_shareholder_structure_sync_plan(
+    db: &sqlx::PgPool,
+    req: ShareholderStructureSyncPlanReq,
+) -> Result<Value, String> {
+    let start = parse_futures_price_chain_coverage_date(req.start_date.as_deref(), "start_date")?
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2014, 1, 1).unwrap());
+    let end = parse_futures_price_chain_coverage_date(req.end_date.as_deref(), "end_date")?
+        .unwrap_or_else(|| Utc::now().date_naive());
+    if start > end {
+        return Err("shareholder_structure sync-plan start_date cannot be after end_date".into());
+    }
+
+    let mut batches = Vec::new();
+    for year in start.year()..=end.year() {
+        let year_start = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+        let year_end = NaiveDate::from_ymd_opt(year, 12, 31).unwrap();
+        let batch_start = start.max(year_start);
+        let batch_end = end.min(year_end);
+        let symbol_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM market_stock
+            WHERE symbol ~ '^[036][0-9]{5}\.(SH|SZ)$'
+              AND list_date IS NOT NULL
+              AND list_date <= $1
+              AND (delist_date IS NULL OR delist_date >= $2)
+            "#,
+        )
+        .bind(batch_end)
+        .bind(batch_start)
+        .fetch_one(db)
+        .await
+        .map_err(|error| format!("Failed to estimate shareholder symbols for {year}: {error}"))?;
+
+        batches.push(ShareholderStructureSyncPlanBatch {
+            year,
+            start_date: batch_start,
+            end_date: batch_end,
+            symbol_count,
+            quarter_count: shareholder_structure_quarter_count(batch_start, batch_end),
+        });
+    }
+
+    Ok(shareholder_structure_sync_plan_response(
+        start, end, batches,
+    ))
+}
+
+fn decide_equity_pledge_coverage_audit(
+    schema_passed: bool,
+    raw_rows: i64,
+    symbol_coverage_ratio: f64,
+    pit_violation_rows: i64,
+    duplicate_source_row_hash_count: i64,
+) -> Value {
+    const MIN_BROAD_BASE_SYMBOL_COVERAGE: f64 = 0.30;
+    const MIN_RAW_ROWS_FOR_P310: i64 = 10_000;
+
+    let (coverage_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "schema_missing_or_invalid",
+            "apply_schema_before_sync",
+            "apply_sql_phase7_equity_pledge_source_then_rerun_coverage_audit",
+        )
+    } else if raw_rows <= 0 {
+        (
+            "raw_missing",
+            "bounded_sync_required_before_coverage_audit",
+            "run_bounded_equity_pledge_pressure_sync_then_coverage_audit",
+        )
+    } else if pit_violation_rows > 0 {
+        (
+            "raw_pit_failed",
+            "raw_pit_failed",
+            "fix_or_delete_bad_equity_pledge_rows_then_rerun_sync_and_audit",
+        )
+    } else if duplicate_source_row_hash_count > 0 {
+        (
+            "duplicate_source_rows_failed",
+            "duplicate_source_rows_failed",
+            "inspect_pledge_detail_source_row_hash_duplicates_before_feature_builder",
+        )
+    } else if symbol_coverage_ratio < MIN_BROAD_BASE_SYMBOL_COVERAGE
+        || raw_rows < MIN_RAW_ROWS_FOR_P310
+    {
+        (
+            "bounded_sample_or_undercovered",
+            "bounded_sample_passed_needs_full_history_sync",
+            "run_full_history_bounded_equity_pledge_sync_then_coverage_audit",
+        )
+    } else {
+        (
+            "coverage_readiness_ready_for_p310_diagnostics",
+            "coverage_readiness_ready_for_p310_diagnostics",
+            "run_p310_rankic_group_decay_turnover_capacity_diagnostics",
+        )
+    };
+
+    json!({
+        "coverage_status": coverage_status,
+        "admission_decision": admission_decision,
+        "p310_status": if admission_decision == "coverage_readiness_ready_for_p310_diagnostics" {
+            "ready_for_p310_diagnostics_only"
+        } else {
+            "blocked_until_coverage_readiness_passes"
+        },
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "raw_rows": raw_rows,
+        "symbol_coverage_ratio": symbol_coverage_ratio,
+        "pit_violation_rows": pit_violation_rows,
+        "duplicate_source_row_hash_count": duplicate_source_row_hash_count,
+        "next_step": next_step,
+    })
+}
+
+async fn build_equity_pledge_pressure_readiness_audit(db: &sqlx::PgPool) -> Result<Value, String> {
+    let mut table_results = Vec::new();
+    let mut schema_passed = true;
+    let mut stat_rows = 0_i64;
+    let mut detail_rows = 0_i64;
+    let mut pit_violation_rows = 0_i64;
+
+    for (table, required_constraints) in equity_pledge_expected_schema() {
+        let regclass_name = format!("public.{table}");
+        let table_exists: bool = sqlx::query_scalar("SELECT to_regclass($1)::text IS NOT NULL")
+            .bind(&regclass_name)
+            .fetch_one(db)
+            .await
+            .map_err(|error| format!("Failed to inspect {table}: {error}"))?;
+
+        let row_count = if table_exists {
+            let sql = format!("SELECT COUNT(*)::bigint FROM {table}");
+            sqlx::query_scalar::<_, i64>(&sql)
+                .fetch_one(db)
+                .await
+                .map_err(|error| format!("Failed to count {table}: {error}"))?
+        } else {
+            0
+        };
+
+        let table_pit_violations = if table_exists {
+            let sql = if table == "market_stock_pledge_stat" {
+                "SELECT COUNT(*)::bigint FROM market_stock_pledge_stat WHERE available_at < end_date"
+            } else {
+                "SELECT COUNT(*)::bigint FROM market_stock_pledge_detail WHERE available_at < ann_date"
+            };
+            sqlx::query_scalar::<_, i64>(sql)
+                .fetch_one(db)
+                .await
+                .map_err(|error| format!("Failed to count PIT violations for {table}: {error}"))?
+        } else {
+            0
+        };
+
+        let constraints: Vec<String> = if table_exists {
+            sqlx::query_scalar(
+                r#"
+                SELECT conname
+                FROM pg_constraint
+                WHERE conrelid = to_regclass($1)
+                ORDER BY conname
+                "#,
+            )
+            .bind(&regclass_name)
+            .fetch_all(db)
+            .await
+            .map_err(|error| format!("Failed to inspect constraints for {table}: {error}"))?
+        } else {
+            Vec::new()
+        };
+
+        let missing_constraints: Vec<&str> = required_constraints
+            .iter()
+            .copied()
+            .filter(|constraint| !constraints.iter().any(|existing| existing == constraint))
+            .collect();
+
+        let passed = table_exists && missing_constraints.is_empty();
+        schema_passed &= passed;
+        if table == "market_stock_pledge_stat" {
+            stat_rows = row_count;
+        } else if table == "market_stock_pledge_detail" {
+            detail_rows = row_count;
+        }
+        pit_violation_rows += table_pit_violations;
+
+        table_results.push(json!({
+            "table": table,
+            "table_exists": table_exists,
+            "row_count": row_count,
+            "pit_violation_rows": table_pit_violations,
+            "required_constraints": required_constraints,
+            "missing_constraints": missing_constraints,
+            "passed": passed,
+        }));
+    }
+
+    let attempt_breakdown: Vec<(String, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT source,
+               COUNT(*)::bigint AS attempts,
+               COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempts
+        FROM data_sync_attempt
+        WHERE source IN (
+            'equity_pledge_stat_symbol',
+            'equity_pledge_stat_end_date',
+            'equity_pledge_detail_ann_date'
+        )
+        GROUP BY source
+        ORDER BY source
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let decision =
+        decide_equity_pledge_readiness(schema_passed, stat_rows, detail_rows, pit_violation_rows);
+
+    Ok(json!({
+        "audit_version": "p3.20c-equity-pledge-pressure-readiness-v1",
+        "source_id": "equity_pledge_pressure",
+        "mode": "read_only_schema_raw_pit_rowcount_audit",
+        "schema_passed": schema_passed,
+        "tables": table_results,
+        "sync_attempt_breakdown": attempt_breakdown
+            .into_iter()
+            .map(|(source, attempts, failed_attempts)| json!({
+                "source": source,
+                "attempts": attempts,
+                "failed_attempts": failed_attempts,
+            }))
+            .collect::<Vec<_>>(),
+        "decision": decision,
+        "pit_policy": {
+            "pledge_detail": "available_at equals ann_date and downstream filters must require available_at <= stock_trade_date",
+            "pledge_stat": "available_at is conservatively set to end_date + 1 day until a source_published_at audit proves earlier availability",
+            "intraday_rule": "same-day pledge updates are unavailable to intraday trading without source publication timestamps"
+        },
+        "prohibited": [
+            "factor_backfill_before_full_history_coverage_pit_audit",
+            "p310_before_year_symbol_ann_date_duplicate_and_sync_attempt_audit",
+            "bounded_wfa_or_v19_train_selection_before_p310_passes"
+        ]
+    }))
+}
+
+async fn build_equity_pledge_pressure_coverage_audit(
+    db: &sqlx::PgPool,
+    req: EquityPledgeCoverageAuditReq,
+) -> Result<Value, String> {
+    let start = parse_futures_price_chain_coverage_date(req.start_date.as_deref(), "start_date")?;
+    let end = parse_futures_price_chain_coverage_date(req.end_date.as_deref(), "end_date")?;
+    if let (Some(start), Some(end)) = (start, end) {
+        if start > end {
+            return Err("equity_pledge coverage start_date cannot be after end_date".into());
+        }
+    }
+
+    let readiness = build_equity_pledge_pressure_readiness_audit(db).await?;
+    let schema_passed = readiness
+        .get("schema_passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let stat_summary: (i64, i64, Option<NaiveDate>, Option<NaiveDate>, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)::bigint AS rows,
+               COUNT(DISTINCT symbol)::bigint AS symbols,
+               MIN(end_date) AS min_date,
+               MAX(end_date) AS max_date,
+               COUNT(*) FILTER (WHERE available_at < end_date)::bigint AS pit_violation_rows,
+               COUNT(*) FILTER (
+                   WHERE pledge_ratio IS NOT NULL
+                     AND (pledge_ratio < 0 OR pledge_ratio > 100)
+               )::bigint AS pledge_ratio_out_of_range_count
+        FROM market_stock_pledge_stat
+        WHERE ($1::date IS NULL OR end_date >= $1)
+          AND ($2::date IS NULL OR end_date <= $2)
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to summarize pledge_stat coverage: {error}"))?;
+
+    let detail_summary: (
+        i64,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)::bigint AS rows,
+               COUNT(DISTINCT symbol)::bigint AS symbols,
+               MIN(ann_date) AS min_date,
+               MAX(ann_date) AS max_date,
+               COUNT(*) FILTER (WHERE available_at < ann_date)::bigint AS pit_violation_rows,
+               COUNT(*) FILTER (
+                   WHERE release_date IS NOT NULL
+                     AND pledge_start_date IS NOT NULL
+                     AND release_date < pledge_start_date
+               )::bigint AS release_before_start_count,
+               COUNT(*) FILTER (
+                   WHERE (p_total_ratio IS NOT NULL AND (p_total_ratio < 0 OR p_total_ratio > 100))
+                      OR (h_total_ratio IS NOT NULL AND (h_total_ratio < 0 OR h_total_ratio > 100))
+               )::bigint AS detail_ratio_out_of_range_count
+        FROM market_stock_pledge_detail
+        WHERE ($1::date IS NULL OR ann_date >= $1)
+          AND ($2::date IS NULL OR ann_date <= $2)
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to summarize pledge_detail coverage: {error}"))?;
+
+    let year_breakdown: Vec<(
+        String,
+        i32,
+        i64,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        i64,
+    )> = sqlx::query_as(
+        r#"
+            SELECT source, year, rows, symbols, min_date, max_date, pit_violation_rows
+            FROM (
+                SELECT 'pledge_stat'::text AS source,
+                       EXTRACT(YEAR FROM end_date)::int AS year,
+                       COUNT(*)::bigint AS rows,
+                       COUNT(DISTINCT symbol)::bigint AS symbols,
+                       MIN(end_date) AS min_date,
+                       MAX(end_date) AS max_date,
+                       COUNT(*) FILTER (WHERE available_at < end_date)::bigint AS pit_violation_rows
+                FROM market_stock_pledge_stat
+                WHERE ($1::date IS NULL OR end_date >= $1)
+                  AND ($2::date IS NULL OR end_date <= $2)
+                GROUP BY 1, 2
+                UNION ALL
+                SELECT 'pledge_detail'::text AS source,
+                       EXTRACT(YEAR FROM ann_date)::int AS year,
+                       COUNT(*)::bigint AS rows,
+                       COUNT(DISTINCT symbol)::bigint AS symbols,
+                       MIN(ann_date) AS min_date,
+                       MAX(ann_date) AS max_date,
+                       COUNT(*) FILTER (WHERE available_at < ann_date)::bigint AS pit_violation_rows
+                FROM market_stock_pledge_detail
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+                GROUP BY 1, 2
+            ) breakdown
+            ORDER BY year, source
+            "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to build pledge year breakdown: {error}"))?;
+
+    let symbol_breadth: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH reference AS (
+            SELECT DISTINCT symbol
+            FROM market_stock
+            WHERE list_status = 'L'
+              AND market IN ('主板', '创业板')
+              AND COALESCE(name, '') NOT ILIKE '%ST%'
+        ),
+        raw_symbols AS (
+            SELECT DISTINCT symbol
+            FROM market_stock_pledge_stat
+            WHERE ($1::date IS NULL OR end_date >= $1)
+              AND ($2::date IS NULL OR end_date <= $2)
+            UNION
+            SELECT DISTINCT symbol
+            FROM market_stock_pledge_detail
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+        )
+        SELECT (SELECT COUNT(*)::bigint FROM reference) AS reference_symbols,
+               COUNT(raw_symbols.symbol)::bigint AS covered_symbols
+        FROM reference
+        LEFT JOIN raw_symbols ON raw_symbols.symbol = reference.symbol
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to build pledge symbol breadth: {error}"))?;
+
+    let duplicate_source_row_hash_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(SUM(row_count - 1), 0)::bigint
+        FROM (
+            SELECT source_row_hash, COUNT(*)::bigint AS row_count
+            FROM market_stock_pledge_detail
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+            GROUP BY source_row_hash
+            HAVING COUNT(*) > 1
+        ) duplicate_groups
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to count pledge duplicate hashes: {error}"))?;
+
+    let attempt_breakdown: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT source,
+               COUNT(*)::bigint AS attempts,
+               COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_attempts,
+               COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempts
+        FROM data_sync_attempt
+        WHERE source IN (
+            'equity_pledge_stat_symbol',
+            'equity_pledge_stat_end_date',
+            'equity_pledge_detail_ann_date'
+        )
+        GROUP BY source
+        ORDER BY source
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let raw_rows = stat_summary.0 + detail_summary.0;
+    let pit_violation_rows = stat_summary.4 + detail_summary.4;
+    let symbol_coverage_ratio = phase7_ratio(symbol_breadth.1, symbol_breadth.0).unwrap_or(0.0);
+    let decision = decide_equity_pledge_coverage_audit(
+        schema_passed,
+        raw_rows,
+        symbol_coverage_ratio,
+        pit_violation_rows,
+        duplicate_source_row_hash_count,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.20d-equity-pledge-pressure-coverage-audit-v1",
+        "source_id": "equity_pledge_pressure",
+        "mode": "read_only_year_symbol_ann_date_coverage_duplicate_audit",
+        "date_range": {
+            "start_date": phase7_date_json(start),
+            "end_date": phase7_date_json(end),
+        },
+        "schema_passed": schema_passed,
+        "raw_summary": {
+            "stat_rows": stat_summary.0,
+            "stat_symbols": stat_summary.1,
+            "stat_min_end_date": phase7_date_json(stat_summary.2),
+            "stat_max_end_date": phase7_date_json(stat_summary.3),
+            "detail_rows": detail_summary.0,
+            "detail_symbols": detail_summary.1,
+            "detail_min_ann_date": phase7_date_json(detail_summary.2),
+            "detail_max_ann_date": phase7_date_json(detail_summary.3),
+            "raw_rows": raw_rows,
+            "pit_violation_rows": pit_violation_rows,
+            "duplicate_source_row_hash_count": duplicate_source_row_hash_count,
+            "stat_pledge_ratio_out_of_range_count": stat_summary.5,
+            "detail_release_before_start_count": detail_summary.5,
+            "detail_ratio_out_of_range_count": detail_summary.6,
+        },
+        "symbol_breadth_vs_main_chinext_non_st": {
+            "reference_symbols": symbol_breadth.0,
+            "covered_symbols": symbol_breadth.1,
+            "coverage_ratio": symbol_coverage_ratio,
+        },
+        "year_breakdown": year_breakdown
+            .into_iter()
+            .map(|(source, year, rows, symbols, min_date, max_date, pit_violation_rows)| json!({
+                "source": source,
+                "year": year,
+                "rows": rows,
+                "symbols": symbols,
+                "min_date": phase7_date_json(min_date),
+                "max_date": phase7_date_json(max_date),
+                "pit_violation_rows": pit_violation_rows,
+            }))
+            .collect::<Vec<_>>(),
+        "sync_attempt_breakdown": attempt_breakdown
+            .into_iter()
+            .map(|(source, attempts, completed_attempts, failed_attempts)| json!({
+                "source": source,
+                "attempts": attempts,
+                "completed_attempts": completed_attempts,
+                "failed_attempts": failed_attempts,
+            }))
+            .collect::<Vec<_>>(),
+        "decision": decision,
+        "promotion_gate": {
+            "factor_builder": "blocked_until_coverage_readiness_and_pit_pass",
+            "p310_status": decision["p310_status"].clone(),
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    }))
+}
+
+async fn build_shareholder_structure_readiness_audit(db: &sqlx::PgPool) -> Result<Value, String> {
+    let mut table_results = Vec::new();
+    let mut schema_passed = true;
+    let mut raw_rows = 0_i64;
+    let mut pit_violation_rows = 0_i64;
+
+    for (table, required_constraints) in shareholder_structure_expected_schema() {
+        let regclass_name = format!("public.{table}");
+        let table_exists: bool = sqlx::query_scalar("SELECT to_regclass($1)::text IS NOT NULL")
+            .bind(&regclass_name)
+            .fetch_one(db)
+            .await
+            .map_err(|error| format!("Failed to inspect {table}: {error}"))?;
+
+        let row_count = if table_exists {
+            let sql = format!("SELECT COUNT(*)::bigint FROM {table}");
+            sqlx::query_scalar::<_, i64>(&sql)
+                .fetch_one(db)
+                .await
+                .map_err(|error| format!("Failed to count {table}: {error}"))?
+        } else {
+            0
+        };
+
+        let table_pit_violations = if table_exists {
+            let sql = match table {
+                "market_stock_holder_number" => {
+                    "SELECT COUNT(*)::bigint FROM market_stock_holder_number WHERE available_at < ann_date OR available_at < end_date"
+                }
+                "market_stock_top10_holders" => {
+                    "SELECT COUNT(*)::bigint FROM market_stock_top10_holders WHERE available_at < ann_date OR available_at < end_date"
+                }
+                "market_stock_top10_float_holders" => {
+                    "SELECT COUNT(*)::bigint FROM market_stock_top10_float_holders WHERE available_at < ann_date OR available_at < end_date"
+                }
+                "market_stock_holder_trade" => {
+                    "SELECT COUNT(*)::bigint FROM market_stock_holder_trade WHERE available_at < ann_date OR (begin_date IS NOT NULL AND close_date IS NOT NULL AND close_date < begin_date)"
+                }
+                _ => "SELECT 0::bigint",
+            };
+            sqlx::query_scalar::<_, i64>(sql)
+                .fetch_one(db)
+                .await
+                .map_err(|error| format!("Failed to count PIT violations for {table}: {error}"))?
+        } else {
+            0
+        };
+
+        let constraints: Vec<String> = if table_exists {
+            sqlx::query_scalar(
+                r#"
+                SELECT conname
+                FROM pg_constraint
+                WHERE conrelid = to_regclass($1)
+                ORDER BY conname
+                "#,
+            )
+            .bind(&regclass_name)
+            .fetch_all(db)
+            .await
+            .map_err(|error| format!("Failed to inspect constraints for {table}: {error}"))?
+        } else {
+            Vec::new()
+        };
+
+        let missing_constraints: Vec<&str> = required_constraints
+            .iter()
+            .copied()
+            .filter(|constraint| !constraints.iter().any(|existing| existing == constraint))
+            .collect();
+
+        let passed = table_exists && missing_constraints.is_empty();
+        schema_passed &= passed;
+        raw_rows += row_count;
+        pit_violation_rows += table_pit_violations;
+
+        table_results.push(json!({
+            "table": table,
+            "table_exists": table_exists,
+            "row_count": row_count,
+            "pit_violation_rows": table_pit_violations,
+            "required_constraints": required_constraints,
+            "missing_constraints": missing_constraints,
+            "passed": passed,
+        }));
+    }
+
+    let attempt_breakdown: Vec<(String, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT source,
+               COUNT(*)::bigint AS attempts,
+               COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempts
+        FROM data_sync_attempt
+        WHERE source IN (
+            'shareholder_holder_number_ann_date',
+            'shareholder_top10_holders_ann_date',
+            'shareholder_top10_float_holders_ann_date',
+            'shareholder_holder_trade_ann_date'
+        )
+        GROUP BY source
+        ORDER BY source
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let decision =
+        decide_shareholder_structure_readiness(schema_passed, raw_rows, pit_violation_rows);
+
+    Ok(json!({
+        "audit_version": "p3.21c-shareholder-structure-readiness-v1",
+        "source_id": "shareholder_structure",
+        "mode": "read_only_schema_raw_pit_rowcount_audit",
+        "schema_passed": schema_passed,
+        "tables": table_results,
+        "sync_attempt_breakdown": attempt_breakdown
+            .into_iter()
+            .map(|(source, attempts, failed_attempts)| json!({
+                "source": source,
+                "attempts": attempts,
+                "failed_attempts": failed_attempts,
+            }))
+            .collect::<Vec<_>>(),
+        "decision": decision,
+        "pit_policy": {
+            "available_at": "available_at equals ann_date for all shareholder_structure raw rows",
+            "period_snapshot_rule": "holdernumber/top10/top10_float rows with ann_date before end_date land as raw source anomalies, but block factor/P3.10/WFA until repaired, excluded, or gated.",
+            "intraday_rule": "same-day shareholder disclosures are unavailable to intraday trading without source publication timestamps"
+        },
+        "prohibited": [
+            "factor_backfill_before_full_history_coverage_pit_audit",
+            "p310_before_year_symbol_ann_date_duplicate_and_sync_attempt_audit",
+            "bounded_wfa_or_v19_train_selection_before_p310_passes"
+        ]
+    }))
+}
+
+async fn build_shareholder_structure_coverage_audit(
+    db: &sqlx::PgPool,
+    req: ShareholderStructureCoverageAuditReq,
+) -> Result<Value, String> {
+    let start = parse_futures_price_chain_coverage_date(req.start_date.as_deref(), "start_date")?;
+    let end = parse_futures_price_chain_coverage_date(req.end_date.as_deref(), "end_date")?;
+    if let (Some(start), Some(end)) = (start, end) {
+        if start > end {
+            return Err(
+                "shareholder_structure coverage start_date cannot be after end_date".into(),
+            );
+        }
+    }
+
+    let readiness = build_shareholder_structure_readiness_audit(db).await?;
+    let schema_passed = readiness
+        .get("schema_passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !schema_passed {
+        let decision = decide_shareholder_structure_coverage_audit(false, 0, 0.0, 0, 0, 0, 0);
+        return Ok(json!({
+            "audit_version": "p3.21d-shareholder-structure-coverage-audit-v1",
+            "source_id": "shareholder_structure",
+            "mode": "read_only_year_source_symbol_ann_date_coverage_duplicate_audit",
+            "schema_passed": false,
+            "date_range": {
+                "start_date": phase7_date_json(start),
+                "end_date": phase7_date_json(end),
+            },
+            "decision": decision,
+            "readiness_audit": readiness,
+            "prohibited": [
+                "raw_factor_backfill_before_schema_passes",
+                "p310_before_coverage_and_pit_readiness",
+                "bounded_wfa_or_v19_train_selection_before_p310_passes"
+            ]
+        }));
+    }
+
+    let raw_summary: (
+        i64,
+        i64,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) =
+        sqlx::query_as(
+            r#"
+            WITH raw AS (
+                SELECT 'holder_number'::text AS source, symbol, ann_date, end_date, available_at,
+                       source_row_hash, NULL::numeric AS ratio_a, NULL::numeric AS ratio_b,
+                       NULL::date AS begin_date, NULL::date AS close_date, holder_num
+                FROM market_stock_holder_number
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+                UNION ALL
+                SELECT 'top10_holders'::text AS source, symbol, ann_date, end_date, available_at,
+                       source_row_hash, hold_ratio AS ratio_a, hold_float_ratio AS ratio_b,
+                       NULL::date AS begin_date, NULL::date AS close_date, NULL::bigint AS holder_num
+                FROM market_stock_top10_holders
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+                UNION ALL
+                SELECT 'top10_float_holders'::text AS source, symbol, ann_date, end_date, available_at,
+                       source_row_hash, hold_ratio AS ratio_a, hold_float_ratio AS ratio_b,
+                       NULL::date AS begin_date, NULL::date AS close_date, NULL::bigint AS holder_num
+                FROM market_stock_top10_float_holders
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+                UNION ALL
+                SELECT 'holder_trade'::text AS source, symbol, ann_date, NULL::date AS end_date,
+                       available_at, source_row_hash, change_ratio AS ratio_a, after_ratio AS ratio_b,
+                       begin_date, close_date, NULL::bigint AS holder_num
+                FROM market_stock_holder_trade
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+            )
+            SELECT COUNT(*)::bigint AS raw_rows,
+                   COUNT(DISTINCT symbol)::bigint AS symbols,
+                   MIN(ann_date) AS min_ann_date,
+                   MAX(ann_date) AS max_ann_date,
+                   COUNT(*) FILTER (
+                       WHERE available_at < ann_date
+                          OR (end_date IS NOT NULL AND available_at < end_date)
+                   )::bigint AS pit_violation_rows,
+                   COUNT(*) FILTER (
+                       WHERE (ratio_a IS NOT NULL AND (ratio_a < -100 OR ratio_a > 100))
+                          OR (ratio_b IS NOT NULL AND (ratio_b < -100 OR ratio_b > 100))
+                   )::bigint AS ratio_out_of_range_count,
+                   COUNT(*) FILTER (
+                       WHERE begin_date IS NOT NULL
+                         AND close_date IS NOT NULL
+                         AND close_date < begin_date
+                   )::bigint AS interval_violation_count,
+                   COUNT(*) FILTER (
+                       WHERE source = 'holder_number'
+                         AND (holder_num IS NULL OR holder_num <= 0)
+                   )::bigint AS holder_number_missing_value_count
+            FROM raw
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(db)
+        .await
+        .map_err(|error| format!("Failed to summarize shareholder structure coverage: {error}"))?;
+
+    let year_breakdown: Vec<(String, i32, i64, i64, Option<NaiveDate>, Option<NaiveDate>, i64)> =
+        sqlx::query_as(
+            r#"
+            WITH raw AS (
+                SELECT 'holder_number'::text AS source, symbol, ann_date, end_date, available_at
+                FROM market_stock_holder_number
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+                UNION ALL
+                SELECT 'top10_holders'::text AS source, symbol, ann_date, end_date, available_at
+                FROM market_stock_top10_holders
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+                UNION ALL
+                SELECT 'top10_float_holders'::text AS source, symbol, ann_date, end_date, available_at
+                FROM market_stock_top10_float_holders
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+                UNION ALL
+                SELECT 'holder_trade'::text AS source, symbol, ann_date, NULL::date AS end_date, available_at
+                FROM market_stock_holder_trade
+                WHERE ($1::date IS NULL OR ann_date >= $1)
+                  AND ($2::date IS NULL OR ann_date <= $2)
+            )
+            SELECT source,
+                   EXTRACT(YEAR FROM ann_date)::int AS year,
+                   COUNT(*)::bigint AS rows,
+                   COUNT(DISTINCT symbol)::bigint AS symbols,
+                   MIN(ann_date) AS min_ann_date,
+                   MAX(ann_date) AS max_ann_date,
+                   COUNT(*) FILTER (
+                       WHERE available_at < ann_date
+                          OR (end_date IS NOT NULL AND available_at < end_date)
+                   )::bigint AS pit_violation_rows
+            FROM raw
+            GROUP BY source, year
+            ORDER BY year, source
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("Failed to build shareholder year breakdown: {error}"))?;
+
+    let symbol_breadth: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH reference AS (
+            SELECT DISTINCT symbol
+            FROM market_stock
+            WHERE list_status = 'L'
+              AND market IN ('主板', '创业板')
+              AND COALESCE(name, '') NOT ILIKE '%ST%'
+        ),
+        raw_symbols AS (
+            SELECT DISTINCT symbol FROM market_stock_holder_number
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+            UNION
+            SELECT DISTINCT symbol FROM market_stock_top10_holders
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+            UNION
+            SELECT DISTINCT symbol FROM market_stock_top10_float_holders
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+            UNION
+            SELECT DISTINCT symbol FROM market_stock_holder_trade
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+        )
+        SELECT (SELECT COUNT(*)::bigint FROM reference) AS reference_symbols,
+               COUNT(raw_symbols.symbol)::bigint AS covered_symbols
+        FROM reference
+        LEFT JOIN raw_symbols ON raw_symbols.symbol = reference.symbol
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to build shareholder symbol breadth: {error}"))?;
+
+    let duplicate_source_row_hash_count: i64 = sqlx::query_scalar(
+        r#"
+        WITH raw AS (
+            SELECT 'holder_number'::text AS source, source_row_hash
+            FROM market_stock_holder_number
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+            UNION ALL
+            SELECT 'top10_holders'::text AS source, source_row_hash
+            FROM market_stock_top10_holders
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+            UNION ALL
+            SELECT 'top10_float_holders'::text AS source, source_row_hash
+            FROM market_stock_top10_float_holders
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+            UNION ALL
+            SELECT 'holder_trade'::text AS source, source_row_hash
+            FROM market_stock_holder_trade
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+        )
+        SELECT COALESCE(SUM(row_count - 1), 0)::bigint
+        FROM (
+            SELECT source, source_row_hash, COUNT(*)::bigint AS row_count
+            FROM raw
+            GROUP BY source, source_row_hash
+            HAVING COUNT(*) > 1
+        ) duplicate_groups
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to count shareholder duplicate hashes: {error}"))?;
+
+    let admissible_summary: (i64, i64, Option<NaiveDate>, Option<NaiveDate>, i64, i64) =
+        sqlx::query_as(
+            r#"
+        WITH admissible AS (
+            SELECT 'holder_number'::text AS source, symbol, ann_date, available_at, source_row_hash
+            FROM market_stock_holder_number
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+              AND available_at >= ann_date
+              AND available_at >= end_date
+              AND holder_num IS NOT NULL
+              AND holder_num > 0
+            UNION ALL
+            SELECT 'holder_trade'::text AS source, symbol, ann_date, available_at, source_row_hash
+            FROM market_stock_holder_trade
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+              AND available_at >= ann_date
+              AND (change_ratio IS NULL OR (change_ratio >= -100 AND change_ratio <= 100))
+              AND (after_ratio IS NULL OR (after_ratio >= 0 AND after_ratio <= 100))
+              AND (begin_date IS NULL OR close_date IS NULL OR close_date >= begin_date)
+        ),
+        duplicate_groups AS (
+            SELECT source, source_row_hash, COUNT(*)::bigint AS row_count
+            FROM admissible
+            GROUP BY source, source_row_hash
+            HAVING COUNT(*) > 1
+        )
+        SELECT COUNT(*)::bigint AS admissible_rows,
+               COUNT(DISTINCT symbol)::bigint AS symbols,
+               MIN(ann_date) AS min_ann_date,
+               MAX(ann_date) AS max_ann_date,
+               COUNT(DISTINCT EXTRACT(YEAR FROM ann_date)::int)::bigint AS observed_year_count,
+               COALESCE((SELECT SUM(row_count - 1)::bigint FROM duplicate_groups), 0)::bigint
+                   AS duplicate_source_row_hash_count
+        FROM admissible
+        "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(db)
+        .await
+        .map_err(|error| format!("Failed to summarize shareholder admissible rows: {error}"))?;
+
+    let admissible_symbol_breadth: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH reference AS (
+            SELECT DISTINCT symbol
+            FROM market_stock
+            WHERE list_status = 'L'
+              AND market IN ('主板', '创业板')
+              AND COALESCE(name, '') NOT ILIKE '%ST%'
+        ),
+        admissible_symbols AS (
+            SELECT DISTINCT symbol
+            FROM market_stock_holder_number
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+              AND available_at >= ann_date
+              AND available_at >= end_date
+              AND holder_num IS NOT NULL
+              AND holder_num > 0
+            UNION
+            SELECT DISTINCT symbol
+            FROM market_stock_holder_trade
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+              AND available_at >= ann_date
+              AND (change_ratio IS NULL OR (change_ratio >= -100 AND change_ratio <= 100))
+              AND (after_ratio IS NULL OR (after_ratio >= 0 AND after_ratio <= 100))
+              AND (begin_date IS NULL OR close_date IS NULL OR close_date >= begin_date)
+        )
+        SELECT (SELECT COUNT(*)::bigint FROM reference) AS reference_symbols,
+               COUNT(admissible_symbols.symbol)::bigint AS covered_symbols
+        FROM reference
+        LEFT JOIN admissible_symbols ON admissible_symbols.symbol = reference.symbol
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to build shareholder admissible symbol breadth: {error}"))?;
+
+    let attempt_breakdown: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT source,
+               COUNT(*)::bigint AS attempts,
+               COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_attempts,
+               COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempts
+        FROM data_sync_attempt
+        WHERE source IN (
+            'shareholder_holder_number_ann_date',
+            'shareholder_top10_holders_ann_date',
+            'shareholder_top10_float_holders_ann_date',
+            'shareholder_holder_trade_ann_date'
+        )
+        GROUP BY source
+        ORDER BY source
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let symbol_coverage_ratio = phase7_ratio(symbol_breadth.1, symbol_breadth.0).unwrap_or(0.0);
+    let admissible_symbol_coverage_ratio =
+        phase7_ratio(admissible_symbol_breadth.1, admissible_symbol_breadth.0).unwrap_or(0.0);
+    let requested_years: Vec<i32> = match (start, end) {
+        (Some(start), Some(end)) => (start.year()..=end.year()).collect(),
+        _ => Vec::new(),
+    };
+    let observed_years: BTreeSet<i32> = year_breakdown.iter().map(|row| row.1).collect();
+    let missing_years: Vec<i32> = requested_years
+        .iter()
+        .copied()
+        .filter(|year| !observed_years.contains(year))
+        .collect();
+    let missing_year_count = missing_years.len();
+    let admissible_observed_years: Vec<i32> = sqlx::query_scalar(
+        r#"
+        WITH admissible AS (
+            SELECT ann_date
+            FROM market_stock_holder_number
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+              AND available_at >= ann_date
+              AND available_at >= end_date
+              AND holder_num IS NOT NULL
+              AND holder_num > 0
+            UNION ALL
+            SELECT ann_date
+            FROM market_stock_holder_trade
+            WHERE ($1::date IS NULL OR ann_date >= $1)
+              AND ($2::date IS NULL OR ann_date <= $2)
+              AND available_at >= ann_date
+              AND (change_ratio IS NULL OR (change_ratio >= -100 AND change_ratio <= 100))
+              AND (after_ratio IS NULL OR (after_ratio >= 0 AND after_ratio <= 100))
+              AND (begin_date IS NULL OR close_date IS NULL OR close_date >= begin_date)
+        )
+        SELECT DISTINCT EXTRACT(YEAR FROM ann_date)::int AS year
+        FROM admissible
+        ORDER BY year
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to build shareholder admissible years: {error}"))?;
+    let admissible_observed_year_set: BTreeSet<i32> =
+        admissible_observed_years.iter().copied().collect();
+    let admissible_missing_years: Vec<i32> = requested_years
+        .iter()
+        .copied()
+        .filter(|year| !admissible_observed_year_set.contains(year))
+        .collect();
+    let admissible_missing_year_count = admissible_missing_years.len();
+    let decision = decide_shareholder_structure_coverage_audit(
+        schema_passed,
+        raw_summary.0,
+        symbol_coverage_ratio,
+        raw_summary.4,
+        duplicate_source_row_hash_count,
+        raw_summary.5 + raw_summary.6 + raw_summary.7,
+        missing_year_count as i64,
+    );
+    let strict_low_fanout_gate = decide_shareholder_structure_strict_low_fanout_gate(
+        schema_passed,
+        admissible_summary.0,
+        admissible_symbol_coverage_ratio,
+        admissible_summary.5,
+        admissible_missing_year_count as i64,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.21d-shareholder-structure-coverage-audit-v1",
+        "source_id": "shareholder_structure",
+        "mode": "read_only_year_source_symbol_ann_date_coverage_duplicate_audit",
+        "date_range": {
+            "start_date": phase7_date_json(start),
+            "end_date": phase7_date_json(end),
+        },
+        "schema_passed": schema_passed,
+        "raw_summary": {
+            "raw_rows": raw_summary.0,
+            "symbols": raw_summary.1,
+            "min_ann_date": phase7_date_json(raw_summary.2),
+            "max_ann_date": phase7_date_json(raw_summary.3),
+            "pit_violation_rows": raw_summary.4,
+            "ratio_out_of_range_count": raw_summary.5,
+            "interval_violation_count": raw_summary.6,
+            "holder_number_missing_value_count": raw_summary.7,
+            "data_quality_violation_rows": raw_summary.5 + raw_summary.6 + raw_summary.7,
+            "duplicate_source_row_hash_count": duplicate_source_row_hash_count,
+        },
+        "strict_low_fanout_admissible_summary": {
+            "gate_id": SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID,
+            "source_scope": "holder_number_and_holder_trade_only",
+            "row_filter": {
+                "holder_number": "available_at >= ann_date AND available_at >= end_date AND holder_num > 0",
+                "holder_trade": "available_at >= ann_date AND change_ratio BETWEEN -100 AND 100 when present AND after_ratio BETWEEN 0 AND 100 when present AND close_date >= begin_date when both present",
+                "top10_sources": "excluded_until_separate_high_fanout_coverage_pit_audit"
+            },
+            "admissible_rows": admissible_summary.0,
+            "excluded_rows": raw_summary.0 - admissible_summary.0,
+            "symbols": admissible_summary.1,
+            "min_ann_date": phase7_date_json(admissible_summary.2),
+            "max_ann_date": phase7_date_json(admissible_summary.3),
+            "observed_year_count": admissible_summary.4,
+            "duplicate_source_row_hash_count": admissible_summary.5,
+            "symbol_breadth_vs_main_chinext_non_st": {
+                "reference_symbols": admissible_symbol_breadth.0,
+                "covered_symbols": admissible_symbol_breadth.1,
+                "coverage_ratio": admissible_symbol_coverage_ratio,
+            },
+            "requested_year_coverage": {
+                "requested_years": requested_years.clone(),
+                "observed_years": admissible_observed_years,
+                "missing_years": admissible_missing_years,
+                "missing_year_count": admissible_missing_year_count,
+            },
+            "excluded_by_policy": {
+                "period_snapshot_pit_rows": raw_summary.4,
+                "ratio_out_of_range_rows": raw_summary.5,
+                "interval_violation_rows": raw_summary.6,
+                "holder_number_missing_value_rows": raw_summary.7,
+            },
+            "decision": strict_low_fanout_gate,
+        },
+        "symbol_breadth_vs_main_chinext_non_st": {
+            "reference_symbols": symbol_breadth.0,
+            "covered_symbols": symbol_breadth.1,
+            "coverage_ratio": symbol_coverage_ratio,
+        },
+        "requested_year_coverage": {
+            "requested_years": requested_years,
+            "observed_years": observed_years.into_iter().collect::<Vec<_>>(),
+            "missing_years": missing_years,
+            "missing_year_count": missing_year_count,
+        },
+        "year_breakdown": year_breakdown
+            .into_iter()
+            .map(|(source, year, rows, symbols, min_date, max_date, pit_violation_rows)| json!({
+                "source": source,
+                "year": year,
+                "rows": rows,
+                "symbols": symbols,
+                "min_ann_date": phase7_date_json(min_date),
+                "max_ann_date": phase7_date_json(max_date),
+                "pit_violation_rows": pit_violation_rows,
+            }))
+            .collect::<Vec<_>>(),
+        "sync_attempt_breakdown": attempt_breakdown
+            .into_iter()
+            .map(|(source, attempts, completed_attempts, failed_attempts)| json!({
+                "source": source,
+                "attempts": attempts,
+                "completed_attempts": completed_attempts,
+                "failed_attempts": failed_attempts,
+            }))
+            .collect::<Vec<_>>(),
+        "decision": decision,
+        "promotion_gate": {
+            "factor_builder": "blocked_until_coverage_readiness_and_pit_pass",
+            "p310_status": decision["p310_status"].clone(),
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    }))
 }
 
 fn decide_futures_price_chain_readiness(
@@ -1695,6 +3589,763 @@ fn decide_futures_price_chain_readiness(
     })
 }
 
+#[cfg(test)]
+fn futures_price_chain_normalize_raw_product_symbol(raw: &str) -> Option<String> {
+    let mut product = raw.trim().to_ascii_uppercase();
+    if product.is_empty() {
+        return None;
+    }
+    if product == "PTA" {
+        return Some("TA".to_string());
+    }
+    if product.len() > 4 && product.ends_with("ACTV") {
+        product.truncate(product.len() - 4);
+    } else if product.len() > 2 && product.ends_with('L') {
+        product.pop();
+    }
+    (!product.is_empty()).then_some(product)
+}
+
+#[cfg(test)]
+fn futures_price_chain_product_symbol_from_daily_ts_code(ts_code: &str) -> Option<String> {
+    let value = ts_code.trim();
+    let product = value
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphabetic())
+        .collect::<String>();
+    let month_code = value
+        .chars()
+        .skip(product.len())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if month_code.len() != 4 {
+        return None;
+    }
+    if value.chars().nth(product.len() + month_code.len()) != Some('.') {
+        return None;
+    }
+    futures_price_chain_normalize_raw_product_symbol(&product)
+}
+
+fn decide_futures_price_chain_mapping_audit(
+    schema_passed: bool,
+    raw_product_count: i64,
+    mapped_product_count: i64,
+    excluded_product_count: i64,
+    missing_product_count: i64,
+    invalid_interval_rows: i64,
+    mapping_pit_violation_rows: i64,
+    unsupported_exposure_rows: i64,
+    invalid_exclusion_interval_rows: i64,
+    exclusion_pit_violation_rows: i64,
+) -> Value {
+    let covered_product_count = mapped_product_count + excluded_product_count;
+    let (mapping_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "schema_missing_or_invalid",
+            "apply_schema_before_mapping_audit",
+            "apply_sql_phase7_futures_price_chain_source_then_rerun_mapping_audit",
+        )
+    } else if raw_product_count == 0 {
+        (
+            "raw_sync_required",
+            "raw_sync_required_before_mapping_audit",
+            "run_bounded_futures_price_chain_sync_before_mapping_audit",
+        )
+    } else if covered_product_count == 0 {
+        (
+            "mapping_and_exclusion_missing",
+            "mapping_required_before_feature_or_p310",
+            "create_versioned_product_to_industry_mapping_or_exclusion_gate_before_factor_backfill",
+        )
+    } else if unsupported_exposure_rows > 0
+        || invalid_interval_rows > 0
+        || mapping_pit_violation_rows > 0
+        || invalid_exclusion_interval_rows > 0
+        || exclusion_pit_violation_rows > 0
+    {
+        (
+            "mapping_integrity_failed",
+            "mapping_integrity_failed_before_feature_or_p310",
+            "repair_mapping_or_exclusion_type_interval_and_available_at_before_coverage_audit",
+        )
+    } else if missing_product_count > 0 {
+        (
+            "mapping_coverage_incomplete",
+            "mapping_coverage_incomplete_before_feature_or_p310",
+            "complete_versioned_mapping_for_remaining_raw_products_or_pre_register_exclusion_gate",
+        )
+    } else if mapped_product_count == 0 {
+        (
+            "all_raw_products_excluded",
+            "all_products_excluded_no_trainable_price_chain_source",
+            "stop_futures_price_chain_factor_source_or_add_evidence_backed_industry_mappings",
+        )
+    } else {
+        (
+            "mapping_coverage_ready",
+            "coverage_readiness_audit_required_before_p310",
+            "run_year_product_exchange_mapping_market_scope_coverage_audit",
+        )
+    };
+
+    let coverage_ratio = if raw_product_count > 0 {
+        covered_product_count as f64 / raw_product_count as f64
+    } else {
+        0.0
+    };
+
+    json!({
+        "schema_status": if schema_passed { "created" } else { "missing_or_invalid" },
+        "sync_status": if raw_product_count > 0 { "raw_synced" } else { "not_started" },
+        "mapping_status": mapping_status,
+        "admission_decision": admission_decision,
+        "p310_status": "blocked_until_mapping_and_coverage_readiness_pass",
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "raw_product_count": raw_product_count,
+        "mapped_product_count": mapped_product_count,
+        "excluded_product_count": excluded_product_count,
+        "covered_product_count": covered_product_count,
+        "missing_product_count": missing_product_count,
+        "mapping_coverage_ratio": coverage_ratio,
+        "invalid_interval_rows": invalid_interval_rows,
+        "mapping_pit_violation_rows": mapping_pit_violation_rows,
+        "unsupported_exposure_rows": unsupported_exposure_rows,
+        "invalid_exclusion_interval_rows": invalid_exclusion_interval_rows,
+        "exclusion_pit_violation_rows": exclusion_pit_violation_rows,
+        "next_step": next_step,
+    })
+}
+
+fn decide_futures_price_chain_coverage_audit(
+    schema_passed: bool,
+    raw_rows: i64,
+    raw_product_count: i64,
+    covered_product_count: i64,
+    missing_product_count: i64,
+    raw_pit_violation_rows: i64,
+    failed_sync_attempt_count: i64,
+) -> Value {
+    let coverage_ratio = if raw_product_count > 0 {
+        covered_product_count as f64 / raw_product_count as f64
+    } else {
+        0.0
+    };
+    let (coverage_status, admission_decision, next_step) = if !schema_passed {
+        (
+            "schema_missing_or_invalid",
+            "apply_schema_before_coverage_audit",
+            "apply_sql_phase7_futures_price_chain_source_then_rerun_coverage_audit",
+        )
+    } else if raw_rows == 0 {
+        (
+            "raw_sync_required",
+            "raw_sync_required_before_coverage_audit",
+            "run_bounded_futures_price_chain_sync_before_coverage_audit",
+        )
+    } else if raw_pit_violation_rows > 0 {
+        (
+            "raw_pit_integrity_failed",
+            "raw_pit_integrity_failed_before_feature_or_p310",
+            "repair_raw_available_at_before_mapping_or_p310",
+        )
+    } else if failed_sync_attempt_count > 0 {
+        (
+            "sync_attempt_failures_present",
+            "sync_attempt_failures_require_retry_before_feature_or_p310",
+            "retry_or_explain_failed_futures_price_chain_sync_attempts_before_p310",
+        )
+    } else if missing_product_count > 0 {
+        (
+            "mapping_coverage_incomplete",
+            "mapping_coverage_incomplete_before_feature_or_p310",
+            "complete_versioned_mapping_for_remaining_raw_products_or_pre_register_exclusion_gate",
+        )
+    } else {
+        (
+            "coverage_mapping_ready",
+            "coverage_readiness_ready_for_p310_diagnostics",
+            "run_p310_rankic_group_decay_turnover_capacity_diagnostics",
+        )
+    };
+
+    json!({
+        "coverage_status": coverage_status,
+        "admission_decision": admission_decision,
+        "raw_rows": raw_rows,
+        "raw_product_count": raw_product_count,
+        "covered_product_count": covered_product_count,
+        "missing_product_count": missing_product_count,
+        "mapping_coverage_ratio": coverage_ratio,
+        "raw_pit_violation_rows": raw_pit_violation_rows,
+        "failed_sync_attempt_count": failed_sync_attempt_count,
+        "p310_status": if admission_decision == "coverage_readiness_ready_for_p310_diagnostics" {
+            "ready_for_p310_diagnostics"
+        } else {
+            "blocked_until_mapping_and_coverage_readiness_pass"
+        },
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "next_step": next_step,
+    })
+}
+
+fn futures_price_chain_coverage_promotion_gate(decision: &Value) -> Value {
+    let p310_status = decision
+        .get("p310_status")
+        .and_then(Value::as_str)
+        .unwrap_or("blocked_until_mapping_and_coverage_readiness_pass");
+    let p310_ready = p310_status == "ready_for_p310_diagnostics";
+
+    json!({
+        "factor_builder": if p310_ready {
+            "ready_for_p310_diagnostics"
+        } else {
+            "blocked_until_coverage_mapping_and_pit_pass"
+        },
+        "p310_status": p310_status,
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked"
+    })
+}
+
+fn futures_price_chain_raw_product_summary_sql() -> &'static str {
+    r#"
+    WITH raw_symbol AS (
+        SELECT
+            'daily' AS endpoint,
+            upper(substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.')) AS product_symbol_raw,
+            COALESCE(NULLIF(split_part(ts_code, '.', 2), ''), 'UNKNOWN') AS exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_daily
+        WHERE substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.') IS NOT NULL
+        UNION ALL
+        SELECT
+            'wsr' AS endpoint,
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            COALESCE(NULLIF(trim(exchange), ''), 'UNKNOWN') AS exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_warehouse_receipt
+        WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+        UNION ALL
+        SELECT
+            'holding' AS endpoint,
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            COALESCE(NULLIF(trim(exchange), ''), 'UNKNOWN') AS exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_holding_rank
+        WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+    ),
+    raw AS (
+        SELECT
+            endpoint,
+            CASE
+                WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                ELSE product_symbol_raw
+            END AS product_symbol,
+            exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM raw_symbol
+    )
+    SELECT
+        product_symbol,
+        COUNT(*)::bigint AS raw_rows,
+        string_agg(DISTINCT endpoint, ',' ORDER BY endpoint) AS endpoints,
+        string_agg(DISTINCT exchange_key, ',' ORDER BY exchange_key) AS exchanges,
+        MIN(trade_date) AS min_trade_date,
+        MAX(trade_date) AS max_trade_date,
+        MIN(available_at) AS min_available_at,
+        MAX(available_at) AS max_available_at,
+        COUNT(*) FILTER (WHERE available_at < trade_date)::bigint AS raw_pit_violation_rows,
+        COUNT(*) FILTER (WHERE source_published_at IS NULL)::bigint AS missing_source_published_at_rows
+    FROM raw
+    GROUP BY product_symbol
+    ORDER BY product_symbol
+    "#
+}
+
+fn futures_price_chain_coverage_breakdown_sql() -> &'static str {
+    r#"
+    WITH raw_symbol AS (
+        SELECT
+            'daily' AS endpoint,
+            upper(substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.')) AS product_symbol_raw,
+            COALESCE(NULLIF(split_part(ts_code, '.', 2), ''), 'UNKNOWN') AS exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_daily
+        WHERE substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.') IS NOT NULL
+          AND ($1::date IS NULL OR trade_date >= $1::date)
+          AND ($2::date IS NULL OR trade_date <= $2::date)
+        UNION ALL
+        SELECT
+            'wsr' AS endpoint,
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            COALESCE(NULLIF(trim(exchange), ''), 'UNKNOWN') AS exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_warehouse_receipt
+        WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+          AND ($1::date IS NULL OR trade_date >= $1::date)
+          AND ($2::date IS NULL OR trade_date <= $2::date)
+        UNION ALL
+        SELECT
+            'holding' AS endpoint,
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            COALESCE(NULLIF(trim(exchange), ''), 'UNKNOWN') AS exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_holding_rank
+        WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+          AND ($1::date IS NULL OR trade_date >= $1::date)
+          AND ($2::date IS NULL OR trade_date <= $2::date)
+    ),
+    raw AS (
+        SELECT
+            endpoint,
+            EXTRACT(YEAR FROM trade_date)::int AS trade_year,
+            CASE
+                WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                ELSE product_symbol_raw
+            END AS product_symbol,
+            exchange_key,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM raw_symbol
+    )
+    SELECT
+        endpoint,
+        trade_year,
+        product_symbol,
+        exchange_key,
+        COUNT(*)::bigint AS raw_rows,
+        COUNT(DISTINCT trade_date)::bigint AS trade_date_count,
+        MIN(trade_date) AS min_trade_date,
+        MAX(trade_date) AS max_trade_date,
+        COUNT(*) FILTER (WHERE available_at < trade_date)::bigint AS raw_pit_violation_rows,
+        COUNT(*) FILTER (WHERE source_published_at IS NULL)::bigint AS missing_source_published_at_rows
+    FROM raw
+    GROUP BY endpoint, trade_year, product_symbol, exchange_key
+    ORDER BY trade_year, endpoint, product_symbol, exchange_key
+    "#
+}
+
+fn futures_price_chain_sync_attempt_breakdown_sql() -> &'static str {
+    r#"
+    WITH futures_calendar AS (
+        SELECT DISTINCT trade_date
+        FROM market_trade_calendar
+        WHERE is_open = true
+          AND exchange IN ('SHFE', 'DCE', 'CZCE', 'CFFEX', 'INE')
+          AND ($1::date IS NULL OR trade_date >= $1::date)
+          AND ($2::date IS NULL OR trade_date <= $2::date)
+    ),
+    fallback_calendar AS (
+        SELECT DISTINCT trade_date
+        FROM market_trade_calendar
+        WHERE is_open = true
+          AND ($1::date IS NULL OR trade_date >= $1::date)
+          AND ($2::date IS NULL OR trade_date <= $2::date)
+    ),
+    open_calendar AS (
+        SELECT trade_date FROM futures_calendar
+        UNION
+        SELECT trade_date FROM fallback_calendar
+        WHERE NOT EXISTS (SELECT 1 FROM futures_calendar)
+    ),
+    attempts AS (
+        SELECT
+            attempt.*,
+            open_calendar.trade_date IS NOT NULL AS is_open_trade_date
+        FROM data_sync_attempt attempt
+        LEFT JOIN open_calendar
+          ON attempt.start_date = open_calendar.trade_date
+         AND attempt.end_date = open_calendar.trade_date
+        WHERE source IN (
+            'futures_price_chain_daily',
+            'futures_price_chain_wsr',
+            'futures_price_chain_holding'
+        )
+          AND ($1::date IS NULL OR end_date >= $1::date)
+          AND ($2::date IS NULL OR start_date <= $2::date)
+    )
+    SELECT
+        source,
+        status,
+        COUNT(*) FILTER (WHERE is_open_trade_date)::bigint AS attempt_count,
+        COALESCE(SUM(row_count) FILTER (WHERE is_open_trade_date), 0)::bigint AS row_count,
+        MIN(start_date) FILTER (WHERE is_open_trade_date) AS min_start_date,
+        MAX(end_date) FILTER (WHERE is_open_trade_date) AS max_end_date,
+        COUNT(*) FILTER (WHERE is_open_trade_date AND error_message IS NOT NULL)::bigint AS error_attempt_count,
+        COUNT(*) FILTER (WHERE NOT is_open_trade_date)::bigint AS non_open_attempt_count,
+        COALESCE(SUM(row_count) FILTER (WHERE NOT is_open_trade_date), 0)::bigint AS non_open_row_count
+    FROM attempts
+    GROUP BY source, status
+    ORDER BY source, status
+    "#
+}
+
+fn futures_price_chain_raw_endpoint_breakdown_sql() -> &'static str {
+    r#"
+    WITH raw_symbol AS (
+        SELECT
+            'daily' AS endpoint,
+            upper(substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.')) AS product_symbol_raw,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_daily
+        WHERE substring(ts_code from '^([A-Za-z]+)[0-9]{4}\.') IS NOT NULL
+        UNION ALL
+        SELECT
+            'wsr' AS endpoint,
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_warehouse_receipt
+        WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+        UNION ALL
+        SELECT
+            'holding' AS endpoint,
+            upper(substring(symbol from '^[A-Za-z]+')) AS product_symbol_raw,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM market_futures_holding_rank
+        WHERE substring(symbol from '^[A-Za-z]+') IS NOT NULL
+    ),
+    raw AS (
+        SELECT
+            endpoint,
+            CASE
+                WHEN product_symbol_raw = 'PTA' THEN 'TA'
+                WHEN length(product_symbol_raw) > 4 AND right(product_symbol_raw, 4) = 'ACTV'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 4)
+                WHEN length(product_symbol_raw) > 2 AND right(product_symbol_raw, 1) = 'L'
+                THEN left(product_symbol_raw, length(product_symbol_raw) - 1)
+                ELSE product_symbol_raw
+            END AS product_symbol,
+            trade_date,
+            available_at,
+            source_published_at
+        FROM raw_symbol
+    )
+    SELECT
+        endpoint,
+        COUNT(*)::bigint AS raw_rows,
+        COUNT(DISTINCT product_symbol)::bigint AS product_count,
+        COUNT(DISTINCT trade_date)::bigint AS trade_date_count,
+        MIN(trade_date) AS min_trade_date,
+        MAX(trade_date) AS max_trade_date,
+        COUNT(*) FILTER (WHERE available_at < trade_date)::bigint AS raw_pit_violation_rows,
+        COUNT(*) FILTER (WHERE source_published_at IS NULL)::bigint AS missing_source_published_at_rows
+    FROM raw
+    GROUP BY endpoint
+    ORDER BY endpoint
+    "#
+}
+
+fn futures_price_chain_mapping_summary_sql() -> &'static str {
+    r#"
+    SELECT
+        COUNT(*)::bigint AS mapping_rows,
+        COUNT(DISTINCT upper(trim(product_symbol)))::bigint AS mapping_table_product_count,
+        COUNT(*) FILTER (
+            WHERE exposure_type NOT IN ('sw_industry', 'stock_symbol')
+        )::bigint AS unsupported_exposure_rows,
+        COUNT(*) FILTER (
+            WHERE valid_to IS NOT NULL AND valid_to < valid_from
+        )::bigint AS invalid_interval_rows,
+        COUNT(*) FILTER (
+            WHERE available_at < valid_from
+        )::bigint AS mapping_pit_violation_rows,
+        COUNT(*) FILTER (
+            WHERE NULLIF(trim(source), '') IS NULL OR evidence = '{}'::jsonb
+        )::bigint AS weak_evidence_rows
+    FROM market_futures_product_exposure_mapping_pit
+    "#
+}
+
+fn futures_price_chain_mapping_product_summary_sql() -> &'static str {
+    r#"
+    SELECT
+        upper(trim(product_symbol)) AS product_symbol,
+        COUNT(*)::bigint AS mapping_rows,
+        string_agg(DISTINCT exposure_type, ',' ORDER BY exposure_type) AS exposure_types,
+        string_agg(DISTINCT mapping_version, ',' ORDER BY mapping_version) AS mapping_versions,
+        MIN(valid_from) AS min_valid_from,
+        MAX(valid_to) AS max_valid_to,
+        MIN(available_at) AS min_available_at,
+        COUNT(*) FILTER (
+            WHERE valid_to IS NOT NULL AND valid_to < valid_from
+        )::bigint AS invalid_interval_rows,
+        COUNT(*) FILTER (
+            WHERE available_at < valid_from
+        )::bigint AS mapping_pit_violation_rows,
+        COUNT(*) FILTER (
+            WHERE NULLIF(trim(source), '') IS NULL OR evidence = '{}'::jsonb
+        )::bigint AS weak_evidence_rows
+    FROM market_futures_product_exposure_mapping_pit
+    GROUP BY upper(trim(product_symbol))
+    ORDER BY product_symbol
+    "#
+}
+
+fn futures_price_chain_exclusion_summary_sql() -> &'static str {
+    r#"
+    SELECT
+        COUNT(*)::bigint AS exclusion_rows,
+        COUNT(DISTINCT upper(trim(product_symbol)))::bigint AS exclusion_table_product_count,
+        COUNT(*) FILTER (
+            WHERE valid_to IS NOT NULL AND valid_to < valid_from
+        )::bigint AS invalid_interval_rows,
+        COUNT(*) FILTER (
+            WHERE available_at < valid_from
+        )::bigint AS exclusion_pit_violation_rows,
+        COUNT(*) FILTER (
+            WHERE NULLIF(trim(source), '') IS NULL OR evidence = '{}'::jsonb
+        )::bigint AS weak_evidence_rows
+    FROM market_futures_product_exclusion_gate_pit
+    WHERE gate_scope = 'futures_price_chain_factor'
+    "#
+}
+
+fn futures_price_chain_exclusion_product_summary_sql() -> &'static str {
+    r#"
+    SELECT
+        upper(trim(product_symbol)) AS product_symbol,
+        COUNT(*)::bigint AS exclusion_rows,
+        string_agg(DISTINCT reason_code, ',' ORDER BY reason_code) AS reason_codes,
+        string_agg(DISTINCT gate_version, ',' ORDER BY gate_version) AS gate_versions,
+        MIN(valid_from) AS min_valid_from,
+        MAX(valid_to) AS max_valid_to,
+        MIN(available_at) AS min_available_at,
+        COUNT(*) FILTER (
+            WHERE valid_to IS NOT NULL AND valid_to < valid_from
+        )::bigint AS invalid_interval_rows,
+        COUNT(*) FILTER (
+            WHERE available_at < valid_from
+        )::bigint AS exclusion_pit_violation_rows,
+        COUNT(*) FILTER (
+            WHERE NULLIF(trim(source), '') IS NULL OR evidence = '{}'::jsonb
+        )::bigint AS weak_evidence_rows
+    FROM market_futures_product_exclusion_gate_pit
+    WHERE gate_scope = 'futures_price_chain_factor'
+    GROUP BY upper(trim(product_symbol))
+    ORDER BY product_symbol
+    "#
+}
+
+fn futures_price_chain_industry_targets_sql() -> &'static str {
+    r#"
+    SELECT
+        index_code,
+        index_name,
+        industry_code,
+        industry_name,
+        COUNT(DISTINCT symbol)::bigint AS current_or_historical_symbols,
+        MIN(in_date) AS min_in_date,
+        MAX(in_date) AS max_in_date,
+        MAX(available_at) AS latest_available_at
+    FROM market_stock_industry_membership_pit
+    WHERE classification_source = 'SW2021'
+      AND industry_level = 'L1'
+    GROUP BY index_code, index_name, industry_code, industry_name
+    ORDER BY index_code
+    "#
+}
+
+fn parse_futures_price_chain_mapping_date(raw: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(raw, "%Y%m%d"))
+        .map_err(|_| "date_must_be_yyyy_mm_dd_or_yyyymmdd".to_string())
+}
+
+fn parse_futures_price_chain_coverage_date(
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<NaiveDate>, String> {
+    value
+        .map(|raw| {
+            parse_futures_price_chain_mapping_date(raw)
+                .map_err(|message| format!("{field}_{message}"))
+        })
+        .transpose()
+}
+
+fn futures_price_chain_product_set_from_audit(audit: &Value, key: &str) -> BTreeSet<String> {
+    audit
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("product_symbol").and_then(Value::as_str))
+        .map(|symbol| symbol.trim().to_ascii_uppercase())
+        .filter(|symbol| !symbol.is_empty())
+        .collect()
+}
+
+fn validate_futures_price_chain_mapping_candidate(
+    candidate: &FuturesPriceChainMappingCandidate,
+    raw_products: &BTreeSet<String>,
+    sw2021_l1_targets: &BTreeSet<String>,
+) -> FuturesPriceChainMappingCandidateValidation {
+    let product_symbol = candidate.product_symbol.trim().to_ascii_uppercase();
+    let exposure_type = candidate.exposure_type.trim().to_string();
+    let exposure_code = candidate.exposure_code.trim().to_ascii_uppercase();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    if product_symbol.is_empty() {
+        errors.push("product_symbol_required".to_string());
+    } else if !raw_products.contains(&product_symbol) {
+        errors.push("unknown_raw_product_symbol".to_string());
+    }
+
+    if exposure_type != "sw_industry" {
+        if exposure_type == "stock_symbol" {
+            errors.push("direct_stock_mapping_requires_separate_evidence_gate".to_string());
+        } else {
+            errors.push("unsupported_exposure_type".to_string());
+        }
+    } else if !sw2021_l1_targets.contains(&exposure_code) {
+        errors.push("unknown_sw2021_l1_exposure_code".to_string());
+    }
+
+    if candidate.direction != -1 && candidate.direction != 1 {
+        errors.push("direction_must_be_minus_one_or_one".to_string());
+    }
+    if !(candidate.weight > 0.0 && candidate.weight <= 1.0) {
+        errors.push("weight_must_be_gt_0_and_lte_1".to_string());
+    }
+
+    let valid_from = parse_futures_price_chain_mapping_date(&candidate.valid_from);
+    let valid_to = candidate
+        .valid_to
+        .as_deref()
+        .map(parse_futures_price_chain_mapping_date)
+        .transpose();
+    let available_at = parse_futures_price_chain_mapping_date(&candidate.available_at);
+
+    match (&valid_from, &valid_to) {
+        (Ok(start), Ok(Some(end))) if end < start => {
+            errors.push("valid_to_before_valid_from".to_string())
+        }
+        _ => {}
+    }
+    match (&valid_from, &available_at) {
+        (Ok(start), Ok(available)) if available < start => {
+            errors.push("available_at_before_valid_from".to_string())
+        }
+        _ => {}
+    }
+    if valid_from.is_err() {
+        errors.push("valid_from_invalid".to_string());
+    }
+    if valid_to.is_err() {
+        errors.push("valid_to_invalid".to_string());
+    }
+    if available_at.is_err() {
+        errors.push("available_at_invalid".to_string());
+    }
+
+    if candidate.source.trim().is_empty() {
+        errors.push("source_required".to_string());
+    }
+    if candidate.mapping_version.trim().is_empty() {
+        errors.push("mapping_version_required".to_string());
+    }
+    match &candidate.evidence {
+        Value::Object(object) if !object.is_empty() => {}
+        _ => errors.push("evidence_required".to_string()),
+    }
+    if candidate.evidence.get("source_url").is_none()
+        && candidate.evidence.get("source_document").is_none()
+        && candidate.evidence.get("review_note").is_none()
+    {
+        warnings.push("evidence_should_include_source_url_or_review_note".to_string());
+    }
+
+    FuturesPriceChainMappingCandidateValidation {
+        product_symbol,
+        exposure_type,
+        exposure_code,
+        passed: errors.is_empty(),
+        errors,
+        warnings,
+    }
+}
+
+fn decide_futures_price_chain_mapping_candidate_validation(
+    raw_product_count: i64,
+    covered_product_count: i64,
+    invalid_row_count: i64,
+    missing_product_count: i64,
+) -> Value {
+    let (admission_decision, next_step) = if raw_product_count == 0 {
+        (
+            "raw_sync_required_before_mapping_candidate_validation",
+            "run_bounded_futures_price_chain_sync_before_mapping_template",
+        )
+    } else if invalid_row_count > 0 {
+        (
+            "mapping_candidate_validation_failed",
+            "repair_candidate_rows_before_insert_or_review",
+        )
+    } else if missing_product_count > 0 {
+        (
+            "mapping_candidate_coverage_incomplete_before_insert",
+            "add_candidate_rows_for_all_raw_products_or_pre_register_exclusion_gate",
+        )
+    } else {
+        (
+            "mapping_candidate_ready_for_manual_review_before_insert",
+            "manual_review_then_insert_versioned_mapping_rows",
+        )
+    };
+    let coverage_ratio = if raw_product_count > 0 {
+        covered_product_count as f64 / raw_product_count as f64
+    } else {
+        0.0
+    };
+
+    json!({
+        "admission_decision": admission_decision,
+        "raw_product_count": raw_product_count,
+        "covered_product_count": covered_product_count,
+        "missing_product_count": missing_product_count,
+        "invalid_row_count": invalid_row_count,
+        "mapping_candidate_coverage_ratio": coverage_ratio,
+        "write_enabled": false,
+        "p310_status": "blocked_until_mapping_insert_and_coverage_readiness_pass",
+        "wfa_status": "blocked",
+        "v19_train_selection": "blocked",
+        "next_step": next_step,
+    })
+}
+
 fn futures_price_chain_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![
         (
@@ -1726,6 +4377,23 @@ fn futures_price_chain_expected_schema() -> Vec<(&'static str, Vec<&'static str>
                 "market_futures_product_exposure_weight_check",
                 "market_futures_product_exposure_type_check",
                 "market_futures_product_exposure_interval_check",
+            ],
+        ),
+        (
+            "market_futures_product_exclusion_gate_pit",
+            vec![
+                "market_futures_product_exclusion_gate_pit_pkey",
+                "market_futures_product_exclusion_scope_check",
+                "market_futures_product_exclusion_reason_check",
+                "market_futures_product_exclusion_interval_check",
+            ],
+        ),
+        (
+            "market_futures_product_signal_pit",
+            vec![
+                "market_futures_product_signal_pit_pkey",
+                "market_futures_product_signal_available_at_check",
+                "market_futures_product_signal_code_check",
             ],
         ),
     ]
@@ -1782,7 +4450,10 @@ async fn build_futures_price_chain_readiness_audit(db: &sqlx::PgPool) -> Result<
         schema_passed &= passed;
         if table == "market_futures_product_exposure_mapping_pit" {
             mapping_rows = row_count;
-        } else {
+        } else if table == "market_futures_daily"
+            || table == "market_futures_warehouse_receipt"
+            || table == "market_futures_holding_rank"
+        {
             raw_rows += row_count;
         }
 
@@ -1819,15 +4490,741 @@ async fn build_futures_price_chain_readiness_audit(db: &sqlx::PgPool) -> Result<
     }))
 }
 
-fn phase7_p319_candidate_admission_sources() -> Value {
-    json!({
-        "stage": "P3.19",
-        "objective": "discover lower-correlation broad-base PIT alpha sources before any factor build or WFA admission",
+async fn build_futures_price_chain_mapping_audit(db: &sqlx::PgPool) -> Result<Value, String> {
+    let readiness = build_futures_price_chain_readiness_audit(db).await?;
+    let schema_passed = readiness
+        .get("schema_passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if !schema_passed {
+        let decision = decide_futures_price_chain_mapping_audit(false, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        return Ok(json!({
+            "audit_version": "p3.19m-futures-price-chain-mapping-audit-v1",
+            "source_id": "futures_price_chain",
+            "mode": "read_only_product_mapping_pit_coverage_audit",
+            "schema_passed": false,
+            "decision": decision,
+            "readiness_audit": readiness,
+            "prohibited": [
+                "mapping_backfill_before_schema_passes",
+                "factor_backfill_before_mapping_available_at_audit",
+                "p310_before_mapping_and_coverage_readiness",
+                "bounded_wfa_or_v19_train_selection_before_p310_passes"
+            ]
+        }));
+    }
+
+    let raw_product_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            String,
+            String,
+            NaiveDate,
+            NaiveDate,
+            NaiveDate,
+            NaiveDate,
+            i64,
+            i64,
+        ),
+    >(futures_price_chain_raw_product_summary_sql())
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to audit futures raw products: {error}"))?;
+
+    let endpoint_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+            i64,
+        ),
+    >(futures_price_chain_raw_endpoint_breakdown_sql())
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to audit futures endpoint breakdown: {error}"))?;
+
+    let mapping_summary = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+        futures_price_chain_mapping_summary_sql(),
+    )
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("Failed to audit futures mapping summary: {error}"))?;
+
+    let mapping_product_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            String,
+            String,
+            NaiveDate,
+            Option<NaiveDate>,
+            NaiveDate,
+            i64,
+            i64,
+            i64,
+        ),
+    >(futures_price_chain_mapping_product_summary_sql())
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to audit futures mapping products: {error}"))?;
+
+    let exclusion_summary =
+        sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(futures_price_chain_exclusion_summary_sql())
+            .fetch_one(db)
+            .await
+            .map_err(|error| format!("Failed to audit futures exclusion summary: {error}"))?;
+
+    let exclusion_product_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            String,
+            String,
+            NaiveDate,
+            Option<NaiveDate>,
+            NaiveDate,
+            i64,
+            i64,
+            i64,
+        ),
+    >(futures_price_chain_exclusion_product_summary_sql())
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to audit futures exclusion products: {error}"))?;
+
+    let raw_products: BTreeSet<String> = raw_product_rows.iter().map(|row| row.0.clone()).collect();
+    let mapping_products: BTreeSet<String> = mapping_product_rows
+        .iter()
+        .map(|row| row.0.clone())
+        .collect();
+    let exclusion_products: BTreeSet<String> = exclusion_product_rows
+        .iter()
+        .map(|row| row.0.clone())
+        .collect();
+    let covered_products = mapping_products
+        .union(&exclusion_products)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing_products = raw_products
+        .difference(&covered_products)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mapped_raw_product_count = raw_products.intersection(&mapping_products).count() as i64;
+    let excluded_raw_product_count = raw_products.intersection(&exclusion_products).count() as i64;
+    let raw_product_count = raw_products.len() as i64;
+    let raw_rows = raw_product_rows.iter().map(|row| row.1).sum::<i64>();
+    let raw_pit_violation_rows = raw_product_rows.iter().map(|row| row.8).sum::<i64>();
+    let raw_missing_source_published_at_rows =
+        raw_product_rows.iter().map(|row| row.9).sum::<i64>();
+
+    let raw_products_json = raw_product_rows
+        .iter()
+        .map(|row| {
+            json!({
+                "product_symbol": row.0,
+                "raw_rows": row.1,
+                "endpoints": row.2.split(',').collect::<Vec<_>>(),
+                "exchanges": row.3.split(',').collect::<Vec<_>>(),
+                "min_trade_date": row.4,
+                "max_trade_date": row.5,
+                "min_available_at": row.6,
+                "max_available_at": row.7,
+                "raw_pit_violation_rows": row.8,
+                "missing_source_published_at_rows": row.9,
+                "mapping_status": if mapping_products.contains(&row.0) {
+                    "mapped"
+                } else if exclusion_products.contains(&row.0) {
+                    "excluded"
+                } else {
+                    "missing"
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let endpoint_breakdown = endpoint_rows
+        .iter()
+        .map(|row| {
+            json!({
+                "endpoint": row.0,
+                "raw_rows": row.1,
+                "product_count": row.2,
+                "trade_date_count": row.3,
+                "min_trade_date": row.4,
+                "max_trade_date": row.5,
+                "raw_pit_violation_rows": row.6,
+                "missing_source_published_at_rows": row.7,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mapping_products_json = mapping_product_rows
+        .iter()
+        .map(|row| {
+            json!({
+                "product_symbol": row.0,
+                "mapping_rows": row.1,
+                "exposure_types": row.2.split(',').collect::<Vec<_>>(),
+                "mapping_versions": row.3.split(',').collect::<Vec<_>>(),
+                "min_valid_from": row.4,
+                "max_valid_to": row.5,
+                "min_available_at": row.6,
+                "invalid_interval_rows": row.7,
+                "mapping_pit_violation_rows": row.8,
+                "weak_evidence_rows": row.9,
+                "raw_status": if raw_products.contains(&row.0) { "raw_product_present" } else { "mapping_without_current_raw_product" },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let exclusion_products_json = exclusion_product_rows
+        .iter()
+        .map(|row| {
+            json!({
+                "product_symbol": row.0,
+                "exclusion_rows": row.1,
+                "reason_codes": row.2.split(',').collect::<Vec<_>>(),
+                "gate_versions": row.3.split(',').collect::<Vec<_>>(),
+                "min_valid_from": row.4,
+                "max_valid_to": row.5,
+                "min_available_at": row.6,
+                "invalid_interval_rows": row.7,
+                "exclusion_pit_violation_rows": row.8,
+                "weak_evidence_rows": row.9,
+                "raw_status": if raw_products.contains(&row.0) { "raw_product_present" } else { "exclusion_without_current_raw_product" },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let decision = decide_futures_price_chain_mapping_audit(
+        schema_passed,
+        raw_product_count,
+        mapped_raw_product_count,
+        excluded_raw_product_count,
+        missing_products.len() as i64,
+        mapping_summary.3,
+        mapping_summary.4,
+        mapping_summary.2,
+        exclusion_summary.2,
+        exclusion_summary.3,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.19m-futures-price-chain-mapping-audit-v1",
+        "source_id": "futures_price_chain",
+        "mode": "read_only_product_mapping_pit_coverage_audit",
+        "schema_passed": schema_passed,
+        "raw_rows": raw_rows,
+        "raw_product_count": raw_product_count,
+        "raw_pit_violation_rows": raw_pit_violation_rows,
+        "raw_missing_source_published_at_rows": raw_missing_source_published_at_rows,
+        "mapping_rows": mapping_summary.0,
+        "mapping_table_product_count": mapping_summary.1,
+        "mapped_raw_product_count": mapped_raw_product_count,
+        "exclusion_rows": exclusion_summary.0,
+        "exclusion_table_product_count": exclusion_summary.1,
+        "excluded_raw_product_count": excluded_raw_product_count,
+        "missing_product_count": missing_products.len(),
+        "missing_products": missing_products,
+        "unsupported_exposure_rows": mapping_summary.2,
+        "invalid_interval_rows": mapping_summary.3,
+        "mapping_pit_violation_rows": mapping_summary.4,
+        "weak_evidence_rows": mapping_summary.5,
+        "invalid_exclusion_interval_rows": exclusion_summary.2,
+        "exclusion_pit_violation_rows": exclusion_summary.3,
+        "weak_exclusion_evidence_rows": exclusion_summary.4,
+        "endpoint_breakdown": endpoint_breakdown,
+        "raw_products": raw_products_json,
+        "mapping_products": mapping_products_json,
+        "exclusion_products": exclusion_products_json,
+        "decision": decision,
+        "readiness_audit": readiness,
+        "pit_policy": {
+            "mapping_filter": "mapping.available_at <= stock_trade_date AND mapping.valid_from <= stock_trade_date AND (mapping.valid_to IS NULL OR mapping.valid_to >= stock_trade_date)",
+            "exclusion_filter": "exclusion gates remove non-industry products from this alpha source; they must not be transformed into synthetic industry mappings",
+            "preferred_first_pass": "product_symbol_to_sw_industry_then_join_market_stock_industry_membership_pit",
+            "direct_stock_mapping_requires": "strong_external_evidence_available_at_and_versioned_weight",
+            "intraday_rule": "stock intraday rebalance must use previous available futures trade_date until source_published_at audit proves earlier availability"
+        },
+        "promotion_gate": {
+            "p310_status": "blocked_until_mapping_and_coverage_readiness_pass",
+            "wfa_status": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "prohibited": [
+            "static_hindsight_product_to_stock_mapping",
+            "mapping_weights_derived_from_future_returns_or_future_factor_performance",
+            "factor_backfill_before_mapping_available_at_audit",
+            "p310_before_year_product_exchange_market_scope_coverage_readiness",
+            "bounded_wfa_or_v19_train_selection_before_p310_passes"
+        ]
+    }))
+}
+
+async fn build_futures_price_chain_coverage_audit(
+    db: &sqlx::PgPool,
+    req: FuturesPriceChainCoverageAuditReq,
+) -> Result<Value, String> {
+    let start = parse_futures_price_chain_coverage_date(req.start_date.as_deref(), "start_date")?;
+    let end = parse_futures_price_chain_coverage_date(req.end_date.as_deref(), "end_date")?;
+    if let (Some(start), Some(end)) = (start, end) {
+        if start > end {
+            return Err("futures_price_chain coverage start_date cannot be after end_date".into());
+        }
+    }
+
+    let mapping_audit = build_futures_price_chain_mapping_audit(db).await?;
+    let schema_passed = mapping_audit
+        .get("schema_passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !schema_passed {
+        let decision = decide_futures_price_chain_coverage_audit(false, 0, 0, 0, 0, 0, 0);
+        return Ok(json!({
+            "audit_version": "p3.19p-futures-price-chain-coverage-audit-v1",
+            "source_id": "futures_price_chain",
+            "mode": "read_only_full_history_bounded_sync_coverage_audit",
+            "schema_passed": false,
+            "requested_range": {
+                "start_date": start,
+                "end_date": end,
+            },
+            "decision": decision,
+            "mapping_audit": mapping_audit,
+            "prohibited": [
+                "raw_factor_backfill_before_schema_passes",
+                "p310_before_coverage_mapping_and_pit_readiness",
+                "bounded_wfa_or_v19_train_selection_before_p310_passes"
+            ]
+        }));
+    }
+
+    let coverage_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i32,
+            String,
+            String,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+            i64,
+        ),
+    >(futures_price_chain_coverage_breakdown_sql())
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to audit futures price-chain coverage: {error}"))?;
+
+    let sync_attempt_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+            i64,
+            i64,
+        ),
+    >(futures_price_chain_sync_attempt_breakdown_sql())
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to audit futures price-chain sync attempts: {error}"))?;
+
+    let mapped_products =
+        futures_price_chain_product_set_from_audit(&mapping_audit, "mapping_products");
+    let excluded_products =
+        futures_price_chain_product_set_from_audit(&mapping_audit, "exclusion_products");
+    let covered_products = mapped_products
+        .union(&excluded_products)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let raw_products = coverage_rows
+        .iter()
+        .map(|row| row.2.clone())
+        .collect::<BTreeSet<_>>();
+    let missing_products = raw_products
+        .difference(&covered_products)
+        .cloned()
+        .collect::<Vec<_>>();
+    let covered_product_count = raw_products.intersection(&covered_products).count() as i64;
+    let raw_rows = coverage_rows.iter().map(|row| row.4).sum::<i64>();
+    let raw_pit_violation_rows = coverage_rows.iter().map(|row| row.8).sum::<i64>();
+    let missing_source_published_at_rows = coverage_rows.iter().map(|row| row.9).sum::<i64>();
+    let failed_sync_attempt_count = sync_attempt_rows
+        .iter()
+        .filter(|row| row.1 == "failed")
+        .map(|row| row.2)
+        .sum::<i64>();
+    let non_open_sync_attempt_count = sync_attempt_rows.iter().map(|row| row.7).sum::<i64>();
+    let non_open_sync_attempt_rows = sync_attempt_rows.iter().map(|row| row.8).sum::<i64>();
+
+    let mut endpoint_year_summary: BTreeMap<
+        (i32, String),
+        (i64, i64, i64, BTreeSet<String>, BTreeSet<String>),
+    > = BTreeMap::new();
+    for row in &coverage_rows {
+        let entry = endpoint_year_summary
+            .entry((row.1, row.0.clone()))
+            .or_insert_with(|| (0, 0, 0, BTreeSet::new(), BTreeSet::new()));
+        entry.0 += row.4;
+        entry.1 += row.8;
+        entry.2 += row.9;
+        entry.3.insert(row.2.clone());
+        entry.4.insert(row.3.clone());
+    }
+
+    let endpoint_year_breakdown = endpoint_year_summary
+        .into_iter()
+        .map(|((trade_year, endpoint), summary)| {
+            json!({
+                "trade_year": trade_year,
+                "endpoint": endpoint,
+                "raw_rows": summary.0,
+                "raw_pit_violation_rows": summary.1,
+                "missing_source_published_at_rows": summary.2,
+                "product_count": summary.3.len(),
+                "exchange_count": summary.4.len(),
+                "products": summary.3.into_iter().collect::<Vec<_>>(),
+                "exchanges": summary.4.into_iter().collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let coverage_breakdown = coverage_rows
+        .iter()
+        .map(|row| {
+            let mapping_status = if mapped_products.contains(&row.2) {
+                "mapped"
+            } else if excluded_products.contains(&row.2) {
+                "excluded"
+            } else {
+                "missing"
+            };
+            json!({
+                "endpoint": row.0,
+                "trade_year": row.1,
+                "product_symbol": row.2,
+                "exchange": row.3,
+                "raw_rows": row.4,
+                "trade_date_count": row.5,
+                "min_trade_date": row.6,
+                "max_trade_date": row.7,
+                "raw_pit_violation_rows": row.8,
+                "missing_source_published_at_rows": row.9,
+                "mapping_status": mapping_status,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let sync_attempt_breakdown = sync_attempt_rows
+        .iter()
+        .map(|row| {
+            json!({
+                "source": row.0,
+                "status": row.1,
+                "attempt_count": row.2,
+                "row_count": row.3,
+                "min_start_date": row.4,
+                "max_end_date": row.5,
+                "error_attempt_count": row.6,
+                "non_open_attempt_count": row.7,
+                "non_open_row_count": row.8,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let decision = decide_futures_price_chain_coverage_audit(
+        schema_passed,
+        raw_rows,
+        raw_products.len() as i64,
+        covered_product_count,
+        missing_products.len() as i64,
+        raw_pit_violation_rows,
+        failed_sync_attempt_count,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.19p-futures-price-chain-coverage-audit-v1",
+        "source_id": "futures_price_chain",
+        "mode": "read_only_full_history_bounded_sync_coverage_audit",
+        "schema_passed": schema_passed,
+        "requested_range": {
+            "start_date": start,
+            "end_date": end,
+        },
+        "raw_rows": raw_rows,
+        "raw_product_count": raw_products.len(),
+        "covered_product_count": covered_product_count,
+        "missing_product_count": missing_products.len(),
+        "missing_products": missing_products,
+        "raw_pit_violation_rows": raw_pit_violation_rows,
+        "missing_source_published_at_rows": missing_source_published_at_rows,
+        "failed_sync_attempt_count": failed_sync_attempt_count,
+        "non_open_sync_attempt_count": non_open_sync_attempt_count,
+        "non_open_sync_attempt_rows": non_open_sync_attempt_rows,
+        "endpoint_year_breakdown": endpoint_year_breakdown,
+        "coverage_breakdown": coverage_breakdown,
+        "sync_attempt_breakdown": sync_attempt_breakdown,
+        "mapping_audit_decision": mapping_audit.get("decision").cloned().unwrap_or(Value::Null),
+        "decision": decision,
+        "pit_policy": {
+            "raw_available_at_policy": "available_at = trade_date + 1 day until source publication timing is audited",
+            "intraday_stock_decision_rule": "use previous available futures trade_date for intraday stock rebalance",
+            "source_published_at_null_policy": "null publication timestamps are conservative raw rows and block same-day intraday use"
+        },
+        "promotion_gate": futures_price_chain_coverage_promotion_gate(&decision),
+        "prohibited": [
+            "factor_builder_before_all_raw_products_are_mapped_or_excluded",
+            "p310_before_year_endpoint_product_exchange_coverage_audit_passes",
+            "bounded_wfa_or_v19_train_selection_before_p310_passes"
+        ]
+    }))
+}
+
+async fn build_futures_price_chain_mapping_template(db: &sqlx::PgPool) -> Result<Value, String> {
+    let mapping_audit = build_futures_price_chain_mapping_audit(db).await?;
+    let raw_products = mapping_audit
+        .get("raw_products")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let exclusion_products = mapping_audit
+        .get("exclusion_products")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let excluded_product_symbols = exclusion_products
+        .iter()
+        .filter_map(|row| row.get("product_symbol").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+
+    let industry_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            NaiveDate,
+            NaiveDate,
+            NaiveDate,
+        ),
+    >(futures_price_chain_industry_targets_sql())
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("Failed to load SW2021 L1 industry targets: {error}"))?;
+
+    let sw2021_targets = industry_rows
+        .iter()
+        .map(|row| {
+            json!({
+                "exposure_code": row.0,
+                "index_code": row.0,
+                "index_name": row.1,
+                "industry_code": row.2,
+                "industry_name": row.3,
+                "current_or_historical_symbols": row.4,
+                "min_in_date": row.5,
+                "max_in_date": row.6,
+                "latest_available_at": row.7,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let candidate_rows = raw_products
+        .iter()
+        .filter(|product| {
+            product
+                .get("product_symbol")
+                .and_then(Value::as_str)
+                .map(|symbol| !excluded_product_symbols.contains(symbol))
+                .unwrap_or(false)
+        })
+        .map(|product| {
+            let product_symbol = product
+                .get("product_symbol")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            json!({
+                "product_symbol": product_symbol,
+                "exposure_type": "sw_industry",
+                "exposure_code": null,
+                "direction": 1,
+                "weight": 1.0,
+                "valid_from": null,
+                "valid_to": null,
+                "available_at": null,
+                "source": null,
+                "mapping_version": "p319n-product-sw2021-l1-v1",
+                "evidence": {
+                    "source_url": null,
+                    "source_document": null,
+                    "review_note": null
+                },
+                "raw_product_summary": product,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "audit_version": "p3.19n-futures-price-chain-mapping-template-v1",
+        "source_id": "futures_price_chain",
+        "mode": "read_only_mapping_template_no_write",
+        "write_enabled": false,
+        "mapping_audit_decision": mapping_audit.get("decision").cloned().unwrap_or_else(|| json!({})),
+        "raw_product_count": mapping_audit.get("raw_product_count").cloned().unwrap_or_else(|| json!(0)),
+        "excluded_product_count": mapping_audit.get("excluded_raw_product_count").cloned().unwrap_or_else(|| json!(0)),
+        "mapping_candidate_product_count": candidate_rows.len(),
+        "exclusion_products": exclusion_products,
+        "target_universe": {
+            "classification_source": "SW2021",
+            "industry_level": "L1",
+            "exposure_type": "sw_industry",
+            "exposure_code_field": "index_code",
+            "target_count": sw2021_targets.len(),
+            "targets": sw2021_targets,
+        },
+        "required_candidate_fields": [
+            "product_symbol",
+            "exposure_type",
+            "exposure_code",
+            "direction",
+            "weight",
+            "valid_from",
+            "valid_to",
+            "available_at",
+            "source",
+            "mapping_version",
+            "evidence"
+        ],
+        "candidate_rows": candidate_rows,
+        "guardrails": [
+            "template generation is read-only and does not insert mapping rows",
+            "first pass accepts only sw_industry exposure_code using SW2021 L1 index_code",
+            "direct stock_symbol mapping requires a separate stronger evidence gate",
+            "products listed in exclusion_products are deliberately not emitted as mapping candidates",
+            "candidate rows must pass mapping-validate before any manual insert",
+            "validated candidates still do not unlock factor backfill, P3.10, WFA, or v19 train selection"
+        ],
+    }))
+}
+
+async fn validate_futures_price_chain_mapping_candidates(
+    db: &sqlx::PgPool,
+    req: FuturesPriceChainMappingValidateReq,
+) -> Result<Value, String> {
+    let template = build_futures_price_chain_mapping_template(db).await?;
+    let raw_products = template
+        .get("candidate_rows")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("product_symbol").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let sw2021_targets = template
+        .get("target_universe")
+        .and_then(|target| target.get("targets"))
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("exposure_code").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let validations = req
+        .rows
+        .iter()
+        .map(|candidate| {
+            validate_futures_price_chain_mapping_candidate(
+                candidate,
+                &raw_products,
+                &sw2021_targets,
+            )
+        })
+        .collect::<Vec<_>>();
+    let covered_products = validations
+        .iter()
+        .filter(|validation| validation.passed)
+        .map(|validation| validation.product_symbol.clone())
+        .collect::<BTreeSet<_>>();
+    let missing_products = raw_products
+        .difference(&covered_products)
+        .cloned()
+        .collect::<Vec<_>>();
+    let invalid_row_count = validations
+        .iter()
+        .filter(|validation| !validation.passed)
+        .count() as i64;
+    let decision = decide_futures_price_chain_mapping_candidate_validation(
+        raw_products.len() as i64,
+        covered_products.len() as i64,
+        invalid_row_count,
+        missing_products.len() as i64,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.19n-futures-price-chain-mapping-validate-v1",
+        "source_id": "futures_price_chain",
+        "mode": "read_only_candidate_validation_no_write",
+        "write_enabled": false,
+        "candidate_row_count": req.rows.len(),
+        "valid_row_count": validations.len() as i64 - invalid_row_count,
+        "invalid_row_count": invalid_row_count,
+        "covered_product_count": covered_products.len(),
+        "missing_product_count": missing_products.len(),
+        "missing_products": missing_products,
+        "row_results": validations,
+        "decision": decision,
+        "guardrails": [
+            "this endpoint validates candidate mapping rows only and never writes market_futures_product_exposure_mapping_pit",
+            "manual insert is allowed only after evidence review and must preserve mapping_version/source/evidence",
+            "mapping insert still requires a follow-up mapping-audit and coverage/readiness audit before P3.10"
+        ],
+    }))
+}
+
+fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option<&Value>) -> Value {
+    let mut admission = json!({
+        "stage": "P3.22",
+        "objective": "discover lower-correlation broad-base PIT alpha sources before any factor build, ML training, WFA admission, or v19 train selection",
         "hard_gate": "permission_schema_available_at_first",
         "global_policy": {
             "pit_required": true,
             "no_oos_reverse_tuning": true,
             "no_same_family_parameter_expansion": true,
+            "model_algorithm_policy": {
+                "algorithm_is_secondary_to_source_economics": true,
+                "allowed_after": "candidate source passes data/PIT coverage and P3.10A-D economics gates",
+                "forbidden_use": "do not use a new ML algorithm, full-period sign flip, label mining, or OOS feedback to rescue a source that failed RankIC, group return, decay, turnover/capacity, or bounded train robustness",
+                "allowed_use": "after source admission, compare linear, tree/boosting and calibrated ensemble models only inside rolling train windows with net-of-cost objectives and unchanged test-window evaluation"
+            },
             "required_sequence": [
                 "permission_smoke",
                 "schema_and_available_at_audit",
@@ -1850,11 +5247,34 @@ fn phase7_p319_candidate_admission_sources() -> Value {
             "unlock_pressure",
             "block_trade_supply_demand",
             "main_business_fina_mainbz",
-            "broad_analyst_revision_current_raw_bundle"
+            "broad_analyst_revision_current_raw_bundle",
+            "futures_price_chain_current_version",
+            "equity_pledge_pressure_current_low_ratio_atom",
+            "shareholder_structure_current_low_fanout_sleeve"
         ],
         "candidates": [
             {
-                "source_id": "real_operations_order_price_chain",
+                "source_id": "p322_source_inventory",
+                "source_family": "new_low_correlation_pit_broad_base_source_discovery",
+                "economic_hypothesis": "蓝图达标需要新的信息增量，而不是继续压榨已证伪的公开低频同族源；优先寻找更接近经营兑现、订单、产能、价格链、真实预期修正或股权激励执行质量的 PIT broad-base 数据。",
+                "candidate_raw_sources": [
+                    "regulated_disclosure_or_exchange_feed_for_orders_capacity_price_chain",
+                    "licensed_broad_base_analyst_revision_or_consensus_estimate_feed",
+                    "regulatory_or_exchange_equity_incentive_employee_stock_plan_execution_feed"
+                ],
+                "schema_status": "source_discovery_required",
+                "client_status": "not_started",
+                "sync_status": "not_started",
+                "coverage_status": "not_started",
+                "p310_status": "not_started",
+                "pit_required": true,
+                "available_at_policy": "native announcement/report/publication timestamp required; conservative next-session availability is allowed only when source publication time cannot be audited",
+                "admission_decision": "source_discovery_required_before_permission_smoke",
+                "blocked_reason": "no_new_source_has_passed_permission_schema_available_at_audit_after_p321e",
+                "next_step": "rank_candidate_sources_by_breadth_pit_availability_permission_and_economic_hypothesis_then_run_permission_smoke_for_top_source"
+            },
+            {
+                "source_id": "futures_price_chain",
                 "source_family": "real_operations_and_order_price_chain",
                 "economic_hypothesis": "真实经营、订单、产能、价格链变化比价格成交同族特征更接近基本面边际变化，若可 PIT 化且覆盖 broad-base，可能提供低相关横截面信息。",
                 "candidate_raw_sources": [
@@ -1895,11 +5315,13 @@ fn phase7_p319_candidate_admission_sources() -> Value {
                     },
                     {
                         "candidate": "tushare:futures_price_chain",
-                        "status": "permission_smoke_passed_schema_created_sync_not_started",
+                        "status": "stopped_after_p310_component_economics_failed",
                         "smoke_source": "futures_price_chain",
                         "smoke_endpoint": "POST /api/v1/quant/data/tushare/permission-smoke",
                         "schema_contract_endpoint": "GET /api/v1/quant/data/futures-price-chain/schema-contract",
                         "readiness_endpoint": "GET /api/v1/quant/data/futures-price-chain/readiness-audit",
+                        "diagnostics_endpoint": "POST /api/v1/quant/alpha-sources/diagnostics/report",
+                        "latest_diagnostics_report_id": "exp-4d38dadc-8a09-4158-8b0c-9894004e3714",
                         "official_docs": [
                             "https://tushare.pro/wctapi/documents/138.md",
                             "https://tushare.pro/wctapi/documents/139.md",
@@ -1935,20 +5357,136 @@ fn phase7_p319_candidate_admission_sources() -> Value {
                             "fut_holding_rows": 5,
                             "status": "available"
                         },
-                        "decision": "schema_created_run_bounded_raw_sync_before_coverage_audit"
+                        "full_history_summary": {
+                            "raw_rows": 28375979,
+                            "mapped_products": 84,
+                            "excluded_products": 10,
+                            "missing_products": 0,
+                            "factor_rows": 2770856,
+                            "factor_start": "2014-04-03",
+                            "factor_end": "2026-06-18",
+                            "raw_mapping_exclusion_pit_violations": 0
+                        },
+                        "diagnostics_summary": {
+                            "combo_report_id": "exp-e0e525c6-612d-4b12-b11e-91088dbc8150",
+                            "component_report_id": "exp-4d38dadc-8a09-4158-8b0c-9894004e3714",
+                            "coverage_pit_market_scope": "green",
+                            "research_economic_admission": "blocked_by_p310_economics",
+                            "component_passed_horizon_count": 0,
+                            "decision": "do_not_enter_bounded_wfa_or_v19_train_selection"
+                        },
+                        "decision": "stop_futures_price_chain_after_p310_component_economics_failed"
                     }
                 ],
-                "current_tables": ["market_stock_main_business"],
-                "schema_status": "fina_mainbz_raw_source_schema_available_futures_price_chain_schema_created_empty",
-                "client_status": "main_business_read_only_tools_available_futures_price_chain_permission_smoke_passed",
-                "sync_status": "fina_mainbz_full_history_backfill_completed_futures_price_chain_not_synced",
-                "coverage_status": "fina_mainbz_pit_green_failed_economics_futures_price_chain_schema_created_sync_required",
-                "p310_status": "fina_mainbz_completed_failed_economics_futures_price_chain_not_started",
+                "current_tables": ["market_stock_main_business", "market_futures_daily", "market_futures_warehouse_receipt", "market_futures_holding_rank", "market_futures_product_exposure_mapping_pit"],
+                "schema_status": "completed",
+                "client_status": "read_only_and_sync_client_completed",
+                "sync_status": "full_history_raw_sync_completed",
+                "coverage_status": "coverage_pit_mapping_exclusion_green",
+                "p310_status": "completed_failed_economics",
                 "pit_required": true,
                 "available_at_policy": "source_publication_or_disclosure_date_required_before_effective_period; futures trade_date is usable only after source publication/market close",
-                "admission_decision": "schema_created_sync_required_before_coverage_audit",
-                "blocked_reason": "fina_mainbz_data_pit_coverage_green_but_economics_failed; futures_price_chain_schema_created_but_raw_sync_mapping_available_at_and_full_history_coverage_audit_are_not_done",
-                "next_step": "run_bounded_futures_price_chain_sync_then_coverage_readiness_audit"
+                "admission_decision": "stopped_after_p310_component_economics_failed",
+                "blocked_reason": "data_pit_coverage_mapping_green_but_combo_and_component_p310_economics_failed; no_full_period_sign_flip_no_same_family_weight_rescue_no_oos_reverse_tuning",
+                "next_step": "do_not_expand_same_family_shift_to_p320_new_source_admission"
+            },
+            {
+                "source_id": "equity_pledge_pressure",
+                "source_family": "shareholder_financing_pressure_and_governance_risk",
+                "economic_hypothesis": "股权质押压力可能刻画控股股东融资约束、治理风险和潜在被动减持压力；若能用公告日 PIT 化并覆盖足够广的股票池，可能提供与价格成交、事件后收益、期货价格链较低相关的横截面信息。",
+                "candidate_raw_sources": [
+                    "tushare:pledge_stat",
+                    "tushare:pledge_detail"
+                ],
+                "source_discovery_evidence": [
+                    {
+                        "candidate": "tushare:pledge_stat",
+                        "status": "production_permission_smoke_passed",
+                        "official_doc": "https://tushare.pro/wctapi/documents/110.md",
+                        "official_semantics": "stock_equity_pledge_stat_snapshot",
+                        "observed_fields_from_doc": ["ts_code", "end_date", "pledge_count", "unrest_pledge", "rest_pledge", "total_share", "pledge_ratio"],
+                        "production_smoke": {
+                            "as_of": "2026-06-23",
+                            "scope": "symbol_probe",
+                            "sample_symbol_count": 3,
+                            "status": "available"
+                        },
+                        "native_available_at_candidate": "not_native_end_date_is_measurement_date",
+                        "decision": "do_not_use_pledge_stat_alone_until_available_at_policy_is_joined_or_conservatively_derived"
+                    },
+                    {
+                        "candidate": "tushare:pledge_detail",
+                        "status": "production_permission_smoke_passed",
+                        "official_doc": "https://tushare.pro/wctapi/documents/111.md",
+                        "official_semantics": "stock_equity_pledge_detail_events",
+                        "observed_fields_from_doc": ["ts_code", "ann_date", "holder_name", "pledge_amount", "start_date", "end_date", "is_release", "release_date", "pledgor", "holding_amount", "pledged_amount", "p_total_ratio", "h_total_ratio", "is_buyback"],
+                        "production_smoke": {
+                            "as_of": "2026-06-23",
+                            "scope": "announcement_date_range_probe",
+                            "status": "available"
+                        },
+                        "native_available_at_candidate": "ann_date",
+                        "decision": "schema_contract_ready_but_full_history_coverage_and_pit_audit_required_before_factor_design"
+                    }
+                ],
+                "current_tables": ["market_stock_pledge_stat", "market_stock_pledge_detail"],
+                "schema_status": "completed",
+                "client_status": "read_only_and_sync_client_completed",
+                "sync_status": "full_history_raw_sync_completed",
+                "coverage_status": "coverage_pit_green",
+                "p310_status": "completed_failed_economics",
+                "pit_required": true,
+                "available_at_policy": "pledge_detail.ann_date is the native available_at candidate; pledge_stat.end_date is only a snapshot measurement date and must be joined to detail announcements or shifted conservatively before any feature use",
+                "diagnostics_summary": {
+                    "data_pit_coverage": "green_after_2015_coverage_cliff_check",
+                    "latest_report_id": "exp-0dc8dfd6-c43b-4c01-a42b-99339fc5ef25",
+                    "mean_rankic_20_45_60_120": [0.00353, 0.00505, 0.00580, 0.00895],
+                    "high_minus_low_spread": [-0.00127, -0.00340, -0.00394, -0.00296],
+                    "passed_horizon_count": 0,
+                    "decision": "do_not_enter_bounded_wfa_or_v19_train_selection"
+                },
+                "admission_decision": "stopped_after_p310_economics_failed",
+                "blocked_reason": "coverage_and_pit_passed_but_low_pledge_ratio_atom_failed_rankic_group_spread_and_monotonicity; no_same_family_event_or_sign_flip_rescue",
+                "next_step": "do_not_expand_same_family_shift_to_p322_new_source_inventory"
+            },
+            {
+                "source_id": "shareholder_structure",
+                "source_family": "ownership_structure_and_governance_breadth",
+                "economic_hypothesis": "股东户数和交易事件可刻画筹码扩散、低 fanout 持有人变化与治理压力，但当前 low-fanout 表达在 v19 control 上未能转化为可交易净收益。",
+                "candidate_raw_sources": [
+                    "tushare:stk_holdernumber",
+                    "tushare:stk_holdertrade",
+                    "tushare:top10_holders",
+                    "tushare:top10_floatholders"
+                ],
+                "current_tables": [
+                    "market_stock_holder_number",
+                    "market_stock_holder_trade",
+                    "market_stock_top10_holders",
+                    "market_stock_top10_float_holders"
+                ],
+                "schema_status": "completed",
+                "client_status": "read_only_and_sync_client_completed",
+                "sync_status": "full_history_low_fanout_raw_sync_completed",
+                "coverage_status": "strict_low_fanout_coverage_pit_green_top10_high_fanout_not_admitted",
+                "p310_status": "completed_passed_single_factor_diagnostics",
+                "wfa_status": "completed_skipped_all_windows_by_train_robustness_and_cost_capacity_gate",
+                "pit_required": true,
+                "available_at_policy": "holder_number requires available_at >= end_date and holder_num > 0; holder_trade requires ann_date/native available_at and ratio/interval quality gates; top10 raw cannot bypass separate high-fanout coverage admission",
+                "admission_decision": "stopped_after_bounded_wfa_train_robustness_failed",
+                "diagnostics_summary": {
+                    "p310_rankic_5_10_20d": [0.0187, 0.0285, 0.0361],
+                    "p310_monotonicity": 0.75,
+                    "wfa_experiment_id": "exp-39d6d820-0073-4a22-889f-e9eb67962785",
+                    "wfa_windows": 13,
+                    "skipped_windows": 13,
+                    "stitched_oos": false,
+                    "control_train_annual_return": -0.0677,
+                    "sleeve_train_annual_return_5_10_15pct": [-0.0764, -0.0691, -0.0668],
+                    "decision": "do_not_enter_v19_train_selection_or_expand_same_family_sleeve"
+                },
+                "blocked_reason": "raw_pit_and_p310_single_factor_passed_but_bounded_sleeve_wfa_failed_train_robustness_and_cost_capacity_gate",
+                "next_step": "do_not_expand_same_family_shift_to_p322_new_source_inventory"
             },
             {
                 "source_id": "equity_incentive_execution_quality",
@@ -2064,10 +5602,257 @@ fn phase7_p319_candidate_admission_sources() -> Value {
                 "admission_decision": "blocked_report_rc_current_api_unknown_source_after_permission_smoke",
                 "blocked_reason": "current_forecast_express_disclosure_bundle_stopped_and_report_rc_production_smoke_returned_tushare_40101_unknown_data_source",
                 "guardrail": "must_be_broad_base_revision_not_sparse_event_post_return_overlay",
-                "next_step": "search_other_broad_pit_expectation_revision_source_or_shift_to_futures_price_chain_proxy"
+                "next_step": "search_licensed_or_alternative_broad_pit_expectation_revision_source; do_not_shift_back_to_stopped_futures_price_chain_proxy"
             }
         ]
-    })
+    });
+    if let Some(readiness) = futures_price_chain_readiness {
+        apply_p319_futures_price_chain_readiness(&mut admission, readiness);
+    }
+    admission
+}
+
+fn apply_p319_futures_price_chain_readiness(admission: &mut Value, readiness: &Value) {
+    let Some(decision) = readiness.get("decision") else {
+        return;
+    };
+    let admission_decision = decision
+        .get("admission_decision")
+        .and_then(Value::as_str)
+        .unwrap_or("coverage_readiness_audit_required_before_p310");
+    let sync_status = decision
+        .get("sync_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let next_step = decision
+        .get("next_step")
+        .and_then(Value::as_str)
+        .unwrap_or("run_futures_price_chain_readiness_audit");
+    let schema_status = decision
+        .get("schema_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let raw_rows = decision
+        .get("raw_rows")
+        .cloned()
+        .unwrap_or_else(|| json!(0));
+    let mapping_rows = decision
+        .get("mapping_rows")
+        .cloned()
+        .unwrap_or_else(|| json!(0));
+
+    let Some(candidates) = admission
+        .get_mut("candidates")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let Some(operations) = candidates.iter_mut().find(|candidate| {
+        candidate
+            .get("source_id")
+            .and_then(Value::as_str)
+            .map(|source| source == "futures_price_chain")
+            .unwrap_or(false)
+    }) else {
+        return;
+    };
+    let Some(object) = operations.as_object_mut() else {
+        return;
+    };
+
+    let data_gate_still_blocks = matches!(
+        admission_decision,
+        "apply_schema_before_mapping_audit"
+            | "raw_sync_required_before_mapping_audit"
+            | "mapping_required_before_feature_or_p310"
+            | "mapping_integrity_failed_before_feature_or_p310"
+            | "mapping_coverage_incomplete_before_feature_or_p310"
+            | "all_products_excluded_no_trainable_price_chain_source"
+            | "apply_schema_before_coverage_audit"
+            | "raw_sync_required_before_coverage_audit"
+            | "raw_pit_integrity_failed_before_feature_or_p310"
+            | "sync_attempt_failures_require_retry_before_feature_or_p310"
+    );
+    if !data_gate_still_blocks {
+        object.insert(
+            "futures_price_chain_readiness".to_string(),
+            readiness.clone(),
+        );
+        if let Some(evidence) = object
+            .get_mut("source_discovery_evidence")
+            .and_then(Value::as_array_mut)
+            .and_then(|items| {
+                items.iter_mut().find(|item| {
+                    item.get("candidate")
+                        .and_then(Value::as_str)
+                        .map(|candidate| candidate == "tushare:futures_price_chain")
+                        .unwrap_or(false)
+                })
+            })
+            .and_then(Value::as_object_mut)
+        {
+            evidence.insert("readiness_decision".to_string(), decision.clone());
+        }
+        return;
+    }
+
+    object.insert("admission_decision".to_string(), json!(admission_decision));
+    object.insert("sync_status".to_string(), json!(sync_status));
+    object.insert(
+        "schema_status".to_string(),
+        json!(format!(
+            "fina_mainbz_raw_source_schema_available_futures_price_chain_{schema_status}"
+        )),
+    );
+    object.insert(
+        "coverage_status".to_string(),
+        json!("fina_mainbz_pit_green_failed_economics_futures_price_chain_raw_sync_mapping_and_coverage_required"),
+    );
+    object.insert(
+        "p310_status".to_string(),
+        decision
+            .get("p310_status")
+            .cloned()
+            .unwrap_or_else(|| json!("blocked_until_coverage_readiness_passes")),
+    );
+    object.insert(
+        "wfa_status".to_string(),
+        decision
+            .get("wfa_status")
+            .cloned()
+            .unwrap_or_else(|| json!("blocked_until_mapping_and_p310_pass")),
+    );
+    object.insert(
+        "v19_train_selection".to_string(),
+        decision
+            .get("v19_train_selection")
+            .cloned()
+            .unwrap_or_else(|| json!("blocked")),
+    );
+    object.insert("next_step".to_string(), json!(next_step));
+    object.insert(
+        "blocked_reason".to_string(),
+        json!("fina_mainbz_data_pit_coverage_green_but_economics_failed; futures_price_chain_raw_sync_started_but_mapping_publication_timing_full_history_coverage_audit_and_p310_are_not_done"),
+    );
+    object.insert(
+        "futures_price_chain_readiness".to_string(),
+        readiness.clone(),
+    );
+
+    if let Some(evidence) = object
+        .get_mut("source_discovery_evidence")
+        .and_then(Value::as_array_mut)
+        .and_then(|items| {
+            items.iter_mut().find(|item| {
+                item.get("candidate")
+                    .and_then(Value::as_str)
+                    .map(|candidate| candidate == "tushare:futures_price_chain")
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(Value::as_object_mut)
+    {
+        evidence.insert("status".to_string(), json!(sync_status));
+        evidence.insert("decision".to_string(), json!(admission_decision));
+        evidence.insert("raw_rows".to_string(), raw_rows);
+        evidence.insert("mapping_rows".to_string(), mapping_rows);
+        evidence.insert("readiness_decision".to_string(), decision.clone());
+    }
+}
+
+fn apply_p320_equity_pledge_readiness(admission: &mut Value, readiness: &Value) {
+    let Some(candidates) = admission
+        .get_mut("candidates")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let decision = readiness
+        .get("decision")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let admission_decision = decision
+        .get("admission_decision")
+        .and_then(Value::as_str)
+        .unwrap_or("schema_available_at_contract_ready_for_review");
+    let sync_status = decision
+        .get("sync_status")
+        .and_then(Value::as_str)
+        .unwrap_or("missing");
+    let schema_status = decision
+        .get("schema_status")
+        .and_then(Value::as_str)
+        .unwrap_or("schema_contract_ready_review_required");
+    let next_step = decision
+        .get("next_step")
+        .and_then(Value::as_str)
+        .unwrap_or("review_apply_equity_pledge_schema_then_bounded_sync_plan");
+    let p310_status = decision
+        .get("p310_status")
+        .and_then(Value::as_str)
+        .unwrap_or("blocked_until_coverage_readiness_passes");
+
+    for source in candidates.iter_mut() {
+        let Some("equity_pledge_pressure") =
+            source.get("source_id").and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        if let Value::Object(object) = source {
+            let source_is_stopped_by_research = object
+                .get("admission_decision")
+                .and_then(Value::as_str)
+                .map(|decision| decision.starts_with("stopped_"))
+                .unwrap_or(false)
+                || object
+                    .get("p310_status")
+                    .and_then(Value::as_str)
+                    .map(|status| status == "completed_failed_economics")
+                    .unwrap_or(false);
+
+            object.insert("equity_pledge_readiness".to_string(), readiness.clone());
+            if source_is_stopped_by_research {
+                object.insert("latest_raw_readiness".to_string(), readiness.clone());
+                continue;
+            }
+
+            object.insert(
+                "current_tables".to_string(),
+                json!(["market_stock_pledge_stat", "market_stock_pledge_detail"]),
+            );
+            object.insert("schema_status".to_string(), json!(schema_status));
+            object.insert("sync_status".to_string(), json!(sync_status));
+            object.insert(
+                "coverage_status".to_string(),
+                json!(match admission_decision {
+                    "coverage_readiness_audit_required_before_p310" =>
+                        "raw_pit_ready_coverage_audit_not_started",
+                    "raw_pit_failed" => "blocked_by_raw_pit_violations",
+                    "bounded_sync_required_before_coverage_audit" => "not_started",
+                    "apply_schema_before_sync" => "blocked_until_schema_applied",
+                    _ => "not_started",
+                }),
+            );
+            object.insert("p310_status".to_string(), json!(p310_status));
+            object.insert("admission_decision".to_string(), json!(admission_decision));
+            object.insert(
+                "blocked_reason".to_string(),
+                json!(match admission_decision {
+                    "coverage_readiness_audit_required_before_p310" =>
+                        "equity_pledge_raw_pit_passed_but_year_symbol_ann_date_coverage_duplicate_and_sync_attempt_audit_not_done",
+                    "raw_pit_failed" =>
+                        "equity_pledge_raw_rows_have_available_at_future_leak_or_schema_pit_violation",
+                    "bounded_sync_required_before_coverage_audit" =>
+                        "equity_pledge_schema_exists_but_no_raw_rows_synced",
+                    "apply_schema_before_sync" =>
+                        "equity_pledge_schema_contract_ready_but_database_schema_missing_or_invalid",
+                    _ =>
+                        "equity_pledge_candidate_waiting_for_schema_available_at_bounded_sync_and_p310",
+                }),
+            );
+            object.insert("next_step".to_string(), json!(next_step));
+        }
+    }
 }
 
 fn phase7_new_alpha_candidate_sources_with_market_status(
@@ -2185,7 +5970,13 @@ fn phase7_new_alpha_candidate_sources_with_block_trade_status(
         };
         let readiness = phase7_block_trade_readiness(stats);
         if let Value::Object(object) = source {
-            object.insert("readiness".to_string(), json!(readiness));
+            let final_readiness = if readiness == "raw_source_pit_failed" {
+                readiness
+            } else {
+                "stopped_after_p310_economics_weak"
+            };
+            object.insert("readiness".to_string(), json!(final_readiness));
+            object.insert("raw_source_readiness".to_string(), json!(readiness));
             object.insert(
                 "raw_source_status".to_string(),
                 json!({
@@ -2203,13 +5994,67 @@ fn phase7_new_alpha_candidate_sources_with_block_trade_status(
             );
             object.insert(
                 "next_step".to_string(),
-                json!(match readiness {
-                    "raw_source_ready_for_p310_diagnostics" => {
-                        "run_p310_rankic_group_decay_turnover_capacity_diagnostics"
+                json!(match final_readiness {
+                    "stopped_after_p310_economics_weak" => {
+                        "do_not_expand_same_family_shift_to_p320_new_source_admission"
                     }
                     "raw_source_pit_failed" => "repair_available_at_before_any_diagnostics",
-                    _ => "expand_bounded_history_sync_then_p310_diagnostics",
+                    _ => "do_not_expand_same_family_shift_to_p320_new_source_admission",
                 }),
+            );
+        }
+    }
+    sources
+}
+
+fn equity_pledge_readiness_label(admission_decision: &str) -> &'static str {
+    match admission_decision {
+        "apply_schema_before_sync" => "schema_contract_ready_schema_not_applied",
+        "bounded_sync_required_before_coverage_audit" => "schema_created_bounded_sync_required",
+        "raw_pit_failed" => "raw_source_pit_failed",
+        "coverage_readiness_audit_required_before_p310" => "raw_source_ready_for_coverage_audit",
+        _ => "schema_contract_ready_review_required",
+    }
+}
+
+fn phase7_new_alpha_candidate_sources_with_equity_pledge_status(
+    mut sources: Vec<Value>,
+    readiness: Option<&Value>,
+) -> Vec<Value> {
+    let Some(readiness) = readiness else {
+        return sources;
+    };
+    let decision = readiness
+        .get("decision")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let admission_decision = decision
+        .get("admission_decision")
+        .and_then(Value::as_str)
+        .unwrap_or("schema_available_at_contract_ready_for_review");
+    let readiness_label = equity_pledge_readiness_label(admission_decision);
+    let next_step = decision
+        .get("next_step")
+        .and_then(Value::as_str)
+        .unwrap_or("review_apply_equity_pledge_schema_then_bounded_sync_plan");
+
+    for source in sources.iter_mut() {
+        let Some("equity_pledge_pressure") = source.get("source").and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        if let Value::Object(object) = source {
+            object.insert("readiness".to_string(), json!(readiness_label));
+            object.insert("next_step".to_string(), json!(next_step));
+            object.insert(
+                "current_tables".to_string(),
+                json!(["market_stock_pledge_stat", "market_stock_pledge_detail"]),
+            );
+            object.insert("raw_source_status".to_string(), readiness.clone());
+            object.insert(
+                "why_not_trainable_now".to_string(),
+                json!("股权质押源仍停在 schema/raw/coverage 准入层；只有全历史 coverage/readiness/PIT 与 P3.10A-D 通过后才允许进入 WFA/v19"),
             );
         }
     }
@@ -2981,6 +6826,39 @@ async fn execute_sync_task(
                 json!({"task_id": task_id, "dataset": "futures_price_chain", "status": "completed", "count": count}),
             )
         }
+        "equity_pledge_pressure" | "equity_pledge_pressure_raw" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_equity_pledge_pressure(
+                &state.db,
+                &state.tushare,
+                &task_id,
+                &req.symbols,
+                start,
+                end,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "equity_pledge_pressure", "status": "completed", "count": count}),
+            )
+        }
+        "shareholder_structure" | "shareholder_structure_raw" => {
+            let (start, end) = require_range(&req)?;
+            let count = quant_data::sync::sync_shareholder_structure(
+                &state.db,
+                &state.tushare,
+                &task_id,
+                &req.symbols,
+                &req.source_filters,
+                start,
+                end,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(
+                json!({"task_id": task_id, "dataset": "shareholder_structure", "status": "completed", "count": count}),
+            )
+        }
         "adj_factor" => {
             if req.symbols.is_empty() {
                 return Err("symbols must not be empty for adj_factor sync".into());
@@ -3497,11 +7375,63 @@ pub async fn futures_price_chain_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_futures_price_chain_schema_contract()}))
 }
 
+/// GET /api/v1/quant/data/equity-pledge-pressure/schema-contract
+pub async fn equity_pledge_pressure_schema_contract() -> impl IntoResponse {
+    Json(json!({"code": 0, "data": phase7_equity_pledge_schema_contract()}))
+}
+
+/// GET /api/v1/quant/data/shareholder-structure/schema-contract
+pub async fn shareholder_structure_schema_contract() -> impl IntoResponse {
+    Json(json!({"code": 0, "data": phase7_shareholder_structure_schema_contract()}))
+}
+
 /// GET /api/v1/quant/data/futures-price-chain/readiness-audit
 pub async fn futures_price_chain_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     match build_futures_price_chain_readiness_audit(&state.db).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/futures-price-chain/mapping-audit
+pub async fn futures_price_chain_mapping_audit(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match build_futures_price_chain_mapping_audit(&state.db).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/futures-price-chain/coverage-audit
+pub async fn futures_price_chain_coverage_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<FuturesPriceChainCoverageAuditReq>,
+) -> impl IntoResponse {
+    match build_futures_price_chain_coverage_audit(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/futures-price-chain/mapping-template
+pub async fn futures_price_chain_mapping_template(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match build_futures_price_chain_mapping_template(&state.db).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/futures-price-chain/mapping-validate
+pub async fn futures_price_chain_mapping_validate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FuturesPriceChainMappingValidateReq>,
+) -> impl IntoResponse {
+    match validate_futures_price_chain_mapping_candidates(&state.db, req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
         Err(error) => Json(json!({"code": 1, "message": error})),
     }
@@ -3547,6 +7477,167 @@ pub async fn futures_price_chain_sync(
             "data": {
                 "task_id": task_id,
                 "dataset": "futures_price_chain",
+                "status": "running"
+            }
+        }));
+    }
+
+    match execute_sync_task(state.clone(), task_id.clone(), sync_req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => {
+            let _ = quant_data::repository::fail_sync_task(&state.db, &task_id, &message).await;
+            Json(json!({"code": 1, "message": message, "task_id": task_id}))
+        }
+    }
+}
+
+/// GET /api/v1/quant/data/shareholder-structure/readiness-audit
+pub async fn shareholder_structure_readiness_audit(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match build_shareholder_structure_readiness_audit(&state.db).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/shareholder-structure/coverage-audit
+pub async fn shareholder_structure_coverage_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<ShareholderStructureCoverageAuditReq>,
+) -> impl IntoResponse {
+    match build_shareholder_structure_coverage_audit(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/shareholder-structure/sync-plan
+pub async fn shareholder_structure_sync_plan(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<ShareholderStructureSyncPlanReq>,
+) -> impl IntoResponse {
+    match build_shareholder_structure_sync_plan(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/shareholder-structure/sync
+pub async fn shareholder_structure_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ShareholderStructureSyncReq>,
+) -> impl IntoResponse {
+    let sync_req = req.into_sync_task_req();
+    let task_id = sync_req
+        .data_version_id
+        .clone()
+        .unwrap_or_else(|| format!("shareholder-structure-sync-{}", Uuid::new_v4()));
+
+    if let Err(message) = register_sync_task(&state, &task_id, &sync_req, "running").await {
+        return Json(json!({"code": 1, "message": message}));
+    }
+
+    if sync_req.background {
+        let state_for_task = state.clone();
+        let task_id_for_task = task_id.clone();
+        let req_for_task = sync_req.clone();
+        tokio::spawn(async move {
+            if let Err(message) = execute_sync_task(
+                state_for_task.clone(),
+                task_id_for_task.clone(),
+                req_for_task,
+            )
+            .await
+            {
+                let _ = quant_data::repository::fail_sync_task(
+                    &state_for_task.db,
+                    &task_id_for_task,
+                    &message,
+                )
+                .await;
+            }
+        });
+        return Json(json!({
+            "code": 0,
+            "data": {
+                "task_id": task_id,
+                "dataset": "shareholder_structure",
+                "status": "running"
+            }
+        }));
+    }
+
+    match execute_sync_task(state.clone(), task_id.clone(), sync_req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(message) => {
+            let _ = quant_data::repository::fail_sync_task(&state.db, &task_id, &message).await;
+            Json(json!({"code": 1, "message": message, "task_id": task_id}))
+        }
+    }
+}
+
+/// GET /api/v1/quant/data/equity-pledge-pressure/readiness-audit
+pub async fn equity_pledge_pressure_readiness_audit(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match build_equity_pledge_pressure_readiness_audit(&state.db).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/equity-pledge-pressure/coverage-audit
+pub async fn equity_pledge_pressure_coverage_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<EquityPledgeCoverageAuditReq>,
+) -> impl IntoResponse {
+    match build_equity_pledge_pressure_coverage_audit(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/equity-pledge-pressure/sync
+pub async fn equity_pledge_pressure_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EquityPledgePressureSyncReq>,
+) -> impl IntoResponse {
+    let sync_req = req.into_sync_task_req();
+    let task_id = sync_req
+        .data_version_id
+        .clone()
+        .unwrap_or_else(|| format!("equity-pledge-pressure-sync-{}", Uuid::new_v4()));
+
+    if let Err(message) = register_sync_task(&state, &task_id, &sync_req, "running").await {
+        return Json(json!({"code": 1, "message": message}));
+    }
+
+    if sync_req.background {
+        let state_for_task = state.clone();
+        let task_id_for_task = task_id.clone();
+        let req_for_task = sync_req.clone();
+        tokio::spawn(async move {
+            if let Err(message) = execute_sync_task(
+                state_for_task.clone(),
+                task_id_for_task.clone(),
+                req_for_task,
+            )
+            .await
+            {
+                let _ = quant_data::repository::fail_sync_task(
+                    &state_for_task.db,
+                    &task_id_for_task,
+                    &message,
+                )
+                .await;
+            }
+        });
+        return Json(json!({
+            "code": 0,
+            "data": {
+                "task_id": task_id,
+                "dataset": "equity_pledge_pressure",
                 "status": "running"
             }
         }));
@@ -3723,6 +7814,8 @@ async fn build_tushare_permission_smoke(
             "main_business probes fina_mainbz only; it has no native ann_date and remains blocked from schema/sync/factor backfill until available_at join audit passes.",
             "report_rc probes sell-side research earnings forecasts by report_date range only; production smoke on 2026-06-21 returned Tushare 40101 unknown data source, so it remains blocked from schema/sync/factor work until the callable API path is verified.",
             "futures_price_chain probes fut_daily/fut_wsr/fut_holding only; these remain blocked from schema/sync/factor work until permission, source publication timing, product-to-stock mapping, coverage and P3.10 diagnostics pass.",
+            "equity_pledge_pressure probes pledge_stat and pledge_detail only; pledge_detail.ann_date is the native PIT candidate, while pledge_stat.end_date is a measurement date and must not be used alone as availability.",
+            "shareholder_structure probes stk_holdernumber/top10_holders/top10_floatholders/stk_holdertrade only; ann_date is the native PIT candidate, and end_date must never be used as availability.",
             "Use this result to decide whether an optional source should proceed to Rust schema/repository/sync implementation or stay blocked."
         ],
     }))
@@ -4710,6 +8803,7 @@ async fn build_phase7_optional_source_coverage_sync(
             source: "tushare".to_string(),
             mode: Some("bounded_symbols".to_string()),
             symbols: selected_symbols.clone(),
+            source_filters: Vec::new(),
             index_codes: Vec::new(),
             exchanges: Vec::new(),
             start_date: Some(start_date.clone()),
@@ -4938,6 +9032,7 @@ async fn build_phase7_share_float_coverage_batches(
             source: "tushare".to_string(),
             mode: Some("full_market".to_string()),
             symbols: Vec::new(),
+            source_filters: Vec::new(),
             index_codes: Vec::new(),
             exchanges: Vec::new(),
             start_date: Some(chunk_start_s.clone()),
@@ -5745,6 +9840,7 @@ async fn build_phase7_financial_coverage_batches(
             source: "tushare".to_string(),
             mode: Some("bounded_symbols".to_string()),
             symbols: symbols.clone(),
+            source_filters: Vec::new(),
             index_codes: Vec::new(),
             exchanges: Vec::new(),
             start_date: Some(start_date.to_string()),
@@ -5878,6 +9974,7 @@ fn build_phase7_bounded_sync_req(
         source: "tushare".to_string(),
         mode: Some("bounded_symbols".to_string()),
         symbols,
+        source_filters: Vec::new(),
         index_codes: Vec::new(),
         exchanges: Vec::new(),
         start_date: Some(start_date.to_string()),
@@ -6880,6 +10977,150 @@ async fn run_tushare_permission_source_smoke(
                 "admission_gate": "permission_smoke_only_schema_mapping_available_at_and_full_history_coverage_audit_required_before_sync"
             })
         }
+        "equity_pledge_pressure" => {
+            let mut probes = Vec::new();
+            for symbol in symbols {
+                let result = state
+                    .tushare
+                    .pledge_stat(Some(symbol.as_str()), None, Some(row_limit), Some(0))
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "pledge_stat_by_symbol",
+                    result,
+                ));
+            }
+
+            let detail_result = state
+                .tushare
+                .pledge_detail(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            probes.push(phase7_tushare_probe_json(
+                source,
+                None,
+                "pledge_detail_announcement_date_range",
+                detail_result,
+            ));
+
+            json!({
+                "source": source,
+                "query_scope": "pledge_stat_symbol_and_detail_ann_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "official_docs": [
+                    "https://tushare.pro/wctapi/documents/110.md",
+                    "https://tushare.pro/wctapi/documents/111.md"
+                ],
+                "source_semantics": "equity_pledge_snapshot_and_pledge_detail_events_for_shareholder_financing_pressure",
+                "pit_available_at": "pledge_detail.ann_date is native available_at candidate; pledge_stat.end_date is only a measurement date and must be joined or derived conservatively before factor use",
+                "required_fields_for_schema_audit": ["ts_code", "ann_date", "holder_name", "pledge_amount", "start_date", "end_date", "is_release", "release_date", "pledge_ratio"],
+                "admission_gate": "permission_smoke_only_schema_available_at_and_full_history_coverage_audit_required_before_sync",
+                "blocked_until": ["permission_available", "detail_ann_date_coverage_verified", "stat_snapshot_available_at_policy_verified", "bounded_sync_plan_reviewed"]
+            })
+        }
+        "shareholder_structure" => {
+            let mut probes = Vec::new();
+
+            let holder_number_result = state
+                .tushare
+                .stk_holdernumber(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            probes.push(phase7_tushare_probe_json(
+                source,
+                None,
+                "holder_number_announcement_date_range",
+                holder_number_result,
+            ));
+
+            for symbol in symbols {
+                let top10_result = state
+                    .tushare
+                    .top10_holders(
+                        Some(symbol.as_str()),
+                        None,
+                        None,
+                        None,
+                        Some(row_limit),
+                        Some(0),
+                    )
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "top10_holders_by_symbol",
+                    top10_result,
+                ));
+
+                let top10_float_result = state
+                    .tushare
+                    .top10_floatholders(
+                        Some(symbol.as_str()),
+                        None,
+                        None,
+                        None,
+                        Some(row_limit),
+                        Some(0),
+                    )
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "top10_floatholders_by_symbol",
+                    top10_float_result,
+                ));
+            }
+
+            let holder_trade_result = state
+                .tushare
+                .stk_holdertrade(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            probes.push(phase7_tushare_probe_json(
+                source,
+                None,
+                "holder_trade_announcement_date_range",
+                holder_trade_result,
+            ));
+
+            json!({
+                "source": source,
+                "query_scope": "holder_count_top10_and_holder_trade_smoke",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "source_semantics": "shareholder_count_concentration_and_major_holder_trade_events",
+                "pit_available_at": "ann_date is native available_at; end_date is only the measurement period and must not move availability earlier",
+                "required_fields_for_schema_audit": [
+                    "ts_code", "ann_date", "end_date", "holder_num",
+                    "holder_name", "hold_amount", "hold_ratio", "hold_float_ratio", "hold_change", "holder_type",
+                    "in_de", "change_vol", "change_ratio", "after_share", "after_ratio", "begin_date", "close_date"
+                ],
+                "admission_gate": "permission_smoke_only_schema_available_at_full_history_coverage_and_p310_required_before_sync",
+                "blocked_until": ["schema_contract_reviewed", "bounded_sync_plan_reviewed", "ann_date_coverage_verified", "holder_count_breadth_verified", "p310_diagnostics_passed"]
+            })
+        }
         unsupported => json!({
             "source": unsupported,
             "status": "unsupported_source",
@@ -7424,18 +11665,36 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
         invalid_interval_rows: industry_membership_source_stats.12,
         duplicate_key_rows: industry_membership_source_stats.13,
     };
+    let equity_pledge_readiness = build_equity_pledge_pressure_readiness_audit(&state.db)
+        .await
+        .ok();
     let p315_new_alpha_candidate_sources =
-        phase7_new_alpha_candidate_sources_with_block_trade_status(
-            phase7_new_alpha_candidate_sources_with_industry_membership_status(
-                phase7_new_alpha_candidate_sources_with_market_status(
-                    &market_level_source_stats,
-                    &market_level_sync_tasks,
-                    Utc::now().date_naive(),
+        phase7_new_alpha_candidate_sources_with_equity_pledge_status(
+            phase7_new_alpha_candidate_sources_with_block_trade_status(
+                phase7_new_alpha_candidate_sources_with_industry_membership_status(
+                    phase7_new_alpha_candidate_sources_with_market_status(
+                        &market_level_source_stats,
+                        &market_level_sync_tasks,
+                        Utc::now().date_naive(),
+                    ),
+                    &industry_membership_source_stats,
                 ),
-                &industry_membership_source_stats,
+                &block_trade_source_stats,
             ),
-            &block_trade_source_stats,
+            equity_pledge_readiness.as_ref(),
         );
+    let futures_price_chain_readiness =
+        match build_futures_price_chain_mapping_audit(&state.db).await {
+            Ok(audit) => Some(audit),
+            Err(_) => build_futures_price_chain_readiness_audit(&state.db)
+                .await
+                .ok(),
+        };
+    let mut p319_candidate_admission =
+        phase7_p319_candidate_admission_sources(futures_price_chain_readiness.as_ref());
+    if let Some(readiness) = equity_pledge_readiness.as_ref() {
+        apply_p320_equity_pledge_readiness(&mut p319_candidate_admission, readiness);
+    }
 
     Ok(json!({
         "audit_version": "phase7-fd-v1",
@@ -7447,22 +11706,23 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
         "phase7_combo_coverage": combo_coverage,
         "optional_data_sources": optional_data_sources,
         "p315_new_alpha_candidate_sources": p315_new_alpha_candidate_sources,
-        "p319_candidate_admission": phase7_p319_candidate_admission_sources(),
+        "p319_candidate_admission": p319_candidate_admission,
         "tushare_permission_notes": {
             "forecast": "2000-point interface is usable by symbol; full-market quarterly forecast_vip requires higher permission.",
             "express": "2000-point interface is usable by symbol; full-market quarterly express_vip requires higher permission.",
             "cashflow_dividend_repurchase": "Current Pro 2000 permission passed bounded smoke; use optional_data_sources.feature_readiness before feature backfill or training.",
             "main_business": "fina_mainbz is read-only smokeable as main_business, but it has no native announcement date; available_at join audit is required before schema, sync, factor backfill, P3.10, or WFA.",
             "report_rc": "report_rc official docs exist, but production smoke on 2026-06-21 returned Tushare 40101 unknown data source; do not build schema/sync/factors until the callable API path is verified.",
-            "futures_price_chain": "fut_daily/fut_wsr/fut_holding are newly admitted for explicit read-only permission smoke only; schema, product mapping, PIT publication timing, coverage and P3.10 diagnostics are required before any training use."
+            "futures_price_chain": "fut_daily/fut_wsr/fut_holding data/PIT/mapping passed, but combo and component diagnostics failed P3.10 economics; do not expand same-family parameters or enter WFA/v19.",
+            "equity_pledge_pressure": "pledge_stat/pledge_detail data/PIT/coverage passed, but the current low-pledge-ratio atom failed P3.10 economics; do not expand same-family parameters or enter WFA/v19.",
+            "shareholder_structure": "shareholder low-fanout PIT factor passed single-factor P3.10 but bounded WFA skipped all windows by train robustness/cost-capacity gates; do not expand sleeve weights or enter v19."
         },
         "recommended_next_steps": [
-            "Do not expand Phase 7-FB/FC narrow post-event return searches before data expansion.",
-            "Expand optional source sync only through bounded, resumable Rust tasks; never use empty symbols without mode=full_market.",
-            "Only build PIT feature factory for optional sources after coverage is at least partial_feature_candidate.",
-            "Expand financial/fina_indicator coverage from the current narrow symbol set before treating financial quality as full-market alpha.",
-            "For P3.19, start with real operations/order-price-chain, equity incentive execution, or broad analyst revision admission audit; do not expand stopped same-family sources.",
-            "Only after data coverage passes, build PIT feature factory and strict OOS/WFA automatic discovery profiles."
+            "For P3.22, rank genuinely new low-correlation PIT broad-base sources by breadth, native available_at quality, permission, and economic hypothesis before permission smoke.",
+            "Do not expand stopped futures_price_chain, equity_pledge_pressure, shareholder_structure, event, moneyflow, unlock, liquidity, industry-prosperity, or main-business same-family variants.",
+            "Treat ML algorithm changes as secondary expression/ensemble work only after a source passes P3.10A-D economics; do not use model changes to rescue failed sources.",
+            "For any new source, enforce permission/schema/available_at -> bounded sync -> coverage/PIT -> P3.10A-D -> bounded WFA before factor builder, ML training, or v19 train selection.",
+            "Only after a source passes bounded WFA should active-v19 incremental overlay and replay/paper-trading hardening restart."
         ],
     }))
 }
@@ -8145,7 +12405,11 @@ mod tests {
         );
         assert_eq!(
             by_source["block_trade_supply_demand"]["readiness"],
-            "schema_and_client_ready_permission_smoke_passed"
+            "stopped_after_p310_economics_weak"
+        );
+        assert_eq!(
+            by_source["equity_pledge_pressure"]["readiness"],
+            "permission_smoke_passed_schema_contract_ready"
         );
         assert_eq!(
             by_source["equity_incentive_execution_quality"]["readiness"],
@@ -8153,7 +12417,11 @@ mod tests {
         );
         assert_eq!(
             by_source["block_trade_supply_demand"]["next_step"],
-            "run_bounded_sync_then_p310_diagnostics"
+            "do_not_expand_same_family_shift_to_p320_new_source_admission"
+        );
+        assert_eq!(
+            by_source["equity_pledge_pressure"]["next_step"],
+            "review_apply_equity_pledge_schema_then_bounded_sync_plan"
         );
         assert_eq!(
             by_source["industry_prosperity_proxy"]["next_step"],
@@ -8180,7 +12448,7 @@ mod tests {
 
     #[test]
     fn phase7_p319_candidate_admission_tracks_new_sources_and_stop_families() {
-        let admission = phase7_p319_candidate_admission_sources();
+        let admission = phase7_p319_candidate_admission_sources(None);
         let candidates = admission["candidates"]
             .as_array()
             .expect("p319 admission has candidates");
@@ -8196,7 +12464,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(admission["stage"], "P3.19");
+        assert_eq!(admission["stage"], "P3.22");
         assert_eq!(
             admission["hard_gate"],
             "permission_schema_available_at_first"
@@ -8204,8 +12472,28 @@ mod tests {
         assert_eq!(admission["global_policy"]["pit_required"], true);
         assert_eq!(admission["global_policy"]["no_oos_reverse_tuning"], true);
         assert_eq!(
+            admission["global_policy"]["model_algorithm_policy"]
+                ["algorithm_is_secondary_to_source_economics"],
+            true
+        );
+        assert_eq!(
             admission["stopped_same_family_sources"][0],
             "industry_prosperity_proxy"
+        );
+        assert!(admission["stopped_same_family_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source == "shareholder_structure_current_low_fanout_sleeve"));
+
+        let p322_inventory = by_source["p322_source_inventory"];
+        assert_eq!(
+            p322_inventory["admission_decision"],
+            "source_discovery_required_before_permission_smoke"
+        );
+        assert_eq!(
+            p322_inventory["next_step"],
+            "rank_candidate_sources_by_breadth_pit_availability_permission_and_economic_hypothesis_then_run_permission_smoke_for_top_source"
         );
 
         let equity = by_source["equity_incentive_execution_quality"];
@@ -8231,15 +12519,12 @@ mod tests {
             "rejected_semantic_mismatch"
         );
 
-        let operations = by_source["real_operations_order_price_chain"];
+        let operations = by_source["futures_price_chain"];
         assert_eq!(
             operations["admission_decision"],
-            "schema_created_sync_required_before_coverage_audit"
+            "stopped_after_p310_component_economics_failed"
         );
-        assert_eq!(
-            operations["p310_status"],
-            "fina_mainbz_completed_failed_economics_futures_price_chain_not_started"
-        );
+        assert_eq!(operations["p310_status"], "completed_failed_economics");
         assert_eq!(
             operations["candidate_raw_sources"][0],
             "tushare:fina_mainbz"
@@ -8267,12 +12552,57 @@ mod tests {
         );
         assert_eq!(
             operations["source_discovery_evidence"][1]["decision"],
-            "schema_created_run_bounded_raw_sync_before_coverage_audit"
+            "stop_futures_price_chain_after_p310_component_economics_failed"
         );
         assert_eq!(
             operations["source_discovery_evidence"][1]["production_smoke"]["status"],
             "available"
         );
+        assert_eq!(
+            operations["source_discovery_evidence"][1]["diagnostics_summary"]["decision"],
+            "do_not_enter_bounded_wfa_or_v19_train_selection"
+        );
+
+        let pledge = by_source["equity_pledge_pressure"];
+        assert_eq!(
+            pledge["admission_decision"],
+            "stopped_after_p310_economics_failed"
+        );
+        assert_eq!(pledge["pit_required"], true);
+        assert_eq!(pledge["p310_status"], "completed_failed_economics");
+        assert_eq!(
+            pledge["diagnostics_summary"]["decision"],
+            "do_not_enter_bounded_wfa_or_v19_train_selection"
+        );
+        assert_eq!(pledge["candidate_raw_sources"][0], "tushare:pledge_stat");
+        assert_eq!(pledge["candidate_raw_sources"][1], "tushare:pledge_detail");
+        assert_eq!(
+            pledge["source_discovery_evidence"][0]["native_available_at_candidate"],
+            "not_native_end_date_is_measurement_date"
+        );
+        assert_eq!(
+            pledge["source_discovery_evidence"][0]["status"],
+            "production_permission_smoke_passed"
+        );
+        assert_eq!(
+            pledge["source_discovery_evidence"][1]["native_available_at_candidate"],
+            "ann_date"
+        );
+        assert_eq!(
+            pledge["source_discovery_evidence"][1]["status"],
+            "production_permission_smoke_passed"
+        );
+
+        let shareholder = by_source["shareholder_structure"];
+        assert_eq!(
+            shareholder["admission_decision"],
+            "stopped_after_bounded_wfa_train_robustness_failed"
+        );
+        assert_eq!(
+            shareholder["diagnostics_summary"]["wfa_experiment_id"],
+            "exp-39d6d820-0073-4a22-889f-e9eb67962785"
+        );
+        assert_eq!(shareholder["diagnostics_summary"]["stitched_oos"], false);
 
         let analyst = by_source["broad_analyst_revision"];
         assert_eq!(
@@ -8311,6 +12641,44 @@ mod tests {
         assert_eq!(
             analyst["source_discovery_evidence"][1]["production_smoke"]["error_code"],
             "40101"
+        );
+    }
+
+    #[test]
+    fn phase7_p319_candidate_admission_reflects_live_futures_readiness() {
+        let readiness = json!({
+            "decision": decide_futures_price_chain_readiness(true, 6349, 0),
+            "tables": []
+        });
+        let admission = phase7_p319_candidate_admission_sources(Some(&readiness));
+        let candidates = admission["candidates"]
+            .as_array()
+            .expect("p319 admission has candidates");
+        let operations = candidates
+            .iter()
+            .find(|candidate| {
+                candidate["source_id"]
+                    .as_str()
+                    .map(|source| source == "futures_price_chain")
+                    .unwrap_or(false)
+            })
+            .expect("operations candidate");
+
+        assert_eq!(
+            operations["admission_decision"],
+            "mapping_required_before_feature_or_p310"
+        );
+        assert_eq!(operations["sync_status"], "raw_synced_mapping_missing");
+        assert_eq!(operations["wfa_status"], "blocked");
+        assert_eq!(operations["v19_train_selection"], "blocked");
+        assert_eq!(
+            operations["source_discovery_evidence"][1]["status"],
+            "raw_synced_mapping_missing"
+        );
+        assert_eq!(operations["source_discovery_evidence"][1]["raw_rows"], 6349);
+        assert_eq!(
+            operations["futures_price_chain_readiness"]["decision"]["mapping_rows"],
+            0
         );
     }
 
@@ -8386,11 +12754,15 @@ mod tests {
 
         assert_eq!(
             block_trade["readiness"],
+            "stopped_after_p310_economics_weak"
+        );
+        assert_eq!(
+            block_trade["raw_source_readiness"],
             "bounded_sample_ready_needs_history_coverage"
         );
         assert_eq!(
             block_trade["next_step"],
-            "expand_bounded_history_sync_then_p310_diagnostics"
+            "do_not_expand_same_family_shift_to_p320_new_source_admission"
         );
         assert_eq!(block_trade["raw_source_status"]["data_rows"], 2168);
         assert_eq!(block_trade["raw_source_status"]["covered_trade_days"], 14);
@@ -9197,6 +13569,36 @@ mod tests {
     }
 
     #[test]
+    fn phase7_permission_smoke_allowlists_equity_pledge_without_defaulting_it() {
+        assert!(PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED.contains(&"equity_pledge_pressure"));
+        assert!(!PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS.contains(&"equity_pledge_pressure"));
+
+        let requested = vec![
+            " Equity_Pledge_Pressure ".to_string(),
+            "equity_pledge_pressure".to_string(),
+        ];
+        assert_eq!(
+            phase7_permission_smoke_sources(&requested),
+            vec!["equity_pledge_pressure"]
+        );
+    }
+
+    #[test]
+    fn phase7_permission_smoke_allowlists_shareholder_structure_without_defaulting_it() {
+        assert!(PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED.contains(&"shareholder_structure"));
+        assert!(!PHASE7_OPTIONAL_SOURCE_SMOKE_DEFAULTS.contains(&"shareholder_structure"));
+
+        let requested = vec![
+            " Shareholder_Structure ".to_string(),
+            "shareholder_structure".to_string(),
+        ];
+        assert_eq!(
+            phase7_permission_smoke_sources(&requested),
+            vec!["shareholder_structure"]
+        );
+    }
+
+    #[test]
     fn futures_price_chain_schema_contract_blocks_training_until_mapping_and_pit_audit() {
         let contract = phase7_futures_price_chain_schema_contract();
 
@@ -9215,6 +13617,267 @@ mod tests {
             contract["mapping_tables"][0]["table"],
             "market_futures_product_exposure_mapping_pit"
         );
+        assert_eq!(
+            contract["mapping_tables"][1]["table"],
+            "market_futures_product_exclusion_gate_pit"
+        );
+    }
+
+    #[test]
+    fn equity_pledge_schema_contract_separates_stat_snapshot_from_detail_available_at() {
+        let contract = phase7_equity_pledge_schema_contract();
+
+        assert_eq!(contract["source_id"], "equity_pledge_pressure");
+        assert_eq!(contract["stage"], "P3.20B");
+        assert_eq!(contract["ddl_path"], "sql/phase7_equity_pledge_source.sql");
+        assert_eq!(
+            contract["raw_sources"][0]["native_available_at_candidate"],
+            "not_native_end_date_is_measurement_date"
+        );
+        assert_eq!(
+            contract["raw_sources"][1]["native_available_at_candidate"],
+            "ann_date"
+        );
+        assert_eq!(contract["tables"][0]["table"], "market_stock_pledge_stat");
+        assert_eq!(contract["tables"][1]["table"], "market_stock_pledge_detail");
+        assert_eq!(
+            contract["available_at_policy"]["pledge_detail"],
+            "ann_date is native available_at candidate and must be persisted as available_at."
+        );
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+
+        let ddl = include_str!("../../../sql/phase7_equity_pledge_source.sql");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS market_stock_pledge_stat"));
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS market_stock_pledge_detail"));
+        assert!(ddl.contains("available_at >= end_date"));
+        assert!(ddl.contains("available_at >= ann_date"));
+        assert!(ddl.contains("PRIMARY KEY (symbol, ann_date, source_row_hash)"));
+        assert_eq!(
+            contract["tables"][1]["natural_key"],
+            json!(["symbol", "ann_date", "source_row_hash"])
+        );
+        assert!(contract["tables"][1]["nullable_source_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("pledge_start_date")));
+    }
+
+    #[test]
+    fn shareholder_structure_schema_contract_requires_four_ann_date_tables() {
+        let contract = phase7_shareholder_structure_schema_contract();
+
+        assert_eq!(contract["source_id"], "shareholder_structure");
+        assert_eq!(contract["stage"], "P3.21B");
+        assert_eq!(
+            contract["ddl_path"],
+            "sql/phase7_shareholder_structure_source.sql"
+        );
+        assert_eq!(contract["raw_sources"][0]["api"], "stk_holdernumber");
+        assert_eq!(contract["raw_sources"][1]["api"], "top10_holders");
+        assert_eq!(contract["raw_sources"][2]["api"], "top10_floatholders");
+        assert_eq!(contract["raw_sources"][3]["api"], "stk_holdertrade");
+        assert_eq!(
+            contract["available_at_policy"]["default"],
+            "available_at equals native ann_date for all four shareholder_structure raw tables; end_date is a measurement period only."
+        );
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+
+        let ddl = include_str!("../../../sql/phase7_shareholder_structure_source.sql");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS market_stock_holder_number"));
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS market_stock_top10_holders"));
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS market_stock_top10_float_holders"));
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS market_stock_holder_trade"));
+        assert!(ddl.contains("PRIMARY KEY (symbol, ann_date, end_date)"));
+        assert!(ddl.contains("PRIMARY KEY (symbol, ann_date, end_date, source_row_hash)"));
+        assert!(ddl.contains("available_at >= ann_date"));
+    }
+
+    #[test]
+    fn shareholder_structure_raw_schema_lands_period_anomalies_for_audit() {
+        let contract = phase7_shareholder_structure_schema_contract();
+        assert_eq!(
+            contract["available_at_policy"]["period_snapshot_rule"],
+            "holdernumber/top10/top10_float rows with ann_date before end_date land as raw source anomalies, but block factor/P3.10/WFA until repaired, excluded, or gated."
+        );
+
+        let ddl = include_str!("../../../sql/phase7_shareholder_structure_source.sql");
+        assert!(!ddl.contains("CONSTRAINT market_stock_holder_number_period_pit_check"));
+        assert!(!ddl.contains("CONSTRAINT market_stock_top10_holders_period_pit_check"));
+        assert!(!ddl.contains("CONSTRAINT market_stock_top10_float_holders_period_pit_check"));
+        assert!(
+            ddl.contains("DROP CONSTRAINT IF EXISTS market_stock_holder_number_period_pit_check")
+        );
+
+        let expected_constraints = shareholder_structure_expected_schema();
+        let holder_number_constraints = expected_constraints
+            .iter()
+            .find(|(table, _)| *table == "market_stock_holder_number")
+            .map(|(_, constraints)| constraints)
+            .expect("holder number schema");
+        assert!(!holder_number_constraints
+            .iter()
+            .any(|constraint| constraint.contains("period_pit_check")));
+    }
+
+    #[test]
+    fn shareholder_structure_sync_request_forces_bounded_raw_dataset() {
+        let req = ShareholderStructureSyncReq {
+            symbols: vec!["000001.SZ".to_string()],
+            source_filters: Vec::new(),
+            start_date: Some("20140101".to_string()),
+            end_date: Some("20260623".to_string()),
+            data_version_id: Some("holder-smoke".to_string()),
+            background: true,
+        }
+        .into_sync_task_req();
+
+        assert_eq!(req.dataset, "shareholder_structure");
+        assert_eq!(req.source, "tushare:shareholder_structure");
+        assert_eq!(req.mode.as_deref(), Some("bounded_raw_sync"));
+        assert_eq!(req.symbols, vec!["000001.SZ".to_string()]);
+        assert_eq!(
+            req.reason.as_deref(),
+            Some("p3.21 shareholder structure bounded raw sync")
+        );
+        assert!(req.background);
+    }
+
+    #[test]
+    fn shareholder_structure_sync_request_preserves_source_filters_for_staged_history_sync() {
+        let req = ShareholderStructureSyncReq {
+            symbols: Vec::new(),
+            source_filters: vec!["holder_number".to_string(), "holder_trade".to_string()],
+            start_date: Some("20140101".to_string()),
+            end_date: Some("20260623".to_string()),
+            data_version_id: Some("shareholder-low-fanout".to_string()),
+            background: true,
+        }
+        .into_sync_task_req();
+
+        assert_eq!(
+            req.source_filters,
+            vec!["holder_number".to_string(), "holder_trade".to_string()]
+        );
+        assert_eq!(req.dataset, "shareholder_structure");
+    }
+
+    #[test]
+    fn shareholder_structure_coverage_decision_requires_breadth_pit_and_duplicates() {
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(false, 0, 0.0, 0, 0, 0, 0)
+                ["admission_decision"],
+            "apply_schema_before_sync"
+        );
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(true, 0, 0.0, 0, 0, 0, 0)
+                ["admission_decision"],
+            "bounded_sync_required_before_coverage_audit"
+        );
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(true, 10_000, 0.5, 1, 0, 0, 0)
+                ["admission_decision"],
+            "raw_pit_failed"
+        );
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(true, 10_000, 0.5, 0, 1, 0, 0)
+                ["admission_decision"],
+            "duplicate_source_rows_failed"
+        );
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(true, 10_000, 0.5, 0, 0, 1, 0)
+                ["admission_decision"],
+            "raw_quality_failed"
+        );
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(true, 500_000, 0.80, 0, 0, 0, 1)
+                ["admission_decision"],
+            "full_history_coverage_failed"
+        );
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(true, 100, 0.01, 0, 0, 0, 0)
+                ["admission_decision"],
+            "bounded_sample_passed_needs_full_history_sync"
+        );
+        assert_eq!(
+            decide_shareholder_structure_coverage_audit(true, 500_000, 0.80, 0, 0, 0, 0)
+                ["admission_decision"],
+            "coverage_readiness_ready_for_p310_diagnostics"
+        );
+    }
+
+    #[test]
+    fn shareholder_structure_strict_low_fanout_gate_allows_clean_exclusion_scope_only() {
+        assert_eq!(
+            decide_shareholder_structure_strict_low_fanout_gate(false, 0, 0.0, 0, 0)
+                ["admission_decision"],
+            "apply_schema_before_strict_low_fanout_gate"
+        );
+        assert_eq!(
+            decide_shareholder_structure_strict_low_fanout_gate(true, 500_000, 0.80, 1, 0)
+                ["admission_decision"],
+            "duplicate_admissible_rows_failed"
+        );
+        assert_eq!(
+            decide_shareholder_structure_strict_low_fanout_gate(true, 500_000, 0.80, 0, 1)
+                ["admission_decision"],
+            "full_history_coverage_failed"
+        );
+        assert_eq!(
+            decide_shareholder_structure_strict_low_fanout_gate(true, 100, 0.80, 0, 0)
+                ["admission_decision"],
+            "bounded_sample_passed_needs_more_admissible_history"
+        );
+        let ready = decide_shareholder_structure_strict_low_fanout_gate(true, 500_000, 0.80, 0, 0);
+        assert_eq!(
+            ready["gate_id"],
+            "shareholder_structure_low_fanout_strict_pit_gate_v1"
+        );
+        assert_eq!(
+            ready["admission_decision"],
+            "strict_low_fanout_ready_for_p310_diagnostics"
+        );
+        assert_eq!(ready["p310_status"], "ready_for_p310_diagnostics_only");
+        assert_eq!(ready["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn shareholder_structure_sync_plan_estimates_year_batches_and_blocks_full_range_blast() {
+        let batches = (2014..=2026)
+            .map(|year| ShareholderStructureSyncPlanBatch {
+                year,
+                start_date: NaiveDate::from_ymd_opt(year, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(year, 12, 31).unwrap(),
+                symbol_count: 4_300,
+                quarter_count: 4,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = shareholder_structure_sync_plan_response(
+            NaiveDate::from_ymd_opt(2014, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
+            batches,
+        );
+
+        assert_eq!(plan["mode"], "read_only_bounded_sync_plan");
+        assert_eq!(plan["safe_to_run_full_range"], false);
+        assert_eq!(plan["recommended_batch_granularity"], "year");
+        assert_eq!(plan["batch_count"], 13);
+        assert_eq!(plan["estimated_total_units"], 447304);
+        assert_eq!(
+            plan["batches"][0]["recommended_request"]["data_version_id"],
+            "shareholder-structure-2014"
+        );
+        assert_eq!(
+            plan["batches"][0]["recommended_low_fanout_request"]["source_filters"],
+            json!(["holder_number", "holder_trade"])
+        );
+        assert_eq!(
+            plan["batches"][0]["recommended_top10_request"]["source_filters"],
+            json!(["top10_holders", "top10_float_holders"])
+        );
+        assert_eq!(plan["batches"][0]["estimated_units"], 34408);
+        assert_eq!(plan["batches"][0]["symbol_quarter_units"], 34400);
+        assert_eq!(plan["batches"][0]["global_ann_date_units"], 8);
     }
 
     #[test]
@@ -9247,6 +13910,349 @@ mod tests {
     }
 
     #[test]
+    fn futures_price_chain_extracts_product_symbol_from_contract_codes() {
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("CU1811.SHF"),
+            Some("CU".to_string())
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("if1811.CFX"),
+            Some("IF".to_string())
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("  rb2405.SHFE "),
+            Some("RB".to_string())
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("A1901.DCE"),
+            Some("A".to_string())
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("AGL.SHF"),
+            None
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("PTA.ZCE"),
+            None
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("TL.CFX"),
+            None
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("TL1.CFX"),
+            None
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("SCTAS2011.INE"),
+            Some("SCTAS".to_string())
+        );
+        assert_eq!(
+            futures_price_chain_product_symbol_from_daily_ts_code("1811.SHF"),
+            None
+        );
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_audit_blocks_zero_mapping_rows() {
+        let decision = decide_futures_price_chain_mapping_audit(true, 42, 0, 0, 42, 0, 0, 0, 0, 0);
+
+        assert_eq!(
+            decision["admission_decision"],
+            "mapping_required_before_feature_or_p310"
+        );
+        assert_eq!(decision["raw_product_count"], 42);
+        assert_eq!(decision["mapped_product_count"], 0);
+        assert_eq!(decision["excluded_product_count"], 0);
+        assert_eq!(decision["covered_product_count"], 0);
+        assert_eq!(decision["missing_product_count"], 42);
+        assert_eq!(decision["v19_train_selection"], "blocked");
+        assert_eq!(decision["wfa_status"], "blocked");
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_audit_counts_exclusion_gate_as_covered_not_mapped() {
+        let decision = decide_futures_price_chain_mapping_audit(true, 56, 0, 6, 50, 0, 0, 0, 0, 0);
+
+        assert_eq!(
+            decision["admission_decision"],
+            "mapping_coverage_incomplete_before_feature_or_p310"
+        );
+        assert_eq!(decision["mapped_product_count"], 0);
+        assert_eq!(decision["excluded_product_count"], 6);
+        assert_eq!(decision["covered_product_count"], 6);
+        assert_eq!(decision["missing_product_count"], 50);
+        assert_eq!(
+            decision["next_step"],
+            "complete_versioned_mapping_for_remaining_raw_products_or_pre_register_exclusion_gate"
+        );
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_audit_sql_covers_raw_sources_and_pit_mapping() {
+        let raw_sql = futures_price_chain_raw_product_summary_sql();
+        assert!(raw_sql.contains("market_futures_daily"));
+        assert!(raw_sql.contains("market_futures_warehouse_receipt"));
+        assert!(raw_sql.contains("market_futures_holding_rank"));
+        assert!(raw_sql.contains("substring(ts_code from '^([A-Za-z]+)[0-9]{4}"));
+        assert!(raw_sql.contains("substring(symbol from '^[A-Za-z]+'"));
+        assert!(raw_sql.contains("length(product_symbol_raw) > 2"));
+        assert!(raw_sql.contains("right(product_symbol_raw, 1) = 'L'"));
+        assert!(raw_sql.contains("available_at < trade_date"));
+
+        let mapping_sql = futures_price_chain_mapping_summary_sql();
+        assert!(mapping_sql.contains("market_futures_product_exposure_mapping_pit"));
+        assert!(mapping_sql.contains("exposure_type NOT IN ('sw_industry', 'stock_symbol')"));
+        assert!(mapping_sql.contains("valid_to IS NOT NULL AND valid_to < valid_from"));
+        assert!(mapping_sql.contains("available_at < valid_from"));
+
+        let exclusion_sql = futures_price_chain_exclusion_summary_sql();
+        assert!(exclusion_sql.contains("market_futures_product_exclusion_gate_pit"));
+        assert!(exclusion_sql.contains("gate_scope = 'futures_price_chain_factor'"));
+        assert!(exclusion_sql.contains("valid_to IS NOT NULL AND valid_to < valid_from"));
+    }
+
+    #[test]
+    fn futures_price_chain_raw_product_sql_normalizes_known_aliases_before_mapping_gate() {
+        for sql in [
+            futures_price_chain_raw_product_summary_sql(),
+            futures_price_chain_coverage_breakdown_sql(),
+            futures_price_chain_raw_endpoint_breakdown_sql(),
+        ] {
+            assert!(sql.contains("right(product_symbol_raw, 4) = 'ACTV'"));
+            assert!(sql.contains("left(product_symbol_raw, length(product_symbol_raw) - 4)"));
+            assert!(sql.contains("WHEN product_symbol_raw = 'PTA' THEN 'TA'"));
+        }
+    }
+
+    #[test]
+    fn futures_price_chain_exclusion_seed_blocks_non_industry_derivatives() {
+        let sql = include_str!("../../../sql/phase7_futures_price_chain_source.sql");
+
+        assert!(sql.contains("('IM', 'futures_price_chain_factor', 'financial_index_future'"));
+        assert!(sql.contains("中证1000股指期货"));
+        assert!(sql.contains("('IO', 'futures_price_chain_factor', 'non_industry_derivative'"));
+        assert!(sql.contains("沪深300股指期权"));
+        assert!(sql.contains("('SCTAS', 'futures_price_chain_factor', 'non_industry_derivative'"));
+        assert!(sql.contains("原油 TAS"));
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_seed_contains_first_high_confidence_product_batch() {
+        let sql = include_str!("../../../sql/phase7_futures_price_chain_source.sql");
+
+        assert!(sql.contains("INSERT INTO market_futures_product_exposure_mapping_pit"));
+        assert!(sql.contains("('CU', 'sw_industry', '801050.SI'"));
+        assert!(sql.contains("('RB', 'sw_industry', '801040.SI'"));
+        assert!(sql.contains("('SC', 'sw_industry', '801960.SI'"));
+        assert!(sql.contains("('TA', 'sw_industry', '801030.SI'"));
+        assert!(sql.contains("('FG', 'sw_industry', '801710.SI'"));
+        assert!(sql.contains("p319q-product-sw2021-l1-direct-commodity-v1"));
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_seed_contains_second_evidence_backed_product_batch() {
+        let sql = include_str!("../../../sql/phase7_futures_price_chain_source.sql");
+
+        assert!(sql.contains("('A', 'sw_industry', '801010.SI', 1"));
+        assert!(sql.contains("('CF', 'sw_industry', '801130.SI', 1"));
+        assert!(sql.contains("('I', 'sw_industry', '801040.SI', -1"));
+        assert!(sql.contains("('PS', 'sw_industry', '801730.SI', 1"));
+        assert!(sql.contains("('SP', 'sw_industry', '801140.SI', -1"));
+        assert!(sql.contains("p319q-product-sw2021-l1-evidence-backed-v1"));
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_seed_covers_officially_sourced_residual_products() {
+        let sql = include_str!("../../../sql/phase7_futures_price_chain_source.sql");
+
+        assert!(sql.contains("('EC', 'sw_industry', '801170.SI', 1"));
+        assert!(sql.contains("('OP', 'sw_industry', '801140.SI', 1"));
+        assert!(sql.contains("('ME', 'sw_industry', '801030.SI', 1"));
+        assert!(sql.contains("('TC', 'sw_industry', '801950.SI', 1"));
+        assert!(sql.contains("('ER', 'sw_industry', '801010.SI', 1"));
+        assert!(sql.contains("('WS', 'sw_industry', '801010.SI', 1"));
+        assert!(sql.contains("p319q-product-sw2021-l1-official-residual-v1"));
+    }
+
+    #[test]
+    fn futures_price_chain_coverage_audit_sql_breaks_down_year_endpoint_product_exchange() {
+        let coverage_sql = futures_price_chain_coverage_breakdown_sql();
+
+        assert!(coverage_sql.contains("market_futures_daily"));
+        assert!(coverage_sql.contains("market_futures_warehouse_receipt"));
+        assert!(coverage_sql.contains("market_futures_holding_rank"));
+        assert!(coverage_sql.contains("EXTRACT(YEAR FROM trade_date)"));
+        assert!(
+            coverage_sql.contains("GROUP BY endpoint, trade_year, product_symbol, exchange_key")
+        );
+        assert!(coverage_sql.contains("available_at < trade_date"));
+
+        let attempt_sql = futures_price_chain_sync_attempt_breakdown_sql();
+        assert!(attempt_sql.contains("data_sync_attempt"));
+        assert!(attempt_sql.contains("futures_price_chain_daily"));
+        assert!(attempt_sql.contains("futures_price_chain_wsr"));
+        assert!(attempt_sql.contains("futures_price_chain_holding"));
+        assert!(attempt_sql.contains("error_message IS NOT NULL"));
+        assert!(attempt_sql.contains("futures_calendar"));
+        assert!(attempt_sql.contains("NOT EXISTS (SELECT 1 FROM futures_calendar)"));
+        assert!(attempt_sql.contains("non_open_attempt_count"));
+    }
+
+    #[test]
+    fn futures_price_chain_coverage_audit_blocks_until_mapping_is_complete() {
+        let decision = decide_futures_price_chain_coverage_audit(true, 6_349, 56, 6, 50, 0, 0);
+
+        assert_eq!(
+            decision["admission_decision"],
+            "mapping_coverage_incomplete_before_feature_or_p310"
+        );
+        assert_eq!(
+            decision["p310_status"],
+            "blocked_until_mapping_and_coverage_readiness_pass"
+        );
+        assert_eq!(decision["wfa_status"], "blocked");
+        assert_eq!(decision["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn futures_price_chain_coverage_promotion_gate_opens_only_p310_when_ready() {
+        let decision = decide_futures_price_chain_coverage_audit(true, 27_279_522, 94, 94, 0, 0, 0);
+        let promotion_gate = futures_price_chain_coverage_promotion_gate(&decision);
+
+        assert_eq!(promotion_gate["p310_status"], "ready_for_p310_diagnostics");
+        assert_eq!(
+            promotion_gate["factor_builder"],
+            "ready_for_p310_diagnostics"
+        );
+        assert_eq!(promotion_gate["wfa_status"], "blocked");
+        assert_eq!(promotion_gate["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_template_sql_uses_sw2021_l1_targets() {
+        let sql = futures_price_chain_industry_targets_sql();
+
+        assert!(sql.contains("market_stock_industry_membership_pit"));
+        assert!(sql.contains("classification_source = 'SW2021'"));
+        assert!(sql.contains("industry_level = 'L1'"));
+        assert!(sql.contains("index_code"));
+        assert!(sql.contains("industry_code"));
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_candidate_validation_rejects_invalid_target_and_empty_evidence()
+    {
+        let raw_products = BTreeSet::from(["CU".to_string()]);
+        let sw2021_targets = BTreeSet::from(["801050.SI".to_string()]);
+        let candidate = FuturesPriceChainMappingCandidate {
+            product_symbol: "CU".to_string(),
+            exposure_type: "sw_industry".to_string(),
+            exposure_code: "801999.SI".to_string(),
+            direction: 1,
+            weight: 1.0,
+            valid_from: "2014-01-01".to_string(),
+            valid_to: None,
+            available_at: "2014-01-01".to_string(),
+            source: "manual-review".to_string(),
+            mapping_version: "p319n-test".to_string(),
+            evidence: json!({}),
+        };
+
+        let result = validate_futures_price_chain_mapping_candidate(
+            &candidate,
+            &raw_products,
+            &sw2021_targets,
+        );
+
+        assert!(!result.passed);
+        assert!(result
+            .errors
+            .contains(&"unknown_sw2021_l1_exposure_code".to_string()));
+        assert!(result.errors.contains(&"evidence_required".to_string()));
+    }
+
+    #[test]
+    fn futures_price_chain_mapping_candidate_decision_blocks_incomplete_coverage() {
+        let decision = decide_futures_price_chain_mapping_candidate_validation(57, 56, 0, 1);
+
+        assert_eq!(
+            decision["admission_decision"],
+            "mapping_candidate_coverage_incomplete_before_insert"
+        );
+        assert_eq!(decision["write_enabled"], false);
+        assert_eq!(decision["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn phase7_p319_candidate_admission_reflects_mapping_audit_missing_products() {
+        let mapping_audit = json!({
+            "decision": decide_futures_price_chain_mapping_audit(true, 12, 8, 0, 4, 0, 0, 0, 0, 0),
+            "raw_product_count": 12,
+            "mapped_product_count": 8,
+            "excluded_product_count": 0,
+            "missing_product_count": 4,
+            "missing_products": ["AL", "CU", "IF", "RB"],
+        });
+        let admission = phase7_p319_candidate_admission_sources(Some(&mapping_audit));
+        let candidates = admission["candidates"]
+            .as_array()
+            .expect("p319 admission has candidates");
+        let operations = candidates
+            .iter()
+            .find(|candidate| {
+                candidate["source_id"]
+                    .as_str()
+                    .map(|source| source == "futures_price_chain")
+                    .unwrap_or(false)
+            })
+            .expect("operations candidate");
+
+        assert_eq!(
+            operations["admission_decision"],
+            "mapping_coverage_incomplete_before_feature_or_p310"
+        );
+        assert_eq!(operations["wfa_status"], "blocked");
+        assert_eq!(operations["v19_train_selection"], "blocked");
+        assert_eq!(
+            operations["futures_price_chain_readiness"]["missing_product_count"],
+            4
+        );
+    }
+
+    #[test]
+    fn phase7_p319_candidate_admission_keeps_futures_stopped_after_data_gate_ready() {
+        let coverage_ready = json!({
+            "decision": decide_futures_price_chain_coverage_audit(true, 1000, 10, 10, 0, 0, 0),
+            "raw_product_count": 10,
+            "covered_product_count": 10,
+        });
+        let admission = phase7_p319_candidate_admission_sources(Some(&coverage_ready));
+        let candidates = admission["candidates"]
+            .as_array()
+            .expect("p319 admission has candidates");
+        let operations = candidates
+            .iter()
+            .find(|candidate| {
+                candidate["source_id"]
+                    .as_str()
+                    .map(|source| source == "futures_price_chain")
+                    .unwrap_or(false)
+            })
+            .expect("operations candidate");
+
+        assert_eq!(
+            operations["admission_decision"],
+            "stopped_after_p310_component_economics_failed"
+        );
+        assert_eq!(operations["p310_status"], "completed_failed_economics");
+        assert_eq!(
+            operations["futures_price_chain_readiness"]["decision"]["admission_decision"],
+            "coverage_readiness_ready_for_p310_diagnostics"
+        );
+    }
+
+    #[test]
     fn futures_price_chain_sync_request_forces_bounded_raw_dataset() {
         let req = FuturesPriceChainSyncReq {
             symbols: vec!["CU".to_string()],
@@ -9264,6 +14270,115 @@ mod tests {
         assert_eq!(req.symbols, vec!["CU".to_string()]);
         assert_eq!(req.exchanges, vec!["SHFE".to_string()]);
         assert!(req.background);
+    }
+
+    #[test]
+    fn equity_pledge_sync_request_forces_bounded_raw_dataset() {
+        let req = EquityPledgePressureSyncReq {
+            symbols: vec!["000001.SZ".to_string()],
+            start_date: Some("20240101".to_string()),
+            end_date: Some("20260623".to_string()),
+            data_version_id: Some("pledge-smoke".to_string()),
+            background: true,
+        }
+        .into_sync_task_req();
+
+        assert_eq!(req.dataset, "equity_pledge_pressure");
+        assert_eq!(req.source, "tushare:equity_pledge_pressure");
+        assert_eq!(req.mode.as_deref(), Some("bounded_raw_sync"));
+        assert_eq!(req.symbols, vec!["000001.SZ".to_string()]);
+        assert_eq!(
+            req.reason.as_deref(),
+            Some("p3.20 equity pledge pressure bounded raw sync")
+        );
+        assert!(req.background);
+    }
+
+    #[test]
+    fn equity_pledge_readiness_blocks_until_schema_and_raw_pit_pass() {
+        assert_eq!(
+            decide_equity_pledge_readiness(false, 0, 0, 0)["admission_decision"],
+            "apply_schema_before_sync"
+        );
+        assert_eq!(
+            decide_equity_pledge_readiness(true, 0, 0, 0)["admission_decision"],
+            "bounded_sync_required_before_coverage_audit"
+        );
+        assert_eq!(
+            decide_equity_pledge_readiness(true, 10, 5, 2)["admission_decision"],
+            "raw_pit_failed"
+        );
+        assert_eq!(
+            decide_equity_pledge_readiness(true, 10, 5, 0)["admission_decision"],
+            "coverage_readiness_audit_required_before_p310"
+        );
+    }
+
+    #[test]
+    fn equity_pledge_status_reflects_readiness_audit_in_candidate_lists() {
+        let readiness = json!({
+            "decision": decide_equity_pledge_readiness(true, 10, 5, 0),
+            "schema_passed": true,
+            "tables": [],
+        });
+
+        let sources = phase7_new_alpha_candidate_sources_with_equity_pledge_status(
+            phase7_new_alpha_candidate_sources(),
+            Some(&readiness),
+        );
+        let by_source: BTreeMap<&str, &Value> = sources
+            .iter()
+            .map(|source| (source["source"].as_str().unwrap(), source))
+            .collect();
+
+        assert_eq!(
+            by_source["equity_pledge_pressure"]["readiness"],
+            "raw_source_ready_for_coverage_audit"
+        );
+
+        let mut admission = phase7_p319_candidate_admission_sources(None);
+        apply_p320_equity_pledge_readiness(&mut admission, &readiness);
+        let pledge = admission["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["source_id"] == "equity_pledge_pressure")
+            .unwrap();
+
+        assert_eq!(
+            pledge["admission_decision"],
+            "stopped_after_p310_economics_failed"
+        );
+        assert_eq!(pledge["sync_status"], "full_history_raw_sync_completed");
+        assert_eq!(pledge["p310_status"], "completed_failed_economics");
+        assert_eq!(
+            pledge["latest_raw_readiness"]["decision"]["admission_decision"],
+            "coverage_readiness_audit_required_before_p310"
+        );
+    }
+
+    #[test]
+    fn equity_pledge_coverage_decision_requires_breadth_and_pit_before_p310() {
+        assert_eq!(
+            decide_equity_pledge_coverage_audit(false, 0, 0.0, 0, 0)["admission_decision"],
+            "apply_schema_before_sync"
+        );
+        assert_eq!(
+            decide_equity_pledge_coverage_audit(true, 0, 0.0, 0, 0)["admission_decision"],
+            "bounded_sync_required_before_coverage_audit"
+        );
+        assert_eq!(
+            decide_equity_pledge_coverage_audit(true, 100, 0.5, 1, 0)["admission_decision"],
+            "raw_pit_failed"
+        );
+        assert_eq!(
+            decide_equity_pledge_coverage_audit(true, 100, 0.01, 0, 0)["admission_decision"],
+            "bounded_sample_passed_needs_full_history_sync"
+        );
+        assert_eq!(
+            decide_equity_pledge_coverage_audit(true, 50_000, 0.35, 0, 0)["admission_decision"],
+            "coverage_readiness_ready_for_p310_diagnostics"
+        );
     }
 
     #[test]
