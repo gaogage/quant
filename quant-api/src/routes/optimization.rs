@@ -21,6 +21,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::phase7_alpha_admission::{
+    validate_analyst_revision_entrypoint_admission, validate_analyst_revision_trial_admission,
     validate_equity_pledge_entrypoint_admission, validate_equity_pledge_trial_admission,
     validate_futures_price_chain_entrypoint_admission,
     validate_industry_prosperity_entrypoint_admission,
@@ -8201,6 +8202,18 @@ fn validate_alpha_source_diagnostics_admission(
             .map(str::trim)
             .filter(|value| !value.is_empty()),
         "P3.10 diagnostics",
+    )?;
+    validate_analyst_revision_entrypoint_admission(
+        combo_name,
+        req.alpha_admission_gate_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        req.universe_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        "P3.10 diagnostics",
     )
 }
 
@@ -16209,6 +16222,7 @@ fn build_factor_trial_request(
     validate_equity_pledge_trial_admission(params, template)?;
     validate_shareholder_structure_trial_admission(params, template)?;
     validate_margin_detail_trial_admission(params, template)?;
+    validate_analyst_revision_trial_admission(params, template)?;
 
     let string_value = |name: &str, default: Option<&str>| -> Result<String, String> {
         if let Some(value) = params.get(name).or_else(|| template.get(name)) {
@@ -18724,6 +18738,61 @@ mod tests {
 
         validate_alpha_source_diagnostics_admission(&req, &combo_name)
             .expect("coverage-gated margin detail diagnostics request");
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_blocks_analyst_revision_without_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "multi_vendor_analyst_revision".to_string(),
+            version: Some("p323f-akshare-cninfo-revision-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260624".to_string(),
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        let err = validate_alpha_source_diagnostics_admission(&req, &combo_name).unwrap_err();
+
+        assert!(err.contains("P3.10 diagnostics"));
+        assert!(err.contains("analyst_revision_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+    }
+
+    #[test]
+    fn alpha_source_diagnostics_allows_analyst_revision_with_coverage_gate() {
+        let req = AlphaSourceDiagnosticsRequest {
+            combo_name: "multi_vendor_analyst_revision".to_string(),
+            version: Some("p323f-akshare-cninfo-revision-v1".to_string()),
+            start_date: "20140103".to_string(),
+            end_date: "20260624".to_string(),
+            alpha_admission_gate_id: Some("analyst_revision_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: Some(true),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+        let combo_name = alpha_source_diagnostics_combo_name(&req).unwrap();
+
+        validate_alpha_source_diagnostics_admission(&req, &combo_name)
+            .expect("coverage-gated analyst revision diagnostics request");
     }
 
     #[test]

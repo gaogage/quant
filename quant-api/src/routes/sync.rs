@@ -4,15 +4,20 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::{Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
+use std::env;
 use std::{
     collections::{BTreeMap, BTreeSet},
     hash::{Hash, Hasher},
+    path::Path,
     sync::Arc,
+    time::Duration as StdDuration,
 };
+use tokio::{process::Command, time::timeout};
 use tracing::info;
 use uuid::Uuid;
 
@@ -74,6 +79,96 @@ pub struct TusharePermissionSmokeReq {
     pub end_date: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AkshareAnalystRevisionSmokeReq {
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub dates: Vec<String>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AkshareAnalystRevisionHistoryReplayAuditReq {
+    #[serde(default)]
+    pub dates: Vec<String>,
+    #[serde(default)]
+    pub start_year: Option<i32>,
+    #[serde(default)]
+    pub end_year: Option<i32>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AkshareAnalystRevisionSyncPlanReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub batch: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AkshareAnalystRevisionReadinessAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AkshareAnalystRevisionSyncReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub data_version_id: Option<String>,
+    #[serde(default)]
+    pub python: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+}
+
+impl AkshareAnalystRevisionSyncReq {
+    fn into_sync_task_req(self) -> DataSyncTaskReq {
+        DataSyncTaskReq {
+            dataset: "akshare_analyst_revision".to_string(),
+            source: AKSHARE_ANALYST_REVISION_TASK_SOURCE.to_string(),
+            mode: Some("bounded_calendar_day_raw_sync".to_string()),
+            symbols: Vec::new(),
+            source_filters: Vec::new(),
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: self.start_date,
+            end_date: self.end_date,
+            data_version_id: self.data_version_id,
+            background: self.background,
+            quality_check: false,
+            create_data_version: true,
+            retry_of_task_id: None,
+            reason: Some("p3.23d akshare analyst revision bounded raw sync".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AkshareAnalystRevisionCoverageAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -491,6 +586,15 @@ const PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED: &[&str] = &[
     "shareholder_structure",
     "margin_detail",
 ];
+const AKSHARE_ANALYST_REVISION_SMOKE_DEFAULTS: &[&str] = &["stock_rank_forecast_cninfo"];
+const AKSHARE_ANALYST_REVISION_SMOKE_ALLOWED: &[&str] = &[
+    "stock_rank_forecast_cninfo",
+    "stock_research_report_em",
+    "stock_profit_forecast_em",
+    "stock_institute_recommend",
+    "stock_institute_recommend_detail",
+    "stock_profit_forecast_ths",
+];
 const PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED: &[&str] = &[
     "cashflow",
     "dividend",
@@ -502,6 +606,17 @@ const PHASE7_OPTIONAL_SOURCE_SYNC_ALLOWED: &[&str] = &[
 ];
 const PHASE7_PERMISSION_SMOKE_MAX_SYMBOLS: usize = 3;
 const PHASE7_PERMISSION_SMOKE_MAX_ROWS: usize = 5;
+const AKSHARE_ANALYST_REVISION_MAX_DATES: usize = 8;
+const AKSHARE_ANALYST_REVISION_HISTORY_MAX_DATES: usize = 16;
+const AKSHARE_ANALYST_REVISION_MAX_SYMBOLS: usize = 5;
+const AKSHARE_ANALYST_REVISION_MAX_ROWS: usize = 50;
+const AKSHARE_ANALYST_REVISION_SMOKE_TIMEOUT_SECONDS: u64 = 60;
+const AKSHARE_ANALYST_REVISION_SYNC_PLAN_DEFAULT_BATCH: &str = "quarter";
+const AKSHARE_ANALYST_REVISION_SYNC_PLAN_MAX_BATCHES: usize = 80;
+const AKSHARE_ANALYST_REVISION_SYNC_MAX_CALENDAR_DAYS: i64 = 100;
+const AKSHARE_ANALYST_REVISION_SYNC_MAX_RETRIES: usize = 2;
+const AKSHARE_ANALYST_REVISION_TASK_SOURCE: &str = "akshare_cninfo_revision";
+const AKSHARE_ANALYST_REVISION_ATTEMPT_SOURCE: &str = "akshare:stock_rank_forecast_cninfo";
 const MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS: usize = 100;
 const MAIN_BUSINESS_READINESS_BREAKDOWN_MAX_PERIODS: usize = 200;
 const BROAD_ANALYST_REVISION_BREAKDOWN_LIMIT: usize = 32;
@@ -666,6 +781,443 @@ fn phase7_permission_smoke_limit(limit: Option<usize>) -> usize {
         .clamp(1, PHASE7_PERMISSION_SMOKE_MAX_ROWS)
 }
 
+fn akshare_analyst_revision_smoke_sources(requested: &[String]) -> Vec<String> {
+    let raw_sources: Vec<String> = if requested.is_empty() {
+        AKSHARE_ANALYST_REVISION_SMOKE_DEFAULTS
+            .iter()
+            .map(|source| (*source).to_string())
+            .collect()
+    } else {
+        requested
+            .iter()
+            .map(|source| source.trim().to_ascii_lowercase())
+            .filter(|source| !source.is_empty())
+            .filter(|source| AKSHARE_ANALYST_REVISION_SMOKE_ALLOWED.contains(&source.as_str()))
+            .collect()
+    };
+
+    let mut seen = BTreeSet::new();
+    raw_sources
+        .into_iter()
+        .filter(|source| seen.insert(source.clone()))
+        .collect()
+}
+
+fn akshare_analyst_revision_smoke_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(5)
+        .clamp(1, AKSHARE_ANALYST_REVISION_MAX_ROWS)
+}
+
+fn akshare_analyst_revision_default_dates() -> Vec<String> {
+    let latest_complete_date = chrono::Utc::now().date_naive() - Duration::days(1);
+    vec![latest_complete_date.format("%Y%m%d").to_string()]
+}
+
+fn akshare_analyst_revision_smoke_dates(dates: &[String]) -> Result<Vec<String>, String> {
+    let raw_dates = if dates.is_empty() {
+        akshare_analyst_revision_default_dates()
+    } else {
+        dates
+            .iter()
+            .map(|date| date.trim().to_string())
+            .filter(|date| !date.is_empty())
+            .collect()
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut parsed = Vec::new();
+    for date in raw_dates {
+        parse_optional_date(Some(date.as_str()))?;
+        if seen.insert(date.clone()) {
+            parsed.push(date);
+        }
+        if parsed.len() >= AKSHARE_ANALYST_REVISION_MAX_DATES {
+            break;
+        }
+    }
+    Ok(parsed)
+}
+
+fn akshare_analyst_revision_history_dates(dates: &[String]) -> Result<Vec<String>, String> {
+    let mut seen = BTreeSet::new();
+    let mut parsed = Vec::new();
+    for date in dates
+        .iter()
+        .map(|date| date.trim().to_string())
+        .filter(|date| !date.is_empty())
+    {
+        parse_optional_date(Some(date.as_str()))?;
+        if seen.insert(date.clone()) {
+            parsed.push(date);
+        }
+    }
+    if parsed.len() > AKSHARE_ANALYST_REVISION_HISTORY_MAX_DATES {
+        return Err(format!(
+            "history replay audit accepts at most {} dates per request",
+            AKSHARE_ANALYST_REVISION_HISTORY_MAX_DATES
+        ));
+    }
+    Ok(parsed)
+}
+
+fn akshare_analyst_revision_symbol(value: &str) -> String {
+    value
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or(value.trim())
+        .to_string()
+}
+
+fn akshare_analyst_revision_python_path(requested: Option<String>) -> String {
+    requested
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| env::var("AKSHARE_PYTHON").ok())
+        .unwrap_or_else(|| "/tmp/akshare-smoke/bin/python".to_string())
+}
+
+fn akshare_analyst_revision_timeout_seconds() -> u64 {
+    env::var("AKSHARE_SMOKE_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(AKSHARE_ANALYST_REVISION_SMOKE_TIMEOUT_SECONDS)
+        .clamp(5, 300)
+}
+
+#[derive(Debug, Clone)]
+struct AkshareAnalystRevisionSyncPlanBatch {
+    label: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    calendar_day_count: i64,
+}
+
+#[derive(Debug, Clone)]
+struct AkshareAnalystRevisionRawRow {
+    vendor: String,
+    vendor_source: String,
+    vendor_endpoint: String,
+    request_key: String,
+    symbol: String,
+    symbol_name: Option<String>,
+    publication_date: NaiveDate,
+    source_published_at: DateTime<Utc>,
+    available_at: NaiveDate,
+    institution_name: Option<String>,
+    analyst_name: Option<String>,
+    rating_current: Option<String>,
+    rating_previous: Option<String>,
+    rating_change: Option<String>,
+    is_first_rating: Option<String>,
+    target_price_min: Option<Decimal>,
+    target_price_max: Option<Decimal>,
+    raw_payload: Value,
+    raw_payload_hash: String,
+}
+
+fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap() - Duration::days(1)
+}
+
+fn akshare_analyst_revision_batch_end(date: NaiveDate, batch_mode: &str) -> NaiveDate {
+    match batch_mode {
+        "year" => NaiveDate::from_ymd_opt(date.year(), 12, 31).unwrap(),
+        "month" => last_day_of_month(date.year(), date.month()),
+        _ => {
+            let quarter_end_month = ((date.month() - 1) / 3 + 1) * 3;
+            last_day_of_month(date.year(), quarter_end_month)
+        }
+    }
+}
+
+fn akshare_analyst_revision_batch_label(date: NaiveDate, batch_mode: &str) -> String {
+    match batch_mode {
+        "year" => format!("{}", date.year()),
+        "month" => format!("{}{:02}", date.year(), date.month()),
+        _ => format!("{}Q{}", date.year(), ((date.month() - 1) / 3) + 1),
+    }
+}
+
+fn akshare_analyst_revision_sync_plan_batches(
+    start: NaiveDate,
+    end: NaiveDate,
+    batch_mode: &str,
+) -> Result<Vec<AkshareAnalystRevisionSyncPlanBatch>, String> {
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+    if !matches!(batch_mode, "year" | "quarter" | "month") {
+        return Err(
+            "AkShare analyst revision sync-plan batch must be year, quarter, or month".to_string(),
+        );
+    }
+
+    let mut batches = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        let batch_end = akshare_analyst_revision_batch_end(cursor, batch_mode).min(end);
+        batches.push(AkshareAnalystRevisionSyncPlanBatch {
+            label: akshare_analyst_revision_batch_label(cursor, batch_mode),
+            start_date: cursor,
+            end_date: batch_end,
+            calendar_day_count: (batch_end - cursor).num_days() + 1,
+        });
+        cursor = batch_end + Duration::days(1);
+    }
+
+    if batches.len() > AKSHARE_ANALYST_REVISION_SYNC_PLAN_MAX_BATCHES {
+        return Err(format!(
+            "AkShare analyst revision sync-plan resolved {} batches, above max {}",
+            batches.len(),
+            AKSHARE_ANALYST_REVISION_SYNC_PLAN_MAX_BATCHES
+        ));
+    }
+    Ok(batches)
+}
+
+fn akshare_value_key_part(item: &serde_json::Map<String, Value>, key: &str) -> String {
+    match item.get(key) {
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(Value::Number(value)) => value.to_string(),
+        Some(Value::Bool(value)) => value.to_string(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => value.to_string(),
+    }
+}
+
+fn akshare_stable_hash(parts: &[String]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+fn akshare_optional_string(item: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    let value = akshare_value_key_part(item, key);
+    (!value.is_empty()).then_some(value)
+}
+
+fn akshare_optional_decimal(item: &serde_json::Map<String, Value>, key: &str) -> Option<Decimal> {
+    item.get(key)
+        .and_then(|value| {
+            value.as_f64().or_else(|| {
+                value
+                    .as_str()
+                    .and_then(|raw| raw.trim().parse::<f64>().ok())
+            })
+        })
+        .and_then(Decimal::from_f64_retain)
+}
+
+fn parse_akshare_publication_date(value: &str) -> Option<NaiveDate> {
+    let trimmed = value.trim();
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y%m%d"))
+        .ok()
+}
+
+fn akshare_next_open_date(publication_date: NaiveDate, open_dates: &[NaiveDate]) -> NaiveDate {
+    open_dates
+        .iter()
+        .copied()
+        .find(|date| *date > publication_date)
+        .unwrap_or_else(|| publication_date + Duration::days(1))
+}
+
+fn akshare_source_published_at(available_at: NaiveDate) -> DateTime<Utc> {
+    available_at
+        .and_hms_opt(0, 30, 0)
+        .expect("valid conservative source publication timestamp")
+        .and_utc()
+}
+
+fn akshare_analyst_revision_raw_row_from_record(
+    record: &serde_json::Map<String, Value>,
+    request_key: &str,
+    open_dates: &[NaiveDate],
+) -> Result<AkshareAnalystRevisionRawRow, String> {
+    let symbol = akshare_value_key_part(record, "证券代码");
+    if symbol.is_empty() {
+        return Err("missing_symbol".to_string());
+    }
+    let publication_date =
+        parse_akshare_publication_date(&akshare_value_key_part(record, "发布日期"))
+            .ok_or_else(|| "missing_or_invalid_publication_date".to_string())?;
+    if publication_date.format("%Y%m%d").to_string() != request_key {
+        return Err(format!(
+            "publication_date_mismatch:{}",
+            publication_date.format("%Y%m%d")
+        ));
+    }
+    let available_at = akshare_next_open_date(publication_date, open_dates);
+    let raw_payload = Value::Object(record.clone());
+    let raw_payload_string = serde_json::to_string(&raw_payload).unwrap_or_default();
+    let raw_payload_hash = akshare_stable_hash(&[
+        "akshare".to_string(),
+        "stock_rank_forecast_cninfo".to_string(),
+        request_key.to_string(),
+        symbol.clone(),
+        raw_payload_string,
+    ]);
+
+    Ok(AkshareAnalystRevisionRawRow {
+        vendor: "akshare".to_string(),
+        vendor_source: "akshare".to_string(),
+        vendor_endpoint: "stock_rank_forecast_cninfo".to_string(),
+        request_key: request_key.to_string(),
+        symbol,
+        symbol_name: akshare_optional_string(record, "证券简称"),
+        publication_date,
+        source_published_at: akshare_source_published_at(available_at),
+        available_at,
+        institution_name: akshare_optional_string(record, "研究机构简称"),
+        analyst_name: akshare_optional_string(record, "研究员名称"),
+        rating_current: akshare_optional_string(record, "投资评级"),
+        rating_previous: akshare_optional_string(record, "前一次投资评级"),
+        rating_change: akshare_optional_string(record, "评级变化"),
+        is_first_rating: akshare_optional_string(record, "是否首次评级"),
+        target_price_min: akshare_optional_decimal(record, "目标价格-下限"),
+        target_price_max: akshare_optional_decimal(record, "目标价格-上限"),
+        raw_payload,
+        raw_payload_hash,
+    })
+}
+
+fn validate_akshare_analyst_revision_sync_range(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<i64, String> {
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+    let calendar_day_count = (end - start).num_days() + 1;
+    if calendar_day_count > AKSHARE_ANALYST_REVISION_SYNC_MAX_CALENDAR_DAYS {
+        return Err(format!(
+            "AkShare analyst revision bounded sync resolved {} calendar days, above max {}. Use monthly or <=100-day batches.",
+            calendar_day_count, AKSHARE_ANALYST_REVISION_SYNC_MAX_CALENDAR_DAYS
+        ));
+    }
+    Ok(calendar_day_count)
+}
+
+fn akshare_analyst_revision_calendar_days(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    let mut days = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        days.push(cursor);
+        cursor += Duration::days(1);
+    }
+    days
+}
+
+fn akshare_analyst_revision_should_retry_fetch_status(status: &str) -> bool {
+    matches!(status, "timeout" | "error")
+}
+
+async fn load_akshare_analyst_revision_available_open_dates(
+    db: &sqlx::PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<NaiveDate>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT trade_date
+        FROM market_trade_calendar
+        WHERE is_open = true
+          AND trade_date > $1
+          AND trade_date <= $2
+        ORDER BY trade_date
+        "#,
+    )
+    .bind(start)
+    .bind(end + Duration::days(14))
+    .fetch_all(db)
+    .await
+}
+
+async fn upsert_akshare_analyst_revision_raw_rows(
+    db: &sqlx::PgPool,
+    rows: &[AkshareAnalystRevisionRawRow],
+    data_version_id: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut saved = 0usize;
+    for chunk in rows.chunks(1_000) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_vendor_analyst_revision_raw \
+             (vendor, vendor_source, vendor_endpoint, request_key, symbol, symbol_name, \
+              publication_date, source_published_at, available_at, institution_name, \
+              analyst_name, rating_current, rating_previous, rating_change, is_first_rating, \
+              target_price_min, target_price_max, raw_payload, raw_payload_hash, data_version_id) ",
+        );
+
+        builder.push_values(chunk, |mut row_builder, row| {
+            row_builder
+                .push_bind(&row.vendor)
+                .push_bind(&row.vendor_source)
+                .push_bind(&row.vendor_endpoint)
+                .push_bind(&row.request_key)
+                .push_bind(&row.symbol)
+                .push_bind(&row.symbol_name)
+                .push_bind(row.publication_date)
+                .push_bind(row.source_published_at)
+                .push_bind(row.available_at)
+                .push_bind(&row.institution_name)
+                .push_bind(&row.analyst_name)
+                .push_bind(&row.rating_current)
+                .push_bind(&row.rating_previous)
+                .push_bind(&row.rating_change)
+                .push_bind(&row.is_first_rating)
+                .push_bind(row.target_price_min)
+                .push_bind(row.target_price_max)
+                .push_bind(&row.raw_payload)
+                .push_bind(&row.raw_payload_hash)
+                .push_bind(data_version_id);
+        });
+
+        builder.push(
+            " ON CONFLICT (vendor, vendor_endpoint, request_key, symbol, publication_date, raw_payload_hash) \
+              DO UPDATE SET \
+                vendor_source = EXCLUDED.vendor_source, \
+                symbol_name = EXCLUDED.symbol_name, \
+                source_published_at = EXCLUDED.source_published_at, \
+                available_at = EXCLUDED.available_at, \
+                institution_name = EXCLUDED.institution_name, \
+                analyst_name = EXCLUDED.analyst_name, \
+                rating_current = EXCLUDED.rating_current, \
+                rating_previous = EXCLUDED.rating_previous, \
+                rating_change = EXCLUDED.rating_change, \
+                is_first_rating = EXCLUDED.is_first_rating, \
+                target_price_min = EXCLUDED.target_price_min, \
+                target_price_max = EXCLUDED.target_price_max, \
+                raw_payload = EXCLUDED.raw_payload, \
+                data_version_id = EXCLUDED.data_version_id, \
+                updated_at = now()",
+        );
+
+        let result = builder.build().execute(db).await?;
+        saved += result.rows_affected() as usize;
+    }
+    Ok(saved)
+}
+
 fn main_business_available_at_audit_period_limit(limit: Option<usize>) -> usize {
     limit
         .unwrap_or(MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS)
@@ -737,6 +1289,253 @@ fn decide_broad_analyst_revision_audit(
             blocked_reason: "",
         }
     }
+}
+
+fn decide_akshare_analyst_revision_history_replay_audit(
+    requested_date_count: usize,
+    available_date_count: usize,
+    error_date_count: usize,
+    empty_date_count: usize,
+    row_count: i64,
+    publication_date_mismatch_rows: i64,
+    missing_publication_date_rows: i64,
+    missing_revision_semantics_rows: i64,
+) -> Value {
+    let (passed, status, admission_decision, blocked_reason) = if requested_date_count == 0 {
+        (
+            false,
+            "blocked_no_history_dates_requested",
+            "blocked_no_history_dates_requested",
+            "history replay needs explicit dates or a market-calendar year range",
+        )
+    } else if error_date_count > 0 {
+        (
+            false,
+            "blocked_history_replay_probe_failed",
+            "blocked_history_replay_probe_failed",
+            "one or more AkShare history-date probes failed or timed out",
+        )
+    } else if empty_date_count > 0 || available_date_count < requested_date_count {
+        (
+            false,
+            "blocked_history_replay_empty_dates",
+            "blocked_history_replay_empty_dates",
+            "one or more representative history dates returned no analyst revision rows",
+        )
+    } else if row_count <= 0 {
+        (
+            false,
+            "blocked_history_replay_no_rows",
+            "blocked_history_replay_no_rows",
+            "history replay returned no rows",
+        )
+    } else if publication_date_mismatch_rows > 0 || missing_publication_date_rows > 0 {
+        (
+            false,
+            "blocked_publication_date_mismatch_or_missing",
+            "blocked_publication_date_mismatch_or_missing",
+            "source publication date must equal the requested history date and be non-null",
+        )
+    } else if missing_revision_semantics_rows > 0 {
+        (
+            false,
+            "blocked_revision_semantics_missing_fields",
+            "blocked_revision_semantics_missing_fields",
+            "rating_change and previous_rating fields must be populated before schema review",
+        )
+    } else {
+        (
+            true,
+            "history_replay_available_at_sample_passed",
+            "history_replay_available_at_sample_passed_schema_review_next",
+            "",
+        )
+    };
+
+    json!({
+        "passed": passed,
+        "status": status,
+        "admission_decision": admission_decision,
+        "blocked_reason": if blocked_reason.is_empty() { Value::Null } else { json!(blocked_reason) },
+        "promotion_gate": {
+            "schema_apply": if passed {
+                "schema_review_allowed_next"
+            } else {
+                "blocked_until_history_replay_audit_passes"
+            },
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    })
+}
+
+fn decide_akshare_analyst_revision_readiness(
+    schema_exists: bool,
+    row_count: i64,
+    pit_violation_rows: i64,
+    missing_source_published_at_rows: i64,
+    missing_current_rating_rows: i64,
+    missing_revision_semantics_rows: i64,
+    duplicate_key_rows: i64,
+) -> Value {
+    let (passed, status, admission_decision, blocked_reason) = if !schema_exists {
+        (
+            false,
+            "schema_not_applied",
+            "schema_review_apply_required_before_bounded_sync",
+            "market_vendor_analyst_revision_raw does not exist",
+        )
+    } else if row_count <= 0 {
+        (
+            false,
+            "schema_created_sync_not_started",
+            "bounded_sync_required_before_coverage_audit",
+            "raw schema exists but contains no analyst revision rows",
+        )
+    } else if pit_violation_rows > 0 || missing_source_published_at_rows > 0 {
+        (
+            false,
+            "raw_pit_failed",
+            "raw_pit_or_source_published_at_failed",
+            "raw rows must have publication_date/source_published_at and available_at >= publication_date",
+        )
+    } else if missing_revision_semantics_rows > 0 {
+        (
+            false,
+            "raw_revision_semantics_failed",
+            "raw_revision_semantics_failed",
+            "rating_previous/rating_change must be present before coverage admission; missing current ratings are audited separately and must be excluded or downweighted before current-rating factor use",
+        )
+    } else if duplicate_key_rows > 0 {
+        (
+            false,
+            "raw_duplicate_key_failed",
+            "raw_duplicate_key_failed",
+            "natural key plus raw_payload_hash must not produce duplicate rows",
+        )
+    } else {
+        (
+            true,
+            "raw_readiness_passed_coverage_audit_required_next",
+            "raw_schema_and_pit_ready_for_coverage_audit_only",
+            "",
+        )
+    };
+
+    json!({
+        "passed": passed,
+        "status": status,
+        "admission_decision": admission_decision,
+        "blocked_reason": if blocked_reason.is_empty() { Value::Null } else { json!(blocked_reason) },
+        "row_quality": {
+            "missing_current_rating_rows": missing_current_rating_rows,
+            "current_rating_usage": if missing_current_rating_rows > 0 {
+                "exclude_or_downweight_rows_before_current_rating_factor_use"
+            } else {
+                "fully_populated"
+            },
+            "revision_semantics_required_fields": ["rating_previous", "rating_change"]
+        },
+        "promotion_gate": {
+            "bounded_sync": if schema_exists {
+                "schema_exists_bounded_sync_can_be_considered"
+            } else {
+                "blocked_until_schema_review_and_apply"
+            },
+            "coverage_audit": if passed {
+                "coverage_audit_required_next"
+            } else {
+                "blocked_until_readiness_passes"
+            },
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    })
+}
+
+fn decide_akshare_analyst_revision_coverage_audit(
+    table_exists: bool,
+    row_count: i64,
+    coverage_ratio: f64,
+    failed_attempt_dates: i64,
+    missing_year_count: i64,
+    pit_violation_rows: i64,
+    missing_source_published_at_rows: i64,
+    missing_revision_semantics_rows: i64,
+    duplicate_key_rows: i64,
+    duplicate_payload_hash_rows: i64,
+    correlation_decision: &str,
+) -> Value {
+    let raw_quality_failed = pit_violation_rows > 0
+        || missing_source_published_at_rows > 0
+        || missing_revision_semantics_rows > 0
+        || duplicate_key_rows > 0
+        || duplicate_payload_hash_rows > 0;
+    let (status, admission_decision, p310_status, next_step) = if !table_exists {
+        (
+            "blocked_no_raw_schema_or_full_history_sync",
+            "blocked_raw_schema_not_applied_no_coverage_to_audit",
+            "blocked",
+            "apply_sql_phase7_akshare_analyst_revision_source_then_rerun_coverage_audit",
+        )
+    } else if row_count <= 0 {
+        (
+            "raw_table_present_bounded_sync_required",
+            "bounded_sync_required_before_coverage_audit",
+            "blocked",
+            "run_bounded_calendar_day_raw_sync_before_coverage_audit",
+        )
+    } else if failed_attempt_dates > 0 {
+        (
+            "blocked_failed_sync_attempts_present",
+            "blocked_until_failed_dates_are_repaired_and_rerun",
+            "blocked",
+            "repair_failed_dates_with_same_sync_endpoint_then_rerun_coverage_audit",
+        )
+    } else if coverage_ratio + f64::EPSILON < 1.0 || missing_year_count > 0 {
+        (
+            "blocked_incomplete_calendar_coverage",
+            "blocked_until_full_history_calendar_coverage_passes",
+            "blocked",
+            "continue_month_or_quarter_bounded_raw_sync_then_rerun_coverage_audit",
+        )
+    } else if raw_quality_failed {
+        (
+            "blocked_raw_pit_source_revision_or_duplicate_quality_failed",
+            "blocked_until_pit_source_published_at_revision_semantics_and_duplicate_hash_audit_passes",
+            "blocked",
+            "repair_or_exclude_bad_raw_rows_before_p310_diagnostics",
+        )
+    } else if correlation_decision != "passed_low_linear_correlation_screen" {
+        (
+            "blocked_correlation_screen_not_passed_or_needs_review",
+            "blocked_until_moneyflow_liquidity_price_volume_correlation_audit_passes",
+            "blocked",
+            "complete_low_correlation_review_before_p310_diagnostics",
+        )
+    } else {
+        (
+            "coverage_pit_quality_correlation_ready_for_p310_diagnostics",
+            "coverage_pit_quality_correlation_passed_p310_diagnostics_required_next",
+            "ready_for_p310_diagnostics_only",
+            "run_p310a_d_rankic_group_decay_turnover_capacity_regime_exposure_diagnostics",
+        )
+    };
+
+    json!({
+        "status": status,
+        "admission_decision": admission_decision,
+        "p310_status": p310_status,
+        "next_step": next_step,
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked",
+        "factor_builder": "blocked_until_p310_diagnostics_passes",
+    })
 }
 
 fn main_business_business_type(value: Option<&str>) -> &'static str {
@@ -1475,6 +2274,435 @@ fn phase7_tushare_source_status(probes: &[Value]) -> &'static str {
     }
 }
 
+fn akshare_analyst_revision_probe_status(probes: &[Value]) -> &'static str {
+    if probes.iter().any(|probe| {
+        matches!(
+            probe.get("status").and_then(|status| status.as_str()),
+            Some("ok" | "ok_empty")
+        )
+    }) {
+        "available"
+    } else if probes.iter().any(|probe| {
+        probe.get("status").and_then(|status| status.as_str()) == Some("runtime_not_configured")
+    }) {
+        "runtime_not_configured"
+    } else {
+        "error"
+    }
+}
+
+fn akshare_analyst_revision_known_endpoint_gate(source: &str) -> Option<Value> {
+    match source {
+        "stock_profit_forecast_em" => Some(json!({
+            "source": source,
+            "query_scope": "current_snapshot",
+            "status": "blocked_snapshot_not_pit_ready",
+            "probes": [],
+            "blocked_reason": "current snapshot has no historical snapshot date or source publication timestamp; cannot reconstruct 2014-2026 PIT analyst revision history",
+            "admission_gate": "do_not_sync_without_prospective_snapshot_archive_or_vendor_history"
+        })),
+        "stock_institute_recommend"
+        | "stock_institute_recommend_detail"
+        | "stock_profit_forecast_ths" => Some(json!({
+            "source": source,
+            "query_scope": "parser_unstable_endpoint",
+            "status": "blocked_parse_unreliable",
+            "probes": [],
+            "blocked_reason": "prior AkShare smoke observed parser/XML failures; repeatable source behavior must be proven before schema or sync",
+            "admission_gate": "do_not_sync_until_permission_smoke_is_repeatable"
+        })),
+        _ => None,
+    }
+}
+
+async fn run_akshare_analyst_revision_probe(
+    python: &str,
+    source: &str,
+    request_key: &str,
+    scope: &str,
+    row_limit: usize,
+) -> Value {
+    if !Path::new(python).exists() {
+        return json!({
+            "source": source,
+            "scope": scope,
+            "request_key": request_key,
+            "status": "runtime_not_configured",
+            "permission": "unknown_or_unavailable",
+            "python": python,
+            "error": "AKSHARE_PYTHON is not configured and /tmp/akshare-smoke/bin/python is missing"
+        });
+    }
+
+    let script = r#"
+import json
+import sys
+
+endpoint = sys.argv[1]
+request_key = sys.argv[2]
+row_limit = int(sys.argv[3])
+
+def scrub(value):
+    try:
+        import pandas as pd
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+try:
+    import akshare as ak
+    import pandas as pd
+    if endpoint == "stock_rank_forecast_cninfo":
+        df = ak.stock_rank_forecast_cninfo(date=request_key)
+    elif endpoint == "stock_research_report_em":
+        df = ak.stock_research_report_em(symbol=request_key)
+    elif endpoint == "stock_profit_forecast_em":
+        df = ak.stock_profit_forecast_em()
+    else:
+        raise ValueError(f"unsupported_endpoint:{endpoint}")
+
+    records = []
+    for row in df.head(row_limit).to_dict(orient="records"):
+        records.append({str(key): scrub(value) for key, value in row.items()})
+
+    def nonempty(value):
+        try:
+            if pd.isna(value):
+                return False
+        except Exception:
+            pass
+        return str(value).strip() != ""
+
+    def normalize_date(value):
+        if not nonempty(value):
+            return None
+        try:
+            return pd.to_datetime(value).strftime("%Y%m%d")
+        except Exception:
+            return str(value).strip().replace("-", "")[:8] or None
+
+    symbol_count = None
+    publication_date_match_rows = None
+    publication_date_mismatch_rows = None
+    missing_publication_date_rows = None
+    rating_change_nonnull_rows = None
+    previous_rating_nonnull_rows = None
+    missing_revision_semantics_rows = None
+
+    if endpoint == "stock_rank_forecast_cninfo":
+        symbol_count = int(df["证券代码"].nunique()) if "证券代码" in df.columns else 0
+        if "发布日期" in df.columns:
+            normalized_publication_dates = df["发布日期"].map(normalize_date)
+            publication_date_match_rows = int((normalized_publication_dates == request_key).sum())
+            missing_publication_date_rows = int(normalized_publication_dates.isna().sum())
+            publication_date_mismatch_rows = int(((normalized_publication_dates.notna()) & (normalized_publication_dates != request_key)).sum())
+        else:
+            publication_date_match_rows = 0
+            missing_publication_date_rows = int(len(df))
+            publication_date_mismatch_rows = 0
+
+        rating_change_present = df["评级变化"].map(nonempty) if "评级变化" in df.columns else pd.Series([False] * len(df))
+        previous_rating_present = df["前一次投资评级"].map(nonempty) if "前一次投资评级" in df.columns else pd.Series([False] * len(df))
+        rating_change_nonnull_rows = int(rating_change_present.sum())
+        previous_rating_nonnull_rows = int(previous_rating_present.sum())
+        missing_revision_semantics_rows = int((~(rating_change_present & previous_rating_present)).sum())
+
+    print(json.dumps({
+        "status": "ok" if len(df) > 0 else "ok_empty",
+        "permission": "available",
+        "akshare_version": getattr(ak, "__version__", None),
+        "row_count": int(len(df)),
+        "symbol_count": symbol_count,
+        "publication_date_match_rows": publication_date_match_rows,
+        "publication_date_mismatch_rows": publication_date_mismatch_rows,
+        "missing_publication_date_rows": missing_publication_date_rows,
+        "rating_change_nonnull_rows": rating_change_nonnull_rows,
+        "previous_rating_nonnull_rows": previous_rating_nonnull_rows,
+        "missing_revision_semantics_rows": missing_revision_semantics_rows,
+        "fields": [str(field) for field in list(df.columns)],
+        "sample_rows": records,
+    }, ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({
+        "status": "error",
+        "permission": "unknown_or_unavailable",
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }, ensure_ascii=False))
+"#;
+
+    let home = env::var("HOME").unwrap_or_else(|_| "/Users/gaocheng".to_string());
+    let timeout_seconds = akshare_analyst_revision_timeout_seconds();
+    let child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .arg(source)
+        .arg(request_key)
+        .arg(row_limit.to_string())
+        .env("HOME", home)
+        .env("PYTHONUNBUFFERED", "1")
+        .output();
+
+    let output = match timeout(StdDuration::from_secs(timeout_seconds), child).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return json!({
+                "source": source,
+                "scope": scope,
+                "request_key": request_key,
+                "status": "error",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "error": error.to_string(),
+            });
+        }
+        Err(_) => {
+            return json!({
+                "source": source,
+                "scope": scope,
+                "request_key": request_key,
+                "status": "timeout",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "timeout_seconds": timeout_seconds,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
+        json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error": "failed_to_parse_akshare_probe_stdout",
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+    });
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("source".to_string(), json!(source));
+        object.insert("scope".to_string(), json!(scope));
+        object.insert("request_key".to_string(), json!(request_key));
+        object.insert("python".to_string(), json!(python));
+        object.insert("exit_status".to_string(), json!(output.status.code()));
+        if !stderr.is_empty() {
+            object.insert("stderr".to_string(), json!(stderr));
+        }
+    }
+    payload
+}
+
+fn akshare_analyst_revision_is_empty_dataframe_length_mismatch(payload: &Value) -> bool {
+    let status_is_error = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|status| status == "error")
+        .unwrap_or(false);
+    let error_type_is_value_error = payload
+        .get("error_type")
+        .and_then(Value::as_str)
+        .map(|error_type| error_type == "ValueError")
+        .unwrap_or(false);
+    let Some(error) = payload.get("error").and_then(Value::as_str) else {
+        return false;
+    };
+
+    status_is_error
+        && error_type_is_value_error
+        && error.contains("Length mismatch")
+        && error.contains("Expected axis has 0 elements")
+        && error.contains("new values have 11 elements")
+}
+
+fn normalize_akshare_analyst_revision_full_fetch_payload(payload: Value) -> Value {
+    if !akshare_analyst_revision_is_empty_dataframe_length_mismatch(&payload) {
+        return payload;
+    }
+
+    json!({
+        "status": "ok_empty",
+        "permission": "available",
+        "row_count": 0,
+        "fields": [],
+        "records": [],
+        "normalized_from_error": {
+            "error_type": payload.get("error_type").cloned().unwrap_or_else(|| json!(null)),
+            "error": payload.get("error").cloned().unwrap_or_else(|| json!(null)),
+            "reason": "akshare_empty_dataframe_length_mismatch"
+        }
+    })
+}
+
+async fn run_akshare_analyst_revision_full_date_fetch(python: &str, request_key: &str) -> Value {
+    let source = "stock_rank_forecast_cninfo";
+    if !Path::new(python).exists() {
+        return json!({
+            "source": source,
+            "scope": "bounded_calendar_day_raw_sync",
+            "request_key": request_key,
+            "status": "runtime_not_configured",
+            "permission": "unknown_or_unavailable",
+            "python": python,
+            "error": "AKSHARE_PYTHON is not configured and /tmp/akshare-smoke/bin/python is missing"
+        });
+    }
+
+    let script = r#"
+import json
+import sys
+
+request_key = sys.argv[1]
+
+def scrub(value):
+    try:
+        import pandas as pd
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+try:
+    import akshare as ak
+    df = ak.stock_rank_forecast_cninfo(date=request_key)
+    if df is None:
+        df = []
+    records = []
+    fields = []
+    if hasattr(df, "columns"):
+        fields = [str(field) for field in list(df.columns)]
+        for row in df.to_dict(orient="records"):
+            records.append({str(key): scrub(value) for key, value in row.items()})
+        row_count = int(len(df))
+    else:
+        row_count = 0
+
+    print(json.dumps({
+        "status": "ok" if row_count > 0 else "ok_empty",
+        "permission": "available",
+        "akshare_version": getattr(ak, "__version__", None),
+        "row_count": row_count,
+        "fields": fields,
+        "records": records,
+    }, ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({
+        "status": "error",
+        "permission": "unknown_or_unavailable",
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }, ensure_ascii=False))
+"#;
+
+    let home = env::var("HOME").unwrap_or_else(|_| "/Users/gaocheng".to_string());
+    let timeout_seconds = akshare_analyst_revision_timeout_seconds();
+    let child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .arg(request_key)
+        .env("HOME", home)
+        .env("PYTHONUNBUFFERED", "1")
+        .output();
+
+    let output = match timeout(StdDuration::from_secs(timeout_seconds), child).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return json!({
+                "source": source,
+                "scope": "bounded_calendar_day_raw_sync",
+                "request_key": request_key,
+                "status": "error",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "error": error.to_string(),
+            });
+        }
+        Err(_) => {
+            return json!({
+                "source": source,
+                "scope": "bounded_calendar_day_raw_sync",
+                "request_key": request_key,
+                "status": "timeout",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "timeout_seconds": timeout_seconds,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
+        json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error": "failed_to_parse_akshare_full_fetch_stdout",
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+    });
+    let mut payload = normalize_akshare_analyst_revision_full_fetch_payload(payload);
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("source".to_string(), json!(source));
+        object.insert("scope".to_string(), json!("bounded_calendar_day_raw_sync"));
+        object.insert("request_key".to_string(), json!(request_key));
+        object.insert("python".to_string(), json!(python));
+        object.insert("exit_status".to_string(), json!(output.status.code()));
+        if !stderr.is_empty() {
+            object.insert("stderr".to_string(), json!(stderr));
+        }
+    }
+    payload
+}
+
+async fn run_akshare_analyst_revision_full_date_fetch_with_retry(
+    python: &str,
+    request_key: &str,
+) -> (Value, usize) {
+    let max_attempts = AKSHARE_ANALYST_REVISION_SYNC_MAX_RETRIES + 1;
+    let mut latest = json!({
+        "status": "error",
+        "error": "akshare_fetch_not_started",
+    });
+    for attempt in 1..=max_attempts {
+        latest = run_akshare_analyst_revision_full_date_fetch(python, request_key).await;
+        let status = latest
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("error");
+        if !akshare_analyst_revision_should_retry_fetch_status(status) || attempt == max_attempts {
+            if let Some(object) = latest.as_object_mut() {
+                object.insert("fetch_attempts".to_string(), json!(attempt));
+                object.insert(
+                    "max_retries".to_string(),
+                    json!(AKSHARE_ANALYST_REVISION_SYNC_MAX_RETRIES),
+                );
+            }
+            return (latest, attempt);
+        }
+        tracing::warn!(
+            request_key = %request_key,
+            attempt,
+            status,
+            "AkShare analyst revision full-date fetch retrying after transient failure"
+        );
+    }
+    (latest, max_attempts)
+}
+
 fn phase7_coverage_grade(symbols: i64, reference_symbols: i64) -> &'static str {
     if symbols <= 0 {
         "missing"
@@ -2100,6 +3328,314 @@ fn phase7_shareholder_structure_schema_contract() -> Value {
             "bounded_wfa": "blocked",
             "v19_train_selection": "blocked"
         }
+    })
+}
+
+fn phase7_akshare_analyst_revision_schema_contract() -> Value {
+    json!({
+        "audit_version": "p3.23c-akshare-analyst-revision-schema-contract-v1",
+        "source_id": "multi_vendor_analyst_revision",
+        "stage": "P3.23C",
+        "status": "history_replay_passed_schema_review_allowed",
+        "mode": "read_only_vendor_schema_available_at_contract",
+        "ddl_path": "sql/phase7_akshare_analyst_revision_source.sql",
+        "raw_sources": [
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_rank_forecast_cninfo",
+                "source_semantics": "cninfo analyst stock rating and target-price forecast by publication date",
+                "request_key": "date",
+                "native_available_at_candidate": "发布日期",
+                "source_published_at_candidate": "发布日期",
+                "observed_smoke": {
+                    "akshare_version": "1.18.64",
+                    "date": "20260623",
+                    "row_count": 26,
+                    "fields": ["证券代码", "发布日期", "研究机构简称", "研究员名称", "投资评级", "是否首次评级", "评级变化", "前一次投资评级", "目标价格-上限", "目标价格-下限"]
+                },
+                "admission_gate": "permission_history_date_available_at_and_full_history_coverage_audit_required_before_raw_sync"
+            },
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_research_report_em",
+                "source_semantics": "eastmoney single-stock research report list with rating, institution, earnings forecast, report date and pdf link",
+                "request_key": "symbol",
+                "native_available_at_candidate": "日期",
+                "source_published_at_candidate": "日期",
+                "observed_smoke": {
+                    "akshare_version": "1.18.64",
+                    "symbol": "000001",
+                    "row_count": 225
+                },
+                "admission_gate": "low_fanout_evidence_layer_only_until_full_symbol_fanout_coverage_cost_and_history_stability_pass"
+            },
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_profit_forecast_em",
+                "source_semantics": "current consensus profit forecast snapshot",
+                "request_key": "snapshot",
+                "native_available_at_candidate": "none_observed",
+                "admission_gate": "blocked_snapshot_not_pit_ready_without_vendor_snapshot_archive"
+            },
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_institute_recommend_or_ths_family",
+                "source_semantics": "institution recommendation/profit forecast pages observed as parser-unstable in smoke",
+                "request_key": "varies",
+                "native_available_at_candidate": "not_admitted",
+                "admission_gate": "blocked_parse_unreliable_do_not_sync"
+            },
+            {
+                "vendor": "tushare",
+                "vendor_endpoint": "report_rc",
+                "source_semantics": "sell-side research report earnings forecast daily since 2010",
+                "request_key": "report_date_range",
+                "native_available_at_candidate": "report_date",
+                "admission_gate": "blocked_current_api_unknown_source_after_40101_permission_smoke"
+            }
+        ],
+        "tables": [
+            {
+                "table": "market_vendor_analyst_revision_raw",
+                "natural_key": ["vendor", "vendor_endpoint", "request_key", "symbol", "source_published_at", "raw_payload_hash"],
+                "required_fields": [
+                    "vendor",
+                    "vendor_source",
+                    "vendor_endpoint",
+                    "request_key",
+                    "symbol",
+                    "publication_date",
+                    "source_published_at",
+                    "available_at",
+                    "ingested_at",
+                    "institution_name",
+                    "analyst_name",
+                    "rating_current",
+                    "rating_previous",
+                    "rating_change",
+                    "is_first_rating",
+                    "target_price_min",
+                    "target_price_max",
+                    "report_title",
+                    "report_url",
+                    "raw_payload",
+                    "raw_payload_hash",
+                    "data_version_id"
+                ],
+                "pit_rule": "available_at must be no earlier than the native source publication date; without audited intraday timestamp, intraday trading must use next-session availability only.",
+                "raw_landing_policy": "preserve vendor rows and raw payload hash; source admission gates decide whether rows can feed diagnostics."
+            }
+        ],
+        "available_at_policy": {
+            "stock_rank_forecast_cninfo": "发布日期 is a date-level available_at/source_published_at candidate; source must pass historical date replay and same-day publication timing audit before intraday use.",
+            "stock_research_report_em": "日期 is a candidate only for evidence-layer reports; full-market fanout and pagination/history stability must pass before factor use.",
+            "stock_profit_forecast_em": "current snapshot has no historical snapshot date, so it is blocked for 2014-2026 PIT revision unless a vendor snapshot archive is built prospectively.",
+            "blocked_parse_unreliable": "parser-unstable endpoints must not create raw tables until smoke becomes repeatable."
+        },
+        "coverage_audit_required": [
+            "history_date_replay_by_year",
+            "trading_day_and_calendar_day_breakdown",
+            "vendor_endpoint_symbol_breadth",
+            "publication_date_null_or_future_leak_count",
+            "source_published_at_null_count",
+            "revision_semantics_rating_change_and_previous_rating_coverage",
+            "duplicate_raw_payload_hash_count",
+            "cross_vendor_overlap_vs_tushare_report_rc_if_available"
+        ],
+        "promotion_gate": {
+            "schema_apply": "schema_review_allowed_after_history_replay_passed",
+            "bounded_sync": "blocked_until_schema_review_and_manual_apply",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "sync_plan_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/sync-plan",
+        "readiness_audit_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/readiness-audit",
+        "next_step": "manual_schema_review_apply_then_bounded_calendar_day_sync"
+    })
+}
+
+fn phase7_akshare_analyst_revision_available_at_contract() -> Value {
+    json!({
+        "audit_version": "p3.23a-akshare-analyst-revision-available-at-contract-v1",
+        "source_id": "multi_vendor_analyst_revision",
+        "mode": "read_only_vendor_available_at_source_published_at_semantics_audit",
+        "endpoint_semantics": [
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_rank_forecast_cninfo",
+                "available_at_candidate": "发布日期",
+                "source_published_at_candidate": "发布日期",
+                "revision_fields": ["评级变化", "前一次投资评级", "投资评级", "是否首次评级", "目标价格-上限", "目标价格-下限"],
+                "verdict": "history_replay_required_before_raw_sync",
+                "blocked_until": ["permission_smoke_passed", "multiple_history_dates_return_replayable_rows", "publication_date_parse_rate_audited", "source_published_at_lag_policy_registered"]
+            },
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_research_report_em",
+                "available_at_candidate": "日期",
+                "source_published_at_candidate": "日期",
+                "revision_fields": ["评级", "机构", "盈利预测", "报告名称", "PDF链接"],
+                "verdict": "low_fanout_evidence_layer_only_until_full_symbol_fanout_coverage_passes",
+                "blocked_until": ["symbol_fanout_cost_audited", "pagination_history_stability_audited", "report_date_parse_rate_audited"]
+            },
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_profit_forecast_em",
+                "available_at_candidate": "none_observed",
+                "source_published_at_candidate": "none_observed",
+                "revision_fields": [],
+                "verdict": "blocked_snapshot_not_pit_ready",
+                "blocked_reason": "current snapshot without historical snapshot date cannot reconstruct 2014-2026 PIT revision history"
+            },
+            {
+                "vendor": "akshare",
+                "vendor_endpoint": "stock_institute_recommend_or_ths_family",
+                "available_at_candidate": "not_admitted",
+                "source_published_at_candidate": "not_admitted",
+                "revision_fields": [],
+                "verdict": "blocked_parse_unreliable",
+                "blocked_reason": "prior smoke observed parser/XML failures; do not create schema or sync until repeatability is proven"
+            },
+            {
+                "vendor": "tushare",
+                "vendor_endpoint": "report_rc",
+                "available_at_candidate": "report_date",
+                "source_published_at_candidate": "report_date_or_create_time",
+                "revision_fields": ["rating", "eps", "max_price", "min_price", "quarter", "org_name", "author_name"],
+                "verdict": "blocked_permission_unknown_source",
+                "blocked_reason": "production smoke returned Tushare 40101 unknown data source"
+            }
+        ],
+        "pit_policy": {
+            "daily_research": "date-level publication fields are allowed only as end-of-day/next-session availability until intraday source timestamps are audited.",
+            "downstream_rule": "factor and diagnostics must filter source.available_at <= equity_trade_date; intraday simulation must additionally require source_published_at <= decision_timestamp.",
+            "prohibited": [
+                "using current snapshot fields to reconstruct past consensus",
+                "using ingestion time as historical source publication time",
+                "using full-period coverage or OOS results to choose endpoint sign or endpoint inclusion"
+            ]
+        },
+        "promotion_gate": {
+            "schema_apply": "blocked_until_permission_history_available_at_review",
+            "bounded_sync": "blocked_until_schema_review_and_history_smoke_pass",
+            "coverage_status": "blocked_until_raw_sync_exists",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "permission_history_date_smoke_for_stock_rank_forecast_cninfo_across_multiple_years"
+    })
+}
+
+fn phase7_multi_vendor_analyst_revision_candidate() -> Value {
+    json!({
+        "source_id": "multi_vendor_analyst_revision",
+        "source_family": "broad_base_analyst_expectation_revision",
+        "economic_hypothesis": "真正的评级/目标价/盈利预期修正如果能做到 broad-base、PIT、低相关，可能比已证伪的公开低频经营代理更接近可交易的信息增量；供应商替换不能绕过 source admission、coverage、P3.10 或 bounded WFA。",
+        "candidate_raw_sources": [
+            "akshare:stock_rank_forecast_cninfo",
+            "akshare:stock_research_report_em",
+            "akshare:stock_profit_forecast_em_blocked_snapshot",
+            "akshare:stock_institute_recommend_blocked_parse_unreliable",
+            "tushare:report_rc_blocked_40101"
+        ],
+        "source_discovery_evidence": [
+            {
+                "candidate": "akshare:stock_rank_forecast_cninfo",
+                "status": "stopped_after_p310_economics_failed",
+                "akshare_version": "1.18.64",
+                "observed_smoke": {
+                    "date": "20260623",
+                    "row_count": 26,
+                    "fields": ["证券代码", "发布日期", "研究机构简称", "研究员名称", "投资评级", "是否首次评级", "评级变化", "前一次投资评级", "目标价格-上限", "目标价格-下限"]
+                },
+                "history_date_smoke": "passed",
+                "native_available_at_candidate": "发布日期",
+                "source_published_at_candidate": "发布日期",
+                "full_history_summary": {
+                    "raw_rows": 1222450,
+                    "raw_date_range": "2014-01-01..2026-06-24",
+                    "factor_task_id": "fs-20260624-155815497-05f24316",
+                    "combo_rows": 1025751,
+                    "combo_date_range": "2014-01-03..2026-06-23",
+                    "future_leak_rows": 0,
+                    "null_available_at_rows": 0,
+                    "null_score_rows": 0
+                },
+                "diagnostics_summary": {
+                    "latest_report_id": "exp-0930e5fa-f125-4f22-b9d2-5041da2c44c3",
+                    "level": "red",
+                    "passed": false,
+                    "mean_rankic_20_45_60_120": [-0.00216, -0.00190, -0.00298, 0.00588],
+                    "high_minus_low_spread_20_45_60_120": [0.00372, 0.00269, 0.00616, 0.00824],
+                    "passed_horizon_count": 0,
+                    "daily_weak_day_count": 1316,
+                    "daily_weak_day_ratio": 0.4345,
+                    "decision": "do_not_enter_bounded_wfa_or_v19_train_selection"
+                },
+                "decision": "stop_current_akshare_cninfo_revision_expression_after_p310_economics_failed"
+            },
+            {
+                "candidate": "akshare:stock_research_report_em",
+                "status": "low_fanout_evidence_layer_candidate",
+                "akshare_version": "1.18.64",
+                "observed_smoke": {
+                    "symbol": "000001",
+                    "row_count": 225
+                },
+                "native_available_at_candidate": "日期",
+                "decision": "do_not_treat_as_broad_base_until_full_symbol_fanout_coverage_and_pagination_history_stability_pass"
+            },
+            {
+                "candidate": "akshare:stock_profit_forecast_em",
+                "status": "blocked_snapshot_not_pit_ready",
+                "blocked_reason": "current snapshot has no historical snapshot date and cannot reconstruct 2014-2026 PIT consensus revisions"
+            },
+            {
+                "candidate": "akshare:stock_institute_recommend_or_ths_family",
+                "status": "blocked_parse_unreliable",
+                "blocked_reason": "prior smoke observed parser/XML failures"
+            },
+            {
+                "candidate": "tushare:report_rc",
+                "status": "blocked_current_api_unknown_source_after_production_smoke",
+                "production_smoke": {
+                    "as_of": "2026-06-21",
+                    "error_code": "40101",
+                    "error": "未知的数据源"
+                }
+            }
+        ],
+        "current_tables": ["market_vendor_analyst_revision_raw", "factor_value", "multi_factor_value"],
+        "schema_status": "completed",
+        "client_status": "read_only_and_sync_client_completed",
+        "sync_status": "full_history_raw_sync_completed",
+        "coverage_status": "coverage_pit_quality_correlation_green",
+        "p310_status": "completed_failed_economics",
+        "diagnostics_summary": {
+            "latest_report_id": "exp-0930e5fa-f125-4f22-b9d2-5041da2c44c3",
+            "level": "red",
+            "passed": false,
+            "mean_rankic_20_45_60_120": [-0.00216, -0.00190, -0.00298, 0.00588],
+            "high_minus_low_spread_20_45_60_120": [0.00372, 0.00269, 0.00616, 0.00824],
+            "passed_horizon_count": 0,
+            "daily_weak_day_count": 1316,
+            "daily_weak_day_ratio": 0.4345,
+            "decision": "do_not_enter_bounded_wfa_or_v19_train_selection"
+        },
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked",
+        "pit_required": true,
+        "available_at_policy": "vendor publication date or report date must be persisted as source_published_at/available_at; without intraday timestamp, same-day use is blocked for intraday simulation and only next-session availability is allowed",
+        "schema_contract_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/schema-contract",
+        "permission_smoke_endpoint": "POST /api/v1/quant/data/akshare/analyst-revision/permission-smoke",
+        "available_at_audit_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/available-at-audit",
+        "coverage_audit_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/coverage-audit",
+        "admission_decision": "stopped_after_p310_economics_failed",
+        "blocked_reason": "raw_pit_coverage_and_factor_combo_completed_but_daily_symbol_cliff_and_p310_economics_failed; no_same_family_event_window_or_horizon_rescue",
+        "next_step": "search_licensed_broad_base_consensus_revision_or_exchange_announcement_order_capacity_source"
     })
 }
 
@@ -6335,7 +7871,8 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
             "broad_analyst_revision_current_raw_bundle",
             "futures_price_chain_current_version",
             "equity_pledge_pressure_current_low_ratio_atom",
-            "shareholder_structure_current_low_fanout_sleeve"
+            "shareholder_structure_current_low_fanout_sleeve",
+            "multi_vendor_analyst_revision_current_akshare_cninfo_revision"
         ],
         "candidates": [
             {
@@ -6343,17 +7880,19 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
                 "source_family": "new_low_correlation_pit_broad_base_source_discovery",
                 "economic_hypothesis": "蓝图达标需要新的信息增量，而不是继续压榨已证伪的公开低频同族源；优先寻找更接近经营兑现、订单、产能、价格链、真实预期修正或股权激励执行质量的 PIT broad-base 数据。",
                 "candidate_raw_sources": [
-                    "regulated_disclosure_or_exchange_feed_for_orders_capacity_price_chain",
                     "licensed_broad_base_analyst_revision_or_consensus_estimate_feed",
                     "regulatory_or_exchange_equity_incentive_employee_stock_plan_execution_feed",
-                    "tushare:margin_detail_actionable_fallback"
+                    "regulated_disclosure_or_exchange_feed_for_orders_capacity_price_chain",
+                    "akshare:stock_rank_forecast_cninfo_stopped_p323f",
+                    "akshare:stock_research_report_em_low_fanout_evidence",
+                    "tushare:report_rc_blocked_40101"
                 ],
                 "ranked_candidates": [
                     {
                         "rank": 1,
                         "source_id": "licensed_broad_base_consensus_revision",
                         "status": "source_discovery_required",
-                        "reason": "best aligned with true expectation-revision economics, but current report_rc path is blocked and no licensed callable source is configured"
+                        "reason": "best aligned with true expectation-revision economics, but no licensed callable source is configured; current AkShare CNInfo rating-change expression failed P3.10 economics"
                     },
                     {
                         "rank": 2,
@@ -6363,52 +7902,69 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
                     },
                     {
                         "rank": 3,
+                        "source_id": "multi_vendor_analyst_revision",
+                        "status": "stopped_after_p310_economics_failed",
+                        "reason": "AkShare stock_rank_forecast_cninfo passed raw/PIT/correlation and factor/combo construction, but daily symbol cliff and 0/4 P3.10 horizons block WFA/v19; do not rescue current expression"
+                    },
+                    {
+                        "rank": 4,
                         "source_id": "margin_detail_leverage_crowding",
-                        "status": "actionable_permission_smoke_candidate_lower_priority",
-                        "reason": "daily security-level margin financing/short data has clear PIT boundary and broad coverage, but it is a leverage/crowding microstructure source rather than true operating data and must prove low correlation"
+                        "status": "stopped_after_p310_economics_failed",
+                        "reason": "daily security-level margin financing/short data passed raw coverage/PIT but failed P3.10 economics, so do not rescue current version"
                     }
                 ],
                 "schema_status": "source_discovery_required",
-                "client_status": "not_started",
+                "client_status": "candidate_source_discovery_required",
                 "sync_status": "not_started",
                 "coverage_status": "not_started",
                 "p310_status": "not_started",
                 "pit_required": true,
                 "available_at_policy": "native announcement/report/publication timestamp required; conservative next-session availability is allowed only when source publication time cannot be audited",
-                "admission_decision": "source_discovery_required_before_permission_smoke",
-                "blocked_reason": "no_new_source_has_passed_permission_schema_available_at_audit_after_p321e",
-                "next_step": "rank_candidate_sources_by_breadth_pit_availability_permission_and_economic_hypothesis_then_run_permission_smoke_for_top_source"
+                "admission_decision": "multi_vendor_analyst_revision_stopped_after_p310_shift_to_next_low_correlation_source",
+                "blocked_reason": "akshare_stock_rank_forecast_cninfo_current_expression_passed_data_pit_but_failed_daily_breadth_and_p310_economics",
+                "next_step": "search_licensed_consensus_revision_or_exchange_announcement_order_capacity_source"
             },
             {
                 "source_id": "margin_detail_leverage_crowding",
                 "source_family": "security_level_leverage_crowding_and_short_pressure",
-                "economic_hypothesis": "个股融资买入、偿还、融资余额、融券余量和融券卖出可能刻画杠杆资金拥挤、去杠杆压力和卖空约束；若与 moneyflow/price-volume 已有源相关性足够低，可能作为低优先级 broad-base 补充候选。",
+                "economic_hypothesis": "个股融资买入、偿还、融资余额、融券余量和融券卖出可刻画杠杆资金拥挤和去杠杆压力；当前版本已通过 raw/PIT 覆盖但 P3.10 经济性为负，不应继续救该同族表达。",
                 "candidate_raw_sources": [
                     "tushare:margin_detail"
                 ],
                 "source_discovery_evidence": [
                     {
                         "candidate": "tushare:margin_detail",
-                        "status": "client_added_permission_smoke_required",
+                        "status": "stopped_after_p310_economics_failed",
                         "official_doc": "https://tushare.pro/document/2?doc_id=59",
                         "official_semantics": "security_level_margin_trading_detail_updated_next_day_around_0830",
                         "observed_fields_from_doc": ["trade_date", "ts_code", "rzye", "rqye", "rzmre", "rqyl", "rzche", "rqchl", "rqmcl", "rzrqye"],
                         "native_available_at_candidate": "next_session_after_exchange_publication",
-                        "decision": "permission_smoke_and_schema_available_at_audit_required_before_sync"
+                        "full_history_summary": {
+                            "rows": 4604635,
+                            "date_range": "2014-02-07..2026-06-23",
+                            "pit_violations": 0
+                        },
+                        "diagnostics_summary": {
+                            "latest_report_id": "exp-3812df52-2786-4a9a-b0a3-b5fc475e8ca4",
+                            "mean_rankic_20_45_60_120": [-0.0332, -0.0320, -0.0288, -0.0256],
+                            "passed_horizon_count": 0,
+                            "decision": "do_not_enter_bounded_wfa_or_v19_train_selection"
+                        },
+                        "decision": "stop_margin_detail_current_version_after_negative_p310_economics"
                     }
                 ],
-                "current_tables": [],
-                "schema_status": "not_started",
-                "client_status": "read_only_permission_smoke_client_added",
-                "sync_status": "not_started",
-                "coverage_status": "not_started",
-                "correlation_status": "must_test_against_moneyflow_liquidity_price_volume_and_current_v19",
-                "p310_status": "not_started",
+                "current_tables": ["market_stock_margin_detail"],
+                "schema_status": "completed",
+                "client_status": "read_only_and_sync_client_completed",
+                "sync_status": "full_history_raw_sync_completed",
+                "coverage_status": "coverage_pit_green",
+                "correlation_status": "completed_but_economics_failed",
+                "p310_status": "completed_failed_economics",
                 "pit_required": true,
                 "available_at_policy": "official source says prior-day data is updated around next trading day 08:30; intraday decisions must use only records whose source_published_at or conservative next-session available_at is <= decision time",
-                "admission_decision": "permission_smoke_required_before_schema_available_at_audit",
-                "blocked_reason": "actionable_fallback_candidate_but_same_broad_crowding_family_risk_requires_permission_schema_available_at_correlation_and_p310_before_any_factor_or_ml_training",
-                "next_step": "run_read_only_permission_smoke_for_margin_detail_then_design_schema_available_at_audit_if_available"
+                "admission_decision": "stopped_after_p310_economics_failed",
+                "blocked_reason": "full_history_raw_coverage_pit_passed_but_rankic_negative_across_horizons; no_sign_flip_no_same_family_rescue_no_oos_reverse_tuning",
+                "next_step": "do_not_rescue_margin_detail_current_version_shift_to_multi_vendor_analyst_revision_source_admission"
             },
             {
                 "source_id": "futures_price_chain",
@@ -6743,6 +8299,12 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
             }
         ]
     });
+    if let Some(candidates) = admission
+        .get_mut("candidates")
+        .and_then(|candidates| candidates.as_array_mut())
+    {
+        candidates.push(phase7_multi_vendor_analyst_revision_candidate());
+    }
     if let Some(readiness) = futures_price_chain_readiness {
         apply_p319_futures_price_chain_readiness(&mut admission, readiness);
     }
@@ -8943,6 +10505,87 @@ pub async fn broad_analyst_revision_audit(
     }
 }
 
+/// GET /api/v1/quant/data/akshare/analyst-revision/schema-contract
+pub async fn akshare_analyst_revision_schema_contract() -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_akshare_analyst_revision_schema_contract()
+    }))
+}
+
+/// POST /api/v1/quant/data/akshare/analyst-revision/permission-smoke
+pub async fn akshare_analyst_revision_permission_smoke(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AkshareAnalystRevisionSmokeReq>,
+) -> impl IntoResponse {
+    match build_akshare_analyst_revision_permission_smoke(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/akshare/analyst-revision/available-at-audit
+pub async fn akshare_analyst_revision_available_at_audit() -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_akshare_analyst_revision_available_at_contract()
+    }))
+}
+
+/// POST /api/v1/quant/data/akshare/analyst-revision/history-replay-audit
+pub async fn akshare_analyst_revision_history_replay_audit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AkshareAnalystRevisionHistoryReplayAuditReq>,
+) -> impl IntoResponse {
+    match build_akshare_analyst_revision_history_replay_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/akshare/analyst-revision/sync-plan
+pub async fn akshare_analyst_revision_sync_plan(
+    Query(req): Query<AkshareAnalystRevisionSyncPlanReq>,
+) -> impl IntoResponse {
+    match build_akshare_analyst_revision_sync_plan(req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/akshare/analyst-revision/sync
+pub async fn akshare_analyst_revision_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AkshareAnalystRevisionSyncReq>,
+) -> impl IntoResponse {
+    match run_akshare_analyst_revision_bounded_sync(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/akshare/analyst-revision/readiness-audit
+pub async fn akshare_analyst_revision_readiness_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<AkshareAnalystRevisionReadinessAuditReq>,
+) -> impl IntoResponse {
+    match build_akshare_analyst_revision_readiness_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/akshare/analyst-revision/coverage-audit
+pub async fn akshare_analyst_revision_coverage_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<AkshareAnalystRevisionCoverageAuditReq>,
+) -> impl IntoResponse {
+    match build_akshare_analyst_revision_coverage_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
 /// POST /api/v1/quant/data/phase7-optional-source-coverage-sync
 pub async fn phase7_optional_source_coverage_sync(
     State(state): State<Arc<AppState>>,
@@ -9066,6 +10709,1582 @@ async fn build_tushare_permission_smoke(
             "margin_detail probes security-level financing and short-selling detail only; official publication timing must be handled as conservative next-session availability before any intraday use.",
             "Use this result to decide whether an optional source should proceed to Rust schema/repository/sync implementation or stay blocked."
         ],
+    }))
+}
+
+async fn build_akshare_analyst_revision_permission_smoke(
+    state: &AppState,
+    req: AkshareAnalystRevisionSmokeReq,
+) -> Result<Value, String> {
+    let sources = akshare_analyst_revision_smoke_sources(&req.sources);
+    let dates = akshare_analyst_revision_smoke_dates(&req.dates)?;
+    let row_limit = akshare_analyst_revision_smoke_limit(req.limit);
+    let python = akshare_analyst_revision_python_path(req.python);
+    let symbols = resolve_phase7_permission_smoke_symbols(state, &req.symbols)
+        .await?
+        .into_iter()
+        .map(|symbol| akshare_analyst_revision_symbol(&symbol))
+        .take(AKSHARE_ANALYST_REVISION_MAX_SYMBOLS)
+        .collect::<Vec<_>>();
+
+    let mut source_results = Vec::new();
+    for source in sources {
+        if let Some(blocked) = akshare_analyst_revision_known_endpoint_gate(&source) {
+            source_results.push(blocked);
+            continue;
+        }
+
+        match source.as_str() {
+            "stock_rank_forecast_cninfo" => {
+                let mut probes = Vec::new();
+                for date in &dates {
+                    probes.push(
+                        run_akshare_analyst_revision_probe(
+                            &python,
+                            &source,
+                            date,
+                            "history_publication_date",
+                            row_limit,
+                        )
+                        .await,
+                    );
+                }
+                source_results.push(json!({
+                    "source": source,
+                    "query_scope": "history_publication_date",
+                    "status": akshare_analyst_revision_probe_status(&probes),
+                    "probes": probes,
+                    "symbol_filter_supported": false,
+                    "history_date_smoke": "performed",
+                    "source_semantics": "analyst rating and target-price forecast records by publication date",
+                    "pit_available_at": "发布日期 is date-level available_at/source_published_at candidate; intraday use remains blocked until source publication timestamp is audited",
+                    "required_fields_for_schema_audit": ["证券代码", "发布日期", "研究机构简称", "研究员名称", "投资评级", "评级变化", "前一次投资评级", "目标价格-上限", "目标价格-下限"],
+                    "admission_gate": "permission_smoke_only_schema_available_at_history_coverage_audit_required_before_sync"
+                }));
+            }
+            "stock_research_report_em" => {
+                let mut probes = Vec::new();
+                for symbol in &symbols {
+                    probes.push(
+                        run_akshare_analyst_revision_probe(
+                            &python,
+                            &source,
+                            symbol,
+                            "single_symbol_research_report_list",
+                            row_limit,
+                        )
+                        .await,
+                    );
+                }
+                source_results.push(json!({
+                    "source": source,
+                    "query_scope": "single_symbol_research_report_list",
+                    "status": akshare_analyst_revision_probe_status(&probes),
+                    "probes": probes,
+                    "symbol_filter_supported": true,
+                    "sample_symbols": symbols,
+                    "source_semantics": "single-stock research report evidence layer",
+                    "pit_available_at": "report date is candidate availability but symbol fanout, pagination stability and source publication lag must pass before broad-base use",
+                    "required_fields_for_schema_audit": ["日期", "评级", "机构", "报告名称", "PDF链接"],
+                    "admission_gate": "permission_smoke_only_low_fanout_evidence_no_factor_until_full_symbol_fanout_coverage_passes"
+                }));
+            }
+            unsupported => {
+                source_results.push(json!({
+                    "source": unsupported,
+                    "status": "unsupported_source",
+                    "supported_sources": AKSHARE_ANALYST_REVISION_SMOKE_ALLOWED,
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "audit_version": "p3.23a-akshare-analyst-revision-permission-history-smoke-v1",
+        "mode": "read_only_vendor_permission_history_date_smoke",
+        "vendor": "akshare",
+        "python": python,
+        "row_limit_per_probe": row_limit,
+        "date_keys": dates,
+        "sample_symbols": symbols,
+        "sources": source_results,
+        "schema_contract_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/schema-contract",
+        "available_at_audit_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/available-at-audit",
+        "history_replay_audit_endpoint": "POST /api/v1/quant/data/akshare/analyst-revision/history-replay-audit",
+        "coverage_audit_endpoint": "GET /api/v1/quant/data/akshare/analyst-revision/coverage-audit",
+        "admission_gate": "permission_history_smoke_only_no_schema_no_sync_no_factor_p310_wfa_v19",
+        "notes": [
+            "This endpoint runs bounded read-only AkShare probes through a configured Python runtime. It never writes raw tables, factors, data versions, WFA tasks, or strategy configs.",
+            "stock_rank_forecast_cninfo is the primary analyst revision candidate because it exposes publication date, rating change and previous rating fields.",
+            "stock_research_report_em is treated as a low-fanout evidence layer until full symbol fanout coverage and pagination/history stability are audited.",
+            "Snapshot or parser-unstable endpoints remain blocked even if a smoke call returns rows."
+        ]
+    }))
+}
+
+fn akshare_analyst_revision_sync_plan_response(
+    start: NaiveDate,
+    end: NaiveDate,
+    batch_mode: &str,
+    batches: Vec<AkshareAnalystRevisionSyncPlanBatch>,
+) -> Value {
+    const DEFAULT_ESTIMATED_ROWS_PER_CALENDAR_DAY: f64 = 350.0;
+    let batch_values = batches
+        .iter()
+        .map(|batch| {
+            let estimated_rows =
+                (batch.calendar_day_count as f64 * DEFAULT_ESTIMATED_ROWS_PER_CALENDAR_DAY).round()
+                    as i64;
+            json!({
+                "batch": batch.label,
+                "start_date": batch.start_date.format("%Y-%m-%d").to_string(),
+                "end_date": batch.end_date.format("%Y-%m-%d").to_string(),
+                "calendar_day_count": batch.calendar_day_count,
+                "estimated_api_calls": batch.calendar_day_count,
+                "estimated_rows": estimated_rows,
+                "estimated_rows_basis": "conservative_350_rows_per_calendar_day_from_p3_23b_history_replay_samples",
+                "future_bounded_sync_request": {
+                    "start_date": batch.start_date.format("%Y%m%d").to_string(),
+                    "end_date": batch.end_date.format("%Y%m%d").to_string(),
+                    "data_version_id": format!("akshare-analyst-revision-{}", batch.label),
+                    "background": false
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let calendar_day_count = (end - start).num_days() + 1;
+    let estimated_total_rows = batch_values
+        .iter()
+        .filter_map(|batch| batch.get("estimated_rows").and_then(Value::as_i64))
+        .sum::<i64>();
+
+    json!({
+        "audit_version": "p3.23c-akshare-analyst-revision-sync-plan-v1",
+        "source_id": "multi_vendor_analyst_revision",
+        "vendor": "akshare",
+        "vendor_endpoint": "stock_rank_forecast_cninfo",
+        "mode": "read_only_bounded_calendar_day_sync_plan",
+        "date_range": {
+            "start_date": start.format("%Y%m%d").to_string(),
+            "end_date": end.format("%Y%m%d").to_string(),
+            "calendar_day_count": calendar_day_count,
+        },
+        "request_key_policy": "calendar publication date; do not restrict to market open days or weekend/holiday analyst reports may be missed",
+        "batch_mode": batch_mode,
+        "recommended_batch_granularity": AKSHARE_ANALYST_REVISION_SYNC_PLAN_DEFAULT_BATCH,
+        "batch_count": batch_values.len(),
+        "estimated_api_calls": calendar_day_count,
+        "estimated_total_rows": estimated_total_rows,
+        "safe_to_run_full_range": calendar_day_count <= 100,
+        "sync_endpoint_status": "enabled_for_p3_23d_bounded_calendar_day_raw_sync_max_100_days_background_false",
+        "batches": batch_values,
+        "promotion_gate": {
+            "bounded_sync": "enabled_for_small_batches_after_schema_apply",
+            "coverage_audit": "blocked_until_raw_sync_completes",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "notes": [
+            "This plan does not create data versions, data_sync_task rows, raw tables, or factors. Use the sync endpoint with background=false for each <=100-day batch.",
+            "The bounded sync iterates calendar publication dates and treats empty dates as auditable source outcomes, not silent success.",
+            "Without audited intraday publication timestamp, downstream intraday trading must use conservative next-session available_at."
+        ]
+    })
+}
+
+async fn build_akshare_analyst_revision_sync_plan(
+    req: AkshareAnalystRevisionSyncPlanReq,
+) -> Result<Value, String> {
+    let today = Utc::now().date_naive();
+    let start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+    let batch_mode = req
+        .batch
+        .unwrap_or_else(|| AKSHARE_ANALYST_REVISION_SYNC_PLAN_DEFAULT_BATCH.to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let batches = akshare_analyst_revision_sync_plan_batches(start, end, &batch_mode)?;
+    Ok(akshare_analyst_revision_sync_plan_response(
+        start,
+        end,
+        &batch_mode,
+        batches,
+    ))
+}
+
+async fn run_akshare_analyst_revision_bounded_sync(
+    state: &AppState,
+    req: AkshareAnalystRevisionSyncReq,
+) -> Result<Value, String> {
+    if req.background {
+        return Err(
+            "AkShare analyst revision P3.23D sync currently requires background=false; run <=100 calendar-day batches synchronously so readiness/coverage can be audited immediately."
+                .to_string(),
+        );
+    }
+
+    let start_date = req
+        .start_date
+        .clone()
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end_date = req
+        .end_date
+        .clone()
+        .ok_or_else(|| "end_date is required".to_string())?;
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    let calendar_day_count = validate_akshare_analyst_revision_sync_range(start, end)?;
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.market_vendor_analyst_revision_raw')::text IS NOT NULL",
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("Failed to inspect AkShare analyst revision raw table: {error}"))?;
+    if !table_exists {
+        return Err(
+            "market_vendor_analyst_revision_raw does not exist; apply sql/phase7_akshare_analyst_revision_source.sql before bounded sync"
+                .to_string(),
+        );
+    }
+
+    let data_version_id = req.data_version_id.clone().unwrap_or_else(|| {
+        format!(
+            "akshare-analyst-revision-{}-{}",
+            start.format("%Y%m%d"),
+            end.format("%Y%m%d")
+        )
+    });
+    let task_id = bounded_phase7_task_id(&[data_version_id.as_str(), "raw-sync"]);
+    let sync_req = req.clone().into_sync_task_req();
+    register_sync_task(state, &task_id, &sync_req, "running").await?;
+    quant_data::repository::create_data_version(
+        &state.db,
+        &data_version_id,
+        "AkShare analyst revision raw PIT sync",
+        AKSHARE_ANALYST_REVISION_TASK_SOURCE,
+        &["market_vendor_analyst_revision_raw"],
+        start,
+        end,
+    )
+    .await
+    .map_err(|error| {
+        format!("Failed to create AkShare analyst revision data_version {data_version_id}: {error}")
+    })?;
+
+    let days = akshare_analyst_revision_calendar_days(start, end);
+    let total_days = days.len() as i32;
+    quant_data::repository::heartbeat_sync_task(&state.db, &task_id, total_days, 0, 0, 0)
+        .await
+        .map_err(|error| format!("Failed to heartbeat AkShare analyst revision task: {error}"))?;
+    let open_dates = load_akshare_analyst_revision_available_open_dates(&state.db, start, end)
+        .await
+        .map_err(|error| {
+            format!("Failed to load market_trade_calendar open dates for AkShare analyst revision: {error}")
+        })?;
+    let python = akshare_analyst_revision_python_path(req.python.clone());
+    let source = AKSHARE_ANALYST_REVISION_ATTEMPT_SOURCE;
+
+    let mut completed_dates = 0i32;
+    let mut failed_dates = 0i32;
+    let mut empty_dates = 0i32;
+    let mut fetched_rows = 0i64;
+    let mut mapped_rows = 0i64;
+    let mut upserted_rows = 0i64;
+    let mut malformed_rows = 0i64;
+    let mut per_date = Vec::new();
+    let mut failure_messages = Vec::new();
+
+    for (index, day) in days.iter().enumerate() {
+        let request_key = day.format("%Y%m%d").to_string();
+        let attempt_symbol = format!("calendar:{request_key}");
+        let (fetch, fetch_attempts) =
+            run_akshare_analyst_revision_full_date_fetch_with_retry(&python, &request_key).await;
+        let status = fetch
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("error");
+        let row_count = fetch.get("row_count").and_then(Value::as_i64).unwrap_or(0);
+        fetched_rows += row_count;
+
+        if status == "ok_empty" || (status == "ok" && row_count == 0) {
+            completed_dates += 1;
+            empty_dates += 1;
+            quant_data::repository::upsert_sync_attempt(
+                &state.db,
+                source,
+                &attempt_symbol,
+                *day,
+                *day,
+                &task_id,
+                "completed",
+                0,
+                None,
+            )
+            .await
+            .map_err(|error| format!("Failed to record AkShare empty sync attempt: {error}"))?;
+            per_date.push(json!({
+                "date": request_key,
+                "status": "completed_empty",
+                "fetched_rows": row_count,
+                "mapped_rows": 0,
+                "upserted_rows": 0,
+                "fetch_attempts": fetch_attempts,
+            }));
+        } else if status == "ok" {
+            let records = fetch
+                .get("records")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!(
+                        "AkShare full fetch for {request_key} returned ok without records array"
+                    )
+                })?;
+            let mut rows = Vec::new();
+            let mut date_errors = Vec::new();
+            for record in records {
+                match record.as_object() {
+                    Some(object) => match akshare_analyst_revision_raw_row_from_record(
+                        object,
+                        &request_key,
+                        &open_dates,
+                    ) {
+                        Ok(row) => rows.push(row),
+                        Err(error) => date_errors.push(error),
+                    },
+                    None => date_errors.push("record_not_object".to_string()),
+                }
+            }
+
+            if !date_errors.is_empty() {
+                failed_dates += 1;
+                malformed_rows += date_errors.len() as i64;
+                let error_message = format!(
+                    "akshare_analyst_revision_malformed_rows:{}:{}",
+                    date_errors.len(),
+                    date_errors
+                        .iter()
+                        .take(5)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("|")
+                );
+                failure_messages.push(format!("{request_key}:{error_message}"));
+                quant_data::repository::upsert_sync_attempt(
+                    &state.db,
+                    source,
+                    &attempt_symbol,
+                    *day,
+                    *day,
+                    &task_id,
+                    "failed",
+                    0,
+                    Some(&error_message),
+                )
+                .await
+                .map_err(|error| {
+                    format!("Failed to record AkShare malformed sync attempt: {error}")
+                })?;
+                per_date.push(json!({
+                    "date": request_key,
+                    "status": "failed_malformed_rows",
+                    "fetched_rows": row_count,
+                    "mapped_rows": rows.len(),
+                    "upserted_rows": 0,
+                    "malformed_rows": date_errors.len(),
+                    "fetch_attempts": fetch_attempts,
+                    "errors": date_errors.into_iter().take(10).collect::<Vec<_>>(),
+                }));
+            } else {
+                let upserted = upsert_akshare_analyst_revision_raw_rows(
+                    &state.db,
+                    &rows,
+                    &data_version_id,
+                )
+                .await
+                .map_err(|error| {
+                    format!("Failed to upsert AkShare analyst revision raw rows for {request_key}: {error}")
+                })?;
+                completed_dates += 1;
+                mapped_rows += rows.len() as i64;
+                upserted_rows += upserted as i64;
+                quant_data::repository::upsert_sync_attempt(
+                    &state.db,
+                    source,
+                    &attempt_symbol,
+                    *day,
+                    *day,
+                    &task_id,
+                    "completed",
+                    rows.len() as i64,
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    format!("Failed to record AkShare completed sync attempt: {error}")
+                })?;
+                per_date.push(json!({
+                    "date": request_key,
+                    "status": "completed",
+                    "fetched_rows": row_count,
+                    "mapped_rows": rows.len(),
+                    "upserted_rows": upserted,
+                    "fetch_attempts": fetch_attempts,
+                }));
+            }
+        } else {
+            failed_dates += 1;
+            let error_message = fetch
+                .get("error")
+                .and_then(Value::as_str)
+                .or_else(|| fetch.get("error_type").and_then(Value::as_str))
+                .unwrap_or(status)
+                .to_string();
+            failure_messages.push(format!("{request_key}:{error_message}"));
+            quant_data::repository::upsert_sync_attempt(
+                &state.db,
+                source,
+                &attempt_symbol,
+                *day,
+                *day,
+                &task_id,
+                "failed",
+                0,
+                Some(&error_message),
+            )
+            .await
+            .map_err(|error| format!("Failed to record AkShare failed sync attempt: {error}"))?;
+            per_date.push(json!({
+                "date": request_key,
+                "status": status,
+                "fetched_rows": row_count,
+                "mapped_rows": 0,
+                "upserted_rows": 0,
+                "fetch_attempts": fetch_attempts,
+                "error": error_message,
+            }));
+        }
+
+        let finished = completed_dates + failed_dates;
+        let progress = ((finished as f64 / total_days as f64) * 100.0).round() as i32;
+        quant_data::repository::heartbeat_sync_task(
+            &state.db,
+            &task_id,
+            total_days,
+            completed_dates,
+            failed_dates,
+            progress,
+        )
+        .await
+        .map_err(|error| format!("Failed to heartbeat AkShare analyst revision task: {error}"))?;
+        tracing::info!(
+            task_id = %task_id,
+            request_key = %request_key,
+            completed_dates,
+            failed_dates,
+            index = index + 1,
+            total_days,
+            "AkShare analyst revision bounded raw sync progress"
+        );
+    }
+
+    let final_status = if failed_dates == 0 {
+        "completed"
+    } else if completed_dates == 0 {
+        "failed"
+    } else {
+        "partial"
+    };
+    let error_summary = failure_messages
+        .iter()
+        .take(20)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if failed_dates > 0 {
+        quant_data::repository::update_sync_task_with_error(
+            &state.db,
+            &task_id,
+            final_status,
+            total_days,
+            completed_dates,
+            failed_dates,
+            &error_summary,
+        )
+        .await
+        .map_err(|error| format!("Failed to finalize AkShare analyst revision task: {error}"))?;
+    } else {
+        quant_data::repository::update_sync_task(
+            &state.db,
+            &task_id,
+            final_status,
+            total_days,
+            completed_dates,
+            failed_dates,
+        )
+        .await
+        .map_err(|error| format!("Failed to finalize AkShare analyst revision task: {error}"))?;
+    }
+
+    Ok(json!({
+        "audit_version": "p3.23d-akshare-analyst-revision-bounded-sync-v1",
+        "source_id": "multi_vendor_analyst_revision",
+        "vendor": "akshare",
+        "vendor_endpoint": "stock_rank_forecast_cninfo",
+        "mode": "bounded_calendar_day_raw_sync",
+        "task_id": task_id,
+        "data_version_id": data_version_id,
+        "python": python,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "calendar_day_count": calendar_day_count,
+        },
+        "status": final_status,
+        "summary": {
+            "completed_dates": completed_dates,
+            "failed_dates": failed_dates,
+            "empty_dates": empty_dates,
+            "fetched_rows": fetched_rows,
+            "mapped_rows": mapped_rows,
+            "upserted_rows": upserted_rows,
+            "malformed_rows": malformed_rows,
+            "max_retries_per_date": AKSHARE_ANALYST_REVISION_SYNC_MAX_RETRIES,
+        },
+        "per_date": per_date,
+        "failure_messages": failure_messages,
+        "next_gate": {
+            "readiness_audit": "run GET /api/v1/quant/data/akshare/analyst-revision/readiness-audit for the same date range",
+            "coverage_audit": "run GET /api/v1/quant/data/akshare/analyst-revision/coverage-audit after readiness passes",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "notes": [
+            "This sync writes raw evidence rows only; it does not build factors, diagnostics, WFA sleeves, or v19 strategy candidates.",
+            "Each request_key is a calendar publication date. Empty AkShare dates are recorded as completed attempts with row_count=0.",
+            "Rows are accepted only when row publication_date equals request_key. Malformed dates fail the whole request date to avoid mixed-quality PIT evidence."
+        ]
+    }))
+}
+
+async fn build_akshare_analyst_revision_readiness_audit(
+    state: &AppState,
+    req: AkshareAnalystRevisionReadinessAuditReq,
+) -> Result<Value, String> {
+    let today = Utc::now().date_naive();
+    let start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.market_vendor_analyst_revision_raw')::text IS NOT NULL",
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("Failed to inspect AkShare analyst revision raw table: {error}"))?;
+
+    let mut row_count = 0i64;
+    let mut pit_violation_rows = 0i64;
+    let mut missing_source_published_at_rows = 0i64;
+    let mut missing_current_rating_rows = 0i64;
+    let mut missing_revision_semantics_rows = 0i64;
+    let mut duplicate_key_rows = 0i64;
+    if table_exists {
+        let summary = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+            r#"
+            SELECT COUNT(*)::bigint AS row_count,
+                   COUNT(*) FILTER (
+                       WHERE available_at < publication_date
+                          OR publication_date IS NULL
+                   )::bigint AS pit_violation_rows,
+                   COUNT(*) FILTER (WHERE source_published_at IS NULL)::bigint AS missing_source_published_at_rows,
+                   COUNT(*) FILTER (WHERE rating_current IS NULL)::bigint AS missing_current_rating_rows,
+                   COUNT(*) FILTER (
+                       WHERE rating_previous IS NULL
+                          OR rating_change IS NULL
+                   )::bigint AS missing_revision_semantics_rows
+            FROM market_vendor_analyst_revision_raw
+            WHERE publication_date >= $1 AND publication_date <= $2
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize AkShare analyst revision readiness: {error}")
+        })?;
+        row_count = summary.0;
+        pit_violation_rows = summary.1;
+        missing_source_published_at_rows = summary.2;
+        missing_current_rating_rows = summary.3;
+        missing_revision_semantics_rows = summary.4;
+        duplicate_key_rows = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COALESCE(SUM(cnt - 1), 0)::bigint
+            FROM (
+                SELECT vendor, vendor_endpoint, request_key, symbol, publication_date, raw_payload_hash,
+                       COUNT(*)::bigint AS cnt
+                FROM market_vendor_analyst_revision_raw
+                WHERE publication_date >= $1 AND publication_date <= $2
+                GROUP BY vendor, vendor_endpoint, request_key, symbol, publication_date, raw_payload_hash
+                HAVING COUNT(*) > 1
+            ) d
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize AkShare analyst revision duplicate keys: {error}")
+        })?;
+    }
+
+    let decision = decide_akshare_analyst_revision_readiness(
+        table_exists,
+        row_count,
+        pit_violation_rows,
+        missing_source_published_at_rows,
+        missing_current_rating_rows,
+        missing_revision_semantics_rows,
+        duplicate_key_rows,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.23c-akshare-analyst-revision-readiness-v1",
+        "source_id": "multi_vendor_analyst_revision",
+        "vendor": "akshare",
+        "vendor_endpoint": "stock_rank_forecast_cninfo",
+        "mode": "read_only_schema_raw_pit_semantics_readiness",
+        "table": "market_vendor_analyst_revision_raw",
+        "ddl_path": "sql/phase7_akshare_analyst_revision_source.sql",
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "table_exists": table_exists,
+        "summary": {
+            "row_count": row_count,
+            "pit_violation_rows": pit_violation_rows,
+            "missing_source_published_at_rows": missing_source_published_at_rows,
+            "missing_current_rating_rows": missing_current_rating_rows,
+            "missing_revision_semantics_rows": missing_revision_semantics_rows,
+            "duplicate_key_rows": duplicate_key_rows,
+        },
+        "decision": decision,
+        "prohibited": [
+            "factor_build_before_full_history_calendar_day_coverage_pit_quality_audit",
+            "p310_before_coverage_readiness_and_correlation_audit",
+            "bounded_wfa_or_v19_train_selection_before_p310_passes"
+        ]
+    }))
+}
+
+async fn resolve_akshare_analyst_revision_history_dates(
+    state: &AppState,
+    req: &AkshareAnalystRevisionHistoryReplayAuditReq,
+) -> Result<Vec<String>, String> {
+    if !req.dates.is_empty() {
+        return akshare_analyst_revision_history_dates(&req.dates);
+    }
+
+    let current_year = Utc::now().date_naive().year();
+    let start_year = req.start_year.unwrap_or(2014);
+    let end_year = req.end_year.unwrap_or(current_year);
+    if start_year > end_year {
+        return Err("start_year must be <= end_year".to_string());
+    }
+    if end_year > current_year {
+        return Err("end_year cannot be in the future".to_string());
+    }
+
+    let start_date = NaiveDate::from_ymd_opt(start_year, 1, 1)
+        .ok_or_else(|| format!("invalid start_year: {start_year}"))?;
+    let end_date = NaiveDate::from_ymd_opt(end_year, 12, 31)
+        .ok_or_else(|| format!("invalid end_year: {end_year}"))?;
+    let rows = sqlx::query_as::<_, (i32, NaiveDate)>(
+        r#"
+        WITH open_days AS (
+            SELECT DISTINCT trade_date
+            FROM market_trade_calendar
+            WHERE is_open = true
+              AND trade_date >= $1
+              AND trade_date <= $2
+        )
+        SELECT EXTRACT(YEAR FROM trade_date)::int AS trade_year,
+               MIN(trade_date) AS sample_date
+        FROM open_days
+        GROUP BY trade_year
+        ORDER BY trade_year
+        "#,
+    )
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| {
+        format!("Failed to resolve AkShare analyst revision history replay dates: {error}")
+    })?;
+
+    let expected_years: BTreeSet<i32> = (start_year..=end_year).collect();
+    let observed_years: BTreeSet<i32> = rows.iter().map(|(year, _)| *year).collect();
+    let missing_years: Vec<i32> = expected_years
+        .difference(&observed_years)
+        .copied()
+        .collect();
+    if !missing_years.is_empty() {
+        return Err(format!(
+            "market_trade_calendar has no open-day sample for years: {:?}",
+            missing_years
+        ));
+    }
+    if rows.len() > AKSHARE_ANALYST_REVISION_HISTORY_MAX_DATES {
+        return Err(format!(
+            "history replay audit resolved {} dates, above max {}",
+            rows.len(),
+            AKSHARE_ANALYST_REVISION_HISTORY_MAX_DATES
+        ));
+    }
+
+    Ok(rows
+        .into_iter()
+        .map(|(_, date)| date.format("%Y%m%d").to_string())
+        .collect())
+}
+
+async fn build_akshare_analyst_revision_history_replay_audit(
+    state: &AppState,
+    req: AkshareAnalystRevisionHistoryReplayAuditReq,
+) -> Result<Value, String> {
+    let dates = resolve_akshare_analyst_revision_history_dates(state, &req).await?;
+    let row_limit = akshare_analyst_revision_smoke_limit(req.limit);
+    let python = akshare_analyst_revision_python_path(req.python);
+    let source = "stock_rank_forecast_cninfo";
+
+    let mut probes = Vec::new();
+    let mut per_date = Vec::new();
+    let mut available_date_count = 0usize;
+    let mut error_date_count = 0usize;
+    let mut empty_date_count = 0usize;
+    let mut row_count = 0i64;
+    let mut symbol_count_sum = 0i64;
+    let mut publication_date_mismatch_rows = 0i64;
+    let mut missing_publication_date_rows = 0i64;
+    let mut rating_change_nonnull_rows = 0i64;
+    let mut previous_rating_nonnull_rows = 0i64;
+    let mut missing_revision_semantics_rows = 0i64;
+
+    for date in &dates {
+        let probe = run_akshare_analyst_revision_probe(
+            &python,
+            source,
+            date,
+            "history_replay_available_at_audit",
+            row_limit,
+        )
+        .await;
+        let status = probe
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("error");
+        let rows = probe
+            .get("row_count")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        if status == "ok" && rows > 0 {
+            available_date_count += 1;
+        } else if status == "ok_empty" || (status == "ok" && rows == 0) {
+            empty_date_count += 1;
+        } else {
+            error_date_count += 1;
+        }
+
+        let symbols = probe
+            .get("symbol_count")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        let mismatch_rows = probe
+            .get("publication_date_mismatch_rows")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        let missing_pub_rows = probe
+            .get("missing_publication_date_rows")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        let rating_rows = probe
+            .get("rating_change_nonnull_rows")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        let previous_rows = probe
+            .get("previous_rating_nonnull_rows")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        let missing_revision_rows = probe
+            .get("missing_revision_semantics_rows")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+
+        row_count += rows;
+        symbol_count_sum += symbols;
+        publication_date_mismatch_rows += mismatch_rows;
+        missing_publication_date_rows += missing_pub_rows;
+        rating_change_nonnull_rows += rating_rows;
+        previous_rating_nonnull_rows += previous_rows;
+        missing_revision_semantics_rows += missing_revision_rows;
+
+        per_date.push(json!({
+            "date": date,
+            "status": status,
+            "row_count": rows,
+            "symbol_count": symbols,
+            "publication_date_mismatch_rows": mismatch_rows,
+            "missing_publication_date_rows": missing_pub_rows,
+            "rating_change_nonnull_rows": rating_rows,
+            "previous_rating_nonnull_rows": previous_rows,
+            "missing_revision_semantics_rows": missing_revision_rows,
+        }));
+        probes.push(probe);
+    }
+
+    let decision = decide_akshare_analyst_revision_history_replay_audit(
+        dates.len(),
+        available_date_count,
+        error_date_count,
+        empty_date_count,
+        row_count,
+        publication_date_mismatch_rows,
+        missing_publication_date_rows,
+        missing_revision_semantics_rows,
+    );
+    let passed = decision["passed"].as_bool().unwrap_or(false);
+
+    Ok(json!({
+        "audit_version": "p3.23b-akshare-analyst-revision-history-replay-audit-v1",
+        "source_id": "multi_vendor_analyst_revision",
+        "vendor": "akshare",
+        "vendor_endpoint": source,
+        "mode": "read_only_history_date_replay_available_at_audit",
+        "python": python,
+        "sample_dates": dates,
+        "sample_date_count": dates.len(),
+        "row_limit_per_probe": row_limit,
+        "summary": {
+            "requested_date_count": dates.len(),
+            "available_date_count": available_date_count,
+            "error_date_count": error_date_count,
+            "empty_date_count": empty_date_count,
+            "row_count": row_count,
+            "symbol_count_sum": symbol_count_sum,
+            "publication_date_mismatch_rows": publication_date_mismatch_rows,
+            "missing_publication_date_rows": missing_publication_date_rows,
+            "rating_change_nonnull_rows": rating_change_nonnull_rows,
+            "previous_rating_nonnull_rows": previous_rating_nonnull_rows,
+            "missing_revision_semantics_rows": missing_revision_semantics_rows,
+        },
+        "per_date": per_date,
+        "decision": decision,
+        "admission_gate": "history_replay_audit_only_schema_review_next_no_sync_no_factor_no_p310_no_wfa_no_v19",
+        "next_step": if passed {
+            "manual_schema_review_and_raw_schema_contract_update_before_any_bounded_sync"
+        } else {
+            "fix_vendor_history_replay_or_available_at_semantics_before_schema_review"
+        },
+        "probes": probes,
+        "notes": [
+            "This endpoint is read-only and only calls AkShare for representative history dates.",
+            "Passing this audit means the source can move to manual schema review only; bounded sync, factor builder, P3.10, WFA and v19 training remain blocked.",
+            "Publication date must equal the requested history date. Without audited intraday publication timestamp, intraday trading must still use conservative next-session availability."
+        ]
+    }))
+}
+
+async fn build_akshare_analyst_revision_correlation_audit(
+    db: &sqlx::PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+    raw_table_exists: bool,
+) -> Result<Value, String> {
+    if !raw_table_exists {
+        return Ok(json!({
+            "status": "blocked_until_raw_table_exists",
+            "decision": "blocked_until_correlation_sample_available",
+            "sample_rows": 0,
+        }));
+    }
+
+    let daily_bar_exists = table_exists(db, "market_stock_daily_bar").await?;
+    let moneyflow_exists = table_exists(db, "market_stock_moneyflow").await?;
+    if !daily_bar_exists || !moneyflow_exists {
+        return Ok(json!({
+            "status": "blocked_missing_reference_tables",
+            "decision": "blocked_until_correlation_sample_available",
+            "reference_tables": {
+                "market_stock_daily_bar": daily_bar_exists,
+                "market_stock_moneyflow": moneyflow_exists,
+            },
+            "sample_rows": 0,
+        }));
+    }
+
+    let stats: (i64, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>) =
+        sqlx::query_as(
+            r#"
+            WITH raw_events AS (
+                SELECT CASE
+                           WHEN symbol ~ '^[0-9]{6}\.' THEN symbol
+                           WHEN LEFT(symbol, 1) IN ('6', '9') THEN symbol || '.SH'
+                           WHEN LEFT(symbol, 1) IN ('0', '2', '3') THEN symbol || '.SZ'
+                           WHEN LEFT(symbol, 1) IN ('4', '8') THEN symbol || '.BJ'
+                           ELSE symbol
+                       END AS normalized_symbol,
+                       available_at AS trade_date,
+                       rating_change
+                FROM market_vendor_analyst_revision_raw
+                WHERE publication_date >= $1
+                  AND publication_date <= $2
+            ),
+            daily_features AS (
+                SELECT normalized_symbol AS symbol,
+                       trade_date,
+                       COUNT(*)::double precision AS event_count,
+                       SUM(CASE
+                               WHEN rating_change = '调高' THEN 1
+                               WHEN rating_change = '调低' THEN -1
+                               ELSE 0
+                           END)::double precision AS rating_change_net,
+                       SUM(CASE WHEN rating_change = '调高' THEN 1 ELSE 0 END)::double precision AS upgrade_count,
+                       SUM(CASE WHEN rating_change = '调低' THEN 1 ELSE 0 END)::double precision AS downgrade_count
+                FROM raw_events
+                GROUP BY normalized_symbol, trade_date
+            ),
+            joined AS (
+                SELECT features.event_count,
+                       features.rating_change_net,
+                       features.upgrade_count,
+                       features.downgrade_count,
+                       (money.net_mf_amount::double precision / NULLIF(bar.amount::double precision, 0)) AS moneyflow_net_to_amount,
+                       LN(NULLIF(bar.amount::double precision, 0)) AS ln_amount,
+                       ABS((bar.close::double precision - bar.pre_close::double precision)
+                           / NULLIF(bar.pre_close::double precision, 0)) AS abs_return
+                FROM daily_features features
+                JOIN market_stock_daily_bar bar
+                  ON bar.symbol = features.symbol
+                 AND bar.trade_date = features.trade_date
+                LEFT JOIN market_stock_moneyflow money
+                  ON money.symbol = features.symbol
+                 AND money.trade_date = features.trade_date
+            )
+            SELECT COUNT(*)::bigint AS sample_rows,
+                   CORR(rating_change_net, moneyflow_net_to_amount) AS corr_rating_net_moneyflow,
+                   CORR(event_count, ln_amount) AS corr_event_count_ln_amount,
+                   CORR(event_count, abs_return) AS corr_event_count_abs_return,
+                   CORR(upgrade_count, moneyflow_net_to_amount) AS corr_upgrade_moneyflow,
+                   CORR(downgrade_count, moneyflow_net_to_amount) AS corr_downgrade_moneyflow
+            FROM joined
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(db)
+        .await
+        .map_err(|error| {
+            format!("Failed to build AkShare analyst revision correlation audit: {error}")
+        })?;
+
+    let correlations = [stats.1, stats.2, stats.3, stats.4, stats.5];
+    let max_abs_correlation = correlations
+        .into_iter()
+        .flatten()
+        .map(f64::abs)
+        .reduce(f64::max);
+    let decision = margin_detail_correlation_decision(max_abs_correlation);
+
+    Ok(json!({
+        "status": if decision == "passed_low_linear_correlation_screen" {
+            "completed_low_linear_correlation_screen_passed"
+        } else {
+            "completed_correlation_screen_not_passed_or_needs_review"
+        },
+        "decision": decision,
+        "sample_rows": stats.0,
+        "max_abs_correlation": max_abs_correlation,
+        "correlations": {
+            "rating_change_net_vs_moneyflow_net_to_amount": stats.1,
+            "event_count_vs_ln_amount_liquidity": stats.2,
+            "event_count_vs_abs_return_price_volume": stats.3,
+            "upgrade_count_vs_moneyflow_net_to_amount": stats.4,
+            "downgrade_count_vs_moneyflow_net_to_amount": stats.5,
+        },
+        "feature_scope": "raw event-day linear screen only; P3.10 RankIC/group/decay/turnover-capacity is still mandatory",
+        "pit_alignment": "raw events are joined on conservative available_at, not publication_date"
+    }))
+}
+
+async fn build_akshare_analyst_revision_coverage_audit(
+    state: &AppState,
+    req: AkshareAnalystRevisionCoverageAuditReq,
+) -> Result<Value, String> {
+    let today = chrono::Utc::now().date_naive();
+    let start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+
+    let raw_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.market_vendor_analyst_revision_raw')::text")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|error| {
+                format!("Failed to inspect AkShare analyst revision raw table: {error}")
+            })?;
+
+    let table_exists = raw_table.is_some();
+    let mut row_count = 0i64;
+    let mut distinct_publication_date_count = 0i64;
+    let mut distinct_raw_symbol_count = 0i64;
+    let mut distinct_normalized_symbol_count = 0i64;
+    let mut min_publication_date: Option<NaiveDate> = None;
+    let mut max_publication_date: Option<NaiveDate> = None;
+    let mut pit_violation_rows = 0i64;
+    let mut missing_source_published_at_rows = 0i64;
+    let mut missing_current_rating_rows = 0i64;
+    let mut missing_revision_semantics_rows = 0i64;
+    let mut duplicate_key_rows = 0i64;
+    let mut duplicate_payload_hash_groups = 0i64;
+    let mut duplicate_payload_hash_rows = 0i64;
+    let mut completed_attempt_dates = 0i64;
+    let mut empty_completed_attempt_dates = 0i64;
+    let mut failed_attempt_dates = 0i64;
+    let mut attempt_row_count = 0i64;
+    let mut reference_symbols = 0i64;
+    let mut year_breakdown = Vec::new();
+    let mut market_breakdown = Vec::new();
+    let mut missing_year_count = 0i64;
+
+    if table_exists {
+        let summary =
+            sqlx::query_as::<_, (i64, i64, i64, i64, Option<NaiveDate>, Option<NaiveDate>)>(
+                r#"
+            SELECT COUNT(*)::bigint AS row_count,
+                   COUNT(DISTINCT publication_date)::bigint AS distinct_publication_date_count,
+                   COUNT(DISTINCT symbol)::bigint AS distinct_raw_symbol_count,
+                   COUNT(DISTINCT CASE
+                       WHEN symbol ~ '^[0-9]{6}\.' THEN symbol
+                       WHEN LEFT(symbol, 1) IN ('6', '9') THEN symbol || '.SH'
+                       WHEN LEFT(symbol, 1) IN ('0', '2', '3') THEN symbol || '.SZ'
+                       WHEN LEFT(symbol, 1) IN ('4', '8') THEN symbol || '.BJ'
+                       ELSE symbol
+                   END)::bigint AS distinct_normalized_symbol_count,
+                   MIN(publication_date) AS min_publication_date,
+                   MAX(publication_date) AS max_publication_date
+            FROM market_vendor_analyst_revision_raw
+            WHERE publication_date >= $1 AND publication_date <= $2
+            "#,
+            )
+            .bind(start)
+            .bind(end)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|error| {
+                format!("Failed to summarize AkShare analyst revision coverage: {error}")
+            })?;
+        row_count = summary.0;
+        distinct_publication_date_count = summary.1;
+        distinct_raw_symbol_count = summary.2;
+        distinct_normalized_symbol_count = summary.3;
+        min_publication_date = summary.4;
+        max_publication_date = summary.5;
+
+        let quality = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r#"
+            SELECT COUNT(*) FILTER (
+                       WHERE available_at < publication_date
+                          OR publication_date IS NULL
+                          OR source_published_at::date < publication_date
+                   )::bigint AS pit_violation_rows,
+                   COUNT(*) FILTER (WHERE source_published_at IS NULL)::bigint AS missing_source_published_at_rows,
+                   COUNT(*) FILTER (WHERE rating_current IS NULL)::bigint AS missing_current_rating_rows,
+                   COUNT(*) FILTER (
+                       WHERE rating_previous IS NULL
+                          OR rating_change IS NULL
+                   )::bigint AS missing_revision_semantics_rows
+            FROM market_vendor_analyst_revision_raw
+            WHERE publication_date >= $1 AND publication_date <= $2
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize AkShare analyst revision PIT quality: {error}")
+        })?;
+        pit_violation_rows = quality.0;
+        missing_source_published_at_rows = quality.1;
+        missing_current_rating_rows = quality.2;
+        missing_revision_semantics_rows = quality.3;
+
+        duplicate_key_rows = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COALESCE(SUM(cnt - 1), 0)::bigint
+            FROM (
+                SELECT vendor, vendor_endpoint, request_key, symbol, publication_date, raw_payload_hash,
+                       COUNT(*)::bigint AS cnt
+                FROM market_vendor_analyst_revision_raw
+                WHERE publication_date >= $1 AND publication_date <= $2
+                GROUP BY vendor, vendor_endpoint, request_key, symbol, publication_date, raw_payload_hash
+                HAVING COUNT(*) > 1
+            ) d
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize AkShare analyst revision duplicate keys: {error}")
+        })?;
+
+        let duplicate_hash = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT COUNT(*)::bigint AS duplicate_payload_hash_groups,
+                   COALESCE(SUM(cnt - 1), 0)::bigint AS duplicate_payload_hash_rows
+            FROM (
+                SELECT raw_payload_hash, COUNT(*)::bigint AS cnt
+                FROM market_vendor_analyst_revision_raw
+                WHERE publication_date >= $1 AND publication_date <= $2
+                GROUP BY raw_payload_hash
+                HAVING COUNT(*) > 1
+            ) d
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize AkShare analyst revision duplicate hashes: {error}")
+        })?;
+        duplicate_payload_hash_groups = duplicate_hash.0;
+        duplicate_payload_hash_rows = duplicate_hash.1;
+
+        let attempts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r#"
+            SELECT COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_attempt_dates,
+                   COUNT(*) FILTER (WHERE status = 'completed' AND row_count = 0)::bigint AS empty_completed_attempt_dates,
+                   COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempt_dates,
+                   COALESCE(SUM(row_count) FILTER (WHERE status = 'completed'), 0)::bigint AS attempt_row_count
+            FROM data_sync_attempt
+            WHERE source = $1
+              AND start_date >= $2
+              AND end_date <= $3
+            "#,
+        )
+        .bind(AKSHARE_ANALYST_REVISION_ATTEMPT_SOURCE)
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize AkShare analyst revision sync attempts: {error}")
+        })?;
+        completed_attempt_dates = attempts.0;
+        empty_completed_attempt_dates = attempts.1;
+        failed_attempt_dates = attempts.2;
+        attempt_row_count = attempts.3;
+
+        reference_symbols = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM market_stock
+            WHERE symbol ~ '^[0-9]{6}\.(SH|SZ|BJ)$'
+              AND list_date IS NOT NULL
+              AND list_date <= $2
+              AND (delist_date IS NULL OR delist_date >= $1)
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+        let year_rows: Vec<(
+            i32,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT EXTRACT(YEAR FROM publication_date)::int AS year,
+                   COUNT(*)::bigint AS rows,
+                   COUNT(DISTINCT publication_date)::bigint AS publication_dates,
+                   COUNT(DISTINCT symbol)::bigint AS raw_symbols,
+                   COUNT(DISTINCT CASE
+                       WHEN symbol ~ '^[0-9]{6}\.' THEN symbol
+                       WHEN LEFT(symbol, 1) IN ('6', '9') THEN symbol || '.SH'
+                       WHEN LEFT(symbol, 1) IN ('0', '2', '3') THEN symbol || '.SZ'
+                       WHEN LEFT(symbol, 1) IN ('4', '8') THEN symbol || '.BJ'
+                       ELSE symbol
+                   END)::bigint AS normalized_symbols,
+                   COUNT(*) FILTER (WHERE rating_current IS NULL)::bigint AS missing_current_rating_rows,
+                   COUNT(*) FILTER (WHERE rating_previous IS NULL OR rating_change IS NULL)::bigint AS missing_revision_semantics_rows,
+                   MIN(publication_date) AS min_publication_date,
+                   MAX(publication_date) AS max_publication_date
+            FROM market_vendor_analyst_revision_raw
+            WHERE publication_date >= $1 AND publication_date <= $2
+            GROUP BY 1
+            ORDER BY 1
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to build AkShare analyst revision year breakdown: {error}")
+        })?;
+        let mut rows_by_year: BTreeMap<
+            i32,
+            (
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                Option<NaiveDate>,
+                Option<NaiveDate>,
+            ),
+        > = BTreeMap::new();
+        for (
+            year,
+            rows,
+            publication_dates,
+            raw_symbols,
+            normalized_symbols,
+            missing_current,
+            missing_revision,
+            min_date,
+            max_date,
+        ) in year_rows
+        {
+            rows_by_year.insert(
+                year,
+                (
+                    rows,
+                    publication_dates,
+                    raw_symbols,
+                    normalized_symbols,
+                    missing_current,
+                    missing_revision,
+                    min_date,
+                    max_date,
+                ),
+            );
+        }
+
+        let year_attempts: Vec<(i32, i64, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT EXTRACT(YEAR FROM start_date)::int AS year,
+                   COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_attempt_dates,
+                   COUNT(*) FILTER (WHERE status = 'completed' AND row_count = 0)::bigint AS empty_completed_attempt_dates,
+                   COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed_attempt_dates,
+                   COALESCE(SUM(row_count) FILTER (WHERE status = 'completed'), 0)::bigint AS attempt_row_count
+            FROM data_sync_attempt
+            WHERE source = $1
+              AND start_date >= $2
+              AND end_date <= $3
+            GROUP BY 1
+            ORDER BY 1
+            "#,
+        )
+        .bind(AKSHARE_ANALYST_REVISION_ATTEMPT_SOURCE)
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to build AkShare analyst revision year attempt breakdown: {error}")
+        })?;
+        let mut attempts_by_year: BTreeMap<i32, (i64, i64, i64, i64)> = BTreeMap::new();
+        for (year, completed, empty_completed, failed, attempt_rows) in year_attempts {
+            attempts_by_year.insert(year, (completed, empty_completed, failed, attempt_rows));
+        }
+
+        let reference_by_year_rows: Vec<(i32, i64)> = sqlx::query_as(
+            r#"
+            WITH years AS (
+                SELECT generate_series($1::int, $2::int) AS year
+            )
+            SELECT years.year,
+                   COUNT(stock.symbol)::bigint AS reference_symbols
+            FROM years
+            LEFT JOIN market_stock stock
+              ON stock.symbol ~ '^[0-9]{6}\.(SH|SZ|BJ)$'
+             AND stock.list_date IS NOT NULL
+             AND stock.list_date <= make_date(years.year, 12, 31)
+             AND (stock.delist_date IS NULL OR stock.delist_date >= make_date(years.year, 1, 1))
+            GROUP BY years.year
+            ORDER BY years.year
+            "#,
+        )
+        .bind(start.year())
+        .bind(end.year())
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        let reference_by_year: BTreeMap<i32, i64> = reference_by_year_rows.into_iter().collect();
+
+        for year in start.year()..=end.year() {
+            let year_start = NaiveDate::from_ymd_opt(year, 1, 1).expect("valid year start");
+            let year_end = NaiveDate::from_ymd_opt(year, 12, 31).expect("valid year end");
+            let effective_year_start = std::cmp::max(year_start, start);
+            let effective_year_end = std::cmp::min(year_end, end);
+            let calendar_day_count = (effective_year_end - effective_year_start).num_days() + 1;
+            let (
+                rows,
+                publication_dates,
+                raw_symbols,
+                normalized_symbols,
+                missing_current,
+                missing_revision,
+                min_date,
+                max_date,
+            ) = rows_by_year
+                .remove(&year)
+                .unwrap_or((0, 0, 0, 0, 0, 0, None, None));
+            let (completed, empty_completed, failed, attempt_rows) =
+                attempts_by_year.remove(&year).unwrap_or((0, 0, 0, 0));
+            let audited_calendar_date_count = publication_dates + empty_completed;
+            let year_coverage_ratio = if calendar_day_count > 0 {
+                audited_calendar_date_count as f64 / calendar_day_count as f64
+            } else {
+                0.0
+            };
+            if year_coverage_ratio + f64::EPSILON < 1.0 {
+                missing_year_count += 1;
+            }
+            let year_reference_symbols = reference_by_year.get(&year).copied().unwrap_or(0);
+            year_breakdown.push(json!({
+                "year": year,
+                "rows": rows,
+                "publication_dates": publication_dates,
+                "calendar_day_count": calendar_day_count,
+                "audited_calendar_date_count": audited_calendar_date_count,
+                "coverage_ratio": year_coverage_ratio,
+                "raw_symbols": raw_symbols,
+                "normalized_symbols": normalized_symbols,
+                "reference_symbols": year_reference_symbols,
+                "symbol_coverage_ratio": phase7_ratio(normalized_symbols, year_reference_symbols).unwrap_or(0.0),
+                "missing_current_rating_rows": missing_current,
+                "missing_revision_semantics_rows": missing_revision,
+                "completed_attempt_dates": completed,
+                "empty_completed_attempt_dates": empty_completed,
+                "failed_attempt_dates": failed,
+                "attempt_row_count": attempt_rows,
+                "min_publication_date": phase7_date_json(min_date),
+                "max_publication_date": phase7_date_json(max_date),
+            }));
+        }
+
+        let market_rows: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            WITH normalized AS (
+                SELECT CASE
+                           WHEN symbol ~ '^[0-9]{6}\.' THEN symbol
+                           WHEN LEFT(symbol, 1) IN ('6', '9') THEN symbol || '.SH'
+                           WHEN LEFT(symbol, 1) IN ('0', '2', '3') THEN symbol || '.SZ'
+                           WHEN LEFT(symbol, 1) IN ('4', '8') THEN symbol || '.BJ'
+                           ELSE symbol
+                       END AS normalized_symbol,
+                       publication_date,
+                       rating_current,
+                       rating_previous,
+                       rating_change
+                FROM market_vendor_analyst_revision_raw
+                WHERE publication_date >= $1 AND publication_date <= $2
+            )
+            SELECT CASE
+                       WHEN normalized_symbol LIKE '%.SH' THEN 'SH'
+                       WHEN normalized_symbol LIKE '%.SZ' THEN 'SZ'
+                       WHEN normalized_symbol LIKE '%.BJ' THEN 'BJ'
+                       ELSE 'OTHER'
+                   END AS market,
+                   COUNT(*)::bigint AS rows,
+                   COUNT(DISTINCT normalized_symbol)::bigint AS symbols,
+                   COUNT(DISTINCT publication_date)::bigint AS publication_dates,
+                   COUNT(*) FILTER (WHERE rating_current IS NULL)::bigint AS missing_current_rating_rows,
+                   COUNT(*) FILTER (WHERE rating_previous IS NULL OR rating_change IS NULL)::bigint AS missing_revision_semantics_rows
+            FROM normalized
+            GROUP BY 1
+            ORDER BY 1
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to build AkShare analyst revision market breakdown: {error}")
+        })?;
+        market_breakdown = market_rows
+            .into_iter()
+            .map(
+                |(market, rows, symbols, publication_dates, missing_current, missing_revision)| {
+                    json!({
+                        "market": market,
+                        "rows": rows,
+                        "symbols": symbols,
+                        "publication_dates": publication_dates,
+                        "missing_current_rating_rows": missing_current,
+                        "missing_revision_semantics_rows": missing_revision,
+                    })
+                },
+            )
+            .collect();
+    }
+    let requested_calendar_days = (end - start).num_days() + 1;
+    let audited_calendar_date_count =
+        distinct_publication_date_count + empty_completed_attempt_dates;
+    let coverage_ratio = if requested_calendar_days > 0 {
+        audited_calendar_date_count as f64 / requested_calendar_days as f64
+    } else {
+        0.0
+    };
+    let correlation_audit =
+        build_akshare_analyst_revision_correlation_audit(&state.db, start, end, table_exists)
+            .await?;
+    let correlation_decision = correlation_audit
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("blocked_until_correlation_sample_available");
+    let decision = decide_akshare_analyst_revision_coverage_audit(
+        table_exists,
+        row_count,
+        coverage_ratio,
+        failed_attempt_dates,
+        missing_year_count,
+        pit_violation_rows,
+        missing_source_published_at_rows,
+        missing_revision_semantics_rows,
+        duplicate_key_rows,
+        duplicate_payload_hash_rows,
+        correlation_decision,
+    );
+    let status = decision["status"].clone();
+    let admission_decision = decision["admission_decision"].clone();
+    let p310_status = decision["p310_status"].clone();
+    let bounded_wfa = decision["bounded_wfa"].clone();
+    let v19_train_selection = decision["v19_train_selection"].clone();
+
+    Ok(json!({
+        "audit_version": "p3.23e-akshare-analyst-revision-full-history-coverage-quality-correlation-audit-v1",
+        "source_id": "multi_vendor_analyst_revision",
+        "mode": "read_only_year_market_symbol_pit_quality_duplicate_hash_correlation_gate",
+        "table": "market_vendor_analyst_revision_raw",
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "calendar_day_count": requested_calendar_days,
+        },
+        "table_exists": table_exists,
+        "raw_coverage": {
+            "row_count": row_count,
+            "distinct_publication_date_count": distinct_publication_date_count,
+            "distinct_raw_symbol_count": distinct_raw_symbol_count,
+            "distinct_normalized_symbol_count": distinct_normalized_symbol_count,
+            "min_publication_date": phase7_date_json(min_publication_date),
+            "max_publication_date": phase7_date_json(max_publication_date),
+        },
+        "raw_quality": {
+            "pit_violation_rows": pit_violation_rows,
+            "missing_source_published_at_rows": missing_source_published_at_rows,
+            "missing_current_rating_rows": missing_current_rating_rows,
+            "missing_revision_semantics_rows": missing_revision_semantics_rows,
+            "current_rating_usage": if missing_current_rating_rows > 0 {
+                "exclude_or_downweight_rows_before_current_rating_factor_use"
+            } else {
+                "fully_populated"
+            },
+            "revision_semantics_required_fields": ["rating_previous", "rating_change"]
+        },
+        "duplicate_hash_audit": {
+            "duplicate_key_rows": duplicate_key_rows,
+            "duplicate_payload_hash_groups": duplicate_payload_hash_groups,
+            "duplicate_payload_hash_rows": duplicate_payload_hash_rows,
+        },
+        "sync_attempts": {
+            "completed_attempt_dates": completed_attempt_dates,
+            "empty_completed_attempt_dates": empty_completed_attempt_dates,
+            "failed_attempt_dates": failed_attempt_dates,
+            "attempt_row_count": attempt_row_count,
+            "audited_calendar_date_count": audited_calendar_date_count,
+            "coverage_ratio": coverage_ratio,
+        },
+        "symbol_breadth_vs_listed_stock_universe": {
+            "reference_symbols": reference_symbols,
+            "covered_normalized_symbols": distinct_normalized_symbol_count,
+            "coverage_ratio": phase7_ratio(distinct_normalized_symbol_count, reference_symbols).unwrap_or(0.0),
+            "note": "analyst revision is event-sparse; this is breadth evidence, not a daily panel completeness claim"
+        },
+        "year_breakdown": year_breakdown,
+        "market_breakdown": market_breakdown,
+        "correlation_audit": correlation_audit,
+        "decision": decision,
+        "status": status,
+        "admission_decision": admission_decision,
+        "p310_status": p310_status,
+        "bounded_wfa": bounded_wfa,
+        "v19_train_selection": v19_train_selection,
+        "required_before_p310": [
+            "market_vendor_analyst_revision_raw schema reviewed and applied",
+            "bounded full-history sync by history date or safe batches",
+            "year/vendor_endpoint/symbol breadth coverage",
+            "publication_date/source_published_at/available_at PIT audit",
+            "revision semantics coverage for rating_change and previous_rating",
+            "cross-vendor duplicate/raw-payload hash audit"
+        ],
+        "notes": [
+            "Coverage audit is intentionally blocking until raw schema and bounded sync exist.",
+            "Do not interpret a successful permission smoke as coverage readiness or alpha admission."
+        ]
     }))
 }
 
@@ -13764,34 +16983,53 @@ mod tests {
             .unwrap()
             .iter()
             .any(|source| source == "shareholder_structure_current_low_fanout_sleeve"));
+        assert!(admission["stopped_same_family_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |source| source == "multi_vendor_analyst_revision_current_akshare_cninfo_revision"
+            ));
 
         let p322_inventory = by_source["p322_source_inventory"];
         assert_eq!(
             p322_inventory["admission_decision"],
-            "source_discovery_required_before_permission_smoke"
+            "multi_vendor_analyst_revision_stopped_after_p310_shift_to_next_low_correlation_source"
         );
         assert_eq!(
             p322_inventory["next_step"],
-            "rank_candidate_sources_by_breadth_pit_availability_permission_and_economic_hypothesis_then_run_permission_smoke_for_top_source"
+            "search_licensed_consensus_revision_or_exchange_announcement_order_capacity_source"
         );
         assert_eq!(
-            p322_inventory["ranked_candidates"][2]["source_id"],
+            p322_inventory["ranked_candidates"][0]["source_id"],
+            "licensed_broad_base_consensus_revision"
+        );
+        assert_eq!(
+            p322_inventory["ranked_candidates"][0]["status"],
+            "source_discovery_required"
+        );
+        assert_eq!(
+            p322_inventory["ranked_candidates"][3]["source_id"],
             "margin_detail_leverage_crowding"
         );
         assert_eq!(
-            p322_inventory["ranked_candidates"][2]["status"],
-            "actionable_permission_smoke_candidate_lower_priority"
+            p322_inventory["ranked_candidates"][3]["status"],
+            "stopped_after_p310_economics_failed"
         );
 
         let margin_detail = by_source["margin_detail_leverage_crowding"];
         assert_eq!(
             margin_detail["admission_decision"],
-            "permission_smoke_required_before_schema_available_at_audit"
+            "stopped_after_p310_economics_failed"
         );
         assert_eq!(margin_detail["pit_required"], true);
         assert_eq!(
             margin_detail["correlation_status"],
-            "must_test_against_moneyflow_liquidity_price_volume_and_current_v19"
+            "completed_but_economics_failed"
+        );
+        assert_eq!(
+            margin_detail["source_discovery_evidence"][0]["diagnostics_summary"]["decision"],
+            "do_not_enter_bounded_wfa_or_v19_train_selection"
         );
 
         let equity = by_source["equity_incentive_execution_quality"];
@@ -13939,6 +17177,56 @@ mod tests {
         assert_eq!(
             analyst["source_discovery_evidence"][1]["production_smoke"]["error_code"],
             "40101"
+        );
+
+        let multi_vendor = by_source["multi_vendor_analyst_revision"];
+        assert_eq!(
+            multi_vendor["admission_decision"],
+            "stopped_after_p310_economics_failed"
+        );
+        assert_eq!(multi_vendor["schema_status"], "completed");
+        assert_eq!(
+            multi_vendor["sync_status"],
+            "full_history_raw_sync_completed"
+        );
+        assert_eq!(
+            multi_vendor["coverage_status"],
+            "coverage_pit_quality_correlation_green"
+        );
+        assert_eq!(multi_vendor["p310_status"], "completed_failed_economics");
+        assert_eq!(multi_vendor["bounded_wfa"], "blocked");
+        assert_eq!(multi_vendor["v19_train_selection"], "blocked");
+        assert_eq!(
+            multi_vendor["diagnostics_summary"]["latest_report_id"],
+            "exp-0930e5fa-f125-4f22-b9d2-5041da2c44c3"
+        );
+        assert_eq!(
+            multi_vendor["diagnostics_summary"]["passed_horizon_count"],
+            0
+        );
+        assert_eq!(
+            multi_vendor["diagnostics_summary"]["daily_weak_day_count"],
+            1316
+        );
+        assert_eq!(
+            multi_vendor["source_discovery_evidence"][0]["candidate"],
+            "akshare:stock_rank_forecast_cninfo"
+        );
+        assert_eq!(
+            multi_vendor["source_discovery_evidence"][0]["status"],
+            "stopped_after_p310_economics_failed"
+        );
+        assert_eq!(
+            multi_vendor["source_discovery_evidence"][0]["native_available_at_candidate"],
+            "发布日期"
+        );
+        assert_eq!(
+            multi_vendor["source_discovery_evidence"][1]["candidate"],
+            "akshare:stock_research_report_em"
+        );
+        assert_eq!(
+            multi_vendor["source_discovery_evidence"][2]["status"],
+            "blocked_snapshot_not_pit_ready"
         );
     }
 
@@ -14905,6 +18193,397 @@ mod tests {
         assert_eq!(
             phase7_permission_smoke_sources(&requested),
             vec!["margin_detail"]
+        );
+    }
+
+    #[test]
+    fn akshare_analyst_revision_raw_row_uses_next_open_day_available_at_and_stable_hash() {
+        let mut record = serde_json::Map::new();
+        record.insert("证券代码".to_string(), json!("000001"));
+        record.insert("证券简称".to_string(), json!("平安银行"));
+        record.insert("发布日期".to_string(), json!("2026-06-23"));
+        record.insert("研究机构简称".to_string(), json!("光大证券"));
+        record.insert("研究员名称".to_string(), json!("洪吉然"));
+        record.insert("投资评级".to_string(), json!("买入"));
+        record.insert("评级变化".to_string(), json!("维持"));
+        record.insert("前一次投资评级".to_string(), json!("买入"));
+        record.insert("是否首次评级".to_string(), json!("不是首次评级"));
+        record.insert("目标价格-下限".to_string(), json!(54.1));
+        record.insert("目标价格-上限".to_string(), json!(54.1));
+        let open_dates = vec![NaiveDate::from_ymd_opt(2026, 6, 24).unwrap()];
+
+        let row =
+            akshare_analyst_revision_raw_row_from_record(&record, "20260623", &open_dates).unwrap();
+        let same_row =
+            akshare_analyst_revision_raw_row_from_record(&record, "20260623", &open_dates).unwrap();
+
+        assert_eq!(
+            row.publication_date,
+            NaiveDate::from_ymd_opt(2026, 6, 23).unwrap()
+        );
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2026, 6, 24).unwrap()
+        );
+        assert_eq!(
+            row.source_published_at.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 6, 24).unwrap()
+        );
+        assert_eq!(row.raw_payload_hash, same_row.raw_payload_hash);
+        assert_eq!(row.rating_change.as_deref(), Some("维持"));
+        assert_eq!(row.rating_previous.as_deref(), Some("买入"));
+    }
+
+    #[test]
+    fn akshare_analyst_revision_raw_row_blocks_publication_date_mismatch() {
+        let mut record = serde_json::Map::new();
+        record.insert("证券代码".to_string(), json!("000001"));
+        record.insert("发布日期".to_string(), json!("2026-06-23"));
+        let open_dates = vec![NaiveDate::from_ymd_opt(2026, 6, 24).unwrap()];
+
+        let error = akshare_analyst_revision_raw_row_from_record(&record, "20260624", &open_dates)
+            .unwrap_err();
+
+        assert!(error.contains("publication_date_mismatch"));
+    }
+
+    #[test]
+    fn akshare_analyst_revision_sync_request_builds_bounded_raw_task() {
+        let req = AkshareAnalystRevisionSyncReq {
+            start_date: Some("20260101".to_string()),
+            end_date: Some("20260131".to_string()),
+            data_version_id: Some("akshare-analyst-revision-202601".to_string()),
+            python: Some("/tmp/akshare-smoke/bin/python".to_string()),
+            background: false,
+        };
+
+        let sync_req = req.into_sync_task_req();
+
+        assert_eq!(sync_req.dataset, "akshare_analyst_revision");
+        assert_eq!(sync_req.source, "akshare_cninfo_revision");
+        assert!(sync_req.source.len() <= 32);
+        assert_eq!(
+            sync_req.mode.as_deref(),
+            Some("bounded_calendar_day_raw_sync")
+        );
+        assert_eq!(
+            sync_req.data_version_id.as_deref(),
+            Some("akshare-analyst-revision-202601")
+        );
+        assert!(sync_req.create_data_version);
+        assert!(!sync_req.background);
+    }
+
+    #[test]
+    fn akshare_analyst_revision_sync_range_blocks_large_windows() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 4, 11).unwrap();
+
+        let error = validate_akshare_analyst_revision_sync_range(start, end).unwrap_err();
+
+        assert!(error.contains("above max 100"));
+    }
+
+    #[test]
+    fn akshare_analyst_revision_retry_policy_retries_transient_fetch_failures() {
+        assert!(akshare_analyst_revision_should_retry_fetch_status(
+            "timeout"
+        ));
+        assert!(akshare_analyst_revision_should_retry_fetch_status("error"));
+        assert!(!akshare_analyst_revision_should_retry_fetch_status("ok"));
+        assert!(!akshare_analyst_revision_should_retry_fetch_status(
+            "ok_empty"
+        ));
+        assert!(!akshare_analyst_revision_should_retry_fetch_status(
+            "runtime_not_configured"
+        ));
+    }
+
+    #[test]
+    fn akshare_analyst_revision_full_fetch_normalizes_empty_dataframe_length_mismatch() {
+        let payload = json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error_type": "ValueError",
+            "error": "Length mismatch: Expected axis has 0 elements, new values have 11 elements"
+        });
+
+        let normalized = normalize_akshare_analyst_revision_full_fetch_payload(payload);
+
+        assert_eq!(normalized["status"], "ok_empty");
+        assert_eq!(normalized["permission"], "available");
+        assert_eq!(normalized["row_count"], 0);
+        assert_eq!(normalized["records"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn akshare_analyst_revision_schema_contract_is_vendor_aware_and_blocks_training() {
+        let contract = phase7_akshare_analyst_revision_schema_contract();
+
+        assert_eq!(contract["source_id"], "multi_vendor_analyst_revision");
+        assert_eq!(contract["stage"], "P3.23C");
+        assert_eq!(
+            contract["ddl_path"],
+            "sql/phase7_akshare_analyst_revision_source.sql"
+        );
+        assert_eq!(
+            contract["mode"],
+            "read_only_vendor_schema_available_at_contract"
+        );
+        assert_eq!(
+            contract["raw_sources"][0]["vendor_endpoint"],
+            "stock_rank_forecast_cninfo"
+        );
+        assert_eq!(
+            contract["raw_sources"][0]["native_available_at_candidate"],
+            "发布日期"
+        );
+        assert_eq!(
+            contract["raw_sources"][1]["vendor_endpoint"],
+            "stock_research_report_em"
+        );
+        assert!(contract["tables"][0]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "vendor"));
+        assert!(contract["tables"][0]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "source_published_at"));
+        assert_eq!(contract["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(contract["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn akshare_analyst_revision_sync_plan_uses_calendar_day_quarter_batches() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let batches = akshare_analyst_revision_sync_plan_batches(start, end, "quarter").unwrap();
+        let plan = akshare_analyst_revision_sync_plan_response(start, end, "quarter", batches);
+
+        assert_eq!(plan["mode"], "read_only_bounded_calendar_day_sync_plan");
+        assert_eq!(
+            plan["request_key_policy"],
+            "calendar publication date; do not restrict to market open days or weekend/holiday analyst reports may be missed"
+        );
+        assert_eq!(plan["batch_count"], 2);
+        assert_eq!(plan["estimated_api_calls"], 175);
+        assert_eq!(plan["safe_to_run_full_range"], false);
+        assert_eq!(plan["batches"][0]["batch"], "2026Q1");
+        assert_eq!(plan["batches"][0]["calendar_day_count"], 90);
+        assert_eq!(
+            plan["batches"][0]["future_bounded_sync_request"]["data_version_id"],
+            "akshare-analyst-revision-2026Q1"
+        );
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn akshare_analyst_revision_readiness_decision_blocks_until_schema_and_raw_pit_pass() {
+        let missing_schema = decide_akshare_analyst_revision_readiness(false, 0, 0, 0, 0, 0, 0);
+        assert_eq!(
+            missing_schema["admission_decision"],
+            "schema_review_apply_required_before_bounded_sync"
+        );
+
+        let empty_schema = decide_akshare_analyst_revision_readiness(true, 0, 0, 0, 0, 0, 0);
+        assert_eq!(
+            empty_schema["admission_decision"],
+            "bounded_sync_required_before_coverage_audit"
+        );
+
+        let pit_failed = decide_akshare_analyst_revision_readiness(true, 100, 1, 0, 0, 0, 0);
+        assert_eq!(
+            pit_failed["admission_decision"],
+            "raw_pit_or_source_published_at_failed"
+        );
+
+        let revision_failed = decide_akshare_analyst_revision_readiness(true, 100, 0, 0, 0, 1, 0);
+        assert_eq!(
+            revision_failed["admission_decision"],
+            "raw_revision_semantics_failed"
+        );
+
+        let current_rating_missing =
+            decide_akshare_analyst_revision_readiness(true, 100, 0, 0, 10, 0, 0);
+        assert_eq!(
+            current_rating_missing["admission_decision"],
+            "raw_schema_and_pit_ready_for_coverage_audit_only"
+        );
+        assert_eq!(
+            current_rating_missing["row_quality"]["current_rating_usage"],
+            "exclude_or_downweight_rows_before_current_rating_factor_use"
+        );
+
+        let ready = decide_akshare_analyst_revision_readiness(true, 100, 0, 0, 0, 0, 0);
+        assert_eq!(
+            ready["admission_decision"],
+            "raw_schema_and_pit_ready_for_coverage_audit_only"
+        );
+        assert_eq!(ready["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(ready["promotion_gate"]["bounded_wfa"], "blocked");
+    }
+
+    #[test]
+    fn akshare_analyst_revision_coverage_decision_allows_only_p310_after_full_audit() {
+        let incomplete = decide_akshare_analyst_revision_coverage_audit(
+            true,
+            10_000,
+            0.99,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "passed_low_linear_correlation_screen",
+        );
+        assert_eq!(
+            incomplete["admission_decision"],
+            "blocked_until_full_history_calendar_coverage_passes"
+        );
+
+        let duplicate_failed = decide_akshare_analyst_revision_coverage_audit(
+            true,
+            10_000,
+            1.0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            "passed_low_linear_correlation_screen",
+        );
+        assert_eq!(
+            duplicate_failed["admission_decision"],
+            "blocked_until_pit_source_published_at_revision_semantics_and_duplicate_hash_audit_passes"
+        );
+
+        let ready = decide_akshare_analyst_revision_coverage_audit(
+            true,
+            10_000,
+            1.0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "passed_low_linear_correlation_screen",
+        );
+        assert_eq!(
+            ready["admission_decision"],
+            "coverage_pit_quality_correlation_passed_p310_diagnostics_required_next"
+        );
+        assert_eq!(ready["p310_status"], "ready_for_p310_diagnostics_only");
+        assert_eq!(ready["bounded_wfa"], "blocked");
+        assert_eq!(ready["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn akshare_analyst_revision_smoke_sources_are_allowlisted_and_deduped() {
+        assert_eq!(
+            akshare_analyst_revision_smoke_sources(&[]),
+            vec!["stock_rank_forecast_cninfo"]
+        );
+
+        let requested = vec![
+            " Stock_Rank_Forecast_Cninfo ".to_string(),
+            "stock_research_report_em".to_string(),
+            "stock_rank_forecast_cninfo".to_string(),
+            "stock_profit_forecast_em".to_string(),
+        ];
+        assert_eq!(
+            akshare_analyst_revision_smoke_sources(&requested),
+            vec![
+                "stock_rank_forecast_cninfo",
+                "stock_research_report_em",
+                "stock_profit_forecast_em"
+            ]
+        );
+    }
+
+    #[test]
+    fn akshare_analyst_revision_available_at_contract_classifies_endpoint_risk() {
+        let audit = phase7_akshare_analyst_revision_available_at_contract();
+        let endpoints = audit["endpoint_semantics"].as_array().unwrap();
+        let by_endpoint: BTreeMap<&str, &Value> = endpoints
+            .iter()
+            .map(|endpoint| (endpoint["vendor_endpoint"].as_str().unwrap(), endpoint))
+            .collect();
+
+        assert_eq!(
+            by_endpoint["stock_rank_forecast_cninfo"]["verdict"],
+            "history_replay_required_before_raw_sync"
+        );
+        assert_eq!(
+            by_endpoint["stock_rank_forecast_cninfo"]["available_at_candidate"],
+            "发布日期"
+        );
+        assert_eq!(
+            by_endpoint["stock_research_report_em"]["verdict"],
+            "low_fanout_evidence_layer_only_until_full_symbol_fanout_coverage_passes"
+        );
+        assert_eq!(
+            by_endpoint["stock_profit_forecast_em"]["verdict"],
+            "blocked_snapshot_not_pit_ready"
+        );
+        assert_eq!(audit["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(audit["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn akshare_analyst_revision_history_replay_decision_allows_schema_review_only_after_clean_sample(
+    ) {
+        let decision =
+            decide_akshare_analyst_revision_history_replay_audit(13, 13, 0, 0, 4_491, 0, 0, 0);
+
+        assert_eq!(decision["passed"], true);
+        assert_eq!(
+            decision["admission_decision"],
+            "history_replay_available_at_sample_passed_schema_review_next"
+        );
+        assert_eq!(decision["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(decision["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(decision["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn akshare_analyst_revision_history_replay_decision_blocks_publication_date_mismatch() {
+        let decision =
+            decide_akshare_analyst_revision_history_replay_audit(13, 13, 0, 0, 4_491, 2, 0, 0);
+
+        assert_eq!(decision["passed"], false);
+        assert_eq!(
+            decision["admission_decision"],
+            "blocked_publication_date_mismatch_or_missing"
+        );
+        assert_eq!(decision["promotion_gate"]["bounded_sync"], "blocked");
+    }
+
+    #[test]
+    fn akshare_analyst_revision_history_replay_decision_blocks_empty_or_error_dates() {
+        let error_decision =
+            decide_akshare_analyst_revision_history_replay_audit(13, 12, 1, 0, 4_491, 0, 0, 0);
+        let empty_decision =
+            decide_akshare_analyst_revision_history_replay_audit(13, 12, 0, 1, 4_491, 0, 0, 0);
+
+        assert_eq!(
+            error_decision["admission_decision"],
+            "blocked_history_replay_probe_failed"
+        );
+        assert_eq!(
+            empty_decision["admission_decision"],
+            "blocked_history_replay_empty_dates"
         );
     }
 

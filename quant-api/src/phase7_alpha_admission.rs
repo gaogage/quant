@@ -15,6 +15,8 @@ pub(crate) const SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID: &str =
     "shareholder_structure_low_fanout_strict_pit_gate_v1";
 pub(crate) const MARGIN_DETAIL_SOURCE: &str = "margin_detail_leverage_crowding";
 pub(crate) const MARGIN_DETAIL_COVERAGE_GATE_ID: &str = "margin_detail_coverage_ready_v1";
+pub(crate) const ANALYST_REVISION_SOURCE: &str = "multi_vendor_analyst_revision";
+pub(crate) const ANALYST_REVISION_COVERAGE_GATE_ID: &str = "analyst_revision_coverage_ready_v1";
 
 pub(crate) fn industry_prosperity_alpha_admission_policy(
     eligible_markets: Vec<String>,
@@ -94,6 +96,17 @@ pub(crate) fn identifier_requires_margin_detail_gate(value: &str) -> bool {
         || normalized.contains("margin-detail")
         || normalized.contains("leverage_crowding")
         || normalized.contains("leverage-crowding")
+}
+
+pub(crate) fn identifier_requires_analyst_revision_gate(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized == ANALYST_REVISION_SOURCE
+        || normalized == "analyst_revision"
+        || normalized.contains("analyst_revision")
+        || normalized.contains("analyst-revision")
+        || normalized.contains("stock_rank_forecast_cninfo")
+        || normalized.contains("cninfo_revision")
+        || normalized.contains("forecast_cninfo")
 }
 
 fn optional_string_from_maps<'a>(
@@ -195,6 +208,29 @@ pub(crate) fn validate_margin_detail_trial_admission(
     let universe_profile = optional_string_from_maps(params, template, "universe_profile");
     validate_margin_detail_entrypoint_admission(
         MARGIN_DETAIL_SOURCE,
+        gate_id,
+        universe_profile,
+        "optimization trial",
+    )
+}
+
+pub(crate) fn validate_analyst_revision_trial_admission(
+    params: &Map<String, Value>,
+    template: &Map<String, Value>,
+) -> Result<(), String> {
+    let requires_gate = ["combo_name", "source", "candidate_source", "factor_code"]
+        .iter()
+        .filter_map(|name| optional_string_from_maps(params, template, name))
+        .any(identifier_requires_analyst_revision_gate);
+
+    if !requires_gate {
+        return Ok(());
+    }
+
+    let gate_id = optional_string_from_maps(params, template, "alpha_admission_gate_id");
+    let universe_profile = optional_string_from_maps(params, template, "universe_profile");
+    validate_analyst_revision_entrypoint_admission(
+        ANALYST_REVISION_SOURCE,
         gate_id,
         universe_profile,
         "optimization trial",
@@ -321,6 +357,31 @@ pub(crate) fn validate_margin_detail_entrypoint_admission(
         "{} requires alpha_admission_gate_id={} and universe_profile={} at {} so margin_detail uses only full-history PIT rows with next-session availability, source_published_at present, low same-family correlation, and main/ChiNext non-ST scope before factor builder, P3.10 diagnostics, bounded WFA, or v19 train selection",
         identifier.trim(),
         MARGIN_DETAIL_COVERAGE_GATE_ID,
+        INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
+        entrypoint
+    ))
+}
+
+pub(crate) fn validate_analyst_revision_entrypoint_admission(
+    identifier: &str,
+    gate_id: Option<&str>,
+    universe_profile: Option<&str>,
+    entrypoint: &str,
+) -> Result<(), String> {
+    if !identifier_requires_analyst_revision_gate(identifier) {
+        return Ok(());
+    }
+
+    if gate_id == Some(ANALYST_REVISION_COVERAGE_GATE_ID)
+        && universe_profile == Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE)
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} requires alpha_admission_gate_id={} and universe_profile={} at {} so AkShare/multi-vendor analyst revision uses only full-history PIT rows with source_published_at present, revision semantics complete, duplicate-hash audit clean, low same-family correlation, and main/ChiNext non-ST scope before factor builder, P3.10 diagnostics, bounded WFA, or v19 train selection",
+        identifier.trim(),
+        ANALYST_REVISION_COVERAGE_GATE_ID,
         INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
         entrypoint
     ))

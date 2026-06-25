@@ -360,6 +360,38 @@ async fn main() {
             get(routes::sync::broad_analyst_revision_audit),
         )
         .route(
+            "/api/v1/quant/data/akshare/analyst-revision/schema-contract",
+            get(routes::sync::akshare_analyst_revision_schema_contract),
+        )
+        .route(
+            "/api/v1/quant/data/akshare/analyst-revision/permission-smoke",
+            post(routes::sync::akshare_analyst_revision_permission_smoke),
+        )
+        .route(
+            "/api/v1/quant/data/akshare/analyst-revision/available-at-audit",
+            get(routes::sync::akshare_analyst_revision_available_at_audit),
+        )
+        .route(
+            "/api/v1/quant/data/akshare/analyst-revision/history-replay-audit",
+            post(routes::sync::akshare_analyst_revision_history_replay_audit),
+        )
+        .route(
+            "/api/v1/quant/data/akshare/analyst-revision/sync-plan",
+            get(routes::sync::akshare_analyst_revision_sync_plan),
+        )
+        .route(
+            "/api/v1/quant/data/akshare/analyst-revision/sync",
+            post(routes::sync::akshare_analyst_revision_sync),
+        )
+        .route(
+            "/api/v1/quant/data/akshare/analyst-revision/readiness-audit",
+            get(routes::sync::akshare_analyst_revision_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/akshare/analyst-revision/coverage-audit",
+            get(routes::sync::akshare_analyst_revision_coverage_audit),
+        )
+        .route(
             "/api/v1/quant/data/sync/financial",
             post(routes::sync::sync_financial),
         )
@@ -520,6 +552,10 @@ async fn main() {
         .route(
             "/api/v1/quant/factors/phase7-margin-detail-backfill/background",
             post(routes::factors::backfill_phase7_margin_detail_background),
+        )
+        .route(
+            "/api/v1/quant/factors/phase7-analyst-revision-backfill/background",
+            post(routes::factors::backfill_phase7_analyst_revision_background),
         )
         .route(
             "/api/v1/quant/factors/phase7-event-window-alpha-backfill/background",

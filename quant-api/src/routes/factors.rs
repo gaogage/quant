@@ -21,13 +21,14 @@ use quant_factor::neutralize::NeutralizeConfig;
 use quant_factor::*;
 
 use crate::phase7_alpha_admission::{
-    validate_equity_pledge_entrypoint_admission, validate_futures_price_chain_entrypoint_admission,
+    validate_analyst_revision_entrypoint_admission, validate_equity_pledge_entrypoint_admission,
+    validate_futures_price_chain_entrypoint_admission,
     validate_industry_prosperity_entrypoint_admission,
     validate_industry_prosperity_factor_builder_admission,
     validate_margin_detail_entrypoint_admission,
-    validate_shareholder_structure_entrypoint_admission, EQUITY_PLEDGE_PRESSURE_SOURCE,
-    FUTURES_PRICE_CHAIN_SOURCE, INDUSTRY_PROSPERITY_SOURCE, MARGIN_DETAIL_SOURCE,
-    SHAREHOLDER_STRUCTURE_SOURCE,
+    validate_shareholder_structure_entrypoint_admission, ANALYST_REVISION_SOURCE,
+    EQUITY_PLEDGE_PRESSURE_SOURCE, FUTURES_PRICE_CHAIN_SOURCE, INDUSTRY_PROSPERITY_SOURCE,
+    MARGIN_DETAIL_SOURCE, SHAREHOLDER_STRUCTURE_SOURCE,
 };
 use crate::AppState;
 
@@ -348,6 +349,17 @@ pub struct Phase7MarginDetailBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7AnalystRevisionBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub alpha_admission_gate_id: Option<String>,
+    pub universe_profile: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7AlphaBlendSourceRequest {
     pub combo_name: String,
     pub version: Option<String>,
@@ -429,6 +441,7 @@ type Phase7FuturesPriceChainBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7EquityPledgePressureBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7ShareholderStructureBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7MarginDetailBackfillPlan = SetBasedFactorBackfillPlan;
+type Phase7AnalystRevisionBackfillPlan = SetBasedFactorBackfillPlan;
 type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,6 +564,12 @@ enum Phase7BackfillFactorKind {
     EquityPledgePressure,
     ShareholderStructure,
     MarginDetailLeverageCrowding,
+    AnalystRevision {
+        value_expression: &'static str,
+        higher_is_better: bool,
+        window_days: i32,
+        decay_days: i32,
+    },
     ForecastRevision {
         value_expression: &'static str,
         higher_is_better: bool,
@@ -2124,6 +2143,74 @@ impl Phase7MarginDetailBackfillRequest {
                 "market_trade_calendar",
             ],
             combo_method: "weighted_margin_detail",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+impl Phase7AnalystRevisionBackfillRequest {
+    fn into_plan(self) -> Result<Phase7AnalystRevisionBackfillPlan, String> {
+        validate_analyst_revision_entrypoint_admission(
+            ANALYST_REVISION_SOURCE,
+            self.alpha_admission_gate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            self.universe_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "factor builder",
+        )?;
+
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2014, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "p323f-akshare-cninfo-revision-v1", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "multi_vendor_analyst_revision",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7AnalystRevisionBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_analyst_revision_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "multi_vendor_analyst_revision",
+            category: "analyst_revision_alpha",
+            phase: "7-P3.23F",
+            dependencies: &[
+                "market_vendor_analyst_revision_raw",
+                "market_stock_daily_bar",
+                "market_stock_daily_basic",
+                "market_stock",
+                "market_stock_name_history",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_analyst_revision",
             experiment_type: "phase7_factor_backfill_profile",
             source_combos: Vec::new(),
         })
@@ -3998,6 +4085,59 @@ fn phase7_margin_detail_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
             period: 20,
             kind: Phase7BackfillFactorKind::MarginDetailLeverageCrowding,
             weight: 0.20,
+        },
+    ]
+}
+
+fn phase7_analyst_revision_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![
+        Phase7BackfillFactorSpec {
+            factor_code: "ar_rating_change_net_20d_std",
+            name: "P3.23 PIT AkShare analyst revision net upgrade/downgrade 20d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::AnalystRevision {
+                value_expression: "rating_change_score",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 0.40,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ar_upgrade_event_20d_std",
+            name: "P3.23 PIT AkShare analyst revision upgrade event intensity 20d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::AnalystRevision {
+                value_expression: "CASE WHEN rating_change_score > 0.0 THEN 1.0 ELSE NULL END",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 0.25,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ar_downgrade_pressure_20d_std",
+            name: "P3.23 PIT AkShare analyst revision inverse downgrade pressure 20d",
+            period: 20,
+            kind: Phase7BackfillFactorKind::AnalystRevision {
+                value_expression: "CASE WHEN rating_change_score < 0.0 THEN -1.0 ELSE NULL END",
+                higher_is_better: true,
+                window_days: 20,
+                decay_days: 20,
+            },
+            weight: 0.20,
+        },
+        Phase7BackfillFactorSpec {
+            factor_code: "ar_bullish_first_rating_60d_std",
+            name: "P3.23 PIT AkShare bullish first-rating attention 60d",
+            period: 60,
+            kind: Phase7BackfillFactorKind::AnalystRevision {
+                value_expression: "bullish_first_rating_score",
+                higher_is_better: true,
+                window_days: 60,
+                decay_days: 60,
+            },
+            weight: 0.15,
         },
     ]
 }
@@ -8711,6 +8851,134 @@ pub async fn backfill_phase7_margin_detail_background(
     }))
 }
 
+/// POST /api/v1/quant/factors/phase7-analyst-revision-backfill/background
+///
+/// Dedicated PIT AkShare/multi-vendor analyst-revision factor builder. It
+/// requires the full-history coverage/PIT/correlation admission gate and writes
+/// only a research-source combo for P3.10 diagnostics; WFA and v19 train
+/// selection remain separate gates.
+pub async fn backfill_phase7_analyst_revision_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7AnalystRevisionBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 analyst revision backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_analyst_revision_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_analyst_revision_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 analyst revision backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 analyst revision backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 analyst revision backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 /// POST /api/v1/quant/factors/phase7-alpha-blend-backfill/background
 ///
 /// Combo-only backfill that blends existing multi-factor alpha scores by
@@ -9250,6 +9518,15 @@ async fn run_phase7_margin_detail_backfill(
     run_segmented_margin_detail_backfill(db, task_id, plan, &specs).await
 }
 
+async fn run_phase7_analyst_revision_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7AnalystRevisionBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_analyst_revision_backfill_specs();
+    run_segmented_analyst_revision_backfill(db, task_id, plan, &specs).await
+}
+
 async fn run_phase7_event_window_alpha_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -9681,6 +9958,77 @@ async fn run_segmented_industry_prosperity_backfill(
     ))
 }
 
+async fn run_segmented_analyst_revision_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+    specs: &[SetBasedFactorSpec],
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let started_at = Instant::now();
+    let segments = quarterly_backfill_segments(plan.start_date, plan.end_date);
+    let total_steps = segments.len().saturating_mul(2);
+    let mut completed_steps = 0usize;
+    let mut factor_rows = 0usize;
+    let mut combo_rows = 0usize;
+    let mut factor_row_totals: HashMap<String, usize> = HashMap::new();
+
+    for spec in specs {
+        upsert_set_based_factor_definition(db, spec, plan).await?;
+        factor_row_totals.insert(spec.factor_code.to_string(), 0);
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report =
+                industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_analyst_revision_factor_backfill(db, &segment_plan).await?;
+        for (factor_code, row_count) in rows {
+            *factor_row_totals.entry(factor_code).or_insert(0) += row_count;
+            factor_rows = factor_rows.saturating_add(row_count);
+        }
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(db, task_id, completed_steps, total_steps, factor_rows)
+            .await?;
+    }
+
+    for (segment_start, segment_end) in &segments {
+        if factor_backfill_cancel_requested(db, task_id).await? {
+            let report =
+                industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+            return Ok(SetBasedFactorBackfillCompletion::cancelled_with(
+                report,
+                elapsed_millis(started_at),
+            ));
+        }
+
+        let segment_plan = segmented_backfill_plan(plan, *segment_start, *segment_end);
+        let rows = execute_set_based_combo_backfill(db, specs, &segment_plan).await?;
+        combo_rows = combo_rows.saturating_add(rows);
+        completed_steps = completed_steps.saturating_add(1);
+        update_factor_backfill_progress(
+            db,
+            task_id,
+            completed_steps,
+            total_steps,
+            factor_rows.saturating_add(combo_rows),
+        )
+        .await?;
+    }
+
+    let report = industry_prosperity_report(factor_rows, combo_rows, &factor_row_totals, specs);
+    Ok(SetBasedFactorBackfillCompletion::completed_with(
+        report,
+        elapsed_millis(started_at),
+    ))
+}
+
 async fn run_segmented_futures_price_chain_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -9955,6 +10303,48 @@ async fn execute_industry_prosperity_factor_backfill(
     tx.commit().await.map_err(|error| {
         format!(
             "Failed to commit industry prosperity backfill transaction: {}",
+            error
+        )
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(factor_code, row_count)| (factor_code, row_count.max(0) as usize))
+        .collect())
+}
+
+async fn execute_analyst_revision_factor_backfill(
+    db: &sqlx::PgPool,
+    plan: &SetBasedFactorBackfillPlan,
+) -> Result<Vec<(String, usize)>, String> {
+    let mut tx = db.begin().await.map_err(|error| {
+        format!(
+            "Failed to start analyst revision backfill transaction: {}",
+            error
+        )
+    })?;
+    set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(&phase7_analyst_revision_multi_backfill_sql())
+        .bind("ar_rating_change_net_20d_std")
+        .bind("ar_upgrade_event_20d_std")
+        .bind("ar_downgrade_pressure_20d_std")
+        .bind("ar_bullish_first_rating_60d_std")
+        .bind(&plan.version)
+        .bind(plan.start_date)
+        .bind(plan.end_date)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to backfill analyst revision factors for {}..{}: {}",
+                plan.start_date, plan.end_date, error
+            )
+        })?;
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "Failed to commit analyst revision backfill transaction: {}",
             error
         )
     })?;
@@ -10506,7 +10896,8 @@ fn phase7_combo_required_factor_count(
         | "weighted_forecast_revision"
         | "weighted_repurchase_supply_shock"
         | "weighted_block_trade_sd"
-        | "weighted_unlock_supply_pressure" => 1,
+        | "weighted_unlock_supply_pressure"
+        | "weighted_analyst_revision" => 1,
         "weighted_futures_price_chain" => 1,
         _ => specs.len() as i64,
     }
@@ -10869,6 +11260,17 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
         Phase7BackfillFactorKind::MarginDetailLeverageCrowding => {
             panic!("margin_detail must use the dedicated next-session PIT combo builder")
         }
+        Phase7BackfillFactorKind::AnalystRevision {
+            value_expression,
+            higher_is_better,
+            window_days,
+            decay_days,
+        } => phase7_analyst_revision_backfill_sql(
+            value_expression,
+            higher_is_better,
+            window_days,
+            decay_days,
+        ),
         Phase7BackfillFactorKind::ForecastRevision {
             value_expression,
             higher_is_better,
@@ -14427,6 +14829,351 @@ fn phase7_margin_detail_backfill_sql() -> &'static str {
         normalized_score = EXCLUDED.normalized_score,
         available_at = EXCLUDED.available_at,
         created_at = NOW()"
+}
+
+fn phase7_analyst_revision_backfill_sql(
+    value_expression: &'static str,
+    higher_is_better: bool,
+    window_days: i32,
+    decay_days: i32,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+    let window_days = window_days.max(1);
+    let decay_days = decay_days.max(1);
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        eligible_universe AS MATERIALIZED (
+            SELECT
+                bar.symbol,
+                bar.trade_date
+            FROM trade_days td
+            JOIN market_stock_daily_bar bar
+              ON bar.trade_date = td.trade_date
+            JOIN market_stock ms
+              ON ms.symbol = bar.symbol
+            JOIN market_stock_daily_basic basic
+              ON basic.symbol = bar.symbol
+             AND basic.trade_date = bar.trade_date
+            WHERE bar.close IS NOT NULL
+              AND bar.close > 0
+              AND basic.circ_mv IS NOT NULL
+              AND basic.circ_mv > 0
+              AND ms.list_date IS NOT NULL
+              AND ms.list_date <= bar.trade_date
+              AND (
+                  ms.delist_date IS NULL
+                  OR ms.delist_date >= bar.trade_date
+              )
+              AND ms.exchange IN ('SSE', 'SZSE')
+              AND ms.market IN ('主板', '创业板')
+              AND ms.symbol NOT LIKE '688%SH'
+              AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+              AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM market_stock_name_history st_name
+                  WHERE st_name.symbol = bar.symbol
+                    AND st_name.is_st = true
+                    AND st_name.start_date <= bar.trade_date
+                    AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+              )
+        ),
+        raw_events AS MATERIALIZED (
+            SELECT
+                ms.symbol,
+                raw.available_at,
+                raw.publication_date,
+                CASE
+                    WHEN raw.rating_change = '调高' THEN 1.0
+                    WHEN raw.rating_change = '调低' THEN -1.0
+                    ELSE NULL
+                END AS rating_change_score,
+                CASE
+                    WHEN raw.is_first_rating = '是首次评级'
+                     AND COALESCE(raw.rating_current, '') ~* '(买入|增持|推荐|强烈推荐|谨慎买入|谨慎增持|审慎推荐|BUY|OVERWEIGHT)'
+                    THEN 1.0
+                    WHEN raw.is_first_rating = '是首次评级' THEN 0.0
+                    ELSE NULL
+                END AS bullish_first_rating_score
+            FROM market_vendor_analyst_revision_raw raw
+            JOIN market_stock ms
+              ON LEFT(ms.symbol, 6) = raw.symbol
+            WHERE raw.vendor = 'akshare'
+              AND raw.vendor_endpoint = 'stock_rank_forecast_cninfo'
+              AND raw.available_at IS NOT NULL
+              AND raw.available_at <= $4
+              AND raw.available_at >= ($3::date - INTERVAL '{window_days} days')
+              AND raw.available_at >= raw.publication_date
+              AND raw.source_published_at IS NOT NULL
+              AND raw.rating_previous IS NOT NULL
+              AND raw.rating_change IS NOT NULL
+              AND ms.exchange IN ('SSE', 'SZSE')
+              AND ms.market IN ('主板', '创业板')
+              AND ms.symbol NOT LIKE '688%SH'
+              AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+              AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+        ),
+        events AS (
+            SELECT
+                symbol,
+                available_at,
+                {value_expression} AS event_raw_value
+            FROM raw_events
+        ),
+        expanded AS (
+            SELECT
+                universe.symbol,
+                universe.trade_date,
+                events.available_at,
+                events.event_raw_value,
+                GREATEST(
+                    0.0,
+                    1.0 - ((universe.trade_date - events.available_at)::double precision / {decay_days}.0)
+                ) AS decay_weight
+            FROM eligible_universe universe
+            JOIN events
+              ON events.symbol = universe.symbol
+             AND universe.trade_date >= events.available_at
+             AND universe.trade_date <= events.available_at + INTERVAL '{window_days} days'
+            WHERE events.event_raw_value IS NOT NULL
+              AND events.available_at <= universe.trade_date
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                MAX(available_at) AS available_at,
+                SUM(event_raw_value * decay_weight) AS raw_value
+            FROM expanded
+            WHERE decay_weight > 0.0
+            GROUP BY symbol, trade_date
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                CASE
+                    WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                    ELSE percent_rank() OVER (
+                        PARTITION BY trade_date ORDER BY {rank_order}
+                    )
+                END AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+              AND available_at <= trade_date
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+fn phase7_analyst_revision_multi_backfill_sql() -> String {
+    "WITH trade_days AS (
+        SELECT trade_date
+        FROM market_trade_calendar
+        WHERE exchange = 'SSE'
+          AND is_open = true
+          AND trade_date BETWEEN $6 AND $7
+    ),
+    eligible_universe AS MATERIALIZED (
+        SELECT
+            bar.symbol,
+            bar.trade_date
+        FROM trade_days td
+        JOIN market_stock_daily_bar bar
+          ON bar.trade_date = td.trade_date
+        JOIN market_stock ms
+          ON ms.symbol = bar.symbol
+        JOIN market_stock_daily_basic basic
+          ON basic.symbol = bar.symbol
+         AND basic.trade_date = bar.trade_date
+        WHERE bar.close IS NOT NULL
+          AND bar.close > 0
+          AND basic.circ_mv IS NOT NULL
+          AND basic.circ_mv > 0
+          AND ms.list_date IS NOT NULL
+          AND ms.list_date <= bar.trade_date
+          AND (
+              ms.delist_date IS NULL
+              OR ms.delist_date >= bar.trade_date
+          )
+          AND ms.exchange IN ('SSE', 'SZSE')
+          AND ms.market IN ('主板', '创业板')
+          AND ms.symbol NOT LIKE '688%SH'
+          AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+          AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM market_stock_name_history st_name
+              WHERE st_name.symbol = bar.symbol
+                AND st_name.is_st = true
+                AND st_name.start_date <= bar.trade_date
+                AND COALESCE(st_name.end_date, DATE '9999-12-31') >= bar.trade_date
+          )
+    ),
+    raw_events AS MATERIALIZED (
+        SELECT
+            ms.symbol,
+            raw.available_at,
+            raw.publication_date,
+            CASE
+                WHEN raw.rating_change = '调高' THEN 1.0
+                WHEN raw.rating_change = '调低' THEN -1.0
+                ELSE NULL
+            END AS rating_change_score,
+            CASE
+                WHEN raw.is_first_rating = '是首次评级'
+                 AND COALESCE(raw.rating_current, '') ~* '(买入|增持|推荐|强烈推荐|谨慎买入|谨慎增持|审慎推荐|BUY|OVERWEIGHT)'
+                THEN 1.0
+                WHEN raw.is_first_rating = '是首次评级' THEN 0.0
+                ELSE NULL
+            END AS bullish_first_rating_score
+        FROM market_vendor_analyst_revision_raw raw
+        JOIN market_stock ms
+          ON LEFT(ms.symbol, 6) = raw.symbol
+        WHERE raw.vendor = 'akshare'
+          AND raw.vendor_endpoint = 'stock_rank_forecast_cninfo'
+          AND raw.available_at IS NOT NULL
+          AND raw.available_at <= $7
+          AND raw.available_at >= ($6::date - INTERVAL '60 days')
+          AND raw.available_at >= raw.publication_date
+          AND raw.source_published_at IS NOT NULL
+          AND raw.rating_previous IS NOT NULL
+          AND raw.rating_change IS NOT NULL
+          AND ms.exchange IN ('SSE', 'SZSE')
+          AND ms.market IN ('主板', '创业板')
+          AND ms.symbol NOT LIKE '688%SH'
+          AND COALESCE(ms.market, '') NOT ILIKE '%科创%'
+          AND COALESCE(ms.market, '') NOT ILIKE '%北交%'
+    ),
+    events AS MATERIALIZED (
+        SELECT $1::varchar AS factor_code,
+               symbol,
+               available_at,
+               rating_change_score AS event_raw_value,
+               20::int AS window_days,
+               20::int AS decay_days
+        FROM raw_events
+        WHERE rating_change_score IS NOT NULL
+        UNION ALL
+        SELECT $2::varchar AS factor_code,
+               symbol,
+               available_at,
+               1.0 AS event_raw_value,
+               20::int AS window_days,
+               20::int AS decay_days
+        FROM raw_events
+        WHERE rating_change_score > 0.0
+        UNION ALL
+        SELECT $3::varchar AS factor_code,
+               symbol,
+               available_at,
+               -1.0 AS event_raw_value,
+               20::int AS window_days,
+               20::int AS decay_days
+        FROM raw_events
+        WHERE rating_change_score < 0.0
+        UNION ALL
+        SELECT $4::varchar AS factor_code,
+               symbol,
+               available_at,
+               bullish_first_rating_score AS event_raw_value,
+               60::int AS window_days,
+               60::int AS decay_days
+        FROM raw_events
+        WHERE bullish_first_rating_score IS NOT NULL
+    ),
+    expanded AS (
+        SELECT
+            events.factor_code,
+            universe.symbol,
+            universe.trade_date,
+            events.available_at,
+            events.event_raw_value,
+            GREATEST(
+                0.0,
+                1.0 - ((universe.trade_date - events.available_at)::double precision / events.decay_days::double precision)
+            ) AS decay_weight
+        FROM eligible_universe universe
+        JOIN events
+          ON events.symbol = universe.symbol
+         AND universe.trade_date >= events.available_at
+         AND universe.trade_date <= events.available_at + events.window_days * INTERVAL '1 day'
+        WHERE events.event_raw_value IS NOT NULL
+          AND events.available_at <= universe.trade_date
+    ),
+    raw AS (
+        SELECT
+            factor_code,
+            symbol,
+            trade_date,
+            MAX(available_at) AS available_at,
+            SUM(event_raw_value * decay_weight) AS raw_value
+        FROM expanded
+        WHERE decay_weight > 0.0
+        GROUP BY factor_code, symbol, trade_date
+    ),
+    ranked AS (
+        SELECT
+            factor_code,
+            symbol,
+            trade_date,
+            available_at,
+            raw_value,
+            CASE
+                WHEN COUNT(*) OVER (PARTITION BY factor_code, trade_date) = 1 THEN 1.0
+                ELSE percent_rank() OVER (
+                    PARTITION BY factor_code, trade_date ORDER BY raw_value
+                )
+            END AS normalized_value
+        FROM raw
+        WHERE raw_value IS NOT NULL
+          AND available_at <= trade_date
+    ),
+    deleted AS (
+        DELETE FROM factor_value
+        WHERE factor_code IN ($1, $2, $3, $4)
+          AND factor_version = $5
+          AND trade_date BETWEEN $6 AND $7
+        RETURNING 1
+    ),
+    upserted AS (
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT factor_code, $5, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()
+        RETURNING factor_code
+    )
+    SELECT factor_code, COUNT(*)::int8 AS row_count
+    FROM upserted
+    GROUP BY factor_code
+    ORDER BY factor_code"
+        .to_string()
 }
 
 fn phase7_forecast_revision_backfill_sql(
@@ -18017,6 +18764,154 @@ mod tests {
         assert!(!sql.contains("CROSS JOIN LATERAL"));
         assert!(!sql.contains("latest_raw AS"));
         assert!(!sql.contains("COUNT(DISTINCT ranked.factor_code)"));
+    }
+
+    #[test]
+    fn phase7_analyst_revision_request_requires_coverage_gate() {
+        let req = Phase7AnalystRevisionBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-24".to_string()),
+            version: Some("p323f-akshare-cninfo-revision-v1".to_string()),
+            combo_name: None,
+            alpha_admission_gate_id: None,
+            universe_profile: Some("listed_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let err = req.into_plan().unwrap_err();
+
+        assert!(err.contains("analyst_revision_coverage_ready_v1"));
+        assert!(err.contains("main_chinext_non_st"));
+        assert!(err.contains("factor builder"));
+    }
+
+    #[test]
+    fn phase7_analyst_revision_request_builds_p323f_plan() {
+        let req = Phase7AnalystRevisionBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-24".to_string()),
+            version: None,
+            combo_name: None,
+            alpha_admission_gate_id: Some("analyst_revision_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            statement_timeout_ms: Some(240_000),
+        };
+
+        let plan = req.into_plan().expect("valid analyst revision plan");
+
+        assert_eq!(plan.combo_name, "multi_vendor_analyst_revision");
+        assert_eq!(plan.version, "p323f-akshare-cninfo-revision-v1");
+        assert_eq!(plan.bundle_name, "multi_vendor_analyst_revision");
+        assert_eq!(plan.task_type, "phase7_analyst_revision_backfill");
+        assert_eq!(plan.category, "analyst_revision_alpha");
+        assert_eq!(plan.phase, "7-P3.23F");
+        assert_eq!(plan.combo_method, "weighted_analyst_revision");
+        assert!(plan.combo_method.len() <= 32);
+        assert_eq!(plan.statement_timeout_ms, 240_000);
+        assert!(plan
+            .dependencies
+            .contains(&"market_vendor_analyst_revision_raw"));
+        assert!(plan.dependencies.contains(&"market_stock_daily_bar"));
+        assert!(plan.dependencies.contains(&"market_stock_daily_basic"));
+        assert!(plan.dependencies.contains(&"market_stock_name_history"));
+    }
+
+    #[test]
+    fn phase7_analyst_revision_specs_are_low_dimensional_and_sparse_combo() {
+        let specs = phase7_analyst_revision_backfill_specs();
+        let codes = specs
+            .iter()
+            .map(|spec| spec.factor_code)
+            .collect::<Vec<_>>();
+        let total_weight = specs.iter().map(|spec| spec.weight).sum::<f64>();
+        let plan = Phase7AnalystRevisionBackfillRequest {
+            start_date: Some("2014-01-03".to_string()),
+            end_date: Some("2026-06-24".to_string()),
+            version: None,
+            combo_name: None,
+            alpha_admission_gate_id: Some("analyst_revision_coverage_ready_v1".to_string()),
+            universe_profile: Some("main_chinext_non_st".to_string()),
+            statement_timeout_ms: None,
+        }
+        .into_plan()
+        .expect("valid analyst revision plan");
+
+        assert_eq!(
+            codes,
+            vec![
+                "ar_rating_change_net_20d_std",
+                "ar_upgrade_event_20d_std",
+                "ar_downgrade_pressure_20d_std",
+                "ar_bullish_first_rating_60d_std",
+            ]
+        );
+        assert!((total_weight - 1.0).abs() < 1e-12);
+        assert!(specs
+            .iter()
+            .all(|spec| matches!(spec.kind, Phase7BackfillFactorKind::AnalystRevision { .. })));
+        assert_eq!(phase7_combo_required_factor_count(&specs, &plan), 1);
+    }
+
+    #[test]
+    fn phase7_analyst_revision_sql_is_pit_vendor_aware_and_market_scope_gated() {
+        let specs = phase7_analyst_revision_backfill_specs();
+        let net = specs
+            .iter()
+            .find(|spec| spec.factor_code == "ar_rating_change_net_20d_std")
+            .expect("net revision spec");
+        let first_rating = specs
+            .iter()
+            .find(|spec| spec.factor_code == "ar_bullish_first_rating_60d_std")
+            .expect("bullish first-rating spec");
+
+        let net_sql = phase7_factor_backfill_sql(net);
+        let first_sql = phase7_factor_backfill_sql(first_rating);
+
+        assert!(net_sql.contains("market_vendor_analyst_revision_raw raw"));
+        assert!(net_sql.contains("raw.vendor = 'akshare'"));
+        assert!(net_sql.contains("raw.vendor_endpoint = 'stock_rank_forecast_cninfo'"));
+        assert!(net_sql.contains("raw.available_at <= $4"));
+        assert!(net_sql.contains("raw.source_published_at IS NOT NULL"));
+        assert!(net_sql.contains("raw.rating_previous IS NOT NULL"));
+        assert!(net_sql.contains("raw.rating_change IS NOT NULL"));
+        assert!(net_sql.contains("LEFT(ms.symbol, 6) = raw.symbol"));
+        assert!(net_sql.contains("events.available_at <= universe.trade_date"));
+        assert!(net_sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(net_sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(net_sql.contains("FROM market_stock_name_history st_name"));
+        assert!(net_sql.contains("WHEN raw.rating_change = '调高' THEN 1.0"));
+        assert!(net_sql.contains("WHEN raw.rating_change = '调低' THEN -1.0"));
+        assert!(first_sql.contains("bullish_first_rating_score"));
+        assert!(first_sql.contains("raw.is_first_rating = '是首次评级'"));
+        assert!(!net_sql.contains("future_return"));
+        assert!(!net_sql.contains("model_prediction"));
+    }
+
+    #[test]
+    fn phase7_analyst_revision_multi_sql_writes_all_atoms_with_single_pit_universe() {
+        let sql = phase7_analyst_revision_multi_backfill_sql();
+
+        assert_eq!(sql.matches("eligible_universe AS MATERIALIZED").count(), 1);
+        assert!(sql.contains("market_vendor_analyst_revision_raw raw"));
+        assert!(sql.contains("raw.vendor = 'akshare'"));
+        assert!(sql.contains("raw.vendor_endpoint = 'stock_rank_forecast_cninfo'"));
+        assert!(sql.contains("raw.available_at <= $7"));
+        assert!(sql.contains("raw.source_published_at IS NOT NULL"));
+        assert!(sql.contains("raw.rating_previous IS NOT NULL"));
+        assert!(sql.contains("raw.rating_change IS NOT NULL"));
+        assert!(sql.contains("LEFT(ms.symbol, 6) = raw.symbol"));
+        assert!(sql.contains("events.available_at <= universe.trade_date"));
+        assert!(sql.contains("ms.market IN ('主板', '创业板')"));
+        assert!(sql.contains("ms.symbol NOT LIKE '688%SH'"));
+        assert!(sql.contains("FROM market_stock_name_history st_name"));
+        assert!(sql.contains("PARTITION BY factor_code, trade_date ORDER BY raw_value"));
+        assert!(sql.contains("SELECT $1::varchar AS factor_code"));
+        assert!(sql.contains("SELECT $2::varchar AS factor_code"));
+        assert!(sql.contains("SELECT $3::varchar AS factor_code"));
+        assert!(sql.contains("SELECT $4::varchar AS factor_code"));
+        assert!(sql.contains("RETURNING factor_code"));
+        assert!(!sql.contains("future_return"));
+        assert!(!sql.contains("model_prediction"));
     }
 
     #[test]
