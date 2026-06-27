@@ -9279,6 +9279,871 @@ fn phase7_structured_order_capacity_price_chain_vendor_admission_plan() -> Value
     })
 }
 
+fn phase7_structured_order_capacity_price_chain_source_evidence_inventory() -> Value {
+    let blocked_promotion_gate = json!({
+        "schema_apply": "blocked",
+        "bounded_sync": "blocked",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked"
+    });
+    let missing_core_evidence = json!([
+        "license_or_terms_allow_storage_research_and_internal_trading_use",
+        "read_only_sample_payload_with_source_published_at",
+        "historical_access_range_covering_2014_to_present_or_declared_start",
+        "stable_vendor_event_id_or_natural_key",
+        "raw_payload_hash_and_field_dictionary",
+        "symbol_mapping_effective_date_scope",
+        "rate_limit_cost_and_refresh_latency_budget"
+    ]);
+
+    json!({
+        "audit_version": "p3.25d-structured-order-capacity-price-chain-source-evidence-inventory-v1",
+        "source_id": "structured_order_capacity_contract_price_chain_source",
+        "stage": "P3.25D",
+        "mode": "read_only_source_evidence_inventory_no_permission_probe_no_schema_no_sync",
+        "admission_decision": "blocked_no_candidate_has_complete_vendor_terms_history_payload_and_available_at_evidence",
+        "permission_smoke": "blocked_until_candidate_access_configured",
+        "candidate_evidence": [
+            {
+                "candidate_id": "cninfo_data_service",
+                "vendor": "CNINFO Data Service / Shenzhen Securities Information",
+                "source_url": "https://webapi.cninfo.com.cn/",
+                "source_family": "licensed_timestamped_disclosure_metadata_feed",
+                "observed_relevance": "official data service site advertises listed-company announcements, thematic statistics, data browser, quantitative data service, and industry-chain entry points",
+                "candidate_strength": "official_channel_for_cninfo_disclosure_and_data_service",
+                "admission_status": "candidate_permission_sample_smoke_required",
+                "pit_risk": "public site confirms product family but not sample payload timestamp semantics or storage rights",
+                "missing_required_evidence": missing_core_evidence.clone(),
+                "allowed_next_action": "contact_or_configure_authorized_access_then_read_only_endpoint_dictionary_and_sample_payload_smoke"
+            },
+            {
+                "candidate_id": "eastmoney_major_contracts_public_page",
+                "vendor": "Eastmoney Data Center",
+                "source_url": "https://data.eastmoney.com/zdht/",
+                "source_family": "public_major_contracts_web_page",
+                "observed_relevance": "public page lists major-contract fields such as stock code, contract type, contract name, contract amount, sign date and announcement date",
+                "candidate_strength": "confirms_major_contract_event_taxonomy_exists_publicly",
+                "admission_status": "blocked_public_web_page_not_licensed_api",
+                "pit_risk": "public web page is not evidence of licensed API use, storage rights, stable payload contract, or source publication timestamp",
+                "missing_required_evidence": missing_core_evidence.clone(),
+                "allowed_next_action": "use_only_as_taxonomy_hint_until_choice_or_other_licensed_api_terms_and_sample_payload_are_available"
+            },
+            {
+                "candidate_id": "cnopendata_major_contracts_dataset",
+                "vendor": "CnOpenData",
+                "source_url": "https://m.cnopendata.com/pages/data?module=listedcompany-basic&dataKey=listedco-zdht",
+                "source_family": "licensed_or_paid_major_contracts_dataset",
+                "observed_relevance": "dataset description advertises A-share listed-company major-contract fields including announcement date, sign date, contract name, contract type, amount, content and impact",
+                "candidate_strength": "field_semantics_close_to_order_contract_source",
+                "admission_status": "candidate_permission_sample_smoke_required",
+                "pit_risk": "mobile catalog snippet does not prove API access, historical coverage, source_published_at, storage rights or raw payload stability",
+                "missing_required_evidence": missing_core_evidence.clone(),
+                "allowed_next_action": "request_terms_field_dictionary_history_range_and_read_only_sample_payload_before_schema_design"
+            },
+            {
+                "candidate_id": "wind_client_api_platform",
+                "vendor": "Wind",
+                "source_url": "https://www.wind.com.cn/mobile/ClientApi/zh.html",
+                "source_family": "licensed_financial_terminal_or_client_api",
+                "observed_relevance": "official ClientApi page advertises secure and consistent access to Wind data for internal or third-party applications",
+                "candidate_strength": "mature_licensed_data_platform_candidate",
+                "admission_status": "candidate_catalog_and_entitlement_review_required",
+                "pit_risk": "platform availability alone does not prove the needed structured operation-event endpoint, entitlement, source timestamp, or storage rights",
+                "missing_required_evidence": missing_core_evidence.clone(),
+                "allowed_next_action": "review_contract_entitlement_and_catalog_for_contract_capacity_price_chain_events_then_sample_payload_smoke"
+            },
+            {
+                "candidate_id": "choice_dataservice_platform",
+                "vendor": "Eastmoney Choice",
+                "source_url": "https://choice.eastmoney.com/dataservice",
+                "source_family": "licensed_financial_dataservice_platform",
+                "observed_relevance": "Choice data-service page advertises data interface delivery across assets and macro/industry datasets into enterprise data warehouses",
+                "candidate_strength": "possible_licensed_path_for_eastmoney_major_contracts_or_related_event_data",
+                "admission_status": "candidate_catalog_and_entitlement_review_required",
+                "pit_risk": "data-service page does not prove major-contract endpoint, payload schema, source_published_at, or allowed research/trading storage",
+                "missing_required_evidence": missing_core_evidence.clone(),
+                "allowed_next_action": "verify_whether_choice_entitlement_exposes_major_contracts_or_announcement_event_dataset_with_payload_samples"
+            },
+            {
+                "candidate_id": "juyuan_gildata_platform",
+                "vendor": "Gildata / Hundsun Juyuan",
+                "source_url": "https://www.gildata.com/",
+                "source_family": "licensed_financial_data_platform",
+                "observed_relevance": "public site describes broad financial market data, applied databases and information terminal products",
+                "candidate_strength": "possible_licensed_structured_event_or_announcement_dataset_provider",
+                "admission_status": "candidate_catalog_and_entitlement_review_required",
+                "pit_risk": "public homepage does not prove specific order/capacity/contract/price-chain endpoint or PIT timestamp semantics",
+                "missing_required_evidence": missing_core_evidence.clone(),
+                "allowed_next_action": "request_product_catalog_and_sample_payload_for_listed_company_operation_event_or_announcement_structuring_dataset"
+            }
+        ],
+        "hard_stop_if_missing": [
+            "vendor_terms_allowing_storage_research_internal_trading_use",
+            "source_published_at_or_conservative_available_at_semantics",
+            "historical_payload_samples",
+            "stable_natural_key_and_raw_payload_hash",
+            "symbol_mapping_with_effective_date_or_pre_registered_scope",
+            "event_labels_not_derived_from_future_returns"
+        ],
+        "promotion_gate": blocked_promotion_gate,
+        "fallback_rule": "if_no_candidate_can_supply_terms_history_payload_and_available_at_evidence_then_prepare_announcement_text_broader_universe_pre_registration_instead",
+        "next_step": "select_one_candidate_with_legal_access_then_run_read_only_permission_and_sample_payload_smoke"
+    })
+}
+
+fn phase7_structured_order_capacity_price_chain_cninfo_access_smoke_contract() -> Value {
+    let blocked_promotion_gate = json!({
+        "schema_apply": "blocked",
+        "bounded_sync": "blocked",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked"
+    });
+
+    json!({
+        "audit_version": "p3.25e-cninfo-data-service-access-smoke-contract-v1",
+        "source_id": "structured_order_capacity_contract_price_chain_source",
+        "stage": "P3.25E",
+        "candidate_id": "cninfo_data_service",
+        "mode": "read_only_cninfo_access_and_sample_payload_contract_no_network_no_schema_no_sync",
+        "access_status": "not_configured_or_not_reviewed",
+        "admission_decision": "blocked_cninfo_terms_credentials_endpoint_dictionary_and_sample_payload_required",
+        "why_selected_first": "CNINFO Data Service is the official disclosure/data-service candidate and is closer to source publication semantics than public scraped pages",
+        "selected_candidate": {
+            "vendor": "CNINFO Data Service / Shenzhen Securities Information",
+            "source_url": "https://webapi.cninfo.com.cn/",
+            "source_family": "licensed_timestamped_disclosure_metadata_feed",
+            "target_dataset_candidates": [
+                "listed_company_announcements",
+                "announcement_customization",
+                "thematic_statistics_for_major_contracts_or_operation_events",
+                "industry_chain_or_quantitative_data_service_if_contract_capacity_price_chain_fields_exist"
+            ],
+            "explicit_non_goals": [
+                "do_not_use_public_cninfo_or_eastmoney_web_scraping_as_licensed_source",
+                "do_not_import_current_4_symbol_daily_operation_pilot_rows",
+                "do_not_accept_html_page_timestamp_as_source_published_at_without_payload_proof"
+            ]
+        },
+        "required_local_evidence": [
+            "CNINFO authorized account or API token configured outside source control",
+            "license or terms file reviewed and stored outside repository secrets",
+            "terms explicitly allow local storage for research and internal trading use",
+            "endpoint dictionary identifies operation-event, major-contract, announcement metadata, or industry-chain dataset",
+            "history access range covers 2014-present or declares audited start date",
+            "sample request plan uses read-only calls only and persists no raw rows",
+            "operator records rate limit, cost, and refresh latency budget"
+        ],
+        "required_sample_payload_fields": [
+            "vendor",
+            "vendor_endpoint",
+            "request_key",
+            "vendor_event_id_or_document_id",
+            "symbol_or_company_identifier",
+            "event_type_or_announcement_category",
+            "event_date_or_announcement_date",
+            "source_published_at",
+            "available_at_rule",
+            "source_url_or_document_url",
+            "source_title_or_payload_excerpt",
+            "raw_payload",
+            "raw_payload_hash",
+            "vendor_schema_or_model_version"
+        ],
+        "permission_smoke": {
+            "status": "blocked_no_authorized_access_or_endpoint_dictionary",
+            "network_enabled": false,
+            "db_write_enabled": false,
+            "allowed_after_evidence": [
+                "single_endpoint_read_only_permission_probe",
+                "representative_history_date_probe_2014_2017_2020_2024_latest",
+                "sample_payload_hash_and_timestamp_audit",
+                "symbol_mapping_effective_date_scope_review"
+            ],
+            "forbidden_outputs": [
+                "schema_apply",
+                "raw_sync",
+                "factor_backfill",
+                "p310_diagnostics",
+                "wfa",
+                "v19_train_selection"
+            ]
+        },
+        "available_at_contract": {
+            "daily_rule": "date-only CNINFO announcements or metadata must map to next open trading session until timestamp precision is proven",
+            "intraday_rule": "intraday use requires source_published_at timestamp and decision_timestamp >= source_published_at",
+            "forbidden": [
+                "using vendor ingestion time as source_published_at",
+                "using announcement effective date as available_at",
+                "same-session trading from date-only publication",
+                "event labels inferred from future returns"
+            ]
+        },
+        "stop_rules": [
+            "stop_if_cninfo_terms_do_not_allow_local_storage_research_and_internal_trading_use",
+            "stop_if_no_endpoint_dictionary_for_operation_event_major_contract_or_announcement_metadata",
+            "stop_if_history_access_cannot_cover_2014_to_present_or_declared_start_date",
+            "stop_if_sample_payload_lacks_source_published_at_or_auditable_date_only_publication",
+            "stop_if_payload_lacks_stable_document_or_event_id_and_raw_payload_hash",
+            "stop_if_event_tags_are_equivalent_to_noisy_public_daily_operation_category_without_precision_evidence"
+        ],
+        "promotion_gate": blocked_promotion_gate,
+        "next_step": "obtain_cninfo_terms_endpoint_dictionary_and_authorized_read_only_sample_payload_before_any_network_probe"
+    })
+}
+
+fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_contract() -> Value {
+    let blocked_promotion_gate = json!({
+        "permission_smoke": "blocked_until_manifest_exists_and_manual_review_passes",
+        "schema_apply": "blocked",
+        "bounded_sync": "blocked",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked"
+    });
+
+    json!({
+        "audit_version": "p3.25f-cninfo-operator-evidence-manifest-contract-v1",
+        "source_id": "structured_order_capacity_contract_price_chain_source",
+        "stage": "P3.25F",
+        "candidate_id": "cninfo_data_service",
+        "mode": "read_only_cninfo_operator_evidence_manifest_contract_no_network_no_secret_read_no_schema_no_sync",
+        "admission_decision": "blocked_until_redacted_operator_evidence_manifest_is_reviewed",
+        "why_now": "P3.25E selected CNINFO as the first candidate but correctly blocks network probes until legal, endpoint, history, PIT and sample-payload evidence exists; P3.25F formalizes the external evidence manifest without storing secrets or vendor raw data in the repository",
+        "runtime_actions": {
+            "network_enabled": false,
+            "credential_read_enabled": false,
+            "db_write_enabled": false,
+            "schema_apply_enabled": false,
+            "raw_payload_persistence_enabled": false
+        },
+        "evidence_manifest_contract": {
+            "manifest_env_var": "QUANT_CNINFO_EVIDENCE_MANIFEST_PATH",
+            "manifest_default_location": "operator_controlled_path_outside_git_repository",
+            "repository_storage_policy": "forbid_secrets_raw_payloads_and_vendor_documents_in_repo",
+            "accepted_evidence_categories": [
+                "terms_review_attestation",
+                "credential_presence_attestation_without_secret_value",
+                "endpoint_dictionary_reference",
+                "history_range_attestation",
+                "sample_payload_redacted_hash_evidence",
+                "available_at_source_published_at_semantics_note",
+                "symbol_mapping_scope_note",
+                "rate_limit_cost_refresh_latency_budget"
+            ],
+            "required_manifest_fields": [
+                "artifact_id",
+                "artifact_type",
+                "owner",
+                "review_status",
+                "reviewed_at",
+                "storage_location_type",
+                "content_hash",
+                "redaction_status",
+                "source_effective_start_date",
+                "source_effective_end_date",
+                "pit_relevance",
+                "notes"
+            ],
+            "review_status_allowed_values": [
+                "missing",
+                "pending_review",
+                "reviewed_pass",
+                "reviewed_blocked"
+            ],
+            "minimum_pass_conditions": [
+                "terms_review_attestation_reviewed_pass",
+                "credential_presence_attestation_reviewed_pass_without_secret_value",
+                "endpoint_dictionary_reference_reviewed_pass",
+                "history_range_attestation_covers_2014_to_present_or_declared_start",
+                "sample_payload_redacted_hash_evidence_contains_stable_id_source_published_at_available_at_rule_and_raw_hash",
+                "symbol_mapping_scope_note_reviewed_pass",
+                "rate_limit_cost_refresh_latency_budget_reviewed_pass"
+            ]
+        },
+        "forbidden_manifest_contents": [
+            "api_token_or_password",
+            "raw_vendor_payload_or_full_vendor_document",
+            "unredacted_license_contract",
+            "cookie_session_or_authorization_header",
+            "private_endpoint_secret",
+            "material_non_public_information",
+            "post_event_return_label_or_oos_performance_based_event_direction"
+        ],
+        "manual_review_required": [
+            "legal_or_operator_attestation_terms_allow_local_storage_research_and_internal_trading_use",
+            "endpoint_dictionary_contains_operation_event_major_contract_announcement_metadata_or_industry_chain_dataset",
+            "history_range_covers_2014_to_present_or_has_pre_registered_audited_start_date",
+            "sample_payload_has_source_published_at_or_auditable_date_only_publication_rule",
+            "sample_payload_has_stable_document_or_event_id_and_raw_payload_hash",
+            "available_at_rule_is_next_open_session_for_date_only_publications",
+            "intraday_use_requires_minute_level_source_published_at",
+            "symbol_mapping_has_effective_date_scope_or_pre_registered_market_scope_exclusion",
+            "event_tags_are_not_equivalent_to_noisy_daily_operation_category_without_precision_evidence"
+        ],
+        "allowed_after_manual_review_passes": [
+            "design_read_only_permission_sample_smoke_without_persisting_raw_vendor_rows",
+            "run_single_endpoint_permission_probe_with_operator_supplied_credentials_outside_source_control",
+            "probe_representative_history_dates_2014_2017_2020_2024_latest",
+            "audit_sample_payload_hash_timestamp_available_at_and_symbol_mapping",
+            "decide_schema_contract_only_after_smoke_payload_semantics_pass"
+        ],
+        "stop_rules": [
+            "stop_if_manifest_missing_or_not_operator_reviewed",
+            "stop_if_manifest_contains_secret_or_raw_vendor_payload",
+            "stop_if_terms_do_not_allow_storage_research_and_internal_trading_use",
+            "stop_if_endpoint_dictionary_lacks_target_operation_event_or_metadata_dataset",
+            "stop_if_sample_payload_cannot_prove_source_published_at_or_conservative_available_at",
+            "stop_if_history_access_is_current_snapshot_only_or_forward_revised",
+            "stop_if_symbol_mapping_requires_post_hoc_performance_weights",
+            "stop_if_event_tags_are_return_derived_or_oos_tuned"
+        ],
+        "promotion_gate": blocked_promotion_gate,
+        "fallback_if_evidence_cannot_be_supplied": "return_to_p3.25d_other_candidates_or_prepare_announcement_text_broader_universe_pre_registration_without_rescuing_current_4_symbol_pilot",
+        "next_step": "prepare_redacted_external_cninfo_evidence_manifest_then_manual_review_before_any_read_only_network_probe"
+    })
+}
+
+fn cninfo_operator_evidence_required_categories() -> [&'static str; 7] {
+    [
+        "terms_review_attestation",
+        "credential_presence_attestation_without_secret_value",
+        "endpoint_dictionary_reference",
+        "history_range_attestation",
+        "sample_payload_redacted_hash_evidence",
+        "symbol_mapping_scope_note",
+        "rate_limit_cost_refresh_latency_budget",
+    ]
+}
+
+fn cninfo_operator_evidence_required_fields() -> [&'static str; 12] {
+    [
+        "artifact_id",
+        "artifact_type",
+        "owner",
+        "review_status",
+        "reviewed_at",
+        "storage_location_type",
+        "content_hash",
+        "redaction_status",
+        "source_effective_start_date",
+        "source_effective_end_date",
+        "pit_relevance",
+        "notes",
+    ]
+}
+
+fn cninfo_operator_evidence_forbidden_keys() -> [&'static str; 13] {
+    [
+        "api_token",
+        "password",
+        "cookie",
+        "authorization",
+        "authorization_header",
+        "raw_payload",
+        "raw_vendor_payload",
+        "full_vendor_document",
+        "unredacted_license_contract",
+        "private_endpoint_secret",
+        "secret",
+        "token",
+        "oos_performance_label",
+    ]
+}
+
+fn cninfo_operator_evidence_string_present(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .map(|item| !item.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn collect_cninfo_operator_forbidden_manifest_keys(
+    value: &Value,
+    forbidden: &mut BTreeSet<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            let forbidden_keys: BTreeSet<&str> = cninfo_operator_evidence_forbidden_keys()
+                .into_iter()
+                .collect();
+            for (key, child) in map {
+                let normalized = key.to_ascii_lowercase();
+                if forbidden_keys.contains(normalized.as_str()) {
+                    forbidden.insert(normalized);
+                }
+                collect_cninfo_operator_forbidden_manifest_keys(child, forbidden);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_cninfo_operator_forbidden_manifest_keys(item, forbidden);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn phase7_cninfo_operator_evidence_promotion_gate(permission_smoke: &str) -> Value {
+    json!({
+        "permission_smoke": permission_smoke,
+        "schema_apply": "blocked",
+        "bounded_sync": "blocked",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked"
+    })
+}
+
+fn phase7_cninfo_operator_evidence_runtime_actions() -> Value {
+    json!({
+        "network_enabled": false,
+        "credential_read_enabled": false,
+        "db_write_enabled": false,
+        "schema_apply_enabled": false,
+        "raw_payload_persistence_enabled": false
+    })
+}
+
+fn phase7_cninfo_operator_evidence_privacy_guards() -> Value {
+    json!({
+        "echo_manifest_content": false,
+        "echo_secret_values": false,
+        "echo_raw_payload": false,
+        "echo_vendor_documents": false,
+        "return_only_counts_missing_fields_and_forbidden_key_names": true
+    })
+}
+
+fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_audit_from_manifest(
+    manifest_path: Option<&str>,
+    manifest: Option<&Value>,
+    read_error: Option<&str>,
+) -> Value {
+    let base = |manifest_status: &str, admission_decision: &str, permission_smoke: &str| {
+        json!({
+            "audit_version": "p3.25g-cninfo-operator-evidence-manifest-structure-audit-v1",
+            "source_id": "structured_order_capacity_contract_price_chain_source",
+            "stage": "P3.25G",
+            "candidate_id": "cninfo_data_service",
+            "mode": "read_only_cninfo_operator_evidence_manifest_structure_audit_no_network_no_secret_read_no_schema_no_sync",
+            "manifest_env_var": "QUANT_CNINFO_EVIDENCE_MANIFEST_PATH",
+            "manifest_path_configured": manifest_path
+                .map(|path| !path.trim().is_empty())
+                .unwrap_or(false),
+            "manifest_status": manifest_status,
+            "admission_decision": admission_decision,
+            "runtime_actions": phase7_cninfo_operator_evidence_runtime_actions(),
+            "privacy_guards": phase7_cninfo_operator_evidence_privacy_guards(),
+            "promotion_gate": phase7_cninfo_operator_evidence_promotion_gate(permission_smoke)
+        })
+    };
+
+    let configured_path = manifest_path.map(str::trim).filter(|path| !path.is_empty());
+    if configured_path.is_none() {
+        let mut response = base(
+            "missing_env_var",
+            "blocked_manifest_env_var_not_configured",
+            "blocked_until_manifest_audit_passes",
+        );
+        response["audit_summary"] = json!({
+            "artifact_count": 0,
+            "reviewed_pass_count": 0,
+            "missing_required_category_count": cninfo_operator_evidence_required_categories().len(),
+            "forbidden_manifest_key_count": 0,
+            "missing_required_field_count": 0,
+            "redaction_failure_count": 0
+        });
+        response["missing_required_categories"] =
+            json!(cninfo_operator_evidence_required_categories());
+        response["missing_required_fields"] = json!([]);
+        response["forbidden_manifest_keys"] = json!([]);
+        response["next_step"] =
+            json!("configure_quant_cninfo_evidence_manifest_path_outside_git_repository");
+        return response;
+    }
+
+    if read_error.is_some() {
+        let mut response = base(
+            "manifest_file_unreadable_or_invalid_json",
+            "blocked_manifest_file_unreadable_or_invalid_json",
+            "blocked_until_manifest_audit_passes",
+        );
+        response["read_error_redacted"] = json!(true);
+        response["audit_summary"] = json!({
+            "artifact_count": 0,
+            "reviewed_pass_count": 0,
+            "missing_required_category_count": cninfo_operator_evidence_required_categories().len(),
+            "forbidden_manifest_key_count": 0,
+            "missing_required_field_count": 0,
+            "redaction_failure_count": 0
+        });
+        response["missing_required_categories"] =
+            json!(cninfo_operator_evidence_required_categories());
+        response["missing_required_fields"] = json!([]);
+        response["forbidden_manifest_keys"] = json!([]);
+        response["next_step"] =
+            json!("fix_external_manifest_readability_or_json_structure_without_committing_secrets");
+        return response;
+    }
+
+    let Some(manifest) = manifest else {
+        let mut response = base(
+            "manifest_json_missing",
+            "blocked_manifest_json_missing",
+            "blocked_until_manifest_audit_passes",
+        );
+        response["audit_summary"] = json!({
+            "artifact_count": 0,
+            "reviewed_pass_count": 0,
+            "missing_required_category_count": cninfo_operator_evidence_required_categories().len(),
+            "forbidden_manifest_key_count": 0,
+            "missing_required_field_count": 0,
+            "redaction_failure_count": 0
+        });
+        response["missing_required_categories"] =
+            json!(cninfo_operator_evidence_required_categories());
+        response["missing_required_fields"] = json!([]);
+        response["forbidden_manifest_keys"] = json!([]);
+        response["next_step"] = json!("provide_external_redacted_json_manifest");
+        return response;
+    };
+
+    let artifacts = manifest
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let artifact_count = artifacts.len();
+    let mut present_categories = BTreeSet::new();
+    let mut missing_required_fields = BTreeSet::new();
+    let mut reviewed_pass_count = 0usize;
+    let mut redaction_failure_count = 0usize;
+
+    for artifact in &artifacts {
+        for field in cninfo_operator_evidence_required_fields() {
+            if !cninfo_operator_evidence_string_present(artifact.get(field)) {
+                missing_required_fields.insert(field.to_string());
+            }
+        }
+        if let Some(artifact_type) = artifact.get("artifact_type").and_then(Value::as_str) {
+            present_categories.insert(artifact_type.to_string());
+        }
+        if artifact
+            .get("review_status")
+            .and_then(Value::as_str)
+            .map(|status| status == "reviewed_pass")
+            .unwrap_or(false)
+        {
+            reviewed_pass_count += 1;
+        }
+        let redacted = artifact
+            .get("redaction_status")
+            .and_then(Value::as_str)
+            .map(|status| status.contains("redacted") && !status.contains("unredacted"))
+            .unwrap_or(false);
+        if !redacted {
+            redaction_failure_count += 1;
+        }
+    }
+
+    let missing_required_categories: Vec<String> = cninfo_operator_evidence_required_categories()
+        .into_iter()
+        .filter(|category| !present_categories.contains(*category))
+        .map(ToString::to_string)
+        .collect();
+    let mut forbidden_manifest_keys = BTreeSet::new();
+    collect_cninfo_operator_forbidden_manifest_keys(manifest, &mut forbidden_manifest_keys);
+    let forbidden_manifest_keys: Vec<String> = forbidden_manifest_keys.into_iter().collect();
+    let missing_required_fields: Vec<String> = missing_required_fields.into_iter().collect();
+
+    let top_level_valid = manifest
+        .get("source_id")
+        .and_then(Value::as_str)
+        .map(|source_id| source_id == "structured_order_capacity_contract_price_chain_source")
+        .unwrap_or(false)
+        && manifest
+            .get("candidate_id")
+            .and_then(Value::as_str)
+            .map(|candidate_id| candidate_id == "cninfo_data_service")
+            .unwrap_or(false);
+    let structure_passed = top_level_valid
+        && artifact_count > 0
+        && reviewed_pass_count == artifact_count
+        && redaction_failure_count == 0
+        && missing_required_categories.is_empty()
+        && missing_required_fields.is_empty()
+        && forbidden_manifest_keys.is_empty();
+
+    let (manifest_status, admission_decision, permission_smoke) =
+        if !forbidden_manifest_keys.is_empty() {
+            (
+                "forbidden_content_detected",
+                "blocked_manifest_contains_forbidden_secret_or_raw_payload_fields",
+                "blocked_until_manifest_audit_passes",
+            )
+        } else if structure_passed {
+            (
+                "structure_passed",
+                "passed_for_read_only_permission_sample_smoke_design_only",
+                "allowed_read_only_sample_smoke_design_only",
+            )
+        } else {
+            (
+                "structure_incomplete_or_not_reviewed",
+                "blocked_manifest_structure_or_review_incomplete",
+                "blocked_until_manifest_audit_passes",
+            )
+        };
+
+    let mut response = base(manifest_status, admission_decision, permission_smoke);
+    response["audit_summary"] = json!({
+        "artifact_count": artifact_count,
+        "reviewed_pass_count": reviewed_pass_count,
+        "missing_required_category_count": missing_required_categories.len(),
+        "forbidden_manifest_key_count": forbidden_manifest_keys.len(),
+        "missing_required_field_count": missing_required_fields.len(),
+        "redaction_failure_count": redaction_failure_count,
+        "top_level_source_candidate_valid": top_level_valid
+    });
+    response["missing_required_categories"] = json!(missing_required_categories);
+    response["missing_required_fields"] = json!(missing_required_fields);
+    response["forbidden_manifest_keys"] = json!(forbidden_manifest_keys);
+    response["allowed_after_pass"] = json!([
+        "design_read_only_permission_sample_smoke_without_persisting_raw_vendor_rows",
+        "run_single_endpoint_permission_probe_only_with_operator_supplied_credentials",
+        "probe_representative_history_dates_and_sample_payload_hash_timestamp_semantics"
+    ]);
+    response["still_forbidden_after_pass"] = json!([
+        "schema_apply",
+        "bounded_sync",
+        "factor_builder",
+        "p310_diagnostics",
+        "bounded_wfa",
+        "v19_train_selection"
+    ]);
+    response["next_step"] = if structure_passed {
+        json!("design_cninfo_read_only_permission_sample_smoke_without_raw_payload_persistence")
+    } else {
+        json!("fix_external_redacted_manifest_then_repeat_structure_audit_before_any_network_probe")
+    };
+    response
+}
+
+fn phase7_structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan() -> Value {
+    let promotion_gate = json!({
+        "permission_smoke": "blocked_until_p3_25g_manifest_audit_passes",
+        "schema_apply": "blocked",
+        "bounded_sync": "blocked",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked"
+    });
+
+    json!({
+        "audit_version": "p3.25h-cninfo-permission-sample-smoke-plan-v1",
+        "source_id": "structured_order_capacity_contract_price_chain_source",
+        "stage": "P3.25H",
+        "candidate_id": "cninfo_data_service",
+        "mode": "read_only_cninfo_permission_sample_smoke_plan_no_network_no_secret_read_no_db_write_no_schema_no_sync",
+        "admission_decision": "blocked_until_p3_25g_manifest_audit_passes",
+        "why_now": "P3.25G can verify that external redacted CNINFO evidence is structurally reviewed; P3.25H defines the next read-only single-endpoint smoke plan but still performs no network call, credential read, DB write, schema apply, raw sync, factor build or training",
+        "preconditions": {
+            "required_previous_gate": "P3.25G",
+            "required_previous_gate_endpoint": "GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-audit",
+            "required_previous_gate_decision": "passed_for_read_only_permission_sample_smoke_design_only",
+            "manifest_env_var": "QUANT_CNINFO_EVIDENCE_MANIFEST_PATH",
+            "credential_source": "operator_supplied_outside_source_control_only_after_manifest_audit_passes",
+            "blocked_current_production_reason": "manifest_audit_is_not_passed_or_not_configured"
+        },
+        "runtime_actions": {
+            "network_enabled": false,
+            "credential_read_enabled": false,
+            "db_write_enabled": false,
+            "schema_apply_enabled": false,
+            "raw_payload_persistence_enabled": false
+        },
+        "smoke_plan": {
+            "endpoint_scope": "single_endpoint_only",
+            "max_endpoints_per_run": 1,
+            "max_sample_rows_per_probe": 20,
+            "persist_raw_rows": false,
+            "persist_credentials": false,
+            "capture_raw_payload_in_repo": false,
+            "sample_payload_handling": "hash_and_redacted_shape_only_no_raw_payload_return",
+            "representative_history_dates": [
+                "2014-01-02",
+                "2017-01-03",
+                "2020-07-01",
+                "2024-01-02",
+                "latest_completed_publication_or_trading_date"
+            ],
+            "target_endpoint_candidates_from_manifest_only": [
+                "operation_event_or_major_contract_endpoint",
+                "timestamped_announcement_metadata_endpoint",
+                "industry_chain_or_price_capacity_order_dataset_if_manifest_reviewed"
+            ],
+            "expected_probe_outputs": [
+                "permission_status",
+                "endpoint_name_or_id_hash",
+                "history_date_status_by_probe_date",
+                "sample_row_count_by_probe_date",
+                "schema_field_presence_summary",
+                "source_published_at_quality_summary",
+                "available_at_rule_summary",
+                "stable_id_and_raw_hash_presence_summary",
+                "symbol_mapping_presence_summary"
+            ]
+        },
+        "required_sample_payload_fields": [
+            "vendor",
+            "vendor_endpoint",
+            "request_key",
+            "vendor_event_id_or_document_id",
+            "symbol_or_company_identifier",
+            "event_type_or_announcement_category",
+            "event_date_or_announcement_date",
+            "source_published_at",
+            "available_at_rule",
+            "source_url_or_document_url",
+            "source_title_or_payload_excerpt",
+            "raw_payload_hash",
+            "vendor_schema_or_model_version"
+        ],
+        "pit_and_available_at_rules": {
+            "date_only_publication": "available_at must be next open trading session",
+            "intraday_publication": "decision_timestamp must be >= source_published_at",
+            "weekend_or_holiday_publication": "available_at maps to next open trading session",
+            "forbidden": [
+                "using vendor ingestion time as source_published_at",
+                "using effective date as available_at",
+                "same_session_trading_from_date_only_publication",
+                "event_direction_from_future_returns_or_oos_performance"
+            ]
+        },
+        "forbidden_outputs": [
+            "raw_vendor_payload_persistence",
+            "credential_or_token_echo",
+            "schema_apply",
+            "bounded_sync",
+            "factor_backfill",
+            "p310_diagnostics",
+            "bounded_wfa",
+            "v19_train_selection",
+            "full_history_pull",
+            "multi_endpoint_probe"
+        ],
+        "stop_rules": [
+            "stop_if_p3_25g_manifest_audit_not_passed",
+            "stop_if_endpoint_selected_outside_reviewed_manifest",
+            "stop_if_probe_would_persist_raw_vendor_payload",
+            "stop_if_probe_requires_more_than_one_endpoint",
+            "stop_if_sample_payload_lacks_source_published_at_or_conservative_available_at_rule",
+            "stop_if_history_probe_cannot_cover_2014_2017_2020_2024_latest_or_declared_start",
+            "stop_if_symbol_mapping_is_current_snapshot_only_or_post_hoc",
+            "stop_if_event_tags_are_equivalent_to_noisy_daily_operation_category_without_precision_evidence"
+        ],
+        "promotion_gate": promotion_gate,
+        "allowed_next_implementation_after_precondition_passes": "implement_cninfo_single_endpoint_read_only_permission_sample_smoke_executor_no_raw_persistence",
+        "next_step": "wait_for_p3_25g_manifest_audit_pass_then_implement_single_endpoint_read_only_permission_sample_smoke_executor"
+    })
+}
+
+fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template() -> Value
+{
+    let artifacts: Vec<Value> = cninfo_operator_evidence_required_categories()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, artifact_type)| {
+            json!({
+                "artifact_id": format!("replace_me_cninfo_evidence_{:02}", idx + 1),
+                "artifact_type": artifact_type,
+                "owner": "replace_me_operator_or_reviewer",
+                "review_status": "missing",
+                "reviewed_at": "replace_me_iso8601_after_manual_review",
+                "storage_location_type": "external_operator_controlled_redacted_reference",
+                "content_hash": "replace_me_sha256_of_redacted_evidence_metadata_or_document_reference",
+                "redaction_status": "missing",
+                "source_effective_start_date": "replace_me_yyyy_mm_dd_or_declared_start",
+                "source_effective_end_date": "replace_me_yyyy_mm_dd_or_present",
+                "pit_relevance": "replace_me_why_this_artifact_supports_cninfo_pit_source_admission",
+                "notes": "replace_me_redacted_summary_no_secret_no_raw_payload_no_vendor_document"
+            })
+        })
+        .collect();
+
+    json!({
+        "audit_version": "p3.25i-cninfo-operator-evidence-manifest-template-v1",
+        "source_id": "structured_order_capacity_contract_price_chain_source",
+        "stage": "P3.25I",
+        "candidate_id": "cninfo_data_service",
+        "mode": "read_only_cninfo_operator_evidence_manifest_template_no_network_no_secret_no_db_write",
+        "admission_decision": "template_only_not_evidence_blocked_until_operator_review_replaces_placeholders",
+        "why_now": "P3.25G/H correctly block real CNINFO probes until an external redacted evidence manifest exists; P3.25I provides a machine-auditable template so operators can prepare evidence without committing secrets, raw payloads or vendor documents",
+        "runtime_actions": {
+            "network_enabled": false,
+            "credential_read_enabled": false,
+            "db_write_enabled": false,
+            "schema_apply_enabled": false,
+            "raw_payload_persistence_enabled": false
+        },
+        "template_policy": {
+            "template_can_pass_p3_25g_without_operator_review": false,
+            "must_be_stored_outside_git_repository": true,
+            "must_replace_all_placeholders": true,
+            "must_set_review_status_to_reviewed_pass_only_after_manual_review": true,
+            "must_not_include_secret_values_raw_vendor_payloads_or_full_vendor_documents": true
+        },
+        "manifest_env_var": "QUANT_CNINFO_EVIDENCE_MANIFEST_PATH",
+        "suggested_external_path": "operator_controlled_path_outside_git_repository/cninfo_manifest.redacted.json",
+        "manifest_template": {
+            "manifest_version": "p3.25i-cninfo-operator-evidence-manifest-template-v1",
+            "source_id": "structured_order_capacity_contract_price_chain_source",
+            "candidate_id": "cninfo_data_service",
+            "artifacts": artifacts
+        },
+        "operator_fill_instructions": [
+            "copy_manifest_template_to_operator_controlled_path_outside_git_repository",
+            "replace_every_replace_me_placeholder_with_redacted_metadata_or_hash_only",
+            "keep_credential_values_contract_text_raw_payloads_and_vendor_documents_out_of_manifest",
+            "set_review_status_reviewed_pass_only_after_legal_operator_manual_review",
+            "configure_quant_cninfo_evidence_manifest_path_to_the_external_manifest",
+            "rerun_p3_25g_operator_evidence_audit"
+        ],
+        "forbidden_manifest_contents": [
+            "api_token",
+            "password",
+            "cookie",
+            "authorization",
+            "authorization_header",
+            "raw_payload",
+            "raw_vendor_payload",
+            "full_vendor_document",
+            "unredacted_license_contract",
+            "private_endpoint_secret",
+            "material_non_public_information",
+            "oos_performance_label"
+        ],
+        "promotion_gate": {
+            "manifest_audit": "blocked_until_operator_replaces_template_and_manual_review_passes",
+            "permission_smoke": "blocked_until_p3_25g_manifest_audit_passes",
+            "schema_apply": "blocked",
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "operator_prepares_external_redacted_manifest_then_reruns_p3_25g_audit"
+    })
+}
+
 fn ddl_contains_all(ddl: &str, required: &[&str]) -> (Vec<String>, Vec<String>) {
     let mut present = Vec::new();
     let mut missing = Vec::new();
@@ -16612,6 +17477,77 @@ pub async fn structured_order_capacity_price_chain_vendor_admission_plan() -> im
     }))
 }
 
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/source-evidence-inventory
+pub async fn structured_order_capacity_price_chain_source_evidence_inventory() -> impl IntoResponse
+{
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_source_evidence_inventory()
+    }))
+}
+
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-access-smoke-contract
+pub async fn structured_order_capacity_price_chain_cninfo_access_smoke_contract(
+) -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_cninfo_access_smoke_contract()
+    }))
+}
+
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-contract
+pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_contract(
+) -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_contract()
+    }))
+}
+
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-audit
+pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_audit(
+) -> impl IntoResponse {
+    let manifest_path = env::var("QUANT_CNINFO_EVIDENCE_MANIFEST_PATH").ok();
+    let parsed_manifest = manifest_path.as_deref().and_then(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+    });
+    let read_error = match manifest_path.as_deref() {
+        Some(path) if !path.trim().is_empty() && parsed_manifest.is_none() => {
+            Some("manifest_file_unreadable_or_invalid_json")
+        }
+        _ => None,
+    };
+
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_audit_from_manifest(
+            manifest_path.as_deref(),
+            parsed_manifest.as_ref(),
+            read_error,
+        )
+    }))
+}
+
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-permission-sample-smoke-plan
+pub async fn structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan(
+) -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan()
+    }))
+}
+
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-manifest-template
+pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template(
+) -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template()
+    }))
+}
+
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review
 pub async fn exchange_announcement_order_capacity_manual_schema_review() -> impl IntoResponse {
     Json(json!({
@@ -23733,6 +24669,45 @@ pub async fn sync_financial(
 mod tests {
     use super::*;
 
+    fn cninfo_operator_evidence_reviewed_pass_manifest_fixture() -> Value {
+        let artifact_types = [
+            "terms_review_attestation",
+            "credential_presence_attestation_without_secret_value",
+            "endpoint_dictionary_reference",
+            "history_range_attestation",
+            "sample_payload_redacted_hash_evidence",
+            "symbol_mapping_scope_note",
+            "rate_limit_cost_refresh_latency_budget",
+        ];
+        let artifacts: Vec<Value> = artifact_types
+            .iter()
+            .enumerate()
+            .map(|(idx, artifact_type)| {
+                json!({
+                    "artifact_id": format!("cninfo-evidence-{:02}", idx + 1),
+                    "artifact_type": artifact_type,
+                    "owner": "operator",
+                    "review_status": "reviewed_pass",
+                    "reviewed_at": "2026-06-27T10:00:00Z",
+                    "storage_location_type": "external_operator_controlled_redacted_reference",
+                    "content_hash": format!("sha256:{:064x}", idx + 1),
+                    "redaction_status": "redacted_metadata_only",
+                    "source_effective_start_date": "2014-01-01",
+                    "source_effective_end_date": "2026-06-27",
+                    "pit_relevance": "required_for_cninfo_source_admission",
+                    "notes": "redacted evidence metadata only"
+                })
+            })
+            .collect();
+
+        json!({
+            "manifest_version": "p3.25g-cninfo-operator-evidence-manifest-v1",
+            "source_id": "structured_order_capacity_contract_price_chain_source",
+            "candidate_id": "cninfo_data_service",
+            "artifacts": artifacts
+        })
+    }
+
     #[test]
     fn parse_health_date_accepts_html_and_compact_dates() {
         assert_eq!(
@@ -26064,6 +27039,527 @@ mod tests {
         assert_eq!(
             plan["fallback_if_no_usable_vendor"],
             "switch_to_announcement_text_broader_universe_pre_registered_plan_without_rescuing_current_4_symbol_pilot"
+        );
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_source_evidence_inventory_records_real_candidates() {
+        let inventory = phase7_structured_order_capacity_price_chain_source_evidence_inventory();
+
+        assert_eq!(
+            inventory["source_id"],
+            "structured_order_capacity_contract_price_chain_source"
+        );
+        assert_eq!(inventory["stage"], "P3.25D");
+        assert_eq!(
+            inventory["mode"],
+            "read_only_source_evidence_inventory_no_permission_probe_no_schema_no_sync"
+        );
+        assert_eq!(
+            inventory["admission_decision"],
+            "blocked_no_candidate_has_complete_vendor_terms_history_payload_and_available_at_evidence"
+        );
+
+        let candidates = inventory["candidate_evidence"].as_array().unwrap();
+        let by_id: BTreeMap<&str, &Value> = candidates
+            .iter()
+            .map(|candidate| (candidate["candidate_id"].as_str().unwrap(), candidate))
+            .collect();
+
+        assert!(by_id.contains_key("cninfo_data_service"));
+        assert!(by_id.contains_key("eastmoney_major_contracts_public_page"));
+        assert!(by_id.contains_key("cnopendata_major_contracts_dataset"));
+        assert!(by_id.contains_key("wind_client_api_platform"));
+        assert!(by_id.contains_key("choice_dataservice_platform"));
+        assert!(by_id.contains_key("juyuan_gildata_platform"));
+        assert_eq!(
+            by_id["eastmoney_major_contracts_public_page"]["admission_status"],
+            "blocked_public_web_page_not_licensed_api"
+        );
+        assert_eq!(
+            by_id["cninfo_data_service"]["admission_status"],
+            "candidate_permission_sample_smoke_required"
+        );
+        for candidate in candidates {
+            assert!(candidate["source_url"].is_string());
+            assert!(candidate["observed_relevance"].is_string());
+            assert!(candidate["missing_required_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item
+                    == "license_or_terms_allow_storage_research_and_internal_trading_use"));
+            assert!(candidate["missing_required_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == "read_only_sample_payload_with_source_published_at"));
+        }
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_source_evidence_inventory_blocks_downstream_gates() {
+        let inventory = phase7_structured_order_capacity_price_chain_source_evidence_inventory();
+
+        assert_eq!(
+            inventory["permission_smoke"],
+            "blocked_until_candidate_access_configured"
+        );
+        assert_eq!(inventory["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(inventory["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(inventory["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(inventory["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(inventory["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(
+            inventory["promotion_gate"]["v19_train_selection"],
+            "blocked"
+        );
+        assert!(inventory["hard_stop_if_missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "vendor_terms_allowing_storage_research_internal_trading_use"));
+        assert_eq!(
+            inventory["next_step"],
+            "select_one_candidate_with_legal_access_then_run_read_only_permission_and_sample_payload_smoke"
+        );
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_access_smoke_contract_selects_official_candidate(
+    ) {
+        let contract = phase7_structured_order_capacity_price_chain_cninfo_access_smoke_contract();
+
+        assert_eq!(
+            contract["source_id"],
+            "structured_order_capacity_contract_price_chain_source"
+        );
+        assert_eq!(contract["stage"], "P3.25E");
+        assert_eq!(contract["candidate_id"], "cninfo_data_service");
+        assert_eq!(
+            contract["mode"],
+            "read_only_cninfo_access_and_sample_payload_contract_no_network_no_schema_no_sync"
+        );
+        assert_eq!(
+            contract["admission_decision"],
+            "blocked_cninfo_terms_credentials_endpoint_dictionary_and_sample_payload_required"
+        );
+        assert_eq!(
+            contract["selected_candidate"]["source_url"],
+            "https://webapi.cninfo.com.cn/"
+        );
+        assert!(contract["required_local_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item
+                == "CNINFO authorized account or API token configured outside source control"));
+        assert!(contract["required_sample_payload_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "source_published_at"));
+        assert!(contract["required_sample_payload_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "raw_payload_hash"));
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_access_smoke_contract_blocks_until_evidence_exists(
+    ) {
+        let contract = phase7_structured_order_capacity_price_chain_cninfo_access_smoke_contract();
+
+        assert_eq!(contract["access_status"], "not_configured_or_not_reviewed");
+        assert_eq!(
+            contract["permission_smoke"]["status"],
+            "blocked_no_authorized_access_or_endpoint_dictionary"
+        );
+        assert_eq!(contract["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(contract["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(contract["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+        assert!(contract["stop_rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "stop_if_cninfo_terms_do_not_allow_local_storage_research_and_internal_trading_use"));
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_operator_evidence_contract_defines_external_manifest_without_secrets(
+    ) {
+        let contract =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_contract();
+
+        assert_eq!(
+            contract["source_id"],
+            "structured_order_capacity_contract_price_chain_source"
+        );
+        assert_eq!(contract["stage"], "P3.25F");
+        assert_eq!(contract["candidate_id"], "cninfo_data_service");
+        assert_eq!(
+            contract["mode"],
+            "read_only_cninfo_operator_evidence_manifest_contract_no_network_no_secret_read_no_schema_no_sync"
+        );
+        assert_eq!(
+            contract["admission_decision"],
+            "blocked_until_redacted_operator_evidence_manifest_is_reviewed"
+        );
+        assert_eq!(
+            contract["evidence_manifest_contract"]["manifest_env_var"],
+            "QUANT_CNINFO_EVIDENCE_MANIFEST_PATH"
+        );
+        assert_eq!(
+            contract["evidence_manifest_contract"]["repository_storage_policy"],
+            "forbid_secrets_raw_payloads_and_vendor_documents_in_repo"
+        );
+        assert!(
+            contract["evidence_manifest_contract"]["accepted_evidence_categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == "terms_review_attestation")
+        );
+        assert!(
+            contract["evidence_manifest_contract"]["accepted_evidence_categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == "sample_payload_redacted_hash_evidence")
+        );
+        assert!(
+            contract["evidence_manifest_contract"]["required_manifest_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == "artifact_id")
+        );
+        assert!(contract["forbidden_manifest_contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "api_token_or_password"));
+        assert!(contract["forbidden_manifest_contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "raw_vendor_payload_or_full_vendor_document"));
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_operator_evidence_contract_blocks_downstream_until_reviewed(
+    ) {
+        let contract =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_contract();
+
+        assert_eq!(contract["runtime_actions"]["network_enabled"], false);
+        assert_eq!(
+            contract["runtime_actions"]["credential_read_enabled"],
+            false
+        );
+        assert_eq!(contract["runtime_actions"]["db_write_enabled"], false);
+        assert_eq!(
+            contract["promotion_gate"]["permission_smoke"],
+            "blocked_until_manifest_exists_and_manual_review_passes"
+        );
+        assert_eq!(contract["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(contract["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(contract["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+        assert!(contract["manual_review_required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "legal_or_operator_attestation_terms_allow_local_storage_research_and_internal_trading_use"));
+        assert!(contract["stop_rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "stop_if_manifest_contains_secret_or_raw_vendor_payload"));
+        assert_eq!(
+            contract["next_step"],
+            "prepare_redacted_external_cninfo_evidence_manifest_then_manual_review_before_any_read_only_network_probe"
+        );
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_operator_evidence_audit_blocks_when_manifest_path_missing(
+    ) {
+        let audit =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_audit_from_manifest(
+                None, None, None,
+            );
+
+        assert_eq!(audit["stage"], "P3.25G");
+        assert_eq!(audit["candidate_id"], "cninfo_data_service");
+        assert_eq!(
+            audit["mode"],
+            "read_only_cninfo_operator_evidence_manifest_structure_audit_no_network_no_secret_read_no_schema_no_sync"
+        );
+        assert_eq!(audit["manifest_status"], "missing_env_var");
+        assert_eq!(
+            audit["admission_decision"],
+            "blocked_manifest_env_var_not_configured"
+        );
+        assert_eq!(audit["runtime_actions"]["network_enabled"], false);
+        assert_eq!(audit["runtime_actions"]["credential_read_enabled"], false);
+        assert_eq!(audit["runtime_actions"]["db_write_enabled"], false);
+        assert_eq!(
+            audit["promotion_gate"]["permission_smoke"],
+            "blocked_until_manifest_audit_passes"
+        );
+        assert_eq!(audit["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(audit["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(audit["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(audit["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(audit["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(audit["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_operator_evidence_audit_passes_redacted_manifest_structure_only(
+    ) {
+        let manifest = cninfo_operator_evidence_reviewed_pass_manifest_fixture();
+        let audit =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_audit_from_manifest(
+                Some("/Users/gaocheng/.quant/evidence/cninfo_manifest.redacted.json"),
+                Some(&manifest),
+                None,
+            );
+
+        assert_eq!(audit["stage"], "P3.25G");
+        assert_eq!(audit["manifest_status"], "structure_passed");
+        assert_eq!(
+            audit["admission_decision"],
+            "passed_for_read_only_permission_sample_smoke_design_only"
+        );
+        assert_eq!(
+            audit["promotion_gate"]["permission_smoke"],
+            "allowed_read_only_sample_smoke_design_only"
+        );
+        assert_eq!(audit["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(audit["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(audit["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(audit["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(audit["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(audit["promotion_gate"]["v19_train_selection"], "blocked");
+        assert_eq!(audit["audit_summary"]["artifact_count"], 7);
+        assert_eq!(audit["audit_summary"]["reviewed_pass_count"], 7);
+        assert_eq!(audit["audit_summary"]["missing_required_category_count"], 0);
+        assert_eq!(audit["audit_summary"]["forbidden_manifest_key_count"], 0);
+        assert_eq!(audit["privacy_guards"]["echo_manifest_content"], false);
+        assert_eq!(audit["privacy_guards"]["echo_secret_values"], false);
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_operator_evidence_audit_blocks_forbidden_manifest_keys(
+    ) {
+        let mut manifest = cninfo_operator_evidence_reviewed_pass_manifest_fixture();
+        let artifacts = manifest["artifacts"].as_array_mut().unwrap();
+        artifacts[0]["api_token"] = json!("must_not_be_returned");
+        artifacts[1]["raw_payload"] = json!({"vendor": "must_not_be_returned"});
+
+        let audit =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_audit_from_manifest(
+                Some("/Users/gaocheng/.quant/evidence/cninfo_manifest.redacted.json"),
+                Some(&manifest),
+                None,
+            );
+
+        assert_eq!(audit["manifest_status"], "forbidden_content_detected");
+        assert_eq!(
+            audit["admission_decision"],
+            "blocked_manifest_contains_forbidden_secret_or_raw_payload_fields"
+        );
+        assert_eq!(audit["audit_summary"]["forbidden_manifest_key_count"], 2);
+        assert!(audit["forbidden_manifest_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "api_token"));
+        assert!(audit["forbidden_manifest_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "raw_payload"));
+        assert_eq!(audit["privacy_guards"]["echo_manifest_content"], false);
+        assert_eq!(audit["privacy_guards"]["echo_secret_values"], false);
+        assert_eq!(
+            audit["promotion_gate"]["permission_smoke"],
+            "blocked_until_manifest_audit_passes"
+        );
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan_requires_manifest_audit_pass(
+    ) {
+        let plan =
+            phase7_structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan();
+
+        assert_eq!(plan["stage"], "P3.25H");
+        assert_eq!(plan["candidate_id"], "cninfo_data_service");
+        assert_eq!(
+            plan["mode"],
+            "read_only_cninfo_permission_sample_smoke_plan_no_network_no_secret_read_no_db_write_no_schema_no_sync"
+        );
+        assert_eq!(
+            plan["admission_decision"],
+            "blocked_until_p3_25g_manifest_audit_passes"
+        );
+        assert_eq!(plan["preconditions"]["required_previous_gate"], "P3.25G");
+        assert_eq!(
+            plan["preconditions"]["required_previous_gate_decision"],
+            "passed_for_read_only_permission_sample_smoke_design_only"
+        );
+        assert_eq!(plan["runtime_actions"]["network_enabled"], false);
+        assert_eq!(plan["runtime_actions"]["credential_read_enabled"], false);
+        assert_eq!(plan["runtime_actions"]["db_write_enabled"], false);
+        assert_eq!(
+            plan["promotion_gate"]["permission_smoke"],
+            "blocked_until_p3_25g_manifest_audit_passes"
+        );
+        assert_eq!(plan["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(plan["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan_is_single_endpoint_read_only(
+    ) {
+        let plan =
+            phase7_structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan();
+
+        assert_eq!(plan["smoke_plan"]["endpoint_scope"], "single_endpoint_only");
+        assert_eq!(plan["smoke_plan"]["max_endpoints_per_run"], 1);
+        assert_eq!(plan["smoke_plan"]["max_sample_rows_per_probe"], 20);
+        assert_eq!(plan["smoke_plan"]["persist_raw_rows"], false);
+        assert_eq!(plan["smoke_plan"]["persist_credentials"], false);
+        assert_eq!(plan["smoke_plan"]["capture_raw_payload_in_repo"], false);
+        assert!(plan["smoke_plan"]["representative_history_dates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "2014-01-02"));
+        assert!(plan["smoke_plan"]["representative_history_dates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "latest_completed_publication_or_trading_date"));
+        assert!(plan["required_sample_payload_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "source_published_at"));
+        assert!(plan["required_sample_payload_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "available_at_rule"));
+        assert!(plan["required_sample_payload_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "raw_payload_hash"));
+        assert!(plan["forbidden_outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "raw_vendor_payload_persistence"));
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template_lists_required_categories_without_secrets(
+    ) {
+        let template =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template(
+            );
+
+        assert_eq!(template["stage"], "P3.25I");
+        assert_eq!(template["candidate_id"], "cninfo_data_service");
+        assert_eq!(
+            template["mode"],
+            "read_only_cninfo_operator_evidence_manifest_template_no_network_no_secret_no_db_write"
+        );
+        assert_eq!(
+            template["admission_decision"],
+            "template_only_not_evidence_blocked_until_operator_review_replaces_placeholders"
+        );
+        assert_eq!(template["runtime_actions"]["network_enabled"], false);
+        assert_eq!(
+            template["runtime_actions"]["credential_read_enabled"],
+            false
+        );
+        assert_eq!(template["runtime_actions"]["db_write_enabled"], false);
+        assert_eq!(
+            template["template_policy"]["template_can_pass_p3_25g_without_operator_review"],
+            false
+        );
+
+        let manifest = &template["manifest_template"];
+        assert_eq!(
+            manifest["source_id"],
+            "structured_order_capacity_contract_price_chain_source"
+        );
+        assert_eq!(manifest["candidate_id"], "cninfo_data_service");
+        let artifacts = manifest["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 7);
+        let by_type: BTreeMap<&str, &Value> = artifacts
+            .iter()
+            .map(|artifact| (artifact["artifact_type"].as_str().unwrap(), artifact))
+            .collect();
+        assert!(by_type.contains_key("terms_review_attestation"));
+        assert!(by_type.contains_key("credential_presence_attestation_without_secret_value"));
+        assert!(by_type.contains_key("endpoint_dictionary_reference"));
+        assert!(by_type.contains_key("history_range_attestation"));
+        assert!(by_type.contains_key("sample_payload_redacted_hash_evidence"));
+        assert!(by_type.contains_key("symbol_mapping_scope_note"));
+        assert!(by_type.contains_key("rate_limit_cost_refresh_latency_budget"));
+        for artifact in artifacts {
+            assert_eq!(artifact["review_status"], "missing");
+            assert!(artifact.get("api_token").is_none());
+            assert!(artifact.get("raw_payload").is_none());
+            assert!(artifact.get("authorization").is_none());
+        }
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template_does_not_pass_audit(
+    ) {
+        let template =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template(
+            );
+        let manifest = &template["manifest_template"];
+        let audit =
+            phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_audit_from_manifest(
+                Some("/Users/gaocheng/.quant/evidence/cninfo_manifest.template.json"),
+                Some(manifest),
+                None,
+            );
+
+        assert_eq!(
+            audit["manifest_status"],
+            "structure_incomplete_or_not_reviewed"
+        );
+        assert_eq!(
+            audit["admission_decision"],
+            "blocked_manifest_structure_or_review_incomplete"
+        );
+        assert_eq!(audit["audit_summary"]["artifact_count"], 7);
+        assert_eq!(audit["audit_summary"]["reviewed_pass_count"], 0);
+        assert_eq!(audit["audit_summary"]["missing_required_category_count"], 0);
+        assert_eq!(audit["audit_summary"]["forbidden_manifest_key_count"], 0);
+        assert_eq!(
+            audit["promotion_gate"]["permission_smoke"],
+            "blocked_until_manifest_audit_passes"
         );
     }
 

@@ -268,6 +268,30 @@ async fn main() {
             get(routes::sync::structured_order_capacity_price_chain_vendor_admission_plan),
         )
         .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/source-evidence-inventory",
+            get(routes::sync::structured_order_capacity_price_chain_source_evidence_inventory),
+        )
+        .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/cninfo-access-smoke-contract",
+            get(routes::sync::structured_order_capacity_price_chain_cninfo_access_smoke_contract),
+        )
+        .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-contract",
+            get(routes::sync::structured_order_capacity_price_chain_cninfo_operator_evidence_contract),
+        )
+        .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-audit",
+            get(routes::sync::structured_order_capacity_price_chain_cninfo_operator_evidence_audit),
+        )
+        .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/cninfo-permission-sample-smoke-plan",
+            get(routes::sync::structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan),
+        )
+        .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-manifest-template",
+            get(routes::sync::structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template),
+        )
+        .route(
             "/api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review",
             get(routes::sync::exchange_announcement_order_capacity_manual_schema_review),
         )
