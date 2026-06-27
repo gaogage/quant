@@ -64,6 +64,14 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     // 2. 加载策略配置（A股选股方式 + ETF + 杠杆参数都在策略里）
     let sc = load_strategy_config(db, strategy_id.as_deref().unwrap_or("v19")).await;
 
+    // 杠杆感知 dynamic_target_cap：杠杆账号用保守 tc（避免回撤过大），无杠杆用高 tc（释放 alpha）
+    // 通过 MVO_TARGET_CAP 环境变量传递给 compute_mvo_weights_for_date
+    if lev_enabled {
+        std::env::set_var("MVO_TARGET_CAP", "0.30");
+    } else {
+        std::env::set_var("MVO_TARGET_CAP", "0.80");
+    }
+
     let readiness_report = check_paper_account_data_readiness(
         db,
         &account_id,
