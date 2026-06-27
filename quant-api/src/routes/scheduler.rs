@@ -224,7 +224,7 @@ fn default_top_n() -> i64 {
     30
 }
 fn default_dynamic_target_cap() -> f64 {
-    0.06
+    0.30
 }
 fn default_score_direction() -> String {
     "descending".into()
@@ -262,7 +262,7 @@ impl Default for StrategyConfig {
             combo_name: "full_pit_icir_37f".into(),
             top_n: 30,
             prediction_set_id: None,
-            dynamic_target_cap: 0.06,
+            dynamic_target_cap: 0.30,
             score_direction: "descending".into(),
             candidate_tier: "research_baseline".into(),
         }

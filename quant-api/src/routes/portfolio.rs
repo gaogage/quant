@@ -1719,7 +1719,7 @@ async fn run_mvo_simulate(
     let lev_enabled = req.leverage_mode == "vol_target" || req.leverage_multiplier > 1.0;
 
     // 共享核心逐日模拟（含 regime 降仓 + vol_target/fixed 杠杆）
-    let daily = crate::routes::mvo_engine::simulate_v19_daily_returns(
+    let (daily, _) = crate::routes::mvo_engine::simulate_v19_daily_returns(
         db,
         &sc,
         first_d,

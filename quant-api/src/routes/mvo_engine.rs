@@ -30,6 +30,17 @@ pub struct DailyReturn {
     pub regime: f64,       // 当日体制暴露 0-1
 }
 
+/// 季度再平衡事件：记录权重变化，用于落交易。
+#[derive(Debug, Clone)]
+pub struct RebalanceEvent {
+    pub date: NaiveDate,
+    pub old_weights: Vec<f64>,
+    pub new_weights: Vec<f64>,
+    pub regime: f64,
+    pub leverage: f64,
+    pub nav: f64,
+}
+
 /// 加载某资产（A股 task / ETF symbol）的日收益序列 → HashMap<date, ret>。
 async fn load_a_share_daily(db: &PgPool, task_id: &str) -> Vec<(NaiveDate, f64)> {
     let rows = sqlx::query_as::<_, (NaiveDate, Decimal)>(
@@ -110,7 +121,7 @@ pub async fn simulate_v19_daily_returns(
     leverage_mode: &str,
     liq_threshold: Option<f64>,
     warn_threshold: Option<f64>,
-) -> Result<Vec<DailyReturn>, String> {
+) -> Result<(Vec<DailyReturn>, Vec<RebalanceEvent>), String> {
     // 1. A股日收益（区间过滤）
     let a_daily: Vec<(NaiveDate, f64)> = load_a_share_daily(db, &sc.equity_curve_task_id)
         .await
@@ -136,9 +147,13 @@ pub async fn simulate_v19_daily_returns(
     let mut cached_regime: f64 = 1.0;
     let mut trail_60: Vec<f64> = Vec::new();
     let mut out: Vec<DailyReturn> = Vec::with_capacity(a_daily.len());
+    let mut rebalances: Vec<RebalanceEvent> = Vec::new();
 
     // 杠杆账号维保门控状态：账号净值随杠杆后日收益演进（归一化初始=1.0）
     let mut acct_nav = 1.0_f64;
+    let mut peak_nav = 1.0_f64;
+    let mut recent_peak_nav = 1.0_f64; // 近期峰值（~126交易日/6月），用于判断恢复
+    let mut recent_peak_age = 0;       // 距近期峰值的交易日数
 
     // 上一交易日（用于 ETF 收益的 prev/cur 取价）
     let mut prev_date: Option<NaiveDate> = None;
@@ -149,7 +164,19 @@ pub async fn simulate_v19_daily_returns(
 
         // 季度首次出现 → 刷新 MVO 权重（真 v19 GA）
         if quarter != last_quarter || weights.is_empty() {
+            let old_weights = weights.clone();
             weights = compute_mvo_weights_for_date(db, d, sc).await;
+            // 记录再平衡事件（首次初始化时 old_weights 为空，不落事件）
+            if !old_weights.is_empty() {
+                rebalances.push(RebalanceEvent {
+                    date: d,
+                    old_weights,
+                    new_weights: weights.clone(),
+                    regime: cached_regime,
+                    leverage: 1.0, // 杠杆在后续逐日计算，此处记录基准
+                    nav: acct_nav,
+                });
+            }
             last_quarter = quarter.clone();
             if std::env::var("MVO_DEBUG").is_ok() {
                 let ws: Vec<String> = weights
@@ -173,6 +200,46 @@ pub async fn simulate_v19_daily_returns(
         }
         let regime = cached_regime;
 
+        // Trailing drawdown 降仓覆盖层 v3（双峰值版）
+        // PIT 合规：peak 只使用历史净值
+        // 长期峰值(peak_nav)：全期历史最高，识别系统性风险
+        // 近期峰值(recent_peak_nav)：~126日窗口最高，识别近期趋势
+        // 降仓触发：用近期回撤(dd_recent)判断，而非历史回撤(dd_hist)
+        //   - 近期回撤>8% 且 历史回撤>15% → 降仓（确认是系统性熊市）
+        //   - 仅近期回撤>8% 但历史回撤<15% → 不降仓（可能只是正常回调后恢复中）
+        //   - 仅历史回撤>15% 但近期回撤<8% → 不降仓（已经恢复）
+        recent_peak_age += 1;
+        if acct_nav > recent_peak_nav {
+            recent_peak_nav = acct_nav;
+            recent_peak_age = 0;
+        }
+        // 近期峰值衰减：超过126个交易日未创新高，峰值向当前值衰减
+        if recent_peak_age > 126 {
+            recent_peak_nav = recent_peak_nav * 0.995 + acct_nav * 0.005;
+        }
+        let dd_recent = if recent_peak_nav > 0.0 {
+            (recent_peak_nav - acct_nav) / recent_peak_nav
+        } else {
+            0.0
+        };
+        let dd_hist = if peak_nav > 0.0 {
+            (peak_nav - acct_nav) / peak_nav
+        } else {
+            0.0
+        };
+        // 双确认：近期回撤>8% 且 历史回撤>15% 才降仓
+        let in_bear = dd_recent > 0.08 && dd_hist > 0.15;
+        let dd_factor = if !in_bear {
+            1.00 // 非熊市状态：满仓
+        } else if dd_recent > 0.18 {
+            0.20
+        } else if dd_recent > 0.12 {
+            0.40
+        } else {
+            0.60
+        };
+        let effective_regime = regime * dd_factor;
+
         // 各资产日收益：第0列A股，其余 ETF
         let mut asset_rets: Vec<f64> = vec![*a_ret];
         if let Some(pd) = prev_date {
@@ -193,26 +260,26 @@ pub async fn simulate_v19_daily_returns(
             }
         }
 
-        // 组合日收益 = Σ(weight_i × regime × asset_ret_i)。现金部分(1-regime)收益为0
+        // 组合日收益 = Σ(weight_i × effective_regime × asset_ret_i)。现金部分收益为0
         let gross: f64 = weights
             .iter()
             .zip(asset_rets.iter())
-            .map(|(w, r)| w * regime * r)
+            .map(|(w, r)| w * effective_regime * r)
             .sum();
 
-        // vol_target 杠杆（trailing 60日组合波动），仅 regime>0.9 且账号启用
+        // vol_target 杠杆（trailing 60日组合波动），账号启用即可（regime 降仓已在 L200 生效）
         trail_60.push(gross);
         if trail_60.len() > 60 {
             trail_60.remove(0);
         }
-        let leverage = if leverage_enabled && regime > 0.9 && leverage_multiplier > 1.0 {
+        let leverage = if leverage_enabled && leverage_multiplier > 1.0 {
             if leverage_mode == "vol_target" {
                 if trail_60.len() >= 20 {
                     let n = trail_60.len() as f64;
                     let mean = trail_60.iter().sum::<f64>() / n;
                     let var = trail_60.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
                     let ann_vol = var.sqrt() * (252.0_f64).sqrt();
-                    if ann_vol > 0.05 {
+                    if ann_vol > 0.02 {
                         (sc.vol_target / ann_vol)
                             .clamp(1.0 / sc.leverage_cap.max(1.0), sc.leverage_cap)
                     } else {
@@ -249,6 +316,9 @@ pub async fn simulate_v19_daily_returns(
 
         let net = gross * leverage;
         acct_nav *= 1.0 + net;
+        if acct_nav > peak_nav {
+            peak_nav = acct_nav;
+        }
 
         out.push(DailyReturn {
             date: d,
@@ -260,7 +330,7 @@ pub async fn simulate_v19_daily_returns(
         prev_date = Some(d);
     }
 
-    Ok(out)
+    Ok((out, rebalances))
 }
 
 /// 从逐日收益计算聚合绩效指标。
@@ -370,7 +440,7 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
 
-        let unlev =
+        let (unlev, _) =
             simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
                 .await
                 .expect("unlev sim");
@@ -386,7 +456,7 @@ mod tests {
             m_unlev.trading_days
         );
 
-        let lev =
+        let (lev, _) =
             simulate_v19_daily_returns(&db, &sc, start, end, true, 1.5, "vol_target", None, None)
                 .await
                 .expect("lev sim");
@@ -438,12 +508,12 @@ mod tests {
         );
         for cap in ["0.06", "0.08", "0.10", "0.12", "0.14", "0.16", "0.18"] {
             std::env::set_var("MVO_TARGET_CAP", cap);
-            let u =
+            let (u, _) =
                 simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
                     .await
                     .expect("u");
             let mu = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-            let l = simulate_v19_daily_returns(
+            let (l, _) = simulate_v19_daily_returns(
                 &db,
                 &sc,
                 start,
@@ -500,7 +570,7 @@ mod tests {
             );
             for cap in ["0.06", "0.08", "0.10", "0.12"] {
                 std::env::set_var("MVO_TARGET_CAP", cap);
-                let u = simulate_v19_daily_returns(
+                let (u, _) = simulate_v19_daily_returns(
                     &db, &sc, start, end, false, 1.0, "fixed", None, None,
                 )
                 .await
@@ -548,19 +618,19 @@ mod tests {
             );
             for cap in ["0.06", "0.08", "0.10", "0.12"] {
                 std::env::set_var("MVO_TARGET_CAP", cap);
-                let is_u = simulate_v19_daily_returns(
+                let (is_u, _) = simulate_v19_daily_returns(
                     &db, &sc, is_start, is_end, false, 1.0, "fixed", None, None,
                 )
                 .await
                 .expect("is");
                 let mis = compute_metrics(&is_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                let oos_u = simulate_v19_daily_returns(
+                let (oos_u, _) = simulate_v19_daily_returns(
                     &db, &sc, oos_start, oos_end, false, 1.0, "fixed", None, None,
                 )
                 .await
                 .expect("oos");
                 let moos = compute_metrics(&oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
-                let oos_l = simulate_v19_daily_returns(
+                let (oos_l, _) = simulate_v19_daily_returns(
                     &db,
                     &sc,
                     oos_start,
@@ -604,7 +674,7 @@ mod tests {
 
         // base 逐日 (date, gross_return, regime)：杠杆无关，作保证金模拟输入。
         // regime 用于杠杆门控（与生产 simulate_v19_daily_returns 一致：regime≤0.9 不加杠杆）
-        let base =
+        let (base, _) =
             simulate_v19_daily_returns(&db, &sc, start, end, false, 1.0, "fixed", None, None)
                 .await
                 .expect("base");
@@ -742,7 +812,7 @@ mod tests {
         );
         std::env::set_var("MVO_TARGET_CAP", format!("{}", target));
         for fl in [1.0, 1.5, 2.0, 2.5, 3.0] {
-            let r =
+            let (r, _) =
                 simulate_v19_daily_returns(&db, &sc, start, end, fl > 1.0, fl, "fixed", None, None)
                     .await
                     .expect("fixed");
@@ -754,7 +824,7 @@ mod tests {
                 let mut scv = sc.clone();
                 scv.vol_target = vt;
                 scv.leverage_cap = cap;
-                let r = simulate_v19_daily_returns(
+                let (r, _) = simulate_v19_daily_returns(
                     &db,
                     &scv,
                     start,

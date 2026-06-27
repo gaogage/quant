@@ -108,6 +108,7 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
         warn_thr,
     )
     .await?;
+    let (daily, _rebalances) = daily;
     if daily.is_empty() {
         return Err("v19 模拟无有效交易日".into());
     }
