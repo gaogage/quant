@@ -4,10 +4,11 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::{
@@ -96,6 +97,64 @@ pub struct AkshareAnalystRevisionSmokeReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacitySmokeReq {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub market: Option<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityDetailAuditReq {
+    #[serde(default)]
+    pub announcement_links: Vec<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityPdfParserReadinessReq {
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityPdfDetailAuditReq {
+    #[serde(default)]
+    pub announcement_links: Vec<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub symbols: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AkshareAnalystRevisionHistoryReplayAuditReq {
     #[serde(default)]
     pub dates: Vec<String>,
@@ -117,6 +176,122 @@ pub struct AkshareAnalystRevisionSyncPlanReq {
     pub end_date: Option<String>,
     #[serde(default)]
     pub batch: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacitySyncPlanReq {
+    #[serde(default)]
+    pub symbols: Option<String>,
+    #[serde(default)]
+    pub categories: Option<String>,
+    #[serde(default)]
+    pub market: Option<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub batch: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacitySyncReq {
+    #[serde(default)]
+    pub symbols: Option<String>,
+    #[serde(default)]
+    pub categories: Option<String>,
+    #[serde(default)]
+    pub market: Option<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub data_version_id: Option<String>,
+    #[serde(default)]
+    pub python: Option<String>,
+    #[serde(default)]
+    pub pdf_python: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityAdmissionReadinessAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub include_negative_samples: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExchangeAnnouncementOrderCapacityBoundedSyncReq {
+    #[serde(default)]
+    pub symbols: Option<String>,
+    #[serde(default)]
+    pub categories: Option<String>,
+    #[serde(default)]
+    pub market: Option<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub batch: Option<String>,
+    #[serde(default)]
+    pub data_version_id: Option<String>,
+    #[serde(default)]
+    pub python: Option<String>,
+    #[serde(default)]
+    pub pdf_python: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub stop_on_audit_failure: Option<bool>,
+}
+
+impl ExchangeAnnouncementOrderCapacitySyncReq {
+    fn into_sync_task_req(self) -> DataSyncTaskReq {
+        let symbols = exchange_announcement_order_capacity_csv_values(self.symbols);
+        let categories = exchange_announcement_order_capacity_csv_values(self.categories);
+        DataSyncTaskReq {
+            dataset: "exchange_announcement_order_capacity".to_string(),
+            source: EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_TASK_SOURCE.to_string(),
+            mode: Some("tiny_calendar_day_symbol_category_raw_sync".to_string()),
+            symbols,
+            source_filters: categories,
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: self.start_date,
+            end_date: self.end_date,
+            data_version_id: self.data_version_id,
+            background: self.background,
+            quality_check: false,
+            create_data_version: true,
+            retry_of_task_id: None,
+            reason: Some("p3.24 exchange announcement tiny raw sync smoke".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -482,6 +657,32 @@ struct BroadAnalystRevisionAuditDecision {
     blocked_reason: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+    table_exists: bool,
+    row_count: i64,
+    distinct_symbol_count: i64,
+    distinct_category_count: i64,
+    pit_violation_rows: i64,
+    missing_available_at_rows: i64,
+    missing_source_published_at_quality_rows: i64,
+    duplicate_announcement_id_rows: i64,
+    duplicate_raw_payload_hash_groups: i64,
+    evidence_span_rows: i64,
+    target_event_rows: i64,
+    target_event_missing_evidence_span_rows: i64,
+    scanned_pdf_ocr_required_rows: i64,
+    ocr_taxonomy_excluded_rows: i64,
+    trainable_scanned_pdf_blocking_rows: i64,
+    taxonomy_blocked_target_event_rows: i64,
+    taxonomy_risk_category_rows: i64,
+    completed_attempts: i64,
+    completed_empty_attempts: i64,
+    failed_attempts: i64,
+    total_failed_attempts: i64,
+    excluded_unsupported_category_failed_attempts: i64,
+}
+
 fn default_source() -> String {
     "tushare".into()
 }
@@ -617,6 +818,18 @@ const AKSHARE_ANALYST_REVISION_SYNC_MAX_CALENDAR_DAYS: i64 = 100;
 const AKSHARE_ANALYST_REVISION_SYNC_MAX_RETRIES: usize = 2;
 const AKSHARE_ANALYST_REVISION_TASK_SOURCE: &str = "akshare_cninfo_revision";
 const AKSHARE_ANALYST_REVISION_ATTEMPT_SOURCE: &str = "akshare:stock_rank_forecast_cninfo";
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_TASK_SOURCE: &str = "ak_cninfo_exann_oc";
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE: &str =
+    "akshare:stock_zh_a_disclosure_report_cninfo";
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_SYMBOLS: usize = 5;
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_CATEGORIES: usize = 6;
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_ROWS: usize = 20;
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_RAW_SYNC_MAX_ROWS: usize = 30;
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_OCR_AUDIT_MAX_ROWS: usize = 8;
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_SYNC_MAX_CALENDAR_DAYS: i64 = 3;
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_BOUNDED_SYNC_MAX_QUERY_UNITS: usize = 120;
+const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_DEFAULT_CATEGORIES: &[&str] =
+    &["日常经营", "重大事项", "股权激励", "并购重组"];
 const MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS: usize = 100;
 const MAIN_BUSINESS_READINESS_BREAKDOWN_MAX_PERIODS: usize = 200;
 const BROAD_ANALYST_REVISION_BREAKDOWN_LIMIT: usize = 32;
@@ -885,6 +1098,3784 @@ fn akshare_analyst_revision_timeout_seconds() -> u64 {
         .clamp(5, 300)
 }
 
+fn command_exists_on_path(command: &str) -> bool {
+    env::var_os("PATH")
+        .map(|paths| {
+            env::split_paths(&paths).any(|path| {
+                let candidate = path.join(command);
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn exchange_announcement_order_capacity_pdf_audit_python_path(requested: Option<String>) -> String {
+    requested
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| env::var("QUANT_PDF_AUDIT_PYTHON").ok())
+        .unwrap_or_else(|| {
+            let home = env::var("HOME").unwrap_or_else(|_| "/Users/gaocheng".to_string());
+            format!("{home}/.local/share/quant-pdf-audit/venv/bin/python")
+        })
+}
+
+fn exchange_announcement_order_capacity_row_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(PHASE7_PERMISSION_SMOKE_MAX_ROWS)
+        .clamp(1, EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_ROWS)
+}
+
+fn exchange_announcement_order_capacity_raw_sync_row_limit() -> usize {
+    EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_RAW_SYNC_MAX_ROWS
+}
+
+fn exchange_announcement_order_capacity_symbol(value: &str) -> String {
+    value
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or(value.trim())
+        .to_string()
+}
+
+fn exchange_announcement_order_capacity_symbols(symbols: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    symbols
+        .iter()
+        .map(|symbol| exchange_announcement_order_capacity_symbol(symbol))
+        .filter(|symbol| !symbol.is_empty())
+        .filter(|symbol| seen.insert(symbol.clone()))
+        .take(EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_SYMBOLS)
+        .collect()
+}
+
+fn exchange_announcement_order_capacity_csv_values(value: Option<String>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn exchange_announcement_order_capacity_categories(categories: &[String]) -> Vec<String> {
+    let raw_categories = if categories.is_empty() {
+        EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_DEFAULT_CATEGORIES
+            .iter()
+            .map(|category| category.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        categories
+            .iter()
+            .map(|category| category.trim().to_string())
+            .filter(|category| !category.is_empty())
+            .collect::<Vec<_>>()
+    };
+
+    let mut seen = BTreeSet::new();
+    raw_categories
+        .into_iter()
+        .filter(|category| seen.insert(category.clone()))
+        .take(EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_CATEGORIES)
+        .collect()
+}
+
+fn exchange_announcement_order_capacity_date_range(
+    req: &ExchangeAnnouncementOrderCapacitySmokeReq,
+) -> Result<(String, String), String> {
+    let today = Utc::now().date_naive();
+    let default_start = (today - Duration::days(365)).format("%Y%m%d").to_string();
+    let default_end = today.format("%Y%m%d").to_string();
+    let start_date = req.start_date.clone().unwrap_or(default_start);
+    let end_date = req.end_date.clone().unwrap_or(default_end);
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("exchange announcement smoke start_date cannot be after end_date".into());
+    }
+    Ok((start_date, end_date))
+}
+
+fn exchange_announcement_order_capacity_smoke_plan(
+    req: &ExchangeAnnouncementOrderCapacitySmokeReq,
+) -> Result<Value, String> {
+    let symbols = exchange_announcement_order_capacity_symbols(&req.symbols);
+    if symbols.is_empty() {
+        return Err("exchange announcement smoke requires at least one symbol".into());
+    }
+    let categories = exchange_announcement_order_capacity_categories(&req.categories);
+    if categories.is_empty() {
+        return Err("exchange announcement smoke requires at least one category".into());
+    }
+    let (start_date, end_date) = exchange_announcement_order_capacity_date_range(req)?;
+    let market = req
+        .market
+        .clone()
+        .filter(|market| !market.trim().is_empty())
+        .unwrap_or_else(|| "沪深京".to_string());
+    let row_limit = exchange_announcement_order_capacity_row_limit(req.limit);
+    let python = akshare_analyst_revision_python_path(req.python.clone());
+    let query_count = symbols.len() * categories.len();
+
+    Ok(json!({
+        "audit_version": "p3.24b-exchange-announcement-order-capacity-permission-history-category-smoke-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24B",
+        "mode": "read_only_permission_history_category_smoke_no_write",
+        "write_enabled": false,
+        "vendor": "akshare",
+        "upstream": "cninfo",
+        "vendor_endpoint": "stock_zh_a_disclosure_report_cninfo",
+        "python": python,
+        "market": market,
+        "symbols": symbols,
+        "categories": categories,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "row_limit_per_probe": row_limit,
+        "query_count": query_count,
+        "required_fields_for_schema_audit": ["代码", "简称", "公告标题", "公告时间", "公告链接"],
+        "required_link_metadata": ["announcementId", "orgId", "stockCode", "announcementTime"],
+        "quality_dimensions": [
+            "symbol_category_history_availability",
+            "category_parser_error_classification",
+            "announcement_time_presence",
+            "announcement_link_presence",
+            "announcement_link_metadata_completeness",
+            "duplicate_announcement_id_detection"
+        ],
+        "promotion_gate": {
+            "schema_apply": "blocked",
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "run_this_read_only_smoke_then_audit_cninfo_detail_text_timestamp_and_text_hash_before_schema_apply",
+        "guardrails": [
+            "this plan and smoke endpoint never create raw tables, sync attempts, data versions, factors, WFA tasks, or strategy configs",
+            "ok_empty is not a pass; empty categories must be separated from parser/runtime errors before full-history sync design",
+            "date-only announcement_time cannot be used for same-session intraday decisions",
+            "schema apply is blocked until official detail text, source_published_at timestamp, text hash and manual evidence-span audit are proven"
+        ],
+    }))
+}
+
+fn cninfo_percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = &value[index + 1..index + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                decoded.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        if bytes[index] == b'+' {
+            decoded.push(b' ');
+        } else {
+            decoded.push(bytes[index]);
+        }
+        index += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
+}
+
+fn cninfo_query_param(link: &str, key: &str) -> Option<String> {
+    let query = link.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (param_key, param_value) = pair.split_once('=').unwrap_or((pair, ""));
+        if param_key == key && !param_value.trim().is_empty() {
+            return Some(cninfo_percent_decode(param_value.trim()));
+        }
+    }
+    None
+}
+
+fn cninfo_announcement_id_from_path(link: &str) -> Option<String> {
+    let path = link.split('?').next().unwrap_or(link);
+    let file_name = path.rsplit('/').next()?.trim();
+    let id = file_name
+        .strip_suffix(".PDF")
+        .or_else(|| file_name.strip_suffix(".pdf"))
+        .unwrap_or(file_name)
+        .trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn parse_cninfo_announcement_link_metadata(link: &str) -> Value {
+    let announcement_id = cninfo_query_param(link, "announcementId")
+        .or_else(|| cninfo_announcement_id_from_path(link));
+    let org_id = cninfo_query_param(link, "orgId");
+    let stock_code = cninfo_query_param(link, "stockCode");
+    let announcement_time = cninfo_query_param(link, "announcementTime");
+
+    let required = [
+        ("announcementId", announcement_id.clone()),
+        ("orgId", org_id.clone()),
+        ("stockCode", stock_code.clone()),
+        ("announcementTime", announcement_time.clone()),
+    ];
+    let missing_fields = required
+        .iter()
+        .filter_map(|(field, value)| {
+            if value
+                .as_ref()
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+            {
+                Some(*field)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "raw_link": link,
+        "announcement_id": announcement_id,
+        "org_id": org_id,
+        "stock_code": stock_code,
+        "announcement_time": announcement_time,
+        "metadata_complete": missing_fields.is_empty(),
+        "missing_fields": missing_fields,
+    })
+}
+
+fn exchange_announcement_order_capacity_detail_links(
+    links: &[String],
+    limit: Option<usize>,
+) -> Vec<String> {
+    let max_links = limit.unwrap_or(5).clamp(1, 20);
+    let mut seen = BTreeSet::new();
+    links
+        .iter()
+        .map(|link| link.trim().to_string())
+        .filter(|link| !link.is_empty())
+        .filter(|link| seen.insert(link.clone()))
+        .take(max_links)
+        .collect()
+}
+
+fn exchange_announcement_order_capacity_detail_audit_plan(
+    req: &ExchangeAnnouncementOrderCapacityDetailAuditReq,
+) -> Result<Value, String> {
+    let links =
+        exchange_announcement_order_capacity_detail_links(&req.announcement_links, req.limit);
+    if links.is_empty() {
+        return Err(
+            "exchange announcement detail audit requires at least one announcement link".into(),
+        );
+    }
+    let python = akshare_analyst_revision_python_path(req.python.clone());
+    let link_metadata = links
+        .iter()
+        .map(|link| parse_cninfo_announcement_link_metadata(link))
+        .collect::<Vec<_>>();
+    let incomplete_metadata_count = link_metadata
+        .iter()
+        .filter(|metadata| {
+            !metadata
+                .get("metadata_complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+
+    Ok(json!({
+        "audit_version": "p3.24c-exchange-announcement-order-capacity-detail-text-timestamp-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24C",
+        "mode": "read_only_cninfo_detail_text_timestamp_hash_audit_no_write",
+        "write_enabled": false,
+        "vendor": "cninfo",
+        "vendor_endpoint": "announcement_detail_page",
+        "python": python,
+        "link_count": links.len(),
+        "announcement_links": links,
+        "link_metadata": link_metadata,
+        "incomplete_link_metadata_count": incomplete_metadata_count,
+        "required_evidence": [
+            "detail_page_http_success",
+            "nonempty_text_content",
+            "stable_text_hash",
+            "source_published_at_timestamp_or_explicit_date_only_block",
+            "announcement_id_org_id_stock_code_announcement_time"
+        ],
+        "promotion_gate": {
+            "schema_apply": "blocked_until_detail_audit_passes",
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "run_read_only_detail_fetch_then_manual_schema_review_if_text_timestamp_hash_pass",
+        "guardrails": [
+            "this endpoint never writes raw tables, sync attempts, data versions, factors, WFA tasks, or strategy configs",
+            "detail text availability does not prove event taxonomy precision or alpha economics",
+            "date-only announcementTime remains insufficient for same-session intraday decisions",
+            "schema apply still requires manual review of source_published_at semantics and evidence span policy"
+        ],
+    }))
+}
+
+fn exchange_announcement_order_capacity_pdf_detail_audit_plan(
+    req: &ExchangeAnnouncementOrderCapacityPdfDetailAuditReq,
+) -> Result<Value, String> {
+    let links =
+        exchange_announcement_order_capacity_detail_links(&req.announcement_links, req.limit);
+    if links.is_empty() {
+        return Err(
+            "exchange announcement PDF detail audit requires at least one announcement link".into(),
+        );
+    }
+    let python = exchange_announcement_order_capacity_pdf_audit_python_path(req.python.clone());
+    let link_metadata = links
+        .iter()
+        .map(|link| parse_cninfo_announcement_link_metadata(link))
+        .collect::<Vec<_>>();
+    let incomplete_link_metadata_count = link_metadata
+        .iter()
+        .filter(|metadata| {
+            !metadata
+                .get("metadata_complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+
+    Ok(json!({
+        "audit_version": "p3.24e-exchange-announcement-order-capacity-pdf-detail-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24E",
+        "mode": "read_only_pdf_detail_text_timestamp_span_audit_no_write",
+        "write_enabled": false,
+        "vendor": "cninfo",
+        "vendor_endpoint": "announcement_pdf_detail",
+        "python": python,
+        "link_count": links.len(),
+        "announcement_links": links,
+        "link_metadata": link_metadata,
+        "incomplete_link_metadata_count": incomplete_link_metadata_count,
+        "required_evidence": [
+            "pdf_http_success",
+            "nonempty_pdf_text_content",
+            "stable_text_hash",
+            "source_published_at_timestamp_or_explicit_next_session_policy",
+            "relevant_evidence_spans_for_order_capacity_contract_price_production_capacity_events"
+        ],
+        "promotion_gate": {
+            "schema_apply": "blocked_until_pdf_detail_audit_passes",
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "run_read_only_pdf_detail_audit_then_manual_schema_review_if_pdf_text_availability_and_span_gates_pass",
+        "guardrails": [
+            "this endpoint never writes raw tables, sync attempts, data versions, factors, WFA tasks, or strategy configs",
+            "pdf parser output is admission evidence only; it does not classify alpha or unlock training",
+            "date-only source availability may support next-session policy but never same-session intraday use",
+            "scanned pdfs requiring OCR remain blocked in this stage"
+        ],
+    }))
+}
+
+fn exchange_announcement_order_capacity_ocr_blocked_row_audit_plan(
+    req: &ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq,
+) -> Result<Value, String> {
+    let today = Utc::now().date_naive();
+    let start_date = req
+        .start_date
+        .clone()
+        .unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .clone()
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("OCR blocked-row audit start_date cannot be after end_date".into());
+    }
+
+    let requested_symbols = exchange_announcement_order_capacity_csv_values(req.symbols.clone());
+    let symbols = exchange_announcement_order_capacity_symbols(&requested_symbols);
+    let row_limit = req
+        .limit
+        .unwrap_or(4)
+        .clamp(1, EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_OCR_AUDIT_MAX_ROWS);
+    let python = exchange_announcement_order_capacity_pdf_audit_python_path(req.python.clone());
+
+    Ok(json!({
+        "audit_version": "p3.24t-exchange-announcement-order-capacity-scanned-pdf-ocr-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24T",
+        "mode": "read_only_scanned_pdf_ocr_candidate_audit_no_write",
+        "write_enabled": false,
+        "vendor": "cninfo",
+        "source_table": "market_exchange_announcement_text_raw",
+        "python": python,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "symbols": symbols,
+        "row_limit": row_limit,
+        "row_selector": {
+            "pdf_parse_status": "scanned_pdf_ocr_required",
+            "order_by": "announcement_time, symbol, announcement_id",
+        },
+        "required_runtime": [
+            "tesseract_binary",
+            "pytesseract_python_module",
+            "pymupdf_or_pdf2image_or_poppler_renderer"
+        ],
+        "required_evidence": [
+            "ocr_text_nonempty",
+            "stable_ocr_text_hash",
+            "source_published_at_or_date_only_next_session_policy_preserved_from_raw",
+            "ocr_quality_score_or_minimum_text_length",
+            "evidence_spans_for_order_capacity_contract_price_production_capacity_events",
+            "manual_taxonomy_precision_review_before_any_trainable_row_unblock"
+        ],
+        "promotion_gate": {
+            "raw_backfill": "blocked_until_ocr_quality_and_manual_taxonomy_review_pass",
+            "coverage_quality_audit": "blocked_until_ocr_quality_and_manual_taxonomy_review_pass",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "guardrails": [
+            "this endpoint reads blocked raw rows and candidate PDF URLs but never updates market_exchange_announcement_text_raw",
+            "OCR text is not automatically trainable data; it is manual-review evidence until quality and taxonomy gates pass",
+            "raw available_at and source_published_at policy must be preserved; OCR runtime execution time is never used as PIT availability",
+            "scanned PDF exclusion remains a separate pre-registered coverage-scope decision, not an implicit fallback"
+        ],
+    }))
+}
+
+fn decide_exchange_announcement_detail_audit(
+    total_links: usize,
+    fetched_text_count: usize,
+    text_hash_count: usize,
+    source_published_at_count: usize,
+    incomplete_link_metadata_count: usize,
+) -> Value {
+    let admission_decision = if total_links == 0 {
+        "blocked_no_detail_links"
+    } else if incomplete_link_metadata_count > 0 {
+        "blocked_incomplete_announcement_link_metadata"
+    } else if fetched_text_count < total_links {
+        "blocked_detail_text_fetch_incomplete"
+    } else if text_hash_count < total_links {
+        "blocked_missing_text_hash"
+    } else if source_published_at_count < total_links {
+        "blocked_missing_source_published_at_timestamp"
+    } else {
+        "detail_text_timestamp_hash_audit_passed_schema_review_allowed_next"
+    };
+
+    json!({
+        "admission_decision": admission_decision,
+        "total_links": total_links,
+        "fetched_text_count": fetched_text_count,
+        "text_hash_count": text_hash_count,
+        "source_published_at_count": source_published_at_count,
+        "incomplete_link_metadata_count": incomplete_link_metadata_count,
+        "promotion_gate": {
+            "schema_apply": if admission_decision == "detail_text_timestamp_hash_audit_passed_schema_review_allowed_next" {
+                "manual_review_required"
+            } else {
+                "blocked"
+            },
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+    })
+}
+
+fn decide_exchange_announcement_order_capacity_pdf_detail_audit(
+    total_links: usize,
+    parsed_pdf_count: usize,
+    stable_hash_count: usize,
+    availability_count: usize,
+    evidence_span_count: usize,
+    scanned_pdf_count: usize,
+    incomplete_link_metadata_count: usize,
+) -> Value {
+    let admission_decision = if total_links == 0 {
+        "blocked_no_pdf_detail_links"
+    } else if incomplete_link_metadata_count > 0 {
+        "blocked_incomplete_announcement_link_metadata"
+    } else if scanned_pdf_count > 0 {
+        "blocked_scanned_pdf_ocr_required"
+    } else if parsed_pdf_count < total_links {
+        "blocked_pdf_fetch_or_parse_incomplete"
+    } else if stable_hash_count < total_links {
+        "blocked_unstable_pdf_text_hash"
+    } else if availability_count < total_links {
+        "blocked_missing_pdf_source_published_at_or_next_session_policy"
+    } else if evidence_span_count < total_links {
+        "blocked_missing_relevant_evidence_spans"
+    } else {
+        "pdf_detail_audit_passed_manual_schema_review_allowed_next"
+    };
+
+    json!({
+        "admission_decision": admission_decision,
+        "total_links": total_links,
+        "parsed_pdf_count": parsed_pdf_count,
+        "stable_hash_count": stable_hash_count,
+        "availability_count": availability_count,
+        "evidence_span_count": evidence_span_count,
+        "scanned_pdf_count": scanned_pdf_count,
+        "incomplete_link_metadata_count": incomplete_link_metadata_count,
+        "promotion_gate": {
+            "schema_apply": if admission_decision == "pdf_detail_audit_passed_manual_schema_review_allowed_next" {
+                "manual_review_required"
+            } else {
+                "blocked"
+            },
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+    })
+}
+
+fn decide_exchange_announcement_order_capacity_ocr_blocked_row_audit(
+    total_rows: usize,
+    ocr_text_count: usize,
+    stable_hash_count: usize,
+    availability_count: usize,
+    quality_pass_count: usize,
+    evidence_span_count: usize,
+    runtime_missing_count: usize,
+    ocr_error_count: usize,
+    no_target_span_count: usize,
+    incomplete_raw_link_count: usize,
+) -> Value {
+    let admission_decision = if total_rows == 0 {
+        "blocked_no_scanned_pdf_rows_in_scope"
+    } else if incomplete_raw_link_count > 0 {
+        "blocked_incomplete_raw_pdf_link_metadata"
+    } else if runtime_missing_count > 0 || ocr_text_count < total_rows {
+        "blocked_ocr_runtime_missing_or_incomplete"
+    } else if ocr_error_count > 0 {
+        "blocked_ocr_runtime_errors"
+    } else if stable_hash_count < total_rows {
+        "blocked_unstable_ocr_text_hash"
+    } else if availability_count < total_rows {
+        "blocked_missing_raw_source_published_at_or_available_at_policy"
+    } else if quality_pass_count < total_rows {
+        "blocked_low_ocr_text_quality"
+    } else if evidence_span_count == 0 {
+        "blocked_ocr_text_has_no_order_capacity_evidence_spans"
+    } else {
+        "ocr_text_quality_audit_passed_manual_taxonomy_review_required"
+    };
+    let ocr_quality_status =
+        if admission_decision == "ocr_text_quality_audit_passed_manual_taxonomy_review_required" {
+            "passed_for_manual_review_only"
+        } else {
+            "blocked"
+        };
+
+    json!({
+        "admission_decision": admission_decision,
+        "total_rows": total_rows,
+        "ocr_text_count": ocr_text_count,
+        "stable_hash_count": stable_hash_count,
+        "availability_count": availability_count,
+        "quality_pass_count": quality_pass_count,
+        "evidence_span_count": evidence_span_count,
+        "runtime_missing_count": runtime_missing_count,
+        "ocr_error_count": ocr_error_count,
+        "no_target_span_count": no_target_span_count,
+        "incomplete_raw_link_count": incomplete_raw_link_count,
+        "ocr_quality_gate": {
+            "status": ocr_quality_status,
+            "policy": "OCR output is admission evidence only; it cannot unblock trainable rows until manual taxonomy precision review passes"
+        },
+        "promotion_gate": {
+            "raw_backfill": if admission_decision == "ocr_text_quality_audit_passed_manual_taxonomy_review_required" {
+                "manual_review_required"
+            } else {
+                "blocked"
+            },
+            "coverage_quality_audit": if admission_decision == "ocr_text_quality_audit_passed_manual_taxonomy_review_required" {
+                "manual_review_required_before_unblocking_scanned_pdf_rows"
+            } else {
+                "blocked"
+            },
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": if admission_decision == "ocr_text_quality_audit_passed_manual_taxonomy_review_required" {
+            "manual_review_ocr_text_and_evidence_spans_then_design_auditable_raw_backfill_or_exclusion_policy"
+        } else if runtime_missing_count > 0 {
+            "install_or_configure_isolated_ocr_runtime_then_rerun_this_read_only_audit"
+        } else {
+            "repair_ocr_quality_or_pre_register_scanned_pdf_exclusion_scope_then_rerun"
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExchangeAnnouncementDetailProbeSummary {
+    fetched_text_count: usize,
+    text_hash_count: usize,
+    source_published_at_count: usize,
+    incomplete_link_metadata_count: usize,
+    pdf_parser_required_count: usize,
+}
+
+fn summarize_exchange_announcement_detail_probes(
+    probes: &[Value],
+) -> ExchangeAnnouncementDetailProbeSummary {
+    let fetched_text_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("text_content_type")
+                    .and_then(Value::as_str)
+                    .map(|content_type| content_type != "pdf")
+                    .unwrap_or(true)
+                && probe
+                    .get("text_length")
+                    .and_then(Value::as_u64)
+                    .map(|length| length > 0)
+                    .unwrap_or(false)
+        })
+        .count();
+    let text_hash_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("text_content_type")
+                    .and_then(Value::as_str)
+                    .map(|content_type| content_type != "pdf")
+                    .unwrap_or(true)
+                && probe.get("text_hash").and_then(Value::as_str).is_some()
+        })
+        .count();
+    let source_published_at_count = probes
+        .iter()
+        .filter(|probe| {
+            probe
+                .get("source_published_at_quality")
+                .and_then(Value::as_str)
+                == Some("timestamp")
+        })
+        .count();
+    let incomplete_link_metadata_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("incomplete_link_metadata")
+                || probe
+                    .get("link_metadata")
+                    .and_then(|metadata| metadata.get("metadata_complete"))
+                    .and_then(Value::as_bool)
+                    .map(|complete| !complete)
+                    .unwrap_or(false)
+        })
+        .count();
+    let pdf_parser_required_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("pdf_text_parser_required")
+                || probe.get("text_content_type").and_then(Value::as_str) == Some("pdf")
+        })
+        .count();
+
+    ExchangeAnnouncementDetailProbeSummary {
+        fetched_text_count,
+        text_hash_count,
+        source_published_at_count,
+        incomplete_link_metadata_count,
+        pdf_parser_required_count,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExchangeAnnouncementPdfDetailProbeSummary {
+    parsed_pdf_count: usize,
+    stable_hash_count: usize,
+    availability_count: usize,
+    timestamp_count: usize,
+    next_session_policy_count: usize,
+    evidence_span_count: usize,
+    incomplete_link_metadata_count: usize,
+    scanned_pdf_count: usize,
+    runtime_not_configured_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExchangeAnnouncementOcrBlockedRowProbeSummary {
+    ocr_text_count: usize,
+    stable_hash_count: usize,
+    availability_count: usize,
+    quality_pass_count: usize,
+    evidence_span_count: usize,
+    runtime_missing_count: usize,
+    ocr_error_count: usize,
+    no_target_span_count: usize,
+    incomplete_raw_link_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ExchangeAnnouncementOrderCapacityValidatedSyncRequest {
+    symbols: Vec<String>,
+    categories: Vec<String>,
+    market: String,
+    start: NaiveDate,
+    end: NaiveDate,
+    calendar_day_count: i64,
+    query_count: usize,
+    data_version_id: String,
+    python: String,
+    pdf_python: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExchangeAnnouncementOrderCapacityTinySlice {
+    label: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    calendar_day_count: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ExchangeAnnouncementOrderCapacityValidatedBoundedSyncRequest {
+    symbols: Vec<String>,
+    categories: Vec<String>,
+    market: String,
+    start: NaiveDate,
+    end: NaiveDate,
+    calendar_day_count: i64,
+    batch_mode: String,
+    slices: Vec<ExchangeAnnouncementOrderCapacityTinySlice>,
+    total_query_units: usize,
+    data_version_id: String,
+    python: String,
+    pdf_python: String,
+    stop_on_audit_failure: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ExchangeAnnouncementOrderCapacityRawRow {
+    vendor: String,
+    vendor_endpoint: String,
+    request_key: String,
+    symbol: String,
+    symbol_name: Option<String>,
+    announcement_id: String,
+    org_id: String,
+    announcement_category: String,
+    announcement_title: String,
+    announcement_time: NaiveDate,
+    source_published_at: String,
+    source_published_at_ts: Option<DateTime<Utc>>,
+    source_published_date: Option<NaiveDate>,
+    source_published_at_quality: String,
+    available_at: NaiveDate,
+    announcement_url: String,
+    pdf_final_url: Option<String>,
+    text_content: Option<String>,
+    text_hash: Option<String>,
+    timestamp_candidates: Value,
+    pdf_metadata_keys: Value,
+    raw_payload: Value,
+    raw_payload_hash: String,
+    parser_used: Option<String>,
+    parser_version: Option<String>,
+    parser_errors: Value,
+    pdf_parse_status: String,
+    event_type: Option<String>,
+    evidence_spans: Value,
+}
+
+fn validate_exchange_announcement_order_capacity_sync_request(
+    req: &ExchangeAnnouncementOrderCapacitySyncReq,
+) -> Result<ExchangeAnnouncementOrderCapacityValidatedSyncRequest, String> {
+    if req.background {
+        return Err(
+            "exchange announcement order capacity P3.24I sync requires background=false".into(),
+        );
+    }
+
+    let start_date = req
+        .start_date
+        .clone()
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end_date = req
+        .end_date
+        .clone()
+        .ok_or_else(|| "end_date is required".to_string())?;
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("exchange announcement sync start_date cannot be after end_date".into());
+    }
+    let calendar_day_count = (end - start).num_days() + 1;
+    if calendar_day_count > EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_SYNC_MAX_CALENDAR_DAYS {
+        return Err(format!(
+            "exchange announcement bounded sync resolved {} calendar days, above max {}. Use one tiny manually reviewed batch first.",
+            calendar_day_count, EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_SYNC_MAX_CALENDAR_DAYS
+        ));
+    }
+
+    let requested_symbols = exchange_announcement_order_capacity_csv_values(req.symbols.clone());
+    let symbols = exchange_announcement_order_capacity_symbols(&requested_symbols);
+    if symbols.is_empty() {
+        return Err("exchange announcement sync requires at least one symbol".into());
+    }
+    let requested_categories =
+        exchange_announcement_order_capacity_csv_values(req.categories.clone());
+    let categories = exchange_announcement_order_capacity_categories(&requested_categories);
+    if categories.is_empty() {
+        return Err("exchange announcement sync requires at least one category".into());
+    }
+    let market = req
+        .market
+        .clone()
+        .filter(|market| !market.trim().is_empty())
+        .unwrap_or_else(|| "沪深京".to_string());
+    let data_version_id = req.data_version_id.clone().unwrap_or_else(|| {
+        format!(
+            "exchange-announcement-order-capacity-{}-{}",
+            start.format("%Y%m%d"),
+            end.format("%Y%m%d")
+        )
+    });
+    let python = akshare_analyst_revision_python_path(req.python.clone());
+    let pdf_python =
+        exchange_announcement_order_capacity_pdf_audit_python_path(req.pdf_python.clone());
+    let query_count = symbols.len() * categories.len();
+
+    Ok(ExchangeAnnouncementOrderCapacityValidatedSyncRequest {
+        symbols,
+        categories,
+        market,
+        start,
+        end,
+        calendar_day_count,
+        query_count,
+        data_version_id,
+        python,
+        pdf_python,
+    })
+}
+
+fn quarter_index(date: NaiveDate) -> u32 {
+    ((date.month() - 1) / 3) + 1
+}
+
+fn exchange_announcement_order_capacity_tiny_slices(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<ExchangeAnnouncementOrderCapacityTinySlice> {
+    let mut slices = Vec::new();
+    let mut cursor = start;
+    while cursor <= end {
+        let slice_end = (cursor
+            + Duration::days(EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_SYNC_MAX_CALENDAR_DAYS - 1))
+        .min(end);
+        slices.push(ExchangeAnnouncementOrderCapacityTinySlice {
+            label: format!("{}-{}", cursor.format("%Y%m%d"), slice_end.format("%Y%m%d")),
+            start_date: cursor,
+            end_date: slice_end,
+            calendar_day_count: (slice_end - cursor).num_days() + 1,
+        });
+        cursor = slice_end + Duration::days(1);
+    }
+    slices
+}
+
+fn exchange_announcement_order_capacity_validate_bounded_window(
+    start: NaiveDate,
+    end: NaiveDate,
+    batch_mode: &str,
+) -> Result<(), String> {
+    match batch_mode {
+        "month" => {
+            if start.year() != end.year() || start.month() != end.month() {
+                return Err(
+                    "exchange announcement bounded sync month batch must cover a single month"
+                        .to_string(),
+                );
+            }
+        }
+        "quarter" => {
+            if start.year() != end.year() || quarter_index(start) != quarter_index(end) {
+                return Err(
+                    "exchange announcement bounded sync quarter batch must cover a single quarter"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "exchange announcement bounded sync batch must be 'month' or 'quarter'".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_exchange_announcement_order_capacity_bounded_sync_request(
+    req: &ExchangeAnnouncementOrderCapacityBoundedSyncReq,
+) -> Result<ExchangeAnnouncementOrderCapacityValidatedBoundedSyncRequest, String> {
+    if req.background {
+        return Err(
+            "exchange announcement order capacity P3.24J bounded sync requires background=false"
+                .into(),
+        );
+    }
+
+    let start_date = req
+        .start_date
+        .clone()
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end_date = req
+        .end_date
+        .clone()
+        .ok_or_else(|| "end_date is required".to_string())?;
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err(
+            "exchange announcement bounded sync start_date cannot be after end_date".into(),
+        );
+    }
+    let batch_mode = req
+        .batch
+        .clone()
+        .unwrap_or_else(|| "month".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    exchange_announcement_order_capacity_validate_bounded_window(start, end, &batch_mode)?;
+
+    let requested_symbols = exchange_announcement_order_capacity_csv_values(req.symbols.clone());
+    let symbols = exchange_announcement_order_capacity_symbols(&requested_symbols);
+    if symbols.is_empty() {
+        return Err("exchange announcement bounded sync requires at least one symbol".into());
+    }
+    let requested_categories =
+        exchange_announcement_order_capacity_csv_values(req.categories.clone());
+    let categories = exchange_announcement_order_capacity_categories(&requested_categories);
+    if categories.is_empty() {
+        return Err("exchange announcement bounded sync requires at least one category".into());
+    }
+    let slices = exchange_announcement_order_capacity_tiny_slices(start, end);
+    let total_query_units = slices.len() * symbols.len() * categories.len();
+    if total_query_units > EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_BOUNDED_SYNC_MAX_QUERY_UNITS {
+        return Err(format!(
+            "exchange announcement bounded sync resolved {} query units, above max {}. Narrow symbols/categories or run smaller month/quarter batches.",
+            total_query_units, EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_BOUNDED_SYNC_MAX_QUERY_UNITS
+        ));
+    }
+
+    let market = req
+        .market
+        .clone()
+        .filter(|market| !market.trim().is_empty())
+        .unwrap_or_else(|| "沪深京".to_string());
+    let data_version_id = req.data_version_id.clone().unwrap_or_else(|| {
+        format!(
+            "exann-oc-{}-{}",
+            start.format("%Y%m%d"),
+            end.format("%Y%m%d")
+        )
+    });
+    let python = akshare_analyst_revision_python_path(req.python.clone());
+    let pdf_python =
+        exchange_announcement_order_capacity_pdf_audit_python_path(req.pdf_python.clone());
+    let stop_on_audit_failure = req.stop_on_audit_failure.unwrap_or(true);
+
+    Ok(
+        ExchangeAnnouncementOrderCapacityValidatedBoundedSyncRequest {
+            symbols,
+            categories,
+            market,
+            start,
+            end,
+            calendar_day_count: (end - start).num_days() + 1,
+            batch_mode,
+            slices,
+            total_query_units,
+            data_version_id,
+            python,
+            pdf_python,
+            stop_on_audit_failure,
+        },
+    )
+}
+
+fn parse_exchange_announcement_date(value: &str) -> Option<NaiveDate> {
+    let decoded = cninfo_percent_decode(value);
+    let trimmed = decoded.trim();
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y%m%d"))
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y/%m/%d"))
+        .ok()
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(trimmed)
+                .ok()
+                .map(|value| value.date_naive())
+        })
+        .or_else(|| parse_exchange_announcement_local_datetime(trimmed).map(|value| value.date()))
+}
+
+fn parse_exchange_announcement_local_datetime(value: &str) -> Option<NaiveDateTime> {
+    let normalized = value.trim().replace('T', " ");
+    [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y年%m月%d日 %H:%M:%S",
+        "%Y年%m月%d日 %H:%M",
+    ]
+    .iter()
+    .find_map(|format| NaiveDateTime::parse_from_str(&normalized, format).ok())
+}
+
+fn parse_exchange_announcement_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    let decoded = cninfo_percent_decode(value);
+    let trimmed = decoded.trim();
+    DateTime::parse_from_rfc3339(trimmed)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+        .or_else(|| {
+            parse_exchange_announcement_local_datetime(trimmed)
+                .map(|value| value.and_utc() - Duration::hours(8))
+        })
+}
+
+async fn load_exchange_announcement_next_open_dates(
+    db: &sqlx::PgPool,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<NaiveDate>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT trade_date
+        FROM market_trade_calendar
+        WHERE is_open = true
+          AND trade_date > $1
+          AND trade_date <= $2
+        ORDER BY trade_date
+        "#,
+    )
+    .bind(start)
+    .bind(end + Duration::days(14))
+    .fetch_all(db)
+    .await
+}
+
+fn exchange_announcement_next_open_date(
+    announcement_time: NaiveDate,
+    open_dates: &[NaiveDate],
+) -> NaiveDate {
+    open_dates
+        .iter()
+        .copied()
+        .find(|date| *date > announcement_time)
+        .unwrap_or_else(|| announcement_time + Duration::days(1))
+}
+
+fn exchange_announcement_event_type_from_spans(spans: &Value) -> Option<String> {
+    let spans = spans.as_array()?;
+    let mut has_order = false;
+    let mut has_capacity = false;
+    let mut has_price = false;
+    for span in spans {
+        match span.get("theme").and_then(Value::as_str) {
+            Some("order_contract") => has_order = true,
+            Some("capacity") => has_capacity = true,
+            Some("price") => has_price = true,
+            _ => {}
+        }
+    }
+    if has_order {
+        Some("order_or_contract_signed".to_string())
+    } else if has_capacity {
+        Some("capacity_expansion_or_commissioning".to_string())
+    } else if has_price {
+        Some("product_price_adjustment".to_string())
+    } else {
+        None
+    }
+}
+
+fn exchange_announcement_event_type_from_title_and_spans(
+    title: &str,
+    spans: &Value,
+) -> Option<String> {
+    if exchange_announcement_order_capacity_taxonomy_risk_title_reason("日常经营", title).is_some()
+    {
+        return None;
+    }
+    exchange_announcement_event_type_from_spans(spans)
+}
+
+fn exchange_announcement_pdf_parse_status(probe: &Value) -> String {
+    match probe.get("status").and_then(Value::as_str) {
+        Some("ok") => "ok",
+        Some("scanned_pdf_ocr_required") => "scanned_pdf_ocr_required",
+        Some("pdf_parse_empty") => "pdf_parse_empty",
+        Some("not_pdf_after_redirect") => "error",
+        Some("error" | "timeout" | "runtime_not_configured" | "incomplete_link_metadata") => {
+            "error"
+        }
+        _ => "pending_manual_review",
+    }
+    .to_string()
+}
+
+fn exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
+    category: &str,
+    title: &str,
+) -> Option<&'static str> {
+    let text = format!("{category}{title}");
+    if text.contains("控股股东及其他关联方资金占用")
+        || text.contains("非经营性资金占用")
+        || text.contains("关联资金往来情况汇总表")
+    {
+        return Some("special_report_related_party_funds");
+    }
+    if text.contains("财务公司关联交易")
+        || text.contains("存款、贷款等金融业务")
+        || text.contains("金融业务的专项说明")
+    {
+        return Some("special_report_related_party_finance");
+    }
+    if text.contains("专项说明")
+        && (text.contains("审计")
+            || text.contains("资金占用")
+            || text.contains("关联方")
+            || text.contains("关联交易")
+            || text.contains("财务公司"))
+    {
+        return Some("special_report_audit_or_related_party");
+    }
+    if text.contains("募集资金")
+        && (text.contains("存放与使用") || text.contains("存放和使用"))
+        && (text.contains("鉴证报告") || text.contains("专项核查报告") || text.contains("专项报告"))
+    {
+        return Some("special_report_fundraising_use_assurance");
+    }
+    if text.contains("审计报告") {
+        return Some("audit_report");
+    }
+    if text.contains("法律意见书") {
+        return Some("legal_opinion");
+    }
+    if text.contains("财务顾问报告") {
+        return Some("financial_advisor_report");
+    }
+    None
+}
+
+fn exchange_announcement_order_capacity_taxonomy_risk_title_reason(
+    category: &str,
+    title: &str,
+) -> Option<&'static str> {
+    let text = format!("{category}{title}");
+    let is_true_operating_target = text.contains("签署《关于进一步加强和深化合作的协议》")
+        || text.contains("合资建厂")
+        || text.contains("签订日常经营重大合同")
+        || text.contains("投资建设高效电池产能")
+        || text.contains("投资建设产能项目");
+    if is_true_operating_target {
+        return None;
+    }
+
+    if text.contains("计提减值准备")
+        || text.contains("募投项目")
+        || text.contains("募集资金")
+        || text.contains("关联交易")
+        || text.contains("授信额度")
+        || text.contains("注册资本")
+        || text.contains("工商变更")
+        || text.contains("实际控制人")
+        || text.contains("控制权")
+        || text.contains("股份质押")
+        || text.contains("财务报告")
+        || text.contains("年度报告")
+        || text.contains("半年度报告")
+        || text.contains("季度报告")
+        || text.contains("主要经营数据")
+        || text.contains("股权投资基金")
+        || text.contains("投资基金")
+        || text.contains("风险评估报告")
+        || text.contains("H股发行")
+        || text.contains("发行H股")
+        || text.contains("H股股票")
+        || text.contains("上市审计机构")
+        || text.contains("章程")
+        || text.contains("审计报告")
+        || text.contains("审计机构")
+        || text.contains("资产减值")
+        || text.contains("公募REITs")
+        || text.contains("REITs")
+        || text.contains("收购控股子公司")
+        || text.contains("董事会工作报告")
+        || text.contains("监事会工作报告")
+        || text.contains("内部控制")
+        || text.contains("会计师事务所")
+        || text.contains("审计委员会")
+        || text.contains("委托理财")
+        || text.contains("套期保值")
+        || text.contains("担保额度")
+        || text.contains("担保的进展")
+        || text.contains("提供担保")
+        || text.contains("发行债券")
+        || text.contains("公司章程")
+        || text.contains("公司制度")
+        || text.contains("制定及修订")
+        || text.contains("独立董事")
+        || text.contains("会计政策变更")
+        || text.contains("社会责任报告")
+        || text.contains("可持续发展报告")
+        || text.contains("可持续发展")
+        || text.contains("环境、社会及治理")
+        || text.contains("ESG")
+        || text.contains("估值提升计划")
+        || text.contains("市值管理")
+        || text.contains("质量回报双提升")
+        || text.contains("履职情况")
+        || text.contains("履行监督职责")
+    {
+        return Some("admin_finance_governance_false_positive");
+    }
+
+    None
+}
+
+fn exchange_announcement_order_capacity_probe_is_truncated(probe: &Value) -> bool {
+    let row_count = probe.get("row_count").and_then(Value::as_i64).unwrap_or(0);
+    let sample_count = probe
+        .get("sample_rows")
+        .and_then(Value::as_array)
+        .map(|rows| rows.len() as i64)
+        .unwrap_or(0);
+    row_count > sample_count
+}
+
+fn exchange_announcement_raw_row_from_list_and_pdf_probe(
+    list_row: &Value,
+    category: &str,
+    request_key: &str,
+    pdf_probe: &Value,
+    open_dates: &[NaiveDate],
+    data_version_id: &str,
+) -> Result<ExchangeAnnouncementOrderCapacityRawRow, String> {
+    let announcement_url = list_row
+        .get("公告链接")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "missing_announcement_url".to_string())?
+        .trim()
+        .to_string();
+    let metadata = parse_cninfo_announcement_link_metadata(&announcement_url);
+    if !metadata
+        .get("metadata_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("incomplete_link_metadata".to_string());
+    }
+    let announcement_id = metadata
+        .get("announcement_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing_announcement_id".to_string())?
+        .to_string();
+    let org_id = metadata
+        .get("org_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let symbol = metadata
+        .get("stock_code")
+        .and_then(Value::as_str)
+        .or_else(|| list_row.get("代码").and_then(Value::as_str))
+        .ok_or_else(|| "missing_symbol".to_string())?
+        .to_string();
+    let announcement_time_raw = metadata
+        .get("announcement_time")
+        .and_then(Value::as_str)
+        .or_else(|| list_row.get("公告时间").and_then(Value::as_str))
+        .ok_or_else(|| "missing_announcement_time".to_string())?;
+    let announcement_time = parse_exchange_announcement_date(announcement_time_raw)
+        .ok_or_else(|| format!("invalid_announcement_time:{announcement_time_raw}"))?;
+    let available_at = exchange_announcement_next_open_date(announcement_time, open_dates);
+
+    let raw_payload = list_row.clone();
+    let raw_payload_hash = akshare_stable_hash(&[
+        "akshare".to_string(),
+        "stock_zh_a_disclosure_report_cninfo".to_string(),
+        announcement_id.clone(),
+        symbol.clone(),
+        serde_json::to_string(&raw_payload).unwrap_or_default(),
+    ]);
+    let evidence_spans = pdf_probe
+        .get("evidence_spans")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let announcement_title = list_row
+        .get("公告标题")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let event_type =
+        exchange_announcement_event_type_from_title_and_spans(&announcement_title, &evidence_spans);
+    let parser_errors = pdf_probe
+        .get("parser_errors")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let timestamp_candidates = pdf_probe
+        .get("timestamp_candidates")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let pdf_metadata_keys = pdf_probe
+        .get("pdf_metadata_keys")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let source_published_at = pdf_probe
+        .get("source_published_at")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(announcement_time_raw)
+        .to_string();
+    let parsed_source_published_at_ts = parse_exchange_announcement_timestamp(&source_published_at);
+    let declared_source_published_at_quality = pdf_probe
+        .get("source_published_at_quality")
+        .and_then(Value::as_str)
+        .filter(|quality| matches!(*quality, "timestamp" | "date_only_next_session"))
+        .unwrap_or("date_only_next_session");
+    let source_published_at_quality = if parsed_source_published_at_ts.is_some() {
+        "timestamp".to_string()
+    } else {
+        declared_source_published_at_quality.to_string()
+    };
+    let (source_published_at_ts, source_published_date) =
+        if source_published_at_quality == "timestamp" {
+            (parsed_source_published_at_ts, None)
+        } else {
+            (None, Some(announcement_time))
+        };
+    let text_content = pdf_probe
+        .get("text_sample")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let text_hash = pdf_probe
+        .get("text_hash")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let parser_used = pdf_probe
+        .get("parser_used")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let pdf_final_url = pdf_probe
+        .get("final_url")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    Ok(ExchangeAnnouncementOrderCapacityRawRow {
+        vendor: "akshare".to_string(),
+        vendor_endpoint: "stock_zh_a_disclosure_report_cninfo".to_string(),
+        request_key: request_key.to_string(),
+        symbol,
+        symbol_name: list_row
+            .get("简称")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        announcement_id,
+        org_id,
+        announcement_category: category.to_string(),
+        announcement_title,
+        announcement_time,
+        source_published_at,
+        source_published_at_ts,
+        source_published_date,
+        source_published_at_quality,
+        available_at,
+        announcement_url,
+        pdf_final_url,
+        text_content,
+        text_hash,
+        timestamp_candidates,
+        pdf_metadata_keys,
+        raw_payload,
+        raw_payload_hash,
+        parser_used,
+        parser_version: None,
+        parser_errors,
+        pdf_parse_status: exchange_announcement_pdf_parse_status(pdf_probe),
+        event_type,
+        evidence_spans,
+    })
+    .map(|mut row| {
+        row.raw_payload = json!({
+            "list_row": row.raw_payload,
+            "pdf_probe_status": pdf_probe.get("status").cloned().unwrap_or(Value::Null),
+            "data_version_id": data_version_id,
+        });
+        row
+    })
+}
+
+fn decide_exchange_announcement_order_capacity_coverage_quality_audit(
+    metrics: ExchangeAnnouncementOrderCapacityCoverageQualityMetrics,
+) -> Value {
+    let raw_quality_failed = metrics.pit_violation_rows > 0
+        || metrics.missing_available_at_rows > 0
+        || metrics.missing_source_published_at_quality_rows > 0
+        || metrics.duplicate_announcement_id_rows > 0
+        || metrics.duplicate_raw_payload_hash_groups > 0;
+    let admissible_target_event_rows =
+        (metrics.target_event_rows - metrics.taxonomy_blocked_target_event_rows).max(0);
+
+    let (status, admission_decision, next_step) = if !metrics.table_exists {
+        (
+            "blocked_raw_schema_not_applied",
+            "blocked_raw_schema_not_applied_no_coverage_to_audit",
+            "apply_sql_phase7_exchange_announcement_order_capacity_source_then_rerun_audit",
+        )
+    } else if metrics.failed_attempts > 0 {
+        (
+            "blocked_failed_sync_attempts_present",
+            "blocked_until_failed_small_batch_attempts_are_repaired",
+            "repair_failed_request_keys_then_rerun_coverage_quality_audit",
+        )
+    } else if metrics.row_count <= 0 && metrics.completed_attempts <= 0 {
+        (
+            "raw_table_present_bounded_sync_required",
+            "bounded_sync_required_before_coverage_quality_audit",
+            "run_one_tiny_exchange_announcement_raw_sync_then_rerun_audit",
+        )
+    } else if metrics.row_count <= 0 {
+        (
+            "synced_empty_no_event_rows_passed_for_coverage_accounting_only",
+            "synced_empty_no_event_rows_passed_for_coverage_accounting_only",
+            "continue_next_tiny_slice_or_batch_then_rerun_full_window_audit",
+        )
+    } else if raw_quality_failed {
+        (
+            "blocked_raw_pit_or_quality_failed",
+            "blocked_until_pit_duplicate_or_source_quality_is_repaired",
+            "repair_or_exclude_bad_raw_rows_before_expanding_sync",
+        )
+    } else if metrics.trainable_scanned_pdf_blocking_rows > 0 {
+        (
+            "blocked_scanned_pdf_ocr_required_rows_present",
+            "blocked_until_scanned_pdf_ocr_runtime_and_audit_pass",
+            "run_separate_ocr_runtime_quality_audit_or_exclude_scanned_pdf_rows",
+        )
+    } else if metrics.taxonomy_blocked_target_event_rows > 0 {
+        (
+            "blocked_event_taxonomy_precision_gate_failed",
+            "blocked_until_category_aware_taxonomy_precision_manual_review_passes",
+            "manually_review_or_exclude_taxonomy_risk_category_target_events_before_expansion",
+        )
+    } else if metrics.target_event_missing_evidence_span_rows > 0 {
+        (
+            "blocked_target_event_rows_missing_text_evidence_spans",
+            "blocked_until_target_event_evidence_spans_are_repaired",
+            "repair_or_exclude_target_event_rows_without_evidence_spans",
+        )
+    } else if metrics.target_event_rows <= 0 {
+        (
+            "raw_coverage_passed_no_target_event_rows_for_taxonomy_accounting_only",
+            "raw_coverage_passed_no_target_event_rows_for_taxonomy_accounting_only",
+            "continue_bounded_sync_and_track_target_event_yield",
+        )
+    } else {
+        (
+            "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only",
+            "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only",
+            "expand_by_month_or_quarter_then_rerun_coverage_quality_audit",
+        )
+    };
+
+    json!({
+        "status": status,
+        "admission_decision": admission_decision,
+        "next_step": next_step,
+        "summary": {
+            "table_exists": metrics.table_exists,
+            "row_count": metrics.row_count,
+            "distinct_symbol_count": metrics.distinct_symbol_count,
+            "distinct_category_count": metrics.distinct_category_count,
+            "pit_violation_rows": metrics.pit_violation_rows,
+            "missing_available_at_rows": metrics.missing_available_at_rows,
+            "missing_source_published_at_quality_rows": metrics.missing_source_published_at_quality_rows,
+            "duplicate_announcement_id_rows": metrics.duplicate_announcement_id_rows,
+            "duplicate_raw_payload_hash_groups": metrics.duplicate_raw_payload_hash_groups,
+            "evidence_span_rows": metrics.evidence_span_rows,
+            "target_event_rows": metrics.target_event_rows,
+            "target_event_missing_evidence_span_rows": metrics.target_event_missing_evidence_span_rows,
+            "scanned_pdf_ocr_required_rows": metrics.scanned_pdf_ocr_required_rows,
+            "ocr_taxonomy_excluded_rows": metrics.ocr_taxonomy_excluded_rows,
+            "trainable_scanned_pdf_blocking_rows": metrics.trainable_scanned_pdf_blocking_rows,
+            "taxonomy_blocked_target_event_rows": metrics.taxonomy_blocked_target_event_rows,
+            "taxonomy_risk_category_rows": metrics.taxonomy_risk_category_rows,
+            "admissible_target_event_rows": admissible_target_event_rows,
+            "completed_attempts": metrics.completed_attempts,
+            "completed_empty_attempts": metrics.completed_empty_attempts,
+            "failed_attempts": metrics.failed_attempts,
+            "total_failed_attempts": metrics.total_failed_attempts,
+            "excluded_unsupported_category_failed_attempts": metrics.excluded_unsupported_category_failed_attempts,
+        },
+        "attempt_failure_gate": {
+            "status": if metrics.failed_attempts > 0 {
+                "blocked"
+            } else if metrics.excluded_unsupported_category_failed_attempts > 0 {
+                "passed_with_excluded_unsupported_category_parser_failures"
+            } else {
+                "passed_or_not_observed"
+            },
+            "blocking_failed_attempts": metrics.failed_attempts,
+            "total_failed_attempts": metrics.total_failed_attempts,
+            "excluded_unsupported_category_failed_attempts": metrics.excluded_unsupported_category_failed_attempts,
+            "policy": "failed attempts in the admitted symbol/category/date scope block admission; pre-registered unsupported category parser failures are retained as evidence but do not block the current admitted scope"
+        },
+        "ocr_quality_gate": {
+            "status": if metrics.trainable_scanned_pdf_blocking_rows > 0 {
+                "blocked"
+            } else if metrics.ocr_taxonomy_excluded_rows > 0 {
+                "passed_with_taxonomy_exclusions_only"
+            } else {
+                "passed_or_not_observed"
+            },
+            "scanned_pdf_ocr_required_rows": metrics.scanned_pdf_ocr_required_rows,
+            "ocr_taxonomy_excluded_rows": metrics.ocr_taxonomy_excluded_rows,
+            "trainable_scanned_pdf_blocking_rows": metrics.trainable_scanned_pdf_blocking_rows,
+            "policy": "scanned_pdf rows are retained as raw evidence; only narrow, audited non-target OCR taxonomy exclusions stop blocking coverage, unresolved scanned PDFs remain blocked"
+        },
+        "taxonomy_precision_gate": {
+            "status": if metrics.taxonomy_blocked_target_event_rows > 0 { "blocked" } else { "passed_or_not_observed" },
+            "taxonomy_risk_category_rows": metrics.taxonomy_risk_category_rows,
+            "taxonomy_blocked_target_event_rows": metrics.taxonomy_blocked_target_event_rows,
+            "admissible_target_event_rows": admissible_target_event_rows,
+            "policy": "category-risk target events are taxonomy precision audit material only and cannot be counted as trainable positive labels"
+        },
+        "bounded_sync": if admission_decision == "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only" {
+            "expand_bounded_sync_by_month_or_quarter_only"
+        } else if admission_decision == "synced_empty_no_event_rows_passed_for_coverage_accounting_only" {
+            "continue_bounded_sync_for_coverage_accounting_only"
+        } else if admission_decision == "raw_coverage_passed_no_target_event_rows_for_taxonomy_accounting_only" {
+            "continue_bounded_sync_and_track_target_event_yield"
+        } else {
+            "blocked_until_small_batch_audit_passes"
+        },
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked",
+    })
+}
+
+fn exchange_announcement_order_capacity_target_event_yield_report(
+    raw_row_count: i64,
+    target_event_rows: i64,
+    target_event_with_evidence_span_rows: i64,
+    target_event_missing_evidence_span_rows: i64,
+    taxonomy_blocked_target_event_rows: i64,
+    scanned_pdf_ocr_required_rows: i64,
+    ocr_taxonomy_excluded_rows: i64,
+    trainable_scanned_pdf_blocking_rows: i64,
+) -> Value {
+    let admissible_target_event_rows =
+        (target_event_rows - taxonomy_blocked_target_event_rows).max(0);
+    json!({
+        "raw_row_count": raw_row_count,
+        "target_event_rows": target_event_rows,
+        "admissible_target_event_rows": admissible_target_event_rows,
+        "taxonomy_blocked_target_event_rows": taxonomy_blocked_target_event_rows,
+        "scanned_pdf_ocr_required_rows": scanned_pdf_ocr_required_rows,
+        "ocr_taxonomy_excluded_rows": ocr_taxonomy_excluded_rows,
+        "trainable_scanned_pdf_blocking_rows": trainable_scanned_pdf_blocking_rows,
+        "non_target_event_rows": (raw_row_count - target_event_rows).max(0),
+        "target_event_with_evidence_span_rows": target_event_with_evidence_span_rows,
+        "target_event_missing_evidence_span_rows": target_event_missing_evidence_span_rows,
+        "target_event_yield_ratio": phase7_ratio(target_event_rows, raw_row_count),
+        "admissible_target_event_yield_ratio": phase7_ratio(
+            admissible_target_event_rows,
+            raw_row_count,
+        ),
+        "target_event_evidence_span_coverage_ratio": phase7_ratio(
+            target_event_with_evidence_span_rows,
+            target_event_rows,
+        ),
+        "admission_scope": "raw_coverage_taxonomy_accounting_only",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked",
+    })
+}
+
+fn exchange_announcement_order_capacity_json_path_i64(value: &Value, path: &[&str]) -> i64 {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
+fn exchange_announcement_order_capacity_json_path_f64(value: &Value, path: &[&str]) -> Option<f64> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_f64)
+}
+
+fn exchange_announcement_order_capacity_array_len(value: &Value, key: &str) -> usize {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+fn exchange_announcement_order_capacity_admission_readiness_report(coverage: &Value) -> Value {
+    let row_count =
+        exchange_announcement_order_capacity_json_path_i64(coverage, &["summary", "row_count"]);
+    let target_event_rows = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "target_event_rows"],
+    );
+    let admissible_target_event_rows = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "admissible_target_event_rows"],
+    );
+    let pit_violation_rows = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "pit_violation_rows"],
+    );
+    let duplicate_announcement_id_rows = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "duplicate_announcement_id_rows"],
+    );
+    let duplicate_raw_payload_hash_groups = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "duplicate_raw_payload_hash_groups"],
+    );
+    let failed_attempts = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "failed_attempts"],
+    );
+    let trainable_scanned_pdf_blocking_rows = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "trainable_scanned_pdf_blocking_rows"],
+    );
+    let missing_evidence_rows = exchange_announcement_order_capacity_json_path_i64(
+        coverage,
+        &["summary", "target_event_missing_evidence_span_rows"],
+    );
+    let evidence_span_coverage = exchange_announcement_order_capacity_json_path_f64(
+        coverage,
+        &[
+            "target_event_yield",
+            "target_event_evidence_span_coverage_ratio",
+        ],
+    )
+    .unwrap_or(0.0);
+    let year_category_count =
+        exchange_announcement_order_capacity_array_len(coverage, "year_category_breakdown");
+    let symbol_breakdown_count =
+        exchange_announcement_order_capacity_array_len(coverage, "symbol_event_breakdown");
+
+    let raw_gate_passed = row_count > 0
+        && target_event_rows > 0
+        && admissible_target_event_rows > 0
+        && pit_violation_rows == 0
+        && duplicate_announcement_id_rows == 0
+        && duplicate_raw_payload_hash_groups == 0
+        && failed_attempts == 0
+        && trainable_scanned_pdf_blocking_rows == 0
+        && missing_evidence_rows == 0
+        && evidence_span_coverage >= 1.0;
+
+    let effective_coverage_status =
+        if raw_gate_passed && year_category_count >= 1 && symbol_breakdown_count >= 4 {
+            "pilot_scope_only_not_full_history"
+        } else {
+            "blocked_until_broader_pre_registered_coverage_passes"
+        };
+
+    json!({
+        "audit_version": "p3.24w-exchange-announcement-order-capacity-admission-readiness-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24W",
+        "mode": "read_only_admission_readiness_no_factor_no_p310_no_wfa",
+        "coverage_pit_quality_gate": {
+            "status": if raw_gate_passed {
+                "passed_pilot_scope"
+            } else {
+                "blocked_until_coverage_pit_quality_passes"
+            },
+            "row_count": row_count,
+            "target_event_rows": target_event_rows,
+            "admissible_target_event_rows": admissible_target_event_rows,
+            "pit_violation_rows": pit_violation_rows,
+            "duplicate_announcement_id_rows": duplicate_announcement_id_rows,
+            "duplicate_raw_payload_hash_groups": duplicate_raw_payload_hash_groups,
+            "failed_attempts": failed_attempts,
+            "trainable_scanned_pdf_blocking_rows": trainable_scanned_pdf_blocking_rows,
+            "target_event_missing_evidence_span_rows": missing_evidence_rows,
+            "target_event_evidence_span_coverage_ratio": evidence_span_coverage,
+        },
+        "effective_coverage_gate": {
+            "status": effective_coverage_status,
+            "year_category_breakdown_count": year_category_count,
+            "symbol_breakdown_count": symbol_breakdown_count,
+            "current_scope": "bounded pilot scope; not yet full-history or formally pre-registered broad coverage",
+            "required_before_p310": "pre-register target universe/date range/category scope and prove coverage/readiness across that scope"
+        },
+        "manual_evidence_span_precision_gate": {
+            "status": "blocked_manual_review_required",
+            "required_precision_min": 0.80,
+            "required_sample_size_min": 50,
+            "current_machine_evidence_coverage": evidence_span_coverage,
+            "policy": "machine spans prove text anchoring, not human semantic precision"
+        },
+        "event_taxonomy_precision_gate": {
+            "status": "blocked_manual_review_required",
+            "required_precision_min": 0.80,
+            "required_sample_size_min": 50,
+            "policy": "manual review must confirm order/capacity/price/commissioning labels and negative exclusions before trainable rows"
+        },
+        "correlation_gate": {
+            "status": "blocked_correlation_audit_required",
+            "max_abs_correlation_threshold": 0.30,
+            "reference_families": [
+                "moneyflow_congestion",
+                "liquidity",
+                "price_volume",
+                "financial_quality_change",
+                "earnings_recovery_persistence",
+                "event_overlay",
+                "shareholder_structure"
+            ],
+            "pit_alignment": "must join raw event features by conservative available_at, not announcement_time"
+        },
+        "promotion_gate": {
+            "factor_builder": "blocked_until_admission_readiness_passes",
+            "p310_status": "blocked_until_manual_precision_effective_coverage_and_correlation_pass",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": if raw_gate_passed {
+            "run_manual_evidence_span_and_taxonomy_precision_review_then_low_correlation_audit_before_p310"
+        } else {
+            "repair_or_extend_raw_coverage_pit_quality_before_admission_readiness"
+        },
+        "coverage_audit": coverage,
+    })
+}
+
+fn exchange_announcement_order_capacity_manual_precision_sample_report(
+    admissible_target_event_rows: i64,
+    required_target_sample_size: i64,
+    target_sample_rows: i64,
+    negative_sample_rows: i64,
+    review_items: Vec<Value>,
+) -> Value {
+    let target_sample_shortfall = (required_target_sample_size - target_sample_rows).max(0);
+    let status = if target_sample_shortfall > 0 {
+        "blocked_insufficient_target_review_sample"
+    } else {
+        "manual_review_sample_ready"
+    };
+
+    json!({
+        "audit_version": "p3.24x-exchange-announcement-order-capacity-manual-precision-sample-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24X",
+        "mode": "read_only_manual_review_sample_no_labels_no_factor_no_p310",
+        "status": status,
+        "admissible_target_event_rows": admissible_target_event_rows,
+        "required_target_sample_size_min": required_target_sample_size,
+        "target_sample_rows": target_sample_rows,
+        "negative_sample_rows": negative_sample_rows,
+        "target_sample_shortfall": target_sample_shortfall,
+        "manual_evidence_span_precision_gate": {
+            "status": "blocked_until_human_labels_are_recorded",
+            "required_precision_min": 0.80,
+            "required_sample_size_min": required_target_sample_size,
+            "review_labels_required": [
+                "evidence_span_correct",
+                "evidence_span_wrong_or_too_broad",
+                "insufficient_context"
+            ],
+            "policy": "this endpoint creates a deterministic review sample only; it cannot certify precision without persisted human labels"
+        },
+        "event_taxonomy_precision_gate": {
+            "status": "blocked_until_human_labels_are_recorded",
+            "required_precision_min": 0.80,
+            "required_sample_size_min": required_target_sample_size,
+            "review_labels_required": [
+                "taxonomy_correct_target_event",
+                "taxonomy_false_positive",
+                "taxonomy_uncertain"
+            ],
+            "policy": "target-event labels and negative exclusions require human review before trainable rows"
+        },
+        "promotion_gate": {
+            "factor_builder": "blocked_until_manual_precision_review_passes",
+            "p310_status": "blocked_until_manual_precision_review_passes",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": if status == "manual_review_sample_ready" {
+            "record_human_labels_for_sample_then_compute_precision_before_correlation_audit"
+        } else {
+            "expand_pre_registered_coverage_until_minimum_target_review_sample_is_available"
+        },
+        "review_items": review_items,
+    })
+}
+
+async fn upsert_exchange_announcement_order_capacity_raw_rows(
+    db: &sqlx::PgPool,
+    rows: &[ExchangeAnnouncementOrderCapacityRawRow],
+    data_version_id: &str,
+) -> Result<usize, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut saved = 0usize;
+    for chunk in rows.chunks(500) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO market_exchange_announcement_text_raw \
+             (vendor, vendor_endpoint, request_key, symbol, symbol_name, announcement_id, org_id, \
+              announcement_category, announcement_title, announcement_time, source_published_at, \
+              source_published_at_ts, source_published_date, source_published_at_quality, available_at, \
+              announcement_url, pdf_final_url, text_content, text_hash, text_hash_algorithm, \
+              timestamp_candidates, pdf_metadata_keys, raw_payload, raw_payload_hash, parser_used, \
+              parser_version, parser_errors, pdf_parse_status, event_type, evidence_spans, data_version_id) ",
+        );
+
+        builder.push_values(chunk, |mut row_builder, row| {
+            row_builder
+                .push_bind(&row.vendor)
+                .push_bind(&row.vendor_endpoint)
+                .push_bind(&row.request_key)
+                .push_bind(&row.symbol)
+                .push_bind(&row.symbol_name)
+                .push_bind(&row.announcement_id)
+                .push_bind(&row.org_id)
+                .push_bind(&row.announcement_category)
+                .push_bind(&row.announcement_title)
+                .push_bind(row.announcement_time)
+                .push_bind(&row.source_published_at)
+                .push_bind(row.source_published_at_ts)
+                .push_bind(row.source_published_date)
+                .push_bind(&row.source_published_at_quality)
+                .push_bind(row.available_at)
+                .push_bind(&row.announcement_url)
+                .push_bind(&row.pdf_final_url)
+                .push_bind(&row.text_content)
+                .push_bind(&row.text_hash)
+                .push_bind("sha256")
+                .push_bind(&row.timestamp_candidates)
+                .push_bind(&row.pdf_metadata_keys)
+                .push_bind(&row.raw_payload)
+                .push_bind(&row.raw_payload_hash)
+                .push_bind(&row.parser_used)
+                .push_bind(&row.parser_version)
+                .push_bind(&row.parser_errors)
+                .push_bind(&row.pdf_parse_status)
+                .push_bind(&row.event_type)
+                .push_bind(&row.evidence_spans)
+                .push_bind(data_version_id);
+        });
+
+        builder.push(
+            " ON CONFLICT (vendor, vendor_endpoint, announcement_id, symbol, raw_payload_hash) \
+              DO UPDATE SET \
+                request_key = EXCLUDED.request_key, \
+                symbol_name = EXCLUDED.symbol_name, \
+                org_id = EXCLUDED.org_id, \
+                announcement_category = EXCLUDED.announcement_category, \
+                announcement_title = EXCLUDED.announcement_title, \
+                announcement_time = EXCLUDED.announcement_time, \
+                source_published_at = EXCLUDED.source_published_at, \
+                source_published_at_ts = EXCLUDED.source_published_at_ts, \
+                source_published_date = EXCLUDED.source_published_date, \
+                source_published_at_quality = EXCLUDED.source_published_at_quality, \
+                available_at = EXCLUDED.available_at, \
+                announcement_url = EXCLUDED.announcement_url, \
+                pdf_final_url = EXCLUDED.pdf_final_url, \
+                text_content = EXCLUDED.text_content, \
+                text_hash = EXCLUDED.text_hash, \
+                timestamp_candidates = EXCLUDED.timestamp_candidates, \
+                pdf_metadata_keys = EXCLUDED.pdf_metadata_keys, \
+                raw_payload = EXCLUDED.raw_payload, \
+                parser_used = EXCLUDED.parser_used, \
+                parser_version = EXCLUDED.parser_version, \
+                parser_errors = EXCLUDED.parser_errors, \
+                pdf_parse_status = EXCLUDED.pdf_parse_status, \
+                event_type = EXCLUDED.event_type, \
+                evidence_spans = EXCLUDED.evidence_spans, \
+                data_version_id = EXCLUDED.data_version_id, \
+                updated_at = now()",
+        );
+
+        let result = builder.build().execute(db).await?;
+        saved += result.rows_affected() as usize;
+    }
+
+    Ok(saved)
+}
+
+async fn run_exchange_announcement_order_capacity_tiny_sync(
+    state: &AppState,
+    req: ExchangeAnnouncementOrderCapacitySyncReq,
+) -> Result<Value, String> {
+    let validated = validate_exchange_announcement_order_capacity_sync_request(&req)?;
+    let table_exists = table_exists(&state.db, "market_exchange_announcement_text_raw").await?;
+    if !table_exists {
+        return Err(
+            "market_exchange_announcement_text_raw does not exist; apply sql/phase7_exchange_announcement_order_capacity_source.sql before tiny sync"
+                .to_string(),
+        );
+    }
+
+    let task_id = bounded_phase7_task_id(&[validated.data_version_id.as_str(), "raw-sync"]);
+    let sync_req = req.clone().into_sync_task_req();
+    register_sync_task(state, &task_id, &sync_req, "running").await?;
+    quant_data::repository::create_data_version(
+        &state.db,
+        &validated.data_version_id,
+        "Exchange announcement order/capacity raw text sync",
+        EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_TASK_SOURCE,
+        &["market_exchange_announcement_text_raw"],
+        validated.start,
+        validated.end,
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to create exchange announcement data_version {}: {error}",
+            validated.data_version_id
+        )
+    })?;
+
+    let total_units = validated.query_count as i32;
+    quant_data::repository::heartbeat_sync_task(&state.db, &task_id, total_units, 0, 0, 0)
+        .await
+        .map_err(|error| format!("Failed to heartbeat exchange announcement task: {error}"))?;
+    let open_dates =
+        load_exchange_announcement_next_open_dates(&state.db, validated.start, validated.end)
+            .await
+            .map_err(|error| {
+                format!("Failed to load next open dates for exchange announcement sync: {error}")
+            })?;
+
+    let start_key = validated.start.format("%Y%m%d").to_string();
+    let end_key = validated.end.format("%Y%m%d").to_string();
+    let mut completed_units = 0i32;
+    let mut failed_units = 0i32;
+    let mut fetched_rows = 0i64;
+    let mut mapped_rows = 0i64;
+    let mut upserted_rows = 0i64;
+    let mut pdf_ok_rows = 0i64;
+    let mut evidence_span_rows = 0i64;
+    let mut malformed_rows = 0i64;
+    let mut per_query = Vec::new();
+
+    for symbol in &validated.symbols {
+        for category in &validated.categories {
+            let attempt_symbol = format!("{symbol}:{category}");
+            let probe = run_exchange_announcement_order_capacity_probe(
+                &validated.python,
+                symbol,
+                &validated.market,
+                category,
+                &start_key,
+                &end_key,
+                exchange_announcement_order_capacity_raw_sync_row_limit(),
+            )
+            .await;
+            let status = probe
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+            let row_count = probe.get("row_count").and_then(Value::as_i64).unwrap_or(0);
+            fetched_rows += row_count;
+
+            if status == "ok_empty" || (status == "ok" && row_count == 0) {
+                completed_units += 1;
+                quant_data::repository::upsert_sync_attempt(
+                    &state.db,
+                    EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE,
+                    &attempt_symbol,
+                    validated.start,
+                    validated.end,
+                    &task_id,
+                    "completed",
+                    0,
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    format!("Failed to record exchange announcement empty sync attempt: {error}")
+                })?;
+                per_query.push(json!({
+                    "symbol": symbol,
+                    "category": category,
+                    "status": "completed_empty",
+                    "fetched_rows": row_count,
+                    "mapped_rows": 0,
+                    "upserted_rows": 0,
+                }));
+            } else if status == "ok" {
+                let sample_rows = probe
+                    .get("sample_rows")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if exchange_announcement_order_capacity_probe_is_truncated(&probe) {
+                    failed_units += 1;
+                    let message = format!(
+                        "exchange_announcement_truncated_source_rows:row_count={row_count}:sample_rows={}:narrow_date_range_or_raise_reviewed_row_limit",
+                        sample_rows.len()
+                    );
+                    quant_data::repository::upsert_sync_attempt(
+                        &state.db,
+                        EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE,
+                        &attempt_symbol,
+                        validated.start,
+                        validated.end,
+                        &task_id,
+                        "failed",
+                        0,
+                        Some(&message),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Failed to record exchange announcement truncated sync attempt: {error}"
+                        )
+                    })?;
+                    per_query.push(json!({
+                        "symbol": symbol,
+                        "category": category,
+                        "status": "failed_truncated_source_rows",
+                        "fetched_rows": row_count,
+                        "mapped_rows": 0,
+                        "upserted_rows": 0,
+                        "sample_rows": sample_rows.len(),
+                        "raw_sync_row_landing_cap": exchange_announcement_order_capacity_raw_sync_row_limit(),
+                        "error": message,
+                    }));
+                    let finished_units = completed_units + failed_units;
+                    let progress =
+                        ((finished_units as f64 / total_units as f64) * 100.0).round() as i32;
+                    quant_data::repository::heartbeat_sync_task(
+                        &state.db,
+                        &task_id,
+                        total_units,
+                        completed_units,
+                        failed_units,
+                        progress,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("Failed to heartbeat exchange announcement sync progress: {error}")
+                    })?;
+                    continue;
+                }
+                let mut rows = Vec::new();
+                let mut errors = Vec::new();
+                for list_row in sample_rows {
+                    let Some(link) = list_row.get("公告链接").and_then(Value::as_str) else {
+                        errors.push("missing_announcement_link".to_string());
+                        continue;
+                    };
+                    let pdf_probe =
+                        run_exchange_announcement_pdf_detail_probe(&validated.pdf_python, link)
+                            .await;
+                    if pdf_probe.get("status").and_then(Value::as_str) == Some("ok") {
+                        pdf_ok_rows += 1;
+                    }
+                    if pdf_probe
+                        .get("evidence_spans")
+                        .and_then(Value::as_array)
+                        .map(|spans| !spans.is_empty())
+                        .unwrap_or(false)
+                    {
+                        evidence_span_rows += 1;
+                    }
+                    match exchange_announcement_raw_row_from_list_and_pdf_probe(
+                        &list_row,
+                        category,
+                        &format!("{}:{}:{}:{}", symbol, category, start_key, end_key),
+                        &pdf_probe,
+                        &open_dates,
+                        &validated.data_version_id,
+                    ) {
+                        Ok(row) => rows.push(row),
+                        Err(error) => errors.push(error),
+                    }
+                }
+
+                if !errors.is_empty() {
+                    failed_units += 1;
+                    malformed_rows += errors.len() as i64;
+                    let message = format!(
+                        "exchange_announcement_malformed_rows:{}:{}",
+                        errors.len(),
+                        errors.iter().take(5).cloned().collect::<Vec<_>>().join("|")
+                    );
+                    quant_data::repository::upsert_sync_attempt(
+                        &state.db,
+                        EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE,
+                        &attempt_symbol,
+                        validated.start,
+                        validated.end,
+                        &task_id,
+                        "failed",
+                        0,
+                        Some(&message),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Failed to record exchange announcement malformed sync attempt: {error}"
+                        )
+                    })?;
+                    per_query.push(json!({
+                        "symbol": symbol,
+                        "category": category,
+                        "status": "failed_malformed_rows",
+                        "fetched_rows": row_count,
+                        "mapped_rows": rows.len(),
+                        "upserted_rows": 0,
+                        "errors": errors.into_iter().take(10).collect::<Vec<_>>(),
+                    }));
+                } else {
+                    let upserted = upsert_exchange_announcement_order_capacity_raw_rows(
+                        &state.db,
+                        &rows,
+                        &validated.data_version_id,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Failed to upsert exchange announcement raw rows for {attempt_symbol}: {error}"
+                        )
+                    })?;
+                    completed_units += 1;
+                    mapped_rows += rows.len() as i64;
+                    upserted_rows += upserted as i64;
+                    quant_data::repository::upsert_sync_attempt(
+                        &state.db,
+                        EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE,
+                        &attempt_symbol,
+                        validated.start,
+                        validated.end,
+                        &task_id,
+                        "completed",
+                        rows.len() as i64,
+                        None,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Failed to record exchange announcement completed sync attempt: {error}"
+                        )
+                    })?;
+                    per_query.push(json!({
+                        "symbol": symbol,
+                        "category": category,
+                        "status": "completed",
+                        "fetched_rows": row_count,
+                        "mapped_rows": rows.len(),
+                        "upserted_rows": upserted,
+                    }));
+                }
+            } else {
+                failed_units += 1;
+                let message = probe
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .or_else(|| probe.get("error_type").and_then(Value::as_str))
+                    .unwrap_or(status)
+                    .to_string();
+                quant_data::repository::upsert_sync_attempt(
+                    &state.db,
+                    EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE,
+                    &attempt_symbol,
+                    validated.start,
+                    validated.end,
+                    &task_id,
+                    "failed",
+                    0,
+                    Some(&message),
+                )
+                .await
+                .map_err(|error| {
+                    format!("Failed to record exchange announcement failed sync attempt: {error}")
+                })?;
+                per_query.push(json!({
+                    "symbol": symbol,
+                    "category": category,
+                    "status": status,
+                    "fetched_rows": row_count,
+                    "mapped_rows": 0,
+                    "upserted_rows": 0,
+                    "error": message,
+                }));
+            }
+
+            let finished_units = completed_units + failed_units;
+            let progress = ((finished_units as f64 / total_units as f64) * 100.0).round() as i32;
+            quant_data::repository::heartbeat_sync_task(
+                &state.db,
+                &task_id,
+                total_units,
+                completed_units,
+                failed_units,
+                progress,
+            )
+            .await
+            .map_err(|error| {
+                format!("Failed to heartbeat exchange announcement sync progress: {error}")
+            })?;
+        }
+    }
+
+    let final_status = if failed_units > 0 {
+        "partial"
+    } else {
+        "completed"
+    };
+    quant_data::repository::update_sync_task(
+        &state.db,
+        &task_id,
+        final_status,
+        total_units,
+        completed_units,
+        failed_units,
+    )
+    .await
+    .map_err(|error| format!("Failed to finalize exchange announcement sync task: {error}"))?;
+
+    Ok(json!({
+        "audit_version": "p3.24i-exchange-announcement-order-capacity-tiny-raw-sync-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24I",
+        "mode": "tiny_calendar_day_symbol_category_raw_sync",
+        "write_enabled": true,
+        "task_id": task_id,
+        "data_version_id": validated.data_version_id,
+        "date_range": {
+            "start_date": validated.start.format("%Y%m%d").to_string(),
+            "end_date": validated.end.format("%Y%m%d").to_string(),
+            "calendar_day_count": validated.calendar_day_count,
+        },
+        "symbols": validated.symbols,
+        "categories": validated.categories,
+        "market": validated.market,
+        "summary": {
+            "query_count": total_units,
+            "permission_smoke_sample_cap": EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_ROWS,
+            "raw_sync_row_landing_cap": exchange_announcement_order_capacity_raw_sync_row_limit(),
+            "completed_units": completed_units,
+            "failed_units": failed_units,
+            "fetched_rows": fetched_rows,
+            "mapped_rows": mapped_rows,
+            "upserted_rows": upserted_rows,
+            "pdf_ok_rows": pdf_ok_rows,
+            "evidence_span_rows": evidence_span_rows,
+            "malformed_rows": malformed_rows,
+        },
+        "per_query": per_query,
+        "promotion_gate": {
+            "coverage_quality_audit": "required_next",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "run_coverage_quality_audit_for_the_same_tiny_window_before_any_expansion"
+    }))
+}
+
+async fn run_exchange_announcement_order_capacity_bounded_sync(
+    state: &AppState,
+    req: ExchangeAnnouncementOrderCapacityBoundedSyncReq,
+) -> Result<Value, String> {
+    let validated = validate_exchange_announcement_order_capacity_bounded_sync_request(&req)?;
+    let table_exists = table_exists(&state.db, "market_exchange_announcement_text_raw").await?;
+    if !table_exists {
+        return Err(
+            "market_exchange_announcement_text_raw does not exist; apply sql/phase7_exchange_announcement_order_capacity_source.sql before bounded sync"
+                .to_string(),
+        );
+    }
+
+    let mut completed_slices = 0usize;
+    let mut failed_slices = 0usize;
+    let mut stopped_by_audit = false;
+    let mut slice_results = Vec::new();
+    let mut aggregate_fetched_rows = 0i64;
+    let mut aggregate_mapped_rows = 0i64;
+    let mut aggregate_upserted_rows = 0i64;
+    let mut aggregate_pdf_ok_rows = 0i64;
+    let mut aggregate_evidence_span_rows = 0i64;
+    let mut aggregate_failed_units = 0i64;
+
+    for slice in &validated.slices {
+        let slice_version_id =
+            bounded_phase7_task_id(&[validated.data_version_id.as_str(), slice.label.as_str()]);
+        let tiny_req = ExchangeAnnouncementOrderCapacitySyncReq {
+            symbols: Some(validated.symbols.join(",")),
+            categories: Some(validated.categories.join(",")),
+            market: Some(validated.market.clone()),
+            start_date: Some(slice.start_date.format("%Y%m%d").to_string()),
+            end_date: Some(slice.end_date.format("%Y%m%d").to_string()),
+            data_version_id: Some(slice_version_id.clone()),
+            python: Some(validated.python.clone()),
+            pdf_python: Some(validated.pdf_python.clone()),
+            background: false,
+        };
+        let sync_result =
+            run_exchange_announcement_order_capacity_tiny_sync(state, tiny_req).await?;
+        let summary = sync_result
+            .get("summary")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        aggregate_fetched_rows += summary
+            .get("fetched_rows")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        aggregate_mapped_rows += summary
+            .get("mapped_rows")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        aggregate_upserted_rows += summary
+            .get("upserted_rows")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        aggregate_pdf_ok_rows += summary
+            .get("pdf_ok_rows")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        aggregate_evidence_span_rows += summary
+            .get("evidence_span_rows")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let failed_units = summary
+            .get("failed_units")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        aggregate_failed_units += failed_units;
+
+        let audit_req = ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
+            start_date: Some(slice.start_date.format("%Y%m%d").to_string()),
+            end_date: Some(slice.end_date.format("%Y%m%d").to_string()),
+        };
+        let audit_result =
+            build_exchange_announcement_order_capacity_coverage_quality_audit(state, audit_req)
+                .await?;
+        let audit_decision = audit_result
+            .get("decision")
+            .and_then(|decision| decision.get("admission_decision"))
+            .and_then(Value::as_str)
+            .unwrap_or("missing_audit_decision")
+            .to_string();
+        let audit_passed_for_expansion =
+            audit_decision == "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only";
+        let audit_passed_for_coverage = audit_passed_for_expansion
+            || audit_decision == "synced_empty_no_event_rows_passed_for_coverage_accounting_only"
+            || audit_decision
+                == "raw_coverage_passed_no_target_event_rows_for_taxonomy_accounting_only";
+        if failed_units == 0 && audit_passed_for_coverage {
+            completed_slices += 1;
+        } else {
+            failed_slices += 1;
+        }
+
+        slice_results.push(json!({
+            "slice": slice.label,
+            "start_date": slice.start_date.format("%Y%m%d").to_string(),
+            "end_date": slice.end_date.format("%Y%m%d").to_string(),
+            "calendar_day_count": slice.calendar_day_count,
+            "data_version_id": slice_version_id,
+            "sync_summary": summary,
+            "audit_decision": audit_decision,
+            "audit_status": audit_result
+                .get("decision")
+                .and_then(|decision| decision.get("status"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "audit_passed_for_coverage": audit_passed_for_coverage,
+            "audit_passed_for_expansion": audit_passed_for_expansion,
+        }));
+
+        if validated.stop_on_audit_failure && (failed_units > 0 || !audit_passed_for_coverage) {
+            stopped_by_audit = true;
+            break;
+        }
+    }
+
+    Ok(json!({
+        "audit_version": "p3.24j-exchange-announcement-order-capacity-bounded-raw-sync-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24J",
+        "mode": "bounded_month_or_quarter_sync_composed_of_tiny_3day_slices",
+        "write_enabled": true,
+        "data_version_id": validated.data_version_id,
+        "batch_mode": validated.batch_mode,
+        "date_range": {
+            "start_date": validated.start.format("%Y%m%d").to_string(),
+            "end_date": validated.end.format("%Y%m%d").to_string(),
+            "calendar_day_count": validated.calendar_day_count,
+        },
+        "symbols": validated.symbols,
+        "categories": validated.categories,
+        "market": validated.market,
+        "slice_policy": {
+            "max_calendar_days_per_internal_sync": EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_SYNC_MAX_CALENDAR_DAYS,
+            "total_slices": validated.slices.len(),
+            "total_query_units": validated.total_query_units,
+            "permission_smoke_sample_cap": EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_ROWS,
+            "raw_sync_row_landing_cap": exchange_announcement_order_capacity_raw_sync_row_limit(),
+            "stop_on_audit_failure": validated.stop_on_audit_failure,
+            "truncated_source_rows": "blocked_and_recorded_as_failed_attempt_no_partial_raw_landing"
+        },
+        "summary": {
+            "completed_slices": completed_slices,
+            "failed_slices": failed_slices,
+            "stopped_by_audit": stopped_by_audit,
+            "fetched_rows": aggregate_fetched_rows,
+            "mapped_rows": aggregate_mapped_rows,
+            "upserted_rows": aggregate_upserted_rows,
+            "pdf_ok_rows": aggregate_pdf_ok_rows,
+            "evidence_span_rows": aggregate_evidence_span_rows,
+            "failed_units": aggregate_failed_units,
+        },
+        "slices": slice_results,
+        "promotion_gate": {
+            "coverage_quality_audit": "required_after_each_slice_and_after_batch",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": if stopped_by_audit {
+            "repair_failed_slice_or_reduce_symbol_category_date_scope_then_rerun"
+        } else {
+            "rerun_coverage_quality_audit_for_the_full_batch_then_expand_next_month_or_quarter"
+        }
+    }))
+}
+
+async fn build_exchange_announcement_order_capacity_coverage_quality_audit(
+    state: &AppState,
+    req: ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq,
+) -> Result<Value, String> {
+    let today = Utc::now().date_naive();
+    let start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+
+    let table_exists = table_exists(&state.db, "market_exchange_announcement_text_raw").await?;
+    let mut row_count = 0i64;
+    let mut distinct_symbol_count = 0i64;
+    let mut distinct_category_count = 0i64;
+    let mut distinct_available_at_count = 0i64;
+    let mut pit_violation_rows = 0i64;
+    let mut missing_available_at_rows = 0i64;
+    let mut missing_source_published_at_quality_rows = 0i64;
+    let mut duplicate_announcement_id_rows = 0i64;
+    let mut duplicate_raw_payload_hash_groups = 0i64;
+    let mut evidence_span_rows = 0i64;
+    let mut target_event_rows = 0i64;
+    let mut target_event_missing_evidence_span_rows = 0i64;
+    let mut target_event_with_evidence_span_rows = 0i64;
+    let mut scanned_pdf_ocr_required_rows = 0i64;
+    let mut ocr_taxonomy_excluded_rows = 0i64;
+    let mut trainable_scanned_pdf_blocking_rows = 0i64;
+    let mut taxonomy_blocked_target_event_rows = 0i64;
+    let mut taxonomy_risk_category_rows = 0i64;
+    let mut completed_attempts = 0i64;
+    let mut completed_empty_attempts = 0i64;
+    let mut failed_attempts = 0i64;
+    let mut total_failed_attempts = 0i64;
+    let mut excluded_unsupported_category_failed_attempts = 0i64;
+    let mut attempt_row_count = 0i64;
+    let mut source_published_at_quality_distribution = Vec::new();
+    let mut parser_status_distribution = Vec::new();
+    let mut category_breakdown = Vec::new();
+    let mut event_type_distribution = Vec::new();
+    let mut year_category_breakdown = Vec::new();
+    let mut symbol_event_breakdown = Vec::new();
+
+    if table_exists {
+        let summary =
+            sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
+            r#"
+            WITH scoped AS (
+                SELECT *,
+                       (
+                           pdf_parse_status = 'scanned_pdf_ocr_required'
+                           AND (
+                               announcement_title LIKE '%控股股东及其他关联方资金占用%'
+                               OR announcement_title LIKE '%非经营性资金占用%'
+                               OR announcement_title LIKE '%关联资金往来情况汇总表%'
+                               OR announcement_title LIKE '%财务公司关联交易%'
+                               OR announcement_title LIKE '%存款、贷款等金融业务%'
+                               OR announcement_title LIKE '%金融业务的专项说明%'
+                               OR (
+                                   announcement_title LIKE '%专项说明%'
+                                   AND (
+                                       announcement_title LIKE '%审计%'
+                                       OR announcement_title LIKE '%资金占用%'
+                                       OR announcement_title LIKE '%关联方%'
+                                       OR announcement_title LIKE '%关联交易%'
+                                       OR announcement_title LIKE '%财务公司%'
+                                   )
+                               )
+                               OR (
+                                   announcement_title LIKE '%募集资金%'
+                                   AND (
+                                       announcement_title LIKE '%存放与使用%'
+                                       OR announcement_title LIKE '%存放和使用%'
+                                   )
+                                   AND (
+                                       announcement_title LIKE '%鉴证报告%'
+                                       OR announcement_title LIKE '%专项核查报告%'
+                                       OR announcement_title LIKE '%专项报告%'
+                                   )
+                               )
+                               OR announcement_title LIKE '%审计报告%'
+                               OR announcement_title LIKE '%法律意见书%'
+                               OR announcement_title LIKE '%财务顾问报告%'
+                           )
+                       ) AS is_ocr_taxonomy_excluded,
+                       (
+                           NOT (
+                               announcement_title LIKE '%签署《关于进一步加强和深化合作的协议》%'
+                               OR announcement_title LIKE '%合资建厂%'
+                               OR announcement_title LIKE '%签订日常经营重大合同%'
+                               OR announcement_title LIKE '%投资建设高效电池产能%'
+                               OR announcement_title LIKE '%投资建设产能项目%'
+                           )
+                           AND (
+                               announcement_title LIKE '%计提减值准备%'
+                               OR announcement_title LIKE '%募投项目%'
+                               OR announcement_title LIKE '%募集资金%'
+                               OR announcement_title LIKE '%关联交易%'
+                               OR announcement_title LIKE '%授信额度%'
+                               OR announcement_title LIKE '%注册资本%'
+                               OR announcement_title LIKE '%工商变更%'
+                               OR announcement_title LIKE '%实际控制人%'
+                               OR announcement_title LIKE '%控制权%'
+                               OR announcement_title LIKE '%股份质押%'
+                               OR announcement_title LIKE '%财务报告%'
+                               OR announcement_title LIKE '%年度报告%'
+                               OR announcement_title LIKE '%半年度报告%'
+                               OR announcement_title LIKE '%季度报告%'
+                               OR announcement_title LIKE '%主要经营数据%'
+                               OR announcement_title LIKE '%股权投资基金%'
+                               OR announcement_title LIKE '%投资基金%'
+                               OR announcement_title LIKE '%风险评估报告%'
+                               OR announcement_title LIKE '%H股发行%'
+                               OR announcement_title LIKE '%发行H股%'
+                               OR announcement_title LIKE '%H股股票%'
+                               OR announcement_title LIKE '%上市审计机构%'
+                               OR announcement_title LIKE '%章程%'
+                               OR announcement_title LIKE '%审计报告%'
+                               OR announcement_title LIKE '%审计机构%'
+                               OR announcement_title LIKE '%资产减值%'
+                               OR announcement_title LIKE '%公募REITs%'
+                               OR announcement_title LIKE '%REITs%'
+                               OR announcement_title LIKE '%收购控股子公司%'
+                               OR announcement_title LIKE '%董事会工作报告%'
+                               OR announcement_title LIKE '%监事会工作报告%'
+                               OR announcement_title LIKE '%内部控制%'
+                               OR announcement_title LIKE '%会计师事务所%'
+                               OR announcement_title LIKE '%审计委员会%'
+                               OR announcement_title LIKE '%委托理财%'
+                               OR announcement_title LIKE '%套期保值%'
+                               OR announcement_title LIKE '%担保额度%'
+                               OR announcement_title LIKE '%担保的进展%'
+                               OR announcement_title LIKE '%提供担保%'
+                               OR announcement_title LIKE '%发行债券%'
+                               OR announcement_title LIKE '%公司章程%'
+                               OR announcement_title LIKE '%公司制度%'
+                               OR announcement_title LIKE '%制定及修订%'
+                               OR announcement_title LIKE '%独立董事%'
+                               OR announcement_title LIKE '%会计政策变更%'
+                               OR announcement_title LIKE '%社会责任报告%'
+                               OR announcement_title LIKE '%可持续发展报告%'
+                               OR announcement_title LIKE '%可持续发展%'
+                               OR announcement_title LIKE '%环境、社会及治理%'
+                               OR announcement_title LIKE '%ESG%'
+                               OR announcement_title LIKE '%估值提升计划%'
+                               OR announcement_title LIKE '%市值管理%'
+                               OR announcement_title LIKE '%质量回报双提升%'
+                               OR announcement_title LIKE '%履职情况%'
+                               OR announcement_title LIKE '%履行监督职责%'
+                           )
+                       ) AS is_taxonomy_risk_title
+                FROM market_exchange_announcement_text_raw
+                WHERE announcement_time >= $1 AND announcement_time <= $2
+            )
+            SELECT COUNT(*)::bigint AS row_count,
+                   COUNT(DISTINCT symbol)::bigint AS distinct_symbol_count,
+                   COUNT(DISTINCT announcement_category)::bigint AS distinct_category_count,
+                   COUNT(DISTINCT available_at)::bigint AS distinct_available_at_count,
+                   COUNT(*) FILTER (
+                       WHERE available_at < announcement_time
+                          OR (source_published_at_quality = 'date_only_next_session' AND available_at <= announcement_time)
+                   )::bigint AS pit_violation_rows,
+                   COUNT(*) FILTER (WHERE available_at IS NULL)::bigint AS missing_available_at_rows,
+                   COUNT(*) FILTER (WHERE source_published_at_quality IS NULL OR source_published_at_quality = 'missing')::bigint AS missing_source_published_at_quality_rows,
+                   COUNT(*) FILTER (WHERE jsonb_array_length(evidence_spans) > 0)::bigint AS evidence_span_rows,
+                   COUNT(*) FILTER (WHERE event_type IS NOT NULL)::bigint AS target_event_rows,
+                   COUNT(*) FILTER (WHERE event_type IS NOT NULL AND jsonb_array_length(evidence_spans) = 0)::bigint AS target_event_missing_evidence_span_rows,
+                   COUNT(*) FILTER (WHERE event_type IS NOT NULL AND jsonb_array_length(evidence_spans) > 0)::bigint AS target_event_with_evidence_span_rows,
+                   COUNT(*) FILTER (WHERE pdf_parse_status = 'scanned_pdf_ocr_required')::bigint AS scanned_pdf_ocr_required_rows,
+                   COUNT(*) FILTER (WHERE is_ocr_taxonomy_excluded)::bigint AS ocr_taxonomy_excluded_rows,
+                   COUNT(*) FILTER (WHERE pdf_parse_status = 'scanned_pdf_ocr_required' AND NOT is_ocr_taxonomy_excluded)::bigint AS trainable_scanned_pdf_blocking_rows,
+                   COUNT(*) FILTER (
+                       WHERE event_type IS NOT NULL
+                         AND (announcement_category IN ('股权激励') OR is_taxonomy_risk_title)
+                   )::bigint AS taxonomy_blocked_target_event_rows,
+                   COUNT(*) FILTER (
+                       WHERE announcement_category IN ('股权激励') OR is_taxonomy_risk_title
+                   )::bigint AS taxonomy_risk_category_rows
+            FROM scoped
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize exchange announcement coverage quality: {error}")
+        })?;
+        row_count = summary.0;
+        distinct_symbol_count = summary.1;
+        distinct_category_count = summary.2;
+        distinct_available_at_count = summary.3;
+        pit_violation_rows = summary.4;
+        missing_available_at_rows = summary.5;
+        missing_source_published_at_quality_rows = summary.6;
+        evidence_span_rows = summary.7;
+        target_event_rows = summary.8;
+        target_event_missing_evidence_span_rows = summary.9;
+        target_event_with_evidence_span_rows = summary.10;
+        scanned_pdf_ocr_required_rows = summary.11;
+        ocr_taxonomy_excluded_rows = summary.12;
+        trainable_scanned_pdf_blocking_rows = summary.13;
+        taxonomy_blocked_target_event_rows = summary.14;
+        taxonomy_risk_category_rows = summary.15;
+
+        duplicate_announcement_id_rows = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COALESCE(SUM(cnt - 1), 0)::bigint
+            FROM (
+                SELECT vendor, vendor_endpoint, announcement_id, symbol, COUNT(*)::bigint AS cnt
+                FROM market_exchange_announcement_text_raw
+                WHERE announcement_time >= $1 AND announcement_time <= $2
+                GROUP BY vendor, vendor_endpoint, announcement_id, symbol
+                HAVING COUNT(*) > 1
+            ) d
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize exchange announcement duplicate IDs: {error}")
+        })?;
+        duplicate_raw_payload_hash_groups = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM (
+                SELECT raw_payload_hash, COUNT(*)::bigint AS cnt
+                FROM market_exchange_announcement_text_raw
+                WHERE announcement_time >= $1 AND announcement_time <= $2
+                GROUP BY raw_payload_hash
+                HAVING COUNT(*) > 1
+            ) d
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize exchange announcement duplicate hashes: {error}")
+        })?;
+        let attempt_rows: Vec<(String, Option<String>, String, i64)> = sqlx::query_as(
+            r#"
+            SELECT symbol,
+                   error_message,
+                   status,
+                   row_count
+            FROM data_sync_attempt
+            WHERE source = $1
+              AND start_date >= $2
+              AND end_date <= $3
+            "#,
+        )
+        .bind(EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE)
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to summarize exchange announcement sync attempts: {error}")
+        })?;
+        for (attempt_symbol, error_message, status, row_count) in attempt_rows {
+            match status.as_str() {
+                "completed" => {
+                    completed_attempts += 1;
+                    attempt_row_count += row_count;
+                    if row_count == 0 {
+                        completed_empty_attempts += 1;
+                    }
+                }
+                "failed" => {
+                    total_failed_attempts += 1;
+                    if exchange_announcement_order_capacity_is_excluded_unsupported_category_attempt(
+                        &attempt_symbol,
+                        error_message.as_deref().unwrap_or_default(),
+                    ) {
+                        excluded_unsupported_category_failed_attempts += 1;
+                    } else {
+                        failed_attempts += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let quality_rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT source_published_at_quality, COUNT(*)::bigint
+            FROM market_exchange_announcement_text_raw
+            WHERE announcement_time >= $1 AND announcement_time <= $2
+            GROUP BY source_published_at_quality
+            ORDER BY source_published_at_quality
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to build source_published_at_quality distribution: {error}")
+        })?;
+        source_published_at_quality_distribution = quality_rows
+            .into_iter()
+            .map(|(quality, rows)| json!({"quality": quality, "rows": rows}))
+            .collect();
+
+        let parser_rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT pdf_parse_status, COUNT(*)::bigint
+            FROM market_exchange_announcement_text_raw
+            WHERE announcement_time >= $1 AND announcement_time <= $2
+            GROUP BY pdf_parse_status
+            ORDER BY pdf_parse_status
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to build parser status distribution: {error}"))?;
+        parser_status_distribution = parser_rows
+            .into_iter()
+            .map(|(status, rows)| json!({"pdf_parse_status": status, "rows": rows}))
+            .collect();
+
+        let category_rows: Vec<(String, i64, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            WITH scoped AS (
+                SELECT *,
+                       (
+                           pdf_parse_status = 'scanned_pdf_ocr_required'
+                           AND (
+                               announcement_title LIKE '%控股股东及其他关联方资金占用%'
+                               OR announcement_title LIKE '%非经营性资金占用%'
+                               OR announcement_title LIKE '%关联资金往来情况汇总表%'
+                               OR announcement_title LIKE '%财务公司关联交易%'
+                               OR announcement_title LIKE '%存款、贷款等金融业务%'
+                               OR announcement_title LIKE '%金融业务的专项说明%'
+                               OR (
+                                   announcement_title LIKE '%专项说明%'
+                                   AND (
+                                       announcement_title LIKE '%审计%'
+                                       OR announcement_title LIKE '%资金占用%'
+                                       OR announcement_title LIKE '%关联方%'
+                                       OR announcement_title LIKE '%关联交易%'
+                                       OR announcement_title LIKE '%财务公司%'
+                                   )
+                               )
+                               OR (
+                                   announcement_title LIKE '%募集资金%'
+                                   AND (
+                                       announcement_title LIKE '%存放与使用%'
+                                       OR announcement_title LIKE '%存放和使用%'
+                                   )
+                                   AND (
+                                       announcement_title LIKE '%鉴证报告%'
+                                       OR announcement_title LIKE '%专项核查报告%'
+                                       OR announcement_title LIKE '%专项报告%'
+                                   )
+                               )
+                               OR announcement_title LIKE '%审计报告%'
+                               OR announcement_title LIKE '%法律意见书%'
+                               OR announcement_title LIKE '%财务顾问报告%'
+                           )
+                       ) AS is_ocr_taxonomy_excluded,
+                       (
+                           NOT (
+                               announcement_title LIKE '%签署《关于进一步加强和深化合作的协议》%'
+                               OR announcement_title LIKE '%合资建厂%'
+                               OR announcement_title LIKE '%签订日常经营重大合同%'
+                               OR announcement_title LIKE '%投资建设高效电池产能%'
+                               OR announcement_title LIKE '%投资建设产能项目%'
+                           )
+                           AND (
+                               announcement_title LIKE '%计提减值准备%'
+                               OR announcement_title LIKE '%募投项目%'
+                               OR announcement_title LIKE '%募集资金%'
+                               OR announcement_title LIKE '%关联交易%'
+                               OR announcement_title LIKE '%授信额度%'
+                               OR announcement_title LIKE '%注册资本%'
+                               OR announcement_title LIKE '%工商变更%'
+                               OR announcement_title LIKE '%实际控制人%'
+                               OR announcement_title LIKE '%控制权%'
+                               OR announcement_title LIKE '%股份质押%'
+                               OR announcement_title LIKE '%财务报告%'
+                               OR announcement_title LIKE '%年度报告%'
+                               OR announcement_title LIKE '%半年度报告%'
+                               OR announcement_title LIKE '%季度报告%'
+                               OR announcement_title LIKE '%主要经营数据%'
+                               OR announcement_title LIKE '%股权投资基金%'
+                               OR announcement_title LIKE '%投资基金%'
+                               OR announcement_title LIKE '%风险评估报告%'
+                               OR announcement_title LIKE '%H股发行%'
+                               OR announcement_title LIKE '%发行H股%'
+                               OR announcement_title LIKE '%H股股票%'
+                               OR announcement_title LIKE '%上市审计机构%'
+                               OR announcement_title LIKE '%章程%'
+                               OR announcement_title LIKE '%审计报告%'
+                               OR announcement_title LIKE '%审计机构%'
+                               OR announcement_title LIKE '%资产减值%'
+                               OR announcement_title LIKE '%公募REITs%'
+                               OR announcement_title LIKE '%REITs%'
+                               OR announcement_title LIKE '%收购控股子公司%'
+                               OR announcement_title LIKE '%董事会工作报告%'
+                               OR announcement_title LIKE '%监事会工作报告%'
+                               OR announcement_title LIKE '%内部控制%'
+                               OR announcement_title LIKE '%会计师事务所%'
+                               OR announcement_title LIKE '%审计委员会%'
+                               OR announcement_title LIKE '%委托理财%'
+                               OR announcement_title LIKE '%套期保值%'
+                               OR announcement_title LIKE '%担保额度%'
+                               OR announcement_title LIKE '%担保的进展%'
+                               OR announcement_title LIKE '%提供担保%'
+                               OR announcement_title LIKE '%发行债券%'
+                               OR announcement_title LIKE '%公司章程%'
+                               OR announcement_title LIKE '%公司制度%'
+                               OR announcement_title LIKE '%制定及修订%'
+                               OR announcement_title LIKE '%独立董事%'
+                               OR announcement_title LIKE '%会计政策变更%'
+                               OR announcement_title LIKE '%社会责任报告%'
+                               OR announcement_title LIKE '%可持续发展报告%'
+                               OR announcement_title LIKE '%可持续发展%'
+                               OR announcement_title LIKE '%环境、社会及治理%'
+                               OR announcement_title LIKE '%ESG%'
+                               OR announcement_title LIKE '%估值提升计划%'
+                               OR announcement_title LIKE '%市值管理%'
+                               OR announcement_title LIKE '%质量回报双提升%'
+                               OR announcement_title LIKE '%履职情况%'
+                               OR announcement_title LIKE '%履行监督职责%'
+                           )
+                       ) AS is_taxonomy_risk_title
+                FROM market_exchange_announcement_text_raw
+                WHERE announcement_time >= $1 AND announcement_time <= $2
+            )
+            SELECT announcement_category,
+                   COUNT(*)::bigint AS rows,
+                   COUNT(DISTINCT symbol)::bigint AS symbols,
+                   COUNT(*) FILTER (WHERE event_type IS NOT NULL)::bigint AS target_event_rows,
+                   COUNT(*) FILTER (
+                       WHERE event_type IS NOT NULL
+                         AND (announcement_category IN ('股权激励') OR is_taxonomy_risk_title)
+                   )::bigint AS taxonomy_blocked_target_event_rows,
+                   COUNT(*) FILTER (WHERE pdf_parse_status = 'scanned_pdf_ocr_required')::bigint AS scanned_pdf_ocr_required_rows,
+                   COUNT(*) FILTER (WHERE is_ocr_taxonomy_excluded)::bigint AS ocr_taxonomy_excluded_rows,
+                   COUNT(*) FILTER (WHERE pdf_parse_status = 'scanned_pdf_ocr_required' AND NOT is_ocr_taxonomy_excluded)::bigint AS trainable_scanned_pdf_blocking_rows
+            FROM scoped
+            GROUP BY announcement_category
+            ORDER BY announcement_category
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to build category breakdown: {error}"))?;
+        category_breakdown = category_rows
+            .into_iter()
+            .map(
+                |(
+                    category,
+                    rows,
+                    symbols,
+                    target_rows,
+                    taxonomy_blocked_rows,
+                    ocr_rows,
+                    ocr_taxonomy_excluded,
+                    trainable_ocr_blocking,
+                )| {
+                json!({
+                    "category": category,
+                    "rows": rows,
+                    "symbols": symbols,
+                    "target_event_rows": target_rows,
+                    "taxonomy_blocked_target_event_rows": taxonomy_blocked_rows,
+                    "scanned_pdf_ocr_required_rows": ocr_rows,
+                    "ocr_taxonomy_excluded_rows": ocr_taxonomy_excluded,
+                    "trainable_scanned_pdf_blocking_rows": trainable_ocr_blocking,
+                    "admissible_target_event_rows": (target_rows - taxonomy_blocked_rows).max(0),
+                })
+            },
+            )
+            .collect();
+
+        let event_type_rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT COALESCE(event_type, 'non_target_or_unclassified') AS event_type,
+                   COUNT(*)::bigint AS rows,
+                   COUNT(*) FILTER (WHERE jsonb_array_length(evidence_spans) > 0)::bigint AS evidence_span_rows
+            FROM market_exchange_announcement_text_raw
+            WHERE announcement_time >= $1 AND announcement_time <= $2
+            GROUP BY COALESCE(event_type, 'non_target_or_unclassified')
+            ORDER BY rows DESC, event_type
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to build event type distribution: {error}"))?;
+        event_type_distribution = event_type_rows
+            .into_iter()
+            .map(|(event_type, rows, evidence_rows)| {
+                let target_event = event_type != "non_target_or_unclassified";
+                json!({
+                    "event_type": event_type,
+                    "rows": rows,
+                    "evidence_span_rows": evidence_rows,
+                    "target_event": target_event,
+                })
+            })
+            .collect();
+
+        let year_category_rows: Vec<(i32, String, i64, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            WITH scoped AS (
+                SELECT *,
+                       (
+                           pdf_parse_status = 'scanned_pdf_ocr_required'
+                           AND (
+                               announcement_title LIKE '%控股股东及其他关联方资金占用%'
+                               OR announcement_title LIKE '%非经营性资金占用%'
+                               OR announcement_title LIKE '%关联资金往来情况汇总表%'
+                               OR announcement_title LIKE '%财务公司关联交易%'
+                               OR announcement_title LIKE '%存款、贷款等金融业务%'
+                               OR announcement_title LIKE '%金融业务的专项说明%'
+                               OR (
+                                   announcement_title LIKE '%专项说明%'
+                                   AND (
+                                       announcement_title LIKE '%审计%'
+                                       OR announcement_title LIKE '%资金占用%'
+                                       OR announcement_title LIKE '%关联方%'
+                                       OR announcement_title LIKE '%关联交易%'
+                                       OR announcement_title LIKE '%财务公司%'
+                                   )
+                               )
+                               OR (
+                                   announcement_title LIKE '%募集资金%'
+                                   AND (
+                                       announcement_title LIKE '%存放与使用%'
+                                       OR announcement_title LIKE '%存放和使用%'
+                                   )
+                                   AND (
+                                       announcement_title LIKE '%鉴证报告%'
+                                       OR announcement_title LIKE '%专项核查报告%'
+                                       OR announcement_title LIKE '%专项报告%'
+                                   )
+                               )
+                               OR announcement_title LIKE '%审计报告%'
+                               OR announcement_title LIKE '%法律意见书%'
+                               OR announcement_title LIKE '%财务顾问报告%'
+                           )
+                       ) AS is_ocr_taxonomy_excluded,
+                       (
+                           NOT (
+                               announcement_title LIKE '%签署《关于进一步加强和深化合作的协议》%'
+                               OR announcement_title LIKE '%合资建厂%'
+                               OR announcement_title LIKE '%签订日常经营重大合同%'
+                               OR announcement_title LIKE '%投资建设高效电池产能%'
+                               OR announcement_title LIKE '%投资建设产能项目%'
+                           )
+                           AND (
+                               announcement_title LIKE '%计提减值准备%'
+                               OR announcement_title LIKE '%募投项目%'
+                               OR announcement_title LIKE '%募集资金%'
+                               OR announcement_title LIKE '%关联交易%'
+                               OR announcement_title LIKE '%授信额度%'
+                               OR announcement_title LIKE '%注册资本%'
+                               OR announcement_title LIKE '%工商变更%'
+                               OR announcement_title LIKE '%实际控制人%'
+                               OR announcement_title LIKE '%控制权%'
+                               OR announcement_title LIKE '%股份质押%'
+                               OR announcement_title LIKE '%财务报告%'
+                               OR announcement_title LIKE '%年度报告%'
+                               OR announcement_title LIKE '%半年度报告%'
+                               OR announcement_title LIKE '%季度报告%'
+                               OR announcement_title LIKE '%主要经营数据%'
+                               OR announcement_title LIKE '%股权投资基金%'
+                               OR announcement_title LIKE '%投资基金%'
+                               OR announcement_title LIKE '%风险评估报告%'
+                               OR announcement_title LIKE '%H股发行%'
+                               OR announcement_title LIKE '%发行H股%'
+                               OR announcement_title LIKE '%H股股票%'
+                               OR announcement_title LIKE '%上市审计机构%'
+                               OR announcement_title LIKE '%章程%'
+                               OR announcement_title LIKE '%审计报告%'
+                               OR announcement_title LIKE '%审计机构%'
+                               OR announcement_title LIKE '%资产减值%'
+                               OR announcement_title LIKE '%公募REITs%'
+                               OR announcement_title LIKE '%REITs%'
+                               OR announcement_title LIKE '%收购控股子公司%'
+                               OR announcement_title LIKE '%董事会工作报告%'
+                               OR announcement_title LIKE '%监事会工作报告%'
+                               OR announcement_title LIKE '%内部控制%'
+                               OR announcement_title LIKE '%会计师事务所%'
+                               OR announcement_title LIKE '%审计委员会%'
+                               OR announcement_title LIKE '%委托理财%'
+                               OR announcement_title LIKE '%套期保值%'
+                               OR announcement_title LIKE '%担保额度%'
+                               OR announcement_title LIKE '%担保的进展%'
+                               OR announcement_title LIKE '%提供担保%'
+                               OR announcement_title LIKE '%发行债券%'
+                               OR announcement_title LIKE '%公司章程%'
+                               OR announcement_title LIKE '%公司制度%'
+                               OR announcement_title LIKE '%制定及修订%'
+                               OR announcement_title LIKE '%独立董事%'
+                               OR announcement_title LIKE '%会计政策变更%'
+                               OR announcement_title LIKE '%社会责任报告%'
+                               OR announcement_title LIKE '%可持续发展报告%'
+                               OR announcement_title LIKE '%可持续发展%'
+                               OR announcement_title LIKE '%环境、社会及治理%'
+                               OR announcement_title LIKE '%ESG%'
+                               OR announcement_title LIKE '%估值提升计划%'
+                               OR announcement_title LIKE '%市值管理%'
+                               OR announcement_title LIKE '%质量回报双提升%'
+                               OR announcement_title LIKE '%履职情况%'
+                               OR announcement_title LIKE '%履行监督职责%'
+                           )
+                       ) AS is_taxonomy_risk_title
+                FROM market_exchange_announcement_text_raw
+                WHERE announcement_time >= $1 AND announcement_time <= $2
+            )
+            SELECT EXTRACT(YEAR FROM announcement_time)::int AS year,
+                   announcement_category,
+                   COUNT(*)::bigint AS rows,
+                   COUNT(*) FILTER (WHERE event_type IS NOT NULL)::bigint AS target_event_rows,
+                   COUNT(*) FILTER (
+                       WHERE event_type IS NOT NULL
+                         AND (announcement_category IN ('股权激励') OR is_taxonomy_risk_title)
+                   )::bigint AS taxonomy_blocked_target_event_rows,
+                   COUNT(*) FILTER (WHERE pdf_parse_status = 'scanned_pdf_ocr_required')::bigint AS scanned_pdf_ocr_required_rows,
+                   COUNT(*) FILTER (WHERE is_ocr_taxonomy_excluded)::bigint AS ocr_taxonomy_excluded_rows,
+                   COUNT(*) FILTER (WHERE pdf_parse_status = 'scanned_pdf_ocr_required' AND NOT is_ocr_taxonomy_excluded)::bigint AS trainable_scanned_pdf_blocking_rows,
+                   COUNT(DISTINCT symbol)::bigint AS symbols
+            FROM scoped
+            GROUP BY EXTRACT(YEAR FROM announcement_time)::int, announcement_category
+            ORDER BY year, announcement_category
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to build year/category breakdown: {error}"))?;
+        year_category_breakdown = year_category_rows
+            .into_iter()
+            .map(|(
+                year,
+                category,
+                rows,
+                target_rows,
+                taxonomy_blocked_rows,
+                ocr_rows,
+                ocr_taxonomy_excluded,
+                trainable_ocr_blocking,
+                symbols,
+            )| {
+                let admissible_target_rows = (target_rows - taxonomy_blocked_rows).max(0);
+                json!({
+                    "year": year,
+                    "category": category,
+                    "rows": rows,
+                    "target_event_rows": target_rows,
+                    "taxonomy_blocked_target_event_rows": taxonomy_blocked_rows,
+                    "scanned_pdf_ocr_required_rows": ocr_rows,
+                    "ocr_taxonomy_excluded_rows": ocr_taxonomy_excluded,
+                    "trainable_scanned_pdf_blocking_rows": trainable_ocr_blocking,
+                    "admissible_target_event_rows": admissible_target_rows,
+                    "target_event_yield_ratio": phase7_ratio(target_rows, rows),
+                    "admissible_target_event_yield_ratio": phase7_ratio(admissible_target_rows, rows),
+                    "symbols": symbols,
+                })
+            })
+            .collect();
+
+        let symbol_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT symbol,
+                   COUNT(*)::bigint AS rows,
+                   COUNT(*) FILTER (WHERE event_type IS NOT NULL)::bigint AS target_event_rows,
+                   COUNT(*) FILTER (WHERE event_type IS NOT NULL AND jsonb_array_length(evidence_spans) > 0)::bigint AS target_event_with_evidence_span_rows
+            FROM market_exchange_announcement_text_raw
+            WHERE announcement_time >= $1 AND announcement_time <= $2
+            GROUP BY symbol
+            ORDER BY target_event_rows DESC, rows DESC, symbol
+            LIMIT 200
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to build symbol event breakdown: {error}"))?;
+        symbol_event_breakdown = symbol_rows
+            .into_iter()
+            .map(|(symbol, rows, target_rows, target_span_rows)| {
+                json!({
+                    "symbol": symbol,
+                    "rows": rows,
+                    "target_event_rows": target_rows,
+                    "target_event_with_evidence_span_rows": target_span_rows,
+                    "target_event_yield_ratio": phase7_ratio(target_rows, rows),
+                })
+            })
+            .collect();
+    }
+
+    let decision = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+        ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+            table_exists,
+            row_count,
+            distinct_symbol_count,
+            distinct_category_count,
+            pit_violation_rows,
+            missing_available_at_rows,
+            missing_source_published_at_quality_rows,
+            duplicate_announcement_id_rows,
+            duplicate_raw_payload_hash_groups,
+            evidence_span_rows,
+            target_event_rows,
+            target_event_missing_evidence_span_rows,
+            scanned_pdf_ocr_required_rows,
+            ocr_taxonomy_excluded_rows,
+            trainable_scanned_pdf_blocking_rows,
+            taxonomy_blocked_target_event_rows,
+            taxonomy_risk_category_rows,
+            completed_attempts,
+            completed_empty_attempts,
+            failed_attempts,
+            total_failed_attempts,
+            excluded_unsupported_category_failed_attempts,
+            ..Default::default()
+        },
+    );
+
+    Ok(json!({
+        "audit_version": "p3.24i-exchange-announcement-order-capacity-coverage-quality-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24I",
+        "mode": "read_only_db_backed_small_batch_coverage_pit_quality_audit",
+        "table": "market_exchange_announcement_text_raw",
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "table_exists": table_exists,
+        "summary": {
+            "row_count": row_count,
+            "distinct_symbol_count": distinct_symbol_count,
+            "distinct_category_count": distinct_category_count,
+            "distinct_available_at_count": distinct_available_at_count,
+            "pit_violation_rows": pit_violation_rows,
+            "missing_available_at_rows": missing_available_at_rows,
+            "missing_source_published_at_quality_rows": missing_source_published_at_quality_rows,
+            "duplicate_announcement_id_rows": duplicate_announcement_id_rows,
+            "duplicate_raw_payload_hash_groups": duplicate_raw_payload_hash_groups,
+            "evidence_span_rows": evidence_span_rows,
+            "target_event_rows": target_event_rows,
+            "target_event_missing_evidence_span_rows": target_event_missing_evidence_span_rows,
+            "target_event_with_evidence_span_rows": target_event_with_evidence_span_rows,
+            "scanned_pdf_ocr_required_rows": scanned_pdf_ocr_required_rows,
+            "ocr_taxonomy_excluded_rows": ocr_taxonomy_excluded_rows,
+            "trainable_scanned_pdf_blocking_rows": trainable_scanned_pdf_blocking_rows,
+            "taxonomy_blocked_target_event_rows": taxonomy_blocked_target_event_rows,
+            "taxonomy_risk_category_rows": taxonomy_risk_category_rows,
+            "admissible_target_event_rows": (target_event_rows - taxonomy_blocked_target_event_rows).max(0),
+            "completed_attempts": completed_attempts,
+            "completed_empty_attempts": completed_empty_attempts,
+            "failed_attempts": failed_attempts,
+            "total_failed_attempts": total_failed_attempts,
+            "excluded_unsupported_category_failed_attempts": excluded_unsupported_category_failed_attempts,
+            "attempt_row_count": attempt_row_count,
+        },
+        "target_event_yield": exchange_announcement_order_capacity_target_event_yield_report(
+            row_count,
+            target_event_rows,
+            target_event_with_evidence_span_rows,
+            target_event_missing_evidence_span_rows,
+            taxonomy_blocked_target_event_rows,
+            scanned_pdf_ocr_required_rows,
+            ocr_taxonomy_excluded_rows,
+            trainable_scanned_pdf_blocking_rows,
+        ),
+        "source_published_at_quality_distribution": source_published_at_quality_distribution,
+        "parser_status_distribution": parser_status_distribution,
+        "event_type_distribution": event_type_distribution,
+        "category_breakdown": category_breakdown,
+        "year_category_breakdown": year_category_breakdown,
+        "symbol_event_breakdown": symbol_event_breakdown,
+        "decision": decision,
+        "promotion_gate": {
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        }
+    }))
+}
+
+async fn build_exchange_announcement_order_capacity_manual_precision_sample_audit(
+    state: &AppState,
+    req: ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq,
+) -> Result<Value, String> {
+    let start_date = req.start_date.unwrap_or_else(|| "20240101".to_string());
+    let end_date = req.end_date.unwrap_or_else(|| "20241231".to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date cannot be after end_date".into());
+    }
+    let required_target_sample_size = req.limit.unwrap_or(50).clamp(1, 200);
+    let include_negative_samples = req.include_negative_samples.unwrap_or(true);
+    let negative_limit = if include_negative_samples {
+        (required_target_sample_size / 10).clamp(1, 20)
+    } else {
+        0
+    };
+
+    let table_exists = table_exists(&state.db, "market_exchange_announcement_text_raw").await?;
+    if !table_exists {
+        return Ok(json!({
+            "audit_version": "p3.24x-exchange-announcement-order-capacity-manual-precision-sample-audit-v1",
+            "source_id": "exchange_announcement_order_capacity_text",
+            "stage": "P3.24X",
+            "status": "blocked_raw_schema_not_applied",
+            "date_range": {
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            "promotion_gate": {
+                "factor_builder": "blocked",
+                "p310_status": "blocked_until_manual_precision_review_passes",
+                "bounded_wfa": "blocked",
+                "v19_train_selection": "blocked"
+            }
+        }));
+    }
+
+    let admissible_target_event_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM market_exchange_announcement_text_raw
+        WHERE announcement_time >= $1
+          AND announcement_time <= $2
+          AND event_type IS NOT NULL
+          AND announcement_category NOT IN ('股权激励')
+          AND jsonb_array_length(evidence_spans) > 0
+          AND pdf_parse_status <> 'scanned_pdf_ocr_required'
+          AND NOT (
+              NOT (
+                  announcement_title LIKE '%签署《关于进一步加强和深化合作的协议》%'
+                  OR announcement_title LIKE '%合资建厂%'
+                  OR announcement_title LIKE '%签订日常经营重大合同%'
+                  OR announcement_title LIKE '%投资建设高效电池产能%'
+                  OR announcement_title LIKE '%投资建设产能项目%'
+              )
+              AND (
+                  announcement_title LIKE '%计提减值准备%'
+                  OR announcement_title LIKE '%募投项目%'
+                  OR announcement_title LIKE '%募集资金%'
+                  OR announcement_title LIKE '%关联交易%'
+                  OR announcement_title LIKE '%授信额度%'
+                  OR announcement_title LIKE '%注册资本%'
+                  OR announcement_title LIKE '%工商变更%'
+                  OR announcement_title LIKE '%实际控制人%'
+                  OR announcement_title LIKE '%控制权%'
+                  OR announcement_title LIKE '%股份质押%'
+                  OR announcement_title LIKE '%财务报告%'
+                  OR announcement_title LIKE '%年度报告%'
+                  OR announcement_title LIKE '%半年度报告%'
+                  OR announcement_title LIKE '%季度报告%'
+                  OR announcement_title LIKE '%主要经营数据%'
+                  OR announcement_title LIKE '%股权投资基金%'
+                  OR announcement_title LIKE '%投资基金%'
+                  OR announcement_title LIKE '%风险评估报告%'
+                  OR announcement_title LIKE '%H股发行%'
+                  OR announcement_title LIKE '%发行H股%'
+                  OR announcement_title LIKE '%H股股票%'
+                  OR announcement_title LIKE '%上市审计机构%'
+                  OR announcement_title LIKE '%章程%'
+                  OR announcement_title LIKE '%审计报告%'
+                  OR announcement_title LIKE '%审计机构%'
+                  OR announcement_title LIKE '%资产减值%'
+                  OR announcement_title LIKE '%公募REITs%'
+                  OR announcement_title LIKE '%REITs%'
+                  OR announcement_title LIKE '%收购控股子公司%'
+                  OR announcement_title LIKE '%董事会工作报告%'
+                  OR announcement_title LIKE '%监事会工作报告%'
+                  OR announcement_title LIKE '%内部控制%'
+                  OR announcement_title LIKE '%会计师事务所%'
+                  OR announcement_title LIKE '%审计委员会%'
+                  OR announcement_title LIKE '%委托理财%'
+                  OR announcement_title LIKE '%套期保值%'
+                  OR announcement_title LIKE '%担保额度%'
+                  OR announcement_title LIKE '%担保的进展%'
+                  OR announcement_title LIKE '%提供担保%'
+                  OR announcement_title LIKE '%发行债券%'
+                  OR announcement_title LIKE '%公司章程%'
+                  OR announcement_title LIKE '%公司制度%'
+                  OR announcement_title LIKE '%制定及修订%'
+                  OR announcement_title LIKE '%独立董事%'
+                  OR announcement_title LIKE '%会计政策变更%'
+                  OR announcement_title LIKE '%社会责任报告%'
+                  OR announcement_title LIKE '%可持续发展报告%'
+                  OR announcement_title LIKE '%可持续发展%'
+                  OR announcement_title LIKE '%环境、社会及治理%'
+                  OR announcement_title LIKE '%ESG%'
+                  OR announcement_title LIKE '%估值提升计划%'
+                  OR announcement_title LIKE '%市值管理%'
+                  OR announcement_title LIKE '%质量回报双提升%'
+                  OR announcement_title LIKE '%履职情况%'
+                  OR announcement_title LIKE '%履行监督职责%'
+              )
+          )
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("Failed to count manual precision target sample universe: {error}"))?;
+
+    let target_rows: Vec<(
+        String,
+        Option<String>,
+        String,
+        String,
+        NaiveDate,
+        NaiveDate,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Value,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT 'target'::text AS sample_kind,
+               symbol_name,
+               symbol,
+               announcement_title,
+               announcement_time,
+               available_at,
+               source_published_at_quality,
+               event_type,
+               text_hash,
+               raw_payload_hash,
+               evidence_spans,
+               LEFT(COALESCE(text_content, ''), 800) AS text_excerpt,
+               announcement_url,
+               pdf_final_url
+        FROM market_exchange_announcement_text_raw
+        WHERE announcement_time >= $1
+          AND announcement_time <= $2
+          AND event_type IS NOT NULL
+          AND announcement_category NOT IN ('股权激励')
+          AND jsonb_array_length(evidence_spans) > 0
+          AND pdf_parse_status <> 'scanned_pdf_ocr_required'
+          AND NOT (
+              NOT (
+                  announcement_title LIKE '%签署《关于进一步加强和深化合作的协议》%'
+                  OR announcement_title LIKE '%合资建厂%'
+                  OR announcement_title LIKE '%签订日常经营重大合同%'
+                  OR announcement_title LIKE '%投资建设高效电池产能%'
+                  OR announcement_title LIKE '%投资建设产能项目%'
+              )
+              AND (
+                  announcement_title LIKE '%计提减值准备%'
+                  OR announcement_title LIKE '%募投项目%'
+                  OR announcement_title LIKE '%募集资金%'
+                  OR announcement_title LIKE '%关联交易%'
+                  OR announcement_title LIKE '%授信额度%'
+                  OR announcement_title LIKE '%注册资本%'
+                  OR announcement_title LIKE '%工商变更%'
+                  OR announcement_title LIKE '%实际控制人%'
+                  OR announcement_title LIKE '%控制权%'
+                  OR announcement_title LIKE '%股份质押%'
+                  OR announcement_title LIKE '%财务报告%'
+                  OR announcement_title LIKE '%年度报告%'
+                  OR announcement_title LIKE '%半年度报告%'
+                  OR announcement_title LIKE '%季度报告%'
+                  OR announcement_title LIKE '%主要经营数据%'
+                  OR announcement_title LIKE '%股权投资基金%'
+                  OR announcement_title LIKE '%投资基金%'
+                  OR announcement_title LIKE '%风险评估报告%'
+                  OR announcement_title LIKE '%H股发行%'
+                  OR announcement_title LIKE '%发行H股%'
+                  OR announcement_title LIKE '%H股股票%'
+                  OR announcement_title LIKE '%上市审计机构%'
+                  OR announcement_title LIKE '%章程%'
+                  OR announcement_title LIKE '%审计报告%'
+                  OR announcement_title LIKE '%审计机构%'
+                  OR announcement_title LIKE '%资产减值%'
+                  OR announcement_title LIKE '%公募REITs%'
+                  OR announcement_title LIKE '%REITs%'
+                  OR announcement_title LIKE '%收购控股子公司%'
+                  OR announcement_title LIKE '%董事会工作报告%'
+                  OR announcement_title LIKE '%监事会工作报告%'
+                  OR announcement_title LIKE '%内部控制%'
+                  OR announcement_title LIKE '%会计师事务所%'
+                  OR announcement_title LIKE '%审计委员会%'
+                  OR announcement_title LIKE '%委托理财%'
+                  OR announcement_title LIKE '%套期保值%'
+                  OR announcement_title LIKE '%担保额度%'
+                  OR announcement_title LIKE '%担保的进展%'
+                  OR announcement_title LIKE '%提供担保%'
+                  OR announcement_title LIKE '%发行债券%'
+                  OR announcement_title LIKE '%公司章程%'
+                  OR announcement_title LIKE '%公司制度%'
+                  OR announcement_title LIKE '%制定及修订%'
+                  OR announcement_title LIKE '%独立董事%'
+                  OR announcement_title LIKE '%会计政策变更%'
+                  OR announcement_title LIKE '%社会责任报告%'
+                  OR announcement_title LIKE '%可持续发展报告%'
+                  OR announcement_title LIKE '%可持续发展%'
+                  OR announcement_title LIKE '%环境、社会及治理%'
+                  OR announcement_title LIKE '%ESG%'
+                  OR announcement_title LIKE '%估值提升计划%'
+                  OR announcement_title LIKE '%市值管理%'
+                  OR announcement_title LIKE '%质量回报双提升%'
+                  OR announcement_title LIKE '%履职情况%'
+                  OR announcement_title LIKE '%履行监督职责%'
+              )
+          )
+        ORDER BY raw_payload_hash, announcement_time, symbol
+        LIMIT $3
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .bind(required_target_sample_size)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to build manual precision target sample: {error}"))?;
+
+    let negative_rows: Vec<(
+        String,
+        Option<String>,
+        String,
+        String,
+        NaiveDate,
+        NaiveDate,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Value,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = if negative_limit > 0 {
+        sqlx::query_as(
+            r#"
+            SELECT 'negative'::text AS sample_kind,
+                   symbol_name,
+                   symbol,
+                   announcement_title,
+                   announcement_time,
+                   available_at,
+                   source_published_at_quality,
+                   event_type,
+                   text_hash,
+                   raw_payload_hash,
+                   evidence_spans,
+                   LEFT(COALESCE(text_content, ''), 800) AS text_excerpt,
+                   announcement_url,
+                   pdf_final_url
+            FROM market_exchange_announcement_text_raw
+            WHERE announcement_time >= $1
+              AND announcement_time <= $2
+              AND event_type IS NULL
+              AND pdf_parse_status <> 'scanned_pdf_ocr_required'
+            ORDER BY raw_payload_hash, announcement_time, symbol
+            LIMIT $3
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .bind(negative_limit)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to build manual precision negative sample: {error}"))?
+    } else {
+        Vec::new()
+    };
+
+    let mut review_items = Vec::with_capacity(target_rows.len() + negative_rows.len());
+    for (
+        sample_kind,
+        symbol_name,
+        symbol,
+        announcement_title,
+        announcement_time,
+        available_at,
+        source_published_at_quality,
+        event_type,
+        text_hash,
+        raw_payload_hash,
+        evidence_spans,
+        text_excerpt,
+        announcement_url,
+        pdf_final_url,
+    ) in target_rows.into_iter().chain(negative_rows.into_iter())
+    {
+        review_items.push(json!({
+            "sample_kind": sample_kind,
+            "symbol": symbol,
+            "symbol_name": symbol_name,
+            "announcement_title": announcement_title,
+            "taxonomy_risk_reason": exchange_announcement_order_capacity_taxonomy_risk_title_reason(
+                "日常经营",
+                &announcement_title,
+            ),
+            "announcement_time": announcement_time.to_string(),
+            "available_at": available_at.to_string(),
+            "source_published_at_quality": source_published_at_quality,
+            "event_type": event_type,
+            "text_hash": text_hash,
+            "raw_payload_hash": raw_payload_hash,
+            "evidence_spans": evidence_spans,
+            "text_excerpt": text_excerpt.unwrap_or_default(),
+            "announcement_url": announcement_url,
+            "pdf_final_url": pdf_final_url,
+            "manual_review_fields": {
+                "evidence_span_label": null,
+                "taxonomy_label": null,
+                "reviewer": null,
+                "reviewed_at": null,
+                "review_note": null
+            }
+        }));
+    }
+
+    let target_sample_rows = review_items
+        .iter()
+        .filter(|item| item.get("sample_kind").and_then(Value::as_str) == Some("target"))
+        .count() as i64;
+    let negative_sample_rows = review_items
+        .iter()
+        .filter(|item| item.get("sample_kind").and_then(Value::as_str) == Some("negative"))
+        .count() as i64;
+
+    let mut report = exchange_announcement_order_capacity_manual_precision_sample_report(
+        admissible_target_event_rows,
+        required_target_sample_size,
+        target_sample_rows,
+        negative_sample_rows,
+        review_items,
+    );
+    if let Some(object) = report.as_object_mut() {
+        object.insert(
+            "date_range".to_string(),
+            json!({
+                "start_date": start_date,
+                "end_date": end_date,
+            }),
+        );
+        object.insert(
+            "sample_policy".to_string(),
+            json!({
+                "target_order": "raw_payload_hash, announcement_time, symbol",
+                "negative_samples": include_negative_samples,
+                "negative_sample_limit": negative_limit,
+                "pit_policy": "review uses available_at and source_published_at_quality; no trading use is admitted"
+            }),
+        );
+    }
+
+    Ok(report)
+}
+
+fn summarize_exchange_announcement_pdf_detail_probes(
+    probes: &[Value],
+) -> ExchangeAnnouncementPdfDetailProbeSummary {
+    let parsed_pdf_count = probes
+        .iter()
+        .filter(|probe| probe.get("status").and_then(Value::as_str) == Some("ok"))
+        .count();
+    let stable_hash_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("hash_stable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                && probe.get("text_hash").and_then(Value::as_str).is_some()
+        })
+        .count();
+    let timestamp_count = probes
+        .iter()
+        .filter(|probe| {
+            probe
+                .get("source_published_at_quality")
+                .and_then(Value::as_str)
+                == Some("timestamp")
+        })
+        .count();
+    let next_session_policy_count = probes
+        .iter()
+        .filter(|probe| {
+            probe
+                .get("source_published_at_quality")
+                .and_then(Value::as_str)
+                == Some("date_only_next_session")
+        })
+        .count();
+    let availability_count = timestamp_count + next_session_policy_count;
+    let evidence_span_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("evidence_spans")
+                    .and_then(Value::as_array)
+                    .map(|spans| !spans.is_empty())
+                    .unwrap_or(false)
+        })
+        .count();
+    let incomplete_link_metadata_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("incomplete_link_metadata")
+                || probe
+                    .get("link_metadata")
+                    .and_then(|metadata| metadata.get("metadata_complete"))
+                    .and_then(Value::as_bool)
+                    .map(|complete| !complete)
+                    .unwrap_or(false)
+        })
+        .count();
+    let scanned_pdf_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("scanned_pdf_ocr_required")
+        })
+        .count();
+    let runtime_not_configured_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("runtime_not_configured")
+        })
+        .count();
+
+    ExchangeAnnouncementPdfDetailProbeSummary {
+        parsed_pdf_count,
+        stable_hash_count,
+        availability_count,
+        timestamp_count,
+        next_session_policy_count,
+        evidence_span_count,
+        incomplete_link_metadata_count,
+        scanned_pdf_count,
+        runtime_not_configured_count,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AkshareAnalystRevisionSyncPlanBatch {
     label: String,
@@ -944,6 +4935,112 @@ fn akshare_analyst_revision_batch_label(date: NaiveDate, batch_mode: &str) -> St
     }
 }
 
+fn summarize_exchange_announcement_ocr_blocked_row_probes(
+    probes: &[Value],
+) -> ExchangeAnnouncementOcrBlockedRowProbeSummary {
+    let ocr_text_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("ocr_text_length")
+                    .and_then(Value::as_u64)
+                    .map(|length| length > 0)
+                    .unwrap_or(false)
+        })
+        .count();
+    let stable_hash_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("hash_stable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                && probe.get("ocr_text_hash").and_then(Value::as_str).is_some()
+        })
+        .count();
+    let availability_count = probes
+        .iter()
+        .filter(|probe| {
+            matches!(
+                probe
+                    .get("source_published_at_quality")
+                    .and_then(Value::as_str),
+                Some("timestamp" | "date_only_next_session")
+            ) && probe.get("available_at").and_then(Value::as_str).is_some()
+        })
+        .count();
+    let quality_pass_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("ocr_quality")
+                    .and_then(|quality| quality.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("passed")
+        })
+        .count();
+    let evidence_span_count = probes
+        .iter()
+        .filter(|probe| {
+            probe
+                .get("evidence_spans")
+                .and_then(Value::as_array)
+                .map(|spans| !spans.is_empty())
+                .unwrap_or(false)
+        })
+        .count();
+    let runtime_missing_count = probes
+        .iter()
+        .filter(|probe| {
+            matches!(
+                probe.get("status").and_then(Value::as_str),
+                Some("ocr_runtime_not_configured" | "ocr_dependency_missing")
+            )
+        })
+        .count();
+    let ocr_error_count = probes
+        .iter()
+        .filter(|probe| {
+            matches!(
+                probe.get("status").and_then(Value::as_str),
+                Some("error" | "timeout" | "ocr_error" | "pdf_fetch_error")
+            )
+        })
+        .count();
+    let no_target_span_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("ok")
+                && probe
+                    .get("evidence_spans")
+                    .and_then(Value::as_array)
+                    .map(|spans| spans.is_empty())
+                    .unwrap_or(true)
+        })
+        .count();
+    let incomplete_raw_link_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("incomplete_raw_pdf_link")
+        })
+        .count();
+
+    ExchangeAnnouncementOcrBlockedRowProbeSummary {
+        ocr_text_count,
+        stable_hash_count,
+        availability_count,
+        quality_pass_count,
+        evidence_span_count,
+        runtime_missing_count,
+        ocr_error_count,
+        no_target_span_count,
+        incomplete_raw_link_count,
+    }
+}
+
 fn akshare_analyst_revision_sync_plan_batches(
     start: NaiveDate,
     end: NaiveDate,
@@ -979,6 +5076,19 @@ fn akshare_analyst_revision_sync_plan_batches(
         ));
     }
     Ok(batches)
+}
+
+fn exchange_announcement_order_capacity_sync_plan_batches(
+    start: NaiveDate,
+    end: NaiveDate,
+    batch_mode: &str,
+) -> Result<Vec<AkshareAnalystRevisionSyncPlanBatch>, String> {
+    akshare_analyst_revision_sync_plan_batches(start, end, batch_mode).map_err(|error| {
+        error.replace(
+            "AkShare analyst revision sync-plan",
+            "exchange announcement order capacity sync-plan",
+        )
+    })
 }
 
 fn akshare_value_key_part(item: &serde_json::Map<String, Value>, key: &str) -> String {
@@ -2500,6 +6610,1238 @@ except Exception as error:
     payload
 }
 
+async fn run_exchange_announcement_order_capacity_probe(
+    python: &str,
+    symbol: &str,
+    market: &str,
+    category: &str,
+    start_date: &str,
+    end_date: &str,
+    row_limit: usize,
+) -> Value {
+    let source = "stock_zh_a_disclosure_report_cninfo";
+    if !Path::new(python).exists() {
+        return json!({
+            "source": source,
+            "scope": "symbol_category_date_range",
+            "symbol": symbol,
+            "market": market,
+            "category": category,
+            "date_range": {
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            "status": "runtime_not_configured",
+            "permission": "unknown_or_unavailable",
+            "python": python,
+            "error": "AKSHARE_PYTHON is not configured and /tmp/akshare-smoke/bin/python is missing"
+        });
+    }
+
+    let script = r#"
+import json
+import sys
+
+symbol = sys.argv[1]
+market = sys.argv[2]
+category = sys.argv[3]
+start_date = sys.argv[4]
+end_date = sys.argv[5]
+row_limit = int(sys.argv[6])
+
+def scrub(value):
+    try:
+        import pandas as pd
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+def nonempty(value):
+    try:
+        import pandas as pd
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    return str(value).strip() != ""
+
+try:
+    import akshare as ak
+    import pandas as pd
+    df = ak.stock_zh_a_disclosure_report_cninfo(
+        symbol=symbol,
+        market=market,
+        category=category,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if df is None:
+        df = pd.DataFrame()
+
+    records = []
+    if hasattr(df, "head"):
+        for row in df.head(row_limit).to_dict(orient="records"):
+            records.append({str(key): scrub(value) for key, value in row.items()})
+
+    announcement_time_missing_rows = None
+    announcement_link_missing_rows = None
+    duplicate_link_rows = None
+    if hasattr(df, "columns"):
+        if "公告时间" in df.columns:
+            announcement_time_missing_rows = int((~df["公告时间"].map(nonempty)).sum())
+        if "公告链接" in df.columns:
+            link_nonempty = df["公告链接"].map(nonempty)
+            announcement_link_missing_rows = int((~link_nonempty).sum())
+            duplicate_link_rows = int(df.loc[link_nonempty, "公告链接"].duplicated().sum())
+
+    print(json.dumps({
+        "status": "ok" if len(df) > 0 else "ok_empty",
+        "permission": "available",
+        "akshare_version": getattr(ak, "__version__", None),
+        "row_count": int(len(df)),
+        "fields": [str(field) for field in list(df.columns)] if hasattr(df, "columns") else [],
+        "announcement_time_missing_rows": announcement_time_missing_rows,
+        "announcement_link_missing_rows": announcement_link_missing_rows,
+        "duplicate_link_rows": duplicate_link_rows,
+        "sample_rows": records,
+    }, ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({
+        "status": "error",
+        "permission": "unknown_or_unavailable",
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }, ensure_ascii=False))
+"#;
+
+    let home = env::var("HOME").unwrap_or_else(|_| "/Users/gaocheng".to_string());
+    let timeout_seconds = akshare_analyst_revision_timeout_seconds();
+    let child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .arg(symbol)
+        .arg(market)
+        .arg(category)
+        .arg(start_date)
+        .arg(end_date)
+        .arg(row_limit.to_string())
+        .env("HOME", home)
+        .env("PYTHONUNBUFFERED", "1")
+        .output();
+
+    let output = match timeout(StdDuration::from_secs(timeout_seconds), child).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return json!({
+                "source": source,
+                "scope": "symbol_category_date_range",
+                "symbol": symbol,
+                "market": market,
+                "category": category,
+                "date_range": {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                },
+                "status": "error",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "error": error.to_string(),
+            });
+        }
+        Err(_) => {
+            return json!({
+                "source": source,
+                "scope": "symbol_category_date_range",
+                "symbol": symbol,
+                "market": market,
+                "category": category,
+                "date_range": {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                },
+                "status": "timeout",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "timeout_seconds": timeout_seconds,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
+        json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error": "failed_to_parse_exchange_announcement_probe_stdout",
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+    });
+    payload = normalize_exchange_announcement_order_capacity_probe_payload(payload);
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("source".to_string(), json!(source));
+        object.insert("scope".to_string(), json!("symbol_category_date_range"));
+        object.insert("symbol".to_string(), json!(symbol));
+        object.insert("market".to_string(), json!(market));
+        object.insert("category".to_string(), json!(category));
+        object.insert(
+            "date_range".to_string(),
+            json!({
+                "start_date": start_date,
+                "end_date": end_date,
+            }),
+        );
+        object.insert("python".to_string(), json!(python));
+        object.insert("exit_status".to_string(), json!(output.status.code()));
+        if !stderr.is_empty() {
+            object.insert("stderr".to_string(), json!(stderr));
+        }
+    }
+    attach_exchange_announcement_link_metadata(payload)
+}
+
+fn exchange_announcement_order_capacity_is_akshare_empty_dataframe_key_error(error: &str) -> bool {
+    error.contains("None of [Index([")
+        && error.contains("'代码'")
+        && error.contains("'简称'")
+        && error.contains("'公告标题'")
+        && error.contains("'公告时间'")
+        && error.contains("'announcementId'")
+        && error.contains("'orgId'")
+        && error.contains("are in the [columns]")
+}
+
+fn exchange_announcement_order_capacity_is_excluded_unsupported_category_attempt(
+    attempt_symbol: &str,
+    error: &str,
+) -> bool {
+    attempt_symbol.ends_with(":重大事项") && error.trim_matches('"') == "'重大事项'"
+}
+
+fn normalize_exchange_announcement_order_capacity_probe_payload(payload: Value) -> Value {
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if status != "error" {
+        return payload;
+    }
+
+    let error_type = payload
+        .get("error_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let error = payload
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if error_type == "KeyError"
+        && exchange_announcement_order_capacity_is_akshare_empty_dataframe_key_error(error)
+    {
+        return json!({
+            "status": "ok_empty",
+            "permission": "available",
+            "row_count": 0,
+            "fields": [],
+            "sample_rows": [],
+            "normalized_from_error": {
+                "error_type": error_type,
+                "error": error,
+                "reason": "akshare_empty_dataframe_missing_expected_columns"
+            }
+        });
+    }
+
+    if error_type == "KeyError" {
+        let mut normalized = payload;
+        if let Some(object) = normalized.as_object_mut() {
+            object.insert("status".to_string(), json!("category_parser_error"));
+            object.insert("parser_reliability".to_string(), json!("blocked"));
+        }
+        return normalized;
+    }
+
+    if error_type == "ValueError"
+        && error.contains("Length mismatch")
+        && error.contains("Expected axis has 0 elements")
+    {
+        return json!({
+            "status": "ok_empty",
+            "permission": "available",
+            "row_count": 0,
+            "fields": [],
+            "sample_rows": [],
+            "normalized_from_error": {
+                "error_type": error_type,
+                "error": error,
+                "reason": "akshare_empty_dataframe_length_mismatch"
+            }
+        });
+    }
+
+    payload
+}
+
+fn attach_exchange_announcement_link_metadata(mut payload: Value) -> Value {
+    let sample_rows = payload
+        .get("sample_rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut link_metadata = Vec::new();
+    for row in sample_rows {
+        if let Some(link) = row.get("公告链接").and_then(Value::as_str) {
+            link_metadata.push(parse_cninfo_announcement_link_metadata(link));
+        }
+    }
+    let complete_link_metadata_rows = link_metadata
+        .iter()
+        .filter(|metadata| {
+            metadata
+                .get("metadata_complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let incomplete_link_metadata_rows = link_metadata
+        .len()
+        .saturating_sub(complete_link_metadata_rows);
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("link_metadata_sample".to_string(), json!(link_metadata));
+        object.insert(
+            "complete_link_metadata_sample_rows".to_string(),
+            json!(complete_link_metadata_rows),
+        );
+        object.insert(
+            "incomplete_link_metadata_sample_rows".to_string(),
+            json!(incomplete_link_metadata_rows),
+        );
+    }
+    payload
+}
+
+async fn run_exchange_announcement_detail_probe(python: &str, link: &str) -> Value {
+    let metadata = parse_cninfo_announcement_link_metadata(link);
+    if !metadata
+        .get("metadata_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json!({
+            "status": "incomplete_link_metadata",
+            "permission": "unknown_or_unavailable",
+            "announcement_link": link,
+            "link_metadata": metadata,
+        });
+    }
+
+    if !Path::new(python).exists() {
+        return json!({
+            "status": "runtime_not_configured",
+            "permission": "unknown_or_unavailable",
+            "announcement_link": link,
+            "link_metadata": metadata,
+            "python": python,
+            "error": "AKSHARE_PYTHON is not configured and /tmp/akshare-smoke/bin/python is missing"
+        });
+    }
+
+    let script = r#"
+import json
+import re
+import sys
+from html.parser import HTMLParser
+
+url = sys.argv[1]
+
+class TextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+    def handle_data(self, data):
+        text = data.strip()
+        if text:
+            self.parts.append(text)
+
+def normalize_text(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+try:
+    import requests
+    response = requests.get(url, timeout=15, headers={
+        "User-Agent": "Mozilla/5.0 quant-source-admission-audit"
+    })
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    final_url = response.url or url
+    is_pdf = "application/pdf" in content_type or final_url.lower().endswith(".pdf") or response.content[:5] == b"%PDF-"
+    if is_pdf:
+        print(json.dumps({
+            "status": "pdf_text_parser_required",
+            "permission": "available" if response.ok else "unknown_or_unavailable",
+            "http_status": response.status_code,
+            "final_url": final_url,
+            "content_type": content_type,
+            "text_content_type": "pdf",
+            "text_length": 0,
+            "text_sample": None,
+            "source_published_at": None,
+            "source_published_at_quality": "missing_or_date_only",
+            "blocked_reason": "cninfo detail redirects to PDF; PDF parser and source timestamp audit are required before text evidence can be used",
+        }, ensure_ascii=False))
+        sys.exit(0)
+    html = response.text or ""
+    parser = TextExtractor()
+    parser.feed(html)
+    text = normalize_text(" ".join(parser.parts))
+    timestamp_patterns = [
+        r"(?:公告时间|披露时间|发布时间|发布日期)[:：\\s]*([0-9]{4}[-/年][0-9]{1,2}[-/月][0-9]{1,2}(?:日)?\\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)",
+        r"([0-9]{4}[-/][0-9]{1,2}[-/][0-9]{1,2}\\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)",
+    ]
+    source_published_at = None
+    for pattern in timestamp_patterns:
+        match = re.search(pattern, html)
+        if match:
+            source_published_at = match.group(1)
+            break
+    print(json.dumps({
+        "status": "ok" if response.ok and len(text) > 0 else "error",
+        "permission": "available" if response.ok else "unknown_or_unavailable",
+        "http_status": response.status_code,
+        "final_url": final_url,
+        "content_type": content_type,
+        "text_content_type": "html",
+        "text_length": len(text),
+        "text_sample": text[:1000],
+        "source_published_at": source_published_at,
+        "source_published_at_quality": "timestamp" if source_published_at else "missing_or_date_only",
+    }, ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({
+        "status": "error",
+        "permission": "unknown_or_unavailable",
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }, ensure_ascii=False))
+"#;
+
+    let home = env::var("HOME").unwrap_or_else(|_| "/Users/gaocheng".to_string());
+    let timeout_seconds = akshare_analyst_revision_timeout_seconds();
+    let child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .arg(link)
+        .env("HOME", home)
+        .env("PYTHONUNBUFFERED", "1")
+        .output();
+
+    let output = match timeout(StdDuration::from_secs(timeout_seconds), child).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return json!({
+                "status": "error",
+                "permission": "unknown_or_unavailable",
+                "announcement_link": link,
+                "link_metadata": metadata,
+                "python": python,
+                "error": error.to_string(),
+            });
+        }
+        Err(_) => {
+            return json!({
+                "status": "timeout",
+                "permission": "unknown_or_unavailable",
+                "announcement_link": link,
+                "link_metadata": metadata,
+                "python": python,
+                "timeout_seconds": timeout_seconds,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
+        json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error": "failed_to_parse_exchange_announcement_detail_stdout",
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+    });
+    let text_sample = payload
+        .get("text_sample")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let text_hash = if text_sample.trim().is_empty() {
+        None
+    } else {
+        Some(akshare_stable_hash(&[
+            link.to_string(),
+            text_sample.clone(),
+        ]))
+    };
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("announcement_link".to_string(), json!(link));
+        object.insert("link_metadata".to_string(), metadata);
+        object.insert("python".to_string(), json!(python));
+        object.insert("exit_status".to_string(), json!(output.status.code()));
+        object.insert("text_hash".to_string(), json!(text_hash));
+        object.insert(
+            "text_hash_algorithm".to_string(),
+            json!("fnv64_internal_admission_hash"),
+        );
+        if !stderr.is_empty() {
+            object.insert("stderr".to_string(), json!(stderr));
+        }
+    }
+    payload
+}
+
+async fn run_exchange_announcement_pdf_detail_probe(python: &str, link: &str) -> Value {
+    let metadata = parse_cninfo_announcement_link_metadata(link);
+    if !metadata
+        .get("metadata_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json!({
+            "status": "incomplete_link_metadata",
+            "permission": "unknown_or_unavailable",
+            "announcement_link": link,
+            "link_metadata": metadata,
+        });
+    }
+
+    if !Path::new(python).exists() {
+        return json!({
+            "status": "runtime_not_configured",
+            "permission": "unknown_or_unavailable",
+            "announcement_link": link,
+            "link_metadata": metadata,
+            "python": python,
+            "error": "QUANT_PDF_AUDIT_PYTHON is not configured and the isolated PDF runtime is missing"
+        });
+    }
+
+    let script = r#"
+import hashlib
+import json
+import re
+import sys
+import tempfile
+from email.utils import parsedate_to_datetime
+
+url = sys.argv[1]
+announcement_time = sys.argv[2]
+
+def normalize_text(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+def parse_pdf_with_pdfplumber(pdf_path):
+    import pdfplumber
+    with pdfplumber.open(pdf_path) as pdf:
+        page_texts = [normalize_text(page.extract_text() or "") for page in pdf.pages]
+        metadata = dict(pdf.metadata or {})
+    return page_texts, metadata, "pdfplumber"
+
+def parse_pdf_with_pypdf(pdf_path):
+    from pypdf import PdfReader
+    reader = PdfReader(pdf_path)
+    page_texts = [normalize_text(page.extract_text() or "") for page in reader.pages]
+    metadata = dict(reader.metadata or {})
+    return page_texts, metadata, "pypdf"
+
+def parse_pdf_with_pypdf2(pdf_path):
+    from PyPDF2 import PdfReader
+    reader = PdfReader(pdf_path)
+    page_texts = [normalize_text(page.extract_text() or "") for page in reader.pages]
+    metadata = dict(reader.metadata or {})
+    return page_texts, metadata, "PyPDF2"
+
+def parse_pdf_with_fitz(pdf_path):
+    import fitz
+    doc = fitz.open(pdf_path)
+    page_texts = [normalize_text(page.get_text("text") or "") for page in doc]
+    metadata = dict(doc.metadata or {})
+    doc.close()
+    return page_texts, metadata, "fitz"
+
+def parse_pdf(pdf_path):
+    errors = []
+    for parser in (
+        parse_pdf_with_pdfplumber,
+        parse_pdf_with_pypdf,
+        parse_pdf_with_pypdf2,
+        parse_pdf_with_fitz,
+    ):
+        try:
+            page_texts, metadata, parser_name = parser(pdf_path)
+            return page_texts, metadata, parser_name, errors
+        except Exception as error:
+            errors.append({
+                "parser": parser.__name__,
+                "error_type": type(error).__name__,
+                "error": str(error),
+            })
+    raise RuntimeError(json.dumps(errors, ensure_ascii=False))
+
+def collect_timestamp_candidates(full_text, headers, metadata, announcement_time):
+    candidates = []
+    seen = set()
+
+    patterns = [
+        ("text_timestamp", "timestamp", r"(?:公告时间|披露时间|发布时间|发布日期|刊登时间)[:：\s]*([0-9]{4}[-/年][0-9]{1,2}[-/月][0-9]{1,2}(?:日)?\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)"),
+        ("text_timestamp", "timestamp", r"([0-9]{4}[-/][0-9]{1,2}[-/][0-9]{1,2}\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)"),
+        ("text_date_only", "date_only_next_session", r"(?:公告时间|披露时间|发布时间|发布日期|刊登日期)[:：\s]*([0-9]{4}[-/年][0-9]{1,2}[-/月][0-9]{1,2}(?:日)?)"),
+    ]
+    for source, quality, pattern in patterns:
+        for match in re.finditer(pattern, full_text):
+            value = normalize_text(match.group(1))
+            key = (source, value, quality)
+            if value and key not in seen:
+                candidates.append({
+                    "source": source,
+                    "value": value,
+                    "quality": quality,
+                })
+                seen.add(key)
+            if len(candidates) >= 6:
+                return candidates
+
+    if announcement_time:
+        key = ("announcement_time_param", announcement_time, "date_only_next_session")
+        if key not in seen:
+            candidates.append({
+                "source": "announcement_time_param",
+                "value": announcement_time,
+                "quality": "date_only_next_session",
+            })
+            seen.add(key)
+
+    last_modified = headers.get("Last-Modified") or headers.get("last-modified")
+    if last_modified:
+        try:
+            parsed = parsedate_to_datetime(last_modified)
+            value = parsed.isoformat()
+        except Exception:
+            value = normalize_text(last_modified)
+        key = ("http_last_modified", value, "transport_header_untrusted")
+        if value and key not in seen:
+            candidates.append({
+                "source": "http_last_modified",
+                "value": value,
+                "quality": "transport_header_untrusted",
+            })
+            seen.add(key)
+
+    for meta_key in ("/CreationDate", "/ModDate", "CreationDate", "ModDate", "creationDate", "modDate"):
+        if meta_key in metadata and metadata[meta_key]:
+            value = normalize_text(str(metadata[meta_key]))
+            key = (f"pdf_metadata:{meta_key}", value, "metadata_untrusted")
+            if value and key not in seen:
+                candidates.append({
+                    "source": f"pdf_metadata:{meta_key}",
+                    "value": value,
+                    "quality": "metadata_untrusted",
+                })
+                seen.add(key)
+
+    return candidates[:8]
+
+def evidence_spans(page_texts):
+    themes = [
+        ("order_contract", ["中标", "签订", "订单", "合同", "协议", "框架协议"]),
+        ("capacity", ["产能", "扩产", "投产", "项目", "开工", "复产", "停产"]),
+        ("price", ["调价", "提价", "降价", "价格调整", "售价"]),
+    ]
+    spans = []
+    for page_index, page_text in enumerate(page_texts, start=1):
+        if not page_text:
+            continue
+        for theme, keywords in themes:
+            for keyword in keywords:
+                position = page_text.find(keyword)
+                if position < 0:
+                    continue
+                start = max(0, position - 50)
+                end = min(len(page_text), position + len(keyword) + 80)
+                spans.append({
+                    "theme": theme,
+                    "keyword": keyword,
+                    "page": page_index,
+                    "snippet": page_text[start:end],
+                })
+                break
+        if len(spans) >= 12:
+            break
+    return spans[:12]
+
+try:
+    import requests
+    response = requests.get(url, timeout=20, headers={
+        "User-Agent": "Mozilla/5.0 quant-source-admission-pdf-audit"
+    })
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    final_url = response.url or url
+    is_pdf = "application/pdf" in content_type or final_url.lower().endswith(".pdf") or response.content[:5] == b"%PDF-"
+    if not is_pdf:
+        print(json.dumps({
+            "status": "not_pdf_after_redirect",
+            "permission": "available" if response.ok else "unknown_or_unavailable",
+            "http_status": response.status_code,
+            "final_url": final_url,
+            "content_type": content_type,
+        }, ensure_ascii=False))
+        sys.exit(0)
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+        handle.write(response.content)
+        handle.flush()
+
+        run_hashes = []
+        selected_parser = None
+        selected_page_texts = []
+        selected_metadata = {}
+        parser_errors = []
+        for _ in range(2):
+            page_texts, metadata, parser_name, errors = parse_pdf(handle.name)
+            if selected_parser is None:
+                selected_parser = parser_name
+                selected_page_texts = page_texts
+                selected_metadata = metadata
+                parser_errors = errors
+            canonical_text = normalize_text("\n".join(text for text in page_texts if text))
+            run_hashes.append(hashlib.sha256(canonical_text.encode("utf-8")).hexdigest())
+
+    page_count = len(selected_page_texts)
+    nonempty_page_count = sum(1 for text in selected_page_texts if text)
+    canonical_text = normalize_text("\n".join(text for text in selected_page_texts if text))
+    text_sample = canonical_text[:1000] if canonical_text else None
+    timestamp_candidates = collect_timestamp_candidates(
+        canonical_text,
+        dict(response.headers),
+        selected_metadata,
+        announcement_time,
+    )
+    quality = "missing"
+    source_published_at = None
+    for candidate in timestamp_candidates:
+        if candidate["quality"] in {"timestamp", "date_only_next_session"}:
+            source_published_at = candidate["value"]
+            quality = candidate["quality"]
+            break
+    spans = evidence_spans(selected_page_texts)
+
+    status = "ok"
+    if page_count > 0 and nonempty_page_count == 0:
+        status = "scanned_pdf_ocr_required"
+    elif not canonical_text:
+        status = "pdf_parse_empty"
+
+    print(json.dumps({
+        "status": status,
+        "permission": "available" if response.ok else "unknown_or_unavailable",
+        "http_status": response.status_code,
+        "final_url": final_url,
+        "content_type": content_type,
+        "parser_used": selected_parser,
+        "parser_errors": parser_errors,
+        "page_count": page_count,
+        "nonempty_page_count": nonempty_page_count,
+        "text_length": len(canonical_text),
+        "text_sample": text_sample,
+        "text_hash": run_hashes[0] if run_hashes else None,
+        "text_hash_algorithm": "sha256",
+        "repeat_hashes": run_hashes,
+        "hash_stable": len(set(run_hashes)) == 1 if run_hashes else False,
+        "timestamp_candidates": timestamp_candidates,
+        "source_published_at": source_published_at,
+        "source_published_at_quality": quality,
+        "evidence_spans": spans,
+        "pdf_metadata_keys": sorted([str(key) for key in selected_metadata.keys()])[:20],
+    }, ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({
+        "status": "error",
+        "permission": "unknown_or_unavailable",
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }, ensure_ascii=False))
+"#;
+
+    let announcement_time = metadata
+        .get("announcement_time")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let home = env::var("HOME").unwrap_or_else(|_| "/Users/gaocheng".to_string());
+    let timeout_seconds = akshare_analyst_revision_timeout_seconds();
+    let child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .arg(link)
+        .arg(announcement_time)
+        .env("HOME", home)
+        .env("PYTHONUNBUFFERED", "1")
+        .output();
+
+    let output = match timeout(StdDuration::from_secs(timeout_seconds), child).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return json!({
+                "status": "error",
+                "permission": "unknown_or_unavailable",
+                "announcement_link": link,
+                "link_metadata": metadata,
+                "python": python,
+                "error": error.to_string(),
+            });
+        }
+        Err(_) => {
+            return json!({
+                "status": "timeout",
+                "permission": "unknown_or_unavailable",
+                "announcement_link": link,
+                "link_metadata": metadata,
+                "python": python,
+                "timeout_seconds": timeout_seconds,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
+        json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error": "failed_to_parse_exchange_announcement_pdf_detail_stdout",
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+    });
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("announcement_link".to_string(), json!(link));
+        object.insert("link_metadata".to_string(), metadata);
+        object.insert("python".to_string(), json!(python));
+        object.insert("exit_status".to_string(), json!(output.status.code()));
+        if !stderr.is_empty() {
+            object.insert("stderr".to_string(), json!(stderr));
+        }
+    }
+    payload
+}
+
+fn exchange_announcement_order_capacity_pdf_parser_readiness_report(
+    python: &str,
+    checks: Vec<Value>,
+) -> Value {
+    let available_count = checks
+        .iter()
+        .filter(|check| {
+            check
+                .get("available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let parser_status = if available_count > 0 {
+        "available"
+    } else {
+        "missing"
+    };
+    let admission_decision = if parser_status == "available" {
+        "pdf_parser_available_detail_timestamp_audit_required_next"
+    } else {
+        "blocked_pdf_parser_missing"
+    };
+
+    json!({
+        "audit_version": "p3.24d-exchange-announcement-order-capacity-pdf-parser-readiness-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24D",
+        "mode": "read_only_pdf_parser_source_timestamp_readiness_no_write",
+        "write_enabled": false,
+        "vendor": "cninfo",
+        "source_shape": "cninfo_detail_redirects_to_pdf",
+        "python": python,
+        "parser_status": parser_status,
+        "available_parser_count": available_count,
+        "checks": checks,
+        "admission_decision": admission_decision,
+        "promotion_gate": {
+            "schema_apply": if parser_status == "available" {
+                "blocked_until_pdf_text_and_source_published_at_audit_passes"
+            } else {
+                "blocked_until_pdf_parser_available"
+            },
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "required_evidence_after_parser": [
+            "pdf_http_success",
+            "deterministic_pdf_text_extract",
+            "stable_text_hash",
+            "source_published_at_timestamp_or_explicit_next_session_policy",
+            "evidence_span_precision_for_order_capacity_contract_price_production_capacity_events"
+        ],
+        "next_step": if parser_status == "available" {
+            "run_pdf_text_source_published_at_detail_audit_on_bounded_samples"
+        } else {
+            "install_or_configure_reviewed_pdf_text_parser_in_isolated_runtime_then_rerun_readiness"
+        },
+        "guardrails": [
+            "this endpoint never writes raw tables, sync attempts, data versions, factors, WFA tasks, or strategy configs",
+            "PDF parser availability alone does not prove PIT safety; source_published_at and next-session availability must be audited separately",
+            "do not use PDF bytes, redirected URLs, or date-only announcementTime as text evidence",
+            "P3.10, WFA and v19 remain blocked until full coverage/PIT/text-evidence/correlation gates pass"
+        ],
+    })
+}
+
+async fn probe_exchange_announcement_order_capacity_pdf_parsers(python: &str) -> Vec<Value> {
+    let mut checks = vec![json!({
+        "tool": "pdftotext",
+        "kind": "binary",
+        "available": command_exists_on_path("pdftotext"),
+    })];
+
+    if !Path::new(python).exists() {
+        checks.push(json!({
+            "tool": "python_runtime",
+            "kind": "python",
+            "available": false,
+            "python": python,
+            "error": "configured python runtime is missing"
+        }));
+        return checks;
+    }
+
+    let script = r#"
+import importlib.util
+import json
+import sys
+
+modules = sys.argv[1:]
+print(json.dumps([
+    {
+        "tool": module,
+        "kind": "python_module",
+        "available": importlib.util.find_spec(module) is not None,
+    }
+    for module in modules
+], ensure_ascii=False))
+"#;
+    let child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .args(["pypdf", "PyPDF2", "pdfplumber", "fitz"])
+        .env("PYTHONUNBUFFERED", "1")
+        .output();
+    let output = match timeout(StdDuration::from_secs(15), child).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            checks.push(json!({
+                "tool": "python_module_probe",
+                "kind": "python",
+                "available": false,
+                "python": python,
+                "error": error.to_string()
+            }));
+            return checks;
+        }
+        Err(_) => {
+            checks.push(json!({
+                "tool": "python_module_probe",
+                "kind": "python",
+                "available": false,
+                "python": python,
+                "error": "python module probe timeout"
+            }));
+            return checks;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    match serde_json::from_str::<Vec<Value>>(&stdout) {
+        Ok(module_checks) => checks.extend(module_checks),
+        Err(error) => checks.push(json!({
+            "tool": "python_module_probe",
+            "kind": "python",
+            "available": false,
+            "python": python,
+            "exit_status": output.status.code(),
+            "error": format!("failed_to_parse_python_module_probe_stdout: {error}"),
+            "stdout": stdout,
+            "stderr": stderr
+        })),
+    }
+    checks
+}
+
+async fn run_exchange_announcement_ocr_blocked_row_probe(python: &str, row: Value) -> Value {
+    let pdf_url = row
+        .get("pdf_final_url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| row.get("announcement_url").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_string();
+    if pdf_url.trim().is_empty() {
+        return json!({
+            "status": "incomplete_raw_pdf_link",
+            "raw_row": row,
+            "error": "raw scanned PDF row has neither pdf_final_url nor announcement_url"
+        });
+    }
+
+    if !Path::new(python).exists() {
+        return json!({
+            "status": "ocr_runtime_not_configured",
+            "permission": "unknown_or_unavailable",
+            "python": python,
+            "pdf_url": pdf_url,
+            "raw_row": row,
+            "error": "QUANT_PDF_AUDIT_PYTHON is not configured and the isolated PDF/OCR runtime is missing"
+        });
+    }
+
+    let script = r#"
+import hashlib
+import importlib.util
+import json
+import re
+import shutil
+import sys
+import tempfile
+
+url = sys.argv[1]
+
+missing = []
+if importlib.util.find_spec("requests") is None:
+    missing.append("python_module:requests")
+if importlib.util.find_spec("fitz") is None:
+    missing.append("python_module:fitz")
+if importlib.util.find_spec("pytesseract") is None:
+    missing.append("python_module:pytesseract")
+try:
+    from PIL import Image  # noqa: F401
+except Exception:
+    missing.append("python_module:PIL")
+if shutil.which("tesseract") is None:
+    missing.append("binary:tesseract")
+
+if missing:
+    print(json.dumps({
+        "status": "ocr_dependency_missing",
+        "permission": "unknown_or_unavailable",
+        "missing_dependencies": missing,
+        "required_runtime": ["requests", "fitz", "pytesseract", "PIL", "tesseract"],
+    }, ensure_ascii=False))
+    sys.exit(0)
+
+def normalize_text(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+def evidence_spans(text):
+    themes = [
+        ("order_contract", ["中标", "签订", "订单", "合同", "协议", "框架协议"]),
+        ("capacity", ["产能", "扩产", "投产", "项目", "开工", "复产", "停产"]),
+        ("price", ["调价", "提价", "降价", "价格调整", "售价"]),
+    ]
+    spans = []
+    for theme, keywords in themes:
+        for keyword in keywords:
+            position = text.find(keyword)
+            if position < 0:
+                continue
+            start = max(0, position - 60)
+            end = min(len(text), position + len(keyword) + 100)
+            spans.append({
+                "theme": theme,
+                "keyword": keyword,
+                "snippet": text[start:end],
+            })
+            break
+    return spans[:12]
+
+try:
+    import fitz
+    import pytesseract
+    import requests
+
+    response = requests.get(url, timeout=20, headers={
+        "User-Agent": "Mozilla/5.0 quant-source-admission-ocr-audit"
+    })
+    if not response.ok or response.content[:5] != b"%PDF-":
+        print(json.dumps({
+            "status": "pdf_fetch_error",
+            "permission": "available" if response.ok else "unknown_or_unavailable",
+            "http_status": response.status_code,
+            "content_type": response.headers.get("Content-Type"),
+            "final_url": response.url or url,
+        }, ensure_ascii=False))
+        sys.exit(0)
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+        handle.write(response.content)
+        handle.flush()
+
+        run_hashes = []
+        selected_text = ""
+        selected_page_count = 0
+        selected_ocr_page_count = 0
+        for _ in range(2):
+            doc = fitz.open(handle.name)
+            selected_page_count = len(doc)
+            page_texts = []
+            for page_index, page in enumerate(doc):
+                if page_index >= 3:
+                    break
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                image = Image.open(__import__("io").BytesIO(pix.tobytes("png")))
+                text = pytesseract.image_to_string(image, lang="chi_sim+eng")
+                text = normalize_text(text)
+                if text:
+                    page_texts.append(text)
+            doc.close()
+            canonical = normalize_text("\n".join(page_texts))
+            run_hashes.append(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+            if not selected_text:
+                selected_text = canonical
+                selected_ocr_page_count = len(page_texts)
+
+    spans = evidence_spans(selected_text)
+    quality_passed = len(selected_text) >= 200
+    print(json.dumps({
+        "status": "ok" if selected_text else "ocr_empty_text",
+        "permission": "available",
+        "http_status": response.status_code,
+        "final_url": response.url or url,
+        "parser_used": "pymupdf+pytesseract",
+        "ocr_page_limit": 3,
+        "page_count": selected_page_count,
+        "ocr_nonempty_page_count": selected_ocr_page_count,
+        "ocr_text_length": len(selected_text),
+        "ocr_text_sample": selected_text[:1000] if selected_text else None,
+        "ocr_text_hash": run_hashes[0] if run_hashes else None,
+        "text_hash_algorithm": "sha256",
+        "repeat_hashes": run_hashes,
+        "hash_stable": len(set(run_hashes)) == 1 if run_hashes else False,
+        "ocr_quality": {
+            "status": "passed" if quality_passed else "blocked",
+            "min_text_length": 200,
+            "observed_text_length": len(selected_text),
+        },
+        "evidence_spans": spans,
+    }, ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({
+        "status": "ocr_error",
+        "permission": "unknown_or_unavailable",
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }, ensure_ascii=False))
+"#;
+
+    let home = env::var("HOME").unwrap_or_else(|_| "/Users/gaocheng".to_string());
+    let timeout_seconds = akshare_analyst_revision_timeout_seconds().max(120);
+    let child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .arg(&pdf_url)
+        .env("HOME", home)
+        .env("PYTHONUNBUFFERED", "1")
+        .output();
+
+    let output = match timeout(StdDuration::from_secs(timeout_seconds), child).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return json!({
+                "status": "ocr_error",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "pdf_url": pdf_url,
+                "raw_row": row,
+                "error": error.to_string(),
+            });
+        }
+        Err(_) => {
+            return json!({
+                "status": "timeout",
+                "permission": "unknown_or_unavailable",
+                "python": python,
+                "pdf_url": pdf_url,
+                "raw_row": row,
+                "timeout_seconds": timeout_seconds,
+            });
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
+        json!({
+            "status": "ocr_error",
+            "permission": "unknown_or_unavailable",
+            "error": "failed_to_parse_exchange_announcement_ocr_probe_stdout",
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+    });
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("python".to_string(), json!(python));
+        object.insert("pdf_url".to_string(), json!(pdf_url));
+        object.insert("raw_row".to_string(), row.clone());
+        object.insert("exit_status".to_string(), json!(output.status.code()));
+        object.insert(
+            "source_published_at_quality".to_string(),
+            row.get("source_published_at_quality")
+                .cloned()
+                .unwrap_or_else(|| json!(null)),
+        );
+        object.insert(
+            "source_published_at".to_string(),
+            row.get("source_published_at")
+                .cloned()
+                .unwrap_or_else(|| json!(null)),
+        );
+        object.insert(
+            "available_at".to_string(),
+            row.get("available_at")
+                .cloned()
+                .unwrap_or_else(|| json!(null)),
+        );
+        object.insert(
+            "pit_policy".to_string(),
+            json!("preserve raw source_published_at and available_at; OCR execution timestamp is never used as data availability"),
+        );
+        if !stderr.is_empty() {
+            object.insert("stderr".to_string(), json!(stderr));
+        }
+    }
+    payload
+}
+
 fn akshare_analyst_revision_is_empty_dataframe_length_mismatch(payload: &Value) -> bool {
     let status_is_error = payload
         .get("status")
@@ -3329,6 +8671,1073 @@ fn phase7_shareholder_structure_schema_contract() -> Value {
             "v19_train_selection": "blocked"
         }
     })
+}
+
+fn phase7_exchange_announcement_order_capacity_schema_contract() -> Value {
+    json!({
+        "audit_version": "p3.24a-exchange-announcement-order-capacity-source-contract-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24A",
+        "status": "schema_contract_defined_pdf_detail_admission_required_before_manual_review",
+        "mode": "read_only_source_admission_contract_no_sync",
+        "ddl_path": "sql/phase7_exchange_announcement_order_capacity_source.sql",
+        "raw_sources": [
+            {
+                "vendor": "akshare",
+                "upstream": "cninfo",
+                "vendor_endpoint": "stock_zh_a_disclosure_report_cninfo",
+                "source_semantics": "CNInfo-listed company disclosure reports by symbol, market, category and date range",
+                "request_key": "symbol+market+category+start_date+end_date",
+                "native_available_at_candidate": "公告时间",
+                "source_published_at_candidate": "announcement detail page publish timestamp if available; otherwise date-only announcement time",
+                "observed_smoke": {
+                    "as_of": "2026-06-25",
+                    "akshare_version": "1.18.64",
+                    "symbol": "000001",
+                    "market": "沪深京",
+                    "category": "日常经营",
+                    "date_range": "20230101..20231231",
+                    "row_count": 31,
+                    "fields": ["代码", "简称", "公告标题", "公告时间", "公告链接"]
+                },
+                "known_risks": [
+                    "symbol fanout can be expensive; bounded history sync must be batched by symbol and date range",
+                    "some categories may return empty or parser errors and need category-level reliability audit before full sync",
+                    "date-only announcement time is insufficient for same-day intraday decisions"
+                ],
+                "admission_gate": "permission_history_category_smoke_and_available_at_text_parse_audit_required_before_schema_apply"
+            },
+            {
+                "vendor": "cninfo",
+                "vendor_endpoint": "announcement_detail_page",
+                "source_semantics": "official disclosure detail page referenced by announcement link",
+                "request_key": "announcement_id+org_id+stock_code",
+                "native_available_at_candidate": "detail page disclosure timestamp when present",
+                "required_from_link": ["announcementId", "orgId", "stockCode", "announcementTime"],
+                "admission_gate": "official_page_fetch_text_hash_and_publication_timestamp_audit_required"
+            },
+            {
+                "vendor": "licensed_vendor",
+                "vendor_endpoint": "broad_base_announcement_text_feed",
+                "source_semantics": "licensed exchange/CNInfo disclosure feed with timestamped announcement text",
+                "native_available_at_candidate": "vendor source publication timestamp",
+                "admission_gate": "permission_and_schema_contract_required_if_public_feed_is_not_reliable_enough"
+            }
+        ],
+        "event_taxonomy": [
+            {
+                "event_type": "order_or_contract_signed",
+                "positive_evidence": ["中标", "签订合同", "重大合同", "订单", "框架协议"],
+                "required_evidence": ["counterparty", "contract_amount_or_capacity", "time_window_or_delivery_schedule"]
+            },
+            {
+                "event_type": "capacity_expansion_or_commissioning",
+                "positive_evidence": ["扩产", "产能", "投产", "试生产", "达产"],
+                "required_evidence": ["project_name", "capacity_or_capex", "expected_start_or_completion_date"]
+            },
+            {
+                "event_type": "product_price_adjustment",
+                "positive_evidence": ["价格调整", "上调", "下调", "产品价格"],
+                "required_evidence": ["product", "price_direction", "effective_date"]
+            },
+            {
+                "event_type": "major_supply_or_customer_agreement",
+                "positive_evidence": ["供货协议", "采购协议", "长期协议", "战略合作"],
+                "required_evidence": ["customer_or_supplier", "covered_product", "duration_or_amount"]
+            }
+        ],
+        "tables": [
+            {
+                "table": "market_exchange_announcement_text_raw",
+                "natural_key": ["vendor", "vendor_endpoint", "announcement_id", "symbol"],
+                "required_fields": [
+                    "vendor",
+                    "vendor_endpoint",
+                    "request_key",
+                    "symbol",
+                    "symbol_name",
+                    "announcement_id",
+                    "org_id",
+                    "announcement_category",
+                    "announcement_title",
+                    "announcement_time",
+                    "source_published_at",
+                    "source_published_at_quality",
+                    "available_at",
+                    "announcement_url",
+                    "pdf_final_url",
+                    "text_content",
+                    "text_hash",
+                    "text_hash_algorithm",
+                    "timestamp_candidates",
+                    "pdf_metadata_keys",
+                    "raw_payload",
+                    "raw_payload_hash",
+                    "parser_used",
+                    "parser_version",
+                    "event_type",
+                    "evidence_spans",
+                    "ingested_at",
+                    "data_version_id"
+                ],
+                "pit_rule": "available_at must be no earlier than source_published_at/date-only announcement_time. If source_published_at_quality is date_only_next_session, downstream trading must promote availability to the next open session. Intraday trading must additionally require a trusted timestamp with source_published_at <= decision timestamp.",
+                "text_evidence_rule": "event_type is invalid without evidence_spans that quote the exact announcement text supporting order, capacity, contract, price-adjustment or commissioning semantics. PDF-only rows without evidence_spans remain blocked.",
+                "raw_landing_policy": "preserve full raw payload, source URL, pdf_final_url, text hash and parser identity; category/parser errors and scanned_pdf_ocr_required cases must be audited, not silently dropped."
+            }
+        ],
+        "available_at_policy": {
+            "preferred": "use official source_published_at timestamp from the announcement detail/feed when available",
+            "date_only_policy": "if only announcement date is available, set available_at to next open session for trading decisions until source_published_at timestamp is audited",
+            "intraday_trading": "same-day announcement events are forbidden for intraday rebalance unless source_published_at <= decision timestamp is proven",
+            "weekend_or_holiday_publications": "bounded sync must scan calendar days and map date-only announcements to the next open session rather than dropping non-trading-day disclosures"
+        },
+        "pdf_admission": {
+            "runtime_default_python": "~/.local/share/quant-pdf-audit/venv/bin/python",
+            "pdf_parser_readiness_endpoint": "GET /api/v1/quant/data/exchange-announcement-order-capacity/pdf-parser-readiness",
+            "pdf_detail_audit_endpoint": "POST /api/v1/quant/data/exchange-announcement-order-capacity/pdf-detail-audit",
+            "required_audit_version": "p3.24e-exchange-announcement-order-capacity-pdf-detail-audit-v1",
+            "required_detail_fields": [
+                "pdf_final_url",
+                "parser_used",
+                "text_hash",
+                "text_hash_algorithm",
+                "timestamp_candidates",
+                "source_published_at",
+                "source_published_at_quality",
+                "evidence_spans",
+                "pdf_metadata_keys"
+            ],
+            "next_session_policy": "date_only_next_session is admissible only for next-open-session daily PIT usage; same-session and intraday usage remain blocked",
+            "ocr_policy": "scanned_pdf_ocr_required stays blocked until a separate OCR runtime and audit path are reviewed"
+        },
+        "manual_schema_review": {
+            "endpoint": "GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review",
+            "audit_version": "p3.24f-exchange-announcement-order-capacity-manual-schema-review-v1",
+            "mode": "read_only_schema_contract_ddl_review_no_apply",
+            "decision_scope": "ddl_contract_review_only_bounded_sync_design_allowed_next",
+            "requires": [
+                "pdf_detail_audit_passed_manual_schema_review_allowed_next",
+                "date_only_next_session_policy_encoded",
+                "raw_failure_samples_preserved",
+                "evidence_span_jsonb_preserved"
+            ]
+        },
+        "sync_plan": {
+            "endpoint": "GET /api/v1/quant/data/exchange-announcement-order-capacity/sync-plan",
+            "audit_version": "p3.24g-exchange-announcement-order-capacity-bounded-sync-plan-v1",
+            "mode": "read_only_plan_only_calendar_day_symbol_category_sync_design",
+            "sync_endpoint_status": "disabled_plan_only_design_until_operator_schema_apply_and_small_batch_review"
+        },
+        "coverage_audit_required": [
+            "year_market_symbol_category_breakdown",
+            "calendar_day_and_open_day_publication_coverage",
+            "announcement_id_duplicate_or_missing_count",
+            "source_published_at_null_or_date_only_count",
+            "text_fetch_success_rate",
+            "text_hash_duplicate_count",
+            "category_parser_error_breakdown",
+            "event_taxonomy_precision_manual_sample",
+            "evidence_span_presence_rate",
+            "correlation_vs_existing_event_moneyflow_liquidity_price_volume_quality_sources"
+        ],
+        "promotion_gate": {
+            "permission_smoke": "required",
+            "history_category_replay": "required_before_schema_apply",
+            "schema_apply": "blocked_until_pdf_detail_audit_passes_and_manual_review",
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "guardrails": [
+            "do not build generic post-announcement return overlay from this source",
+            "do not use full-period keyword sign or horizon mining",
+            "do not merge announcement categories before category-level coverage and parser quality pass",
+            "do not use date-only same-day announcements for intraday or same-session decisions",
+            "do not enter P3.10 until coverage/PIT/text-evidence/correlation audits pass"
+        ],
+        "next_step": "use permission_smoke_detail_audit_pdf_parser_readiness_and_pdf_detail_audit_evidence_to_finish_manual_schema_review_before_any_bounded_sync_design"
+    })
+}
+
+fn phase7_exchange_announcement_order_capacity_next_source_admission_plan() -> Value {
+    let blocked_promotion_gate = json!({
+        "schema_apply": "blocked",
+        "bounded_sync": "blocked",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked"
+    });
+
+    json!({
+        "audit_version": "p3.25a-exchange-announcement-order-capacity-next-source-admission-plan-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.25A",
+        "mode": "read_only_next_source_admission_plan_no_sync_no_factor_no_p310",
+        "current_pilot_decision": "stopped_current_4_symbol_daily_operation_pilot_after_clean_target_recall_failed",
+        "current_pilot_evidence": {
+            "scope": "002459.SZ,600519.SH,300750.SZ,000001.SZ / 日常经营 / 2023-10-01..2025-03-31",
+            "raw_rows": 249,
+            "target_event_rows_before_title_risk_gate": 119,
+            "taxonomy_blocked_target_event_rows": 113,
+            "admissible_target_event_rows": 6,
+            "manual_review_min_clean_target_samples": 50,
+            "manual_review_sample_shortfall": 44,
+            "pit_violation_rows": 0,
+            "duplicate_key_rows": 0,
+            "blocking_failed_attempts": 0,
+            "raw_sync_quality": "passed_after_high_density_landing_cap_fix",
+            "interpretation": "engineering raw landing and PIT controls are healthy; blocker is insufficient clean target-event recall and noisy vendor category semantics"
+        },
+        "stop_rules": [
+            "do_not_continue_month_or_quarter_raw_sync_for_current_4_symbol_daily_operation_pilot",
+            "do_not_relax_title_taxonomy_or_manual_precision_gate_to_create_false_ready_status",
+            "do_not_enter_factor_builder_p310_bounded_wfa_or_v19_from_current_pilot",
+            "do_not_use_oos_feedback_full_period_sign_flip_or_horizon_mining_to_rescue_this_source"
+        ],
+        "candidate_routes": [
+            {
+                "priority": 1,
+                "route_id": "structured_order_capacity_contract_price_chain_source",
+                "source_family": "licensed_or_structured_real_operations_feed",
+                "economic_hypothesis": "structured order, capacity, contract, price-adjustment or commissioning data may provide cleaner operational information than noisy category-level disclosure text",
+                "candidate_sources": [
+                    "licensed_exchange_or_cninfo_timestamped_announcement_feed",
+                    "licensed_structured_order_contract_capacity_event_feed",
+                    "authorized_industry_price_capacity_order_chain_feed"
+                ],
+                "universe_policy": "broad_base_main_chinext_non_st_or_pre_registered_market_scope_gate; any excluded market/date/symbol scope must be declared before diagnostics",
+                "required_gates": [
+                    "vendor_permission_and_legal_usage_audit",
+                    "raw_schema_contract_with_stable_natural_key",
+                    "available_at_source_published_at_audit",
+                    "full_history_bounded_sync_plan",
+                    "coverage_readiness_pit_duplicate_hash_audit",
+                    "manual_precision_ge_0_80_with_min_50_clean_target_samples",
+                    "correlation_vs_existing_moneyflow_liquidity_price_volume_quality_event_sources"
+                ],
+                "stop_rule": "stop_before_factor_builder_if_coverage_pit_precision_or_correlation_gate_fails",
+                "promotion_gate": blocked_promotion_gate.clone(),
+                "next_step": "source_discovery_permission_schema_available_at_contract_before_any_raw_sync"
+            },
+            {
+                "priority": 2,
+                "route_id": "announcement_text_broader_universe",
+                "source_family": "public_or_licensed_announcement_text_with_pre_registered_broader_universe",
+                "economic_hypothesis": "if announcement text remains the source, recall must be improved by pre-registering a broader universe and category/taxonomy scope rather than extending the stopped 4-symbol pilot",
+                "candidate_sources": [
+                    "akshare_cninfo_disclosure_feed_with_broader_symbol_universe",
+                    "official_cninfo_or_exchange_feed_with_timestamped_detail_pages",
+                    "licensed_timestamped_announcement_text_feed"
+                ],
+                "universe_policy": "pre_register_symbols_markets_categories_and_date_range; no post-hoc symbol/category selection based on return performance",
+                "required_gates": [
+                    "permission_history_category_smoke",
+                    "detail_text_pdf_ocr_timestamp_hash_audit",
+                    "available_at_source_published_at_audit",
+                    "bounded_calendar_day_symbol_category_sync_plan",
+                    "coverage_readiness_pit_failed_attempt_duplicate_hash_audit",
+                    "manual_precision_ge_0_80_with_min_50_clean_target_samples",
+                    "taxonomy_precision_false_positive_review",
+                    "correlation_vs_existing_event_moneyflow_liquidity_price_volume_quality_sources"
+                ],
+                "stop_rule": "stop_if_broader_pre_registered_scope_still_cannot_produce_50_clean_target_review_samples_or_precision_below_0_80",
+                "promotion_gate": blocked_promotion_gate.clone(),
+                "next_step": "write_pre_registered_broader_universe_plan_then_run_permission_and_available_at_smoke_only"
+            }
+        ],
+        "promotion_gate": {
+            "schema_apply": "blocked_until_new_route_permission_schema_available_at_contract_passes",
+            "bounded_sync": "blocked_until_new_route_manual_schema_review_and_plan_pass",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_required_steps": [
+            "choose_route_1_structured_source_if_usable_vendor_exists_otherwise_route_2_broader_universe",
+            "create_read_only_permission_schema_available_at_admission_for_selected_route",
+            "keep_current_4_symbol_daily_operation_pilot_stopped"
+        ]
+    })
+}
+
+fn phase7_structured_order_capacity_price_chain_source_contract() -> Value {
+    json!({
+        "audit_version": "p3.25b-structured-order-capacity-contract-price-chain-source-contract-v1",
+        "source_id": "structured_order_capacity_contract_price_chain_source",
+        "stage": "P3.25B",
+        "mode": "read_only_structured_source_admission_contract_no_sync",
+        "admission_decision": "blocked_vendor_permission_and_available_at_contract_required",
+        "source_priority": 1,
+        "why_now": "current public CNInfo/AkShare 4-symbol daily-operation pilot is stopped for clean target-event recall and taxonomy precision; next source must prefer structured, timestamped, legally usable real-operation events",
+        "candidate_source_families": [
+            {
+                "family": "licensed_structured_order_contract_capacity_event_feed",
+                "examples": [
+                    "vendor-normalized listed-company contract/order/capacity/commissioning events",
+                    "licensed exchange or CNInfo feed with event tags and publication timestamps"
+                ],
+                "minimum_admission_state": "vendor_permission_and_schema_sample_required"
+            },
+            {
+                "family": "authorized_industry_price_capacity_order_chain_feed",
+                "examples": [
+                    "industry product price adjustment feed",
+                    "capacity commissioning or production schedule feed",
+                    "order backlog or contract award feed with listed-company identifiers"
+                ],
+                "minimum_admission_state": "legal_usage_and_symbol_mapping_required"
+            }
+        ],
+        "legal_and_vendor_gate": {
+            "status": "required_before_schema_or_sync",
+            "required_evidence": [
+                "license_or_terms_allow_research_and_internal_trading_use",
+                "redistribution_and_storage_rights_reviewed",
+                "historical_access_range_confirmed",
+                "api_rate_limit_and_cost_estimated",
+                "vendor_field_dictionary_or_sample_payload_collected"
+            ],
+            "blocked_if": [
+                "no_storage_rights",
+                "no_historical_access",
+                "no_source_publication_timestamp_or_conservative_availability_rule",
+                "event_labels_are_derived_from_future_returns"
+            ]
+        },
+        "required_time_fields": [
+            "event_date",
+            "source_published_at",
+            "available_at",
+            "ingested_at"
+        ],
+        "raw_schema_contract": {
+            "table_candidate": "market_structured_operation_event_raw",
+            "natural_key": [
+                "vendor",
+                "vendor_endpoint",
+                "vendor_event_id",
+                "symbol",
+                "event_type",
+                "source_published_at",
+                "raw_payload_hash"
+            ],
+            "required_identity_fields": [
+                "vendor",
+                "vendor_endpoint",
+                "request_key",
+                "vendor_event_id",
+                "symbol",
+                "symbol_name",
+                "event_type"
+            ],
+            "required_evidence_fields": [
+                "source_url",
+                "source_title",
+                "source_document_id",
+                "source_excerpt_or_structured_payload",
+                "evidence_hash",
+                "raw_payload",
+                "raw_payload_hash",
+                "parser_or_vendor_model_version"
+            ],
+            "pit_rule": "downstream features must filter available_at <= trade_date; intraday decisions must additionally require source_published_at <= decision_timestamp"
+        },
+        "event_schema": [
+            {
+                "event_type": "order_or_contract_signed",
+                "required_fields": [
+                    "counterparty",
+                    "contract_amount",
+                    "covered_product_or_service",
+                    "delivery_or_execution_window",
+                    "contract_status"
+                ],
+                "quality_checks": [
+                    "contract_amount_nonnegative_or_null_with_reason",
+                    "counterparty_not_empty",
+                    "execution_window_not_before_source_published_at"
+                ]
+            },
+            {
+                "event_type": "capacity_expansion_or_commissioning",
+                "required_fields": [
+                    "project_name",
+                    "capacity_or_capex",
+                    "product_or_line",
+                    "expected_start_or_completion_date",
+                    "project_location"
+                ],
+                "quality_checks": [
+                    "capacity_or_capex_nonnegative_or_null_with_reason",
+                    "project_timeline_not_backfilled_from_later_reports",
+                    "location_or_product_scope_reviewed"
+                ]
+            },
+            {
+                "event_type": "product_price_adjustment",
+                "required_fields": [
+                    "product",
+                    "price_direction",
+                    "effective_date",
+                    "price_change_magnitude_or_bucket",
+                    "scope"
+                ],
+                "quality_checks": [
+                    "price_direction_increase_decrease_or_mixed",
+                    "effective_date_available_only_after_source_published_at",
+                    "scope_not_market_return_derived"
+                ]
+            },
+            {
+                "event_type": "supply_customer_agreement_or_order_backlog",
+                "required_fields": [
+                    "customer_or_supplier",
+                    "covered_product",
+                    "duration_or_amount",
+                    "agreement_type",
+                    "execution_status"
+                ],
+                "quality_checks": [
+                    "customer_supplier_not_empty",
+                    "duration_or_amount_not_future_filled",
+                    "agreement_type_from_vendor_or_source_text_not_return_label"
+                ]
+            }
+        ],
+        "available_at_policy": {
+            "daily_rule": "if source has only date-level publication, available_at must map to the next open trading session",
+            "intraday_rule": "decision_timestamp must be >= source_published_at; date-only events are daily next-session only",
+            "weekend_holiday_rule": "weekend or holiday publications map to the next open trading session",
+            "forbidden": [
+                "using event effective_date as available_at",
+                "using vendor ingestion time as source publication time",
+                "same-session trading from date-only publications",
+                "labels or event directions inferred from future stock returns"
+            ]
+        },
+        "coverage_audit_required": [
+            "vendor_endpoint_year_month_breakdown",
+            "market_scope_symbol_coverage_vs_main_chinext_non_st",
+            "event_type_distribution_and_target_yield",
+            "source_published_at_null_or_date_only_count",
+            "available_at_pit_violation_rows",
+            "duplicate_vendor_event_or_payload_hash_rows",
+            "manual_precision_ge_0_80_with_min_50_clean_target_samples",
+            "field_null_rate_and_range_checks_by_event_type",
+            "correlation_vs_existing_moneyflow_liquidity_price_volume_quality_event_sources",
+            "cost_rate_limit_and_refresh_latency_budget"
+        ],
+        "promotion_gate": {
+            "permission_smoke": "blocked_until_vendor_candidate_selected",
+            "schema_apply": "blocked",
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "guardrails": [
+            "do not proceed without legal/vendor storage and usage review",
+            "do not map event_type from post-event returns or OOS performance",
+            "do not merge public noisy text pilot rows into structured-source positives",
+            "do not enter P3.10 before full coverage/PIT/precision/correlation gates pass"
+        ],
+        "next_step": "identify_vendor_or_authorized_structured_source_then_run_permission_and_sample_payload_smoke"
+    })
+}
+
+fn phase7_structured_order_capacity_price_chain_vendor_admission_plan() -> Value {
+    let blocked_promotion_gate = json!({
+        "permission_smoke": "blocked_until_candidate_vendor_and_endpoint_selected",
+        "schema_apply": "blocked",
+        "bounded_sync": "blocked",
+        "factor_builder": "blocked",
+        "p310_status": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked"
+    });
+
+    let sample_payload_evidence_required = json!([
+        "sample_request_and_response_captured_read_only",
+        "vendor_field_dictionary_or_payload_schema",
+        "source_published_at_or_conservative_available_at",
+        "event_date_and_event_type_semantics",
+        "stable_vendor_event_id_or_deterministic_natural_key",
+        "raw_payload_hash",
+        "symbol_mapping_evidence",
+        "license_storage_and_internal_use_note"
+    ]);
+
+    json!({
+        "audit_version": "p3.25c-structured-order-capacity-price-chain-vendor-admission-plan-v1",
+        "source_id": "structured_order_capacity_contract_price_chain_source",
+        "stage": "P3.25C",
+        "mode": "read_only_vendor_source_candidate_discovery_plan_no_schema_no_sync",
+        "admission_decision": "blocked_until_vendor_permission_history_available_at_and_sample_payload_smoke_pass",
+        "why_now": "P3.25B defined the structured source contract; P3.25C must discover a legally usable vendor or source and prove payload/PIT semantics before any schema or sync work",
+        "candidate_sources": [
+            {
+                "priority": 1,
+                "vendor": "licensed_structured_financial_data_vendor",
+                "source_name": "listed_company_order_contract_capacity_event_feed",
+                "source_family": "licensed_structured_order_contract_capacity_event_feed",
+                "legal_storage_use_status": "unknown_requires_terms_or_contract_review",
+                "endpoint_payload_availability": "unknown_requires_permission_and_sample_payload_smoke",
+                "historical_coverage_range": "unknown_requires_history_date_probe_covering_2014_to_present_or_declared_start_date",
+                "source_published_at_semantics": "must_provide_publication_timestamp_or_auditable_date_level_publication",
+                "symbol_mapping_requirement": "must_map_vendor_company_identifier_to_ts_code_or_exchange_symbol_with_effective_date_scope",
+                "sample_payload_evidence_required": sample_payload_evidence_required.clone(),
+                "stop_rule": "stop_if_event_labels_are_return_derived_or_publication_time_is_missing_without_conservative_available_at"
+            },
+            {
+                "priority": 2,
+                "vendor": "licensed_exchange_or_cninfo_metadata_vendor",
+                "source_name": "timestamped_announcement_metadata_with_structured_event_tags",
+                "source_family": "licensed_timestamped_disclosure_metadata_feed",
+                "legal_storage_use_status": "unknown_requires_license_storage_redistribution_and_internal_trading_use_review",
+                "endpoint_payload_availability": "unknown_requires_endpoint_smoke_for_event_tags_detail_url_and_payload_hash",
+                "historical_coverage_range": "unknown_requires_replay_probe_by_publication_date_and_category",
+                "source_published_at_semantics": "must_distinguish_source_publication_time_from_vendor_ingestion_time",
+                "symbol_mapping_requirement": "must_preserve exchange_symbol and normalized ts_code mapping without current_snapshot_backfill",
+                "sample_payload_evidence_required": sample_payload_evidence_required.clone(),
+                "stop_rule": "stop_if_tags_reproduce_the_noisy_current_daily_operation_category_without_clean_target_precision"
+            },
+            {
+                "priority": 3,
+                "vendor": "authorized_industry_chain_data_vendor",
+                "source_name": "industry_price_capacity_order_chain_feed",
+                "source_family": "authorized_industry_price_capacity_order_chain_feed",
+                "legal_storage_use_status": "unknown_requires_data_use_storage_and_symbol_mapping_terms",
+                "endpoint_payload_availability": "unknown_requires_sample_for_product_price_capacity_order_records",
+                "historical_coverage_range": "unknown_requires_product_or_company_history_probe_and_market_scope_declaration",
+                "source_published_at_semantics": "must_provide_observation_publication_or_release_time_not_future_revised_series_only",
+                "symbol_mapping_requirement": "must map product/industry/company exposure using pre_registered PIT mapping or exclusion gate",
+                "sample_payload_evidence_required": sample_payload_evidence_required.clone(),
+                "stop_rule": "stop_if_mapping_to_listed_company_or_sw_industry_requires_future_performance_or_subjective_post_hoc_weights"
+            }
+        ],
+        "required_sample_payload_fields": [
+            "vendor",
+            "vendor_endpoint",
+            "request_key",
+            "vendor_event_id",
+            "symbol_or_company_identifier",
+            "event_type",
+            "event_date",
+            "source_published_at",
+            "available_at_rule",
+            "source_url_or_document_id",
+            "source_title_or_structured_payload_excerpt",
+            "raw_payload",
+            "raw_payload_hash",
+            "vendor_schema_or_model_version"
+        ],
+        "permission_and_history_smoke_plan": {
+            "write_enabled": false,
+            "db_write_enabled": false,
+            "minimum_smoke": [
+                "terms_or_license_storage_use_review",
+                "single_endpoint_permission_probe",
+                "history_date_probe_for_old_mid_recent_periods",
+                "sample_payload_capture_without_persistence",
+                "source_published_at_available_at_semantics_review",
+                "symbol_mapping_and_market_scope_review"
+            ],
+            "representative_history_dates": [
+                "2014-01-02",
+                "2017-01-03",
+                "2020-07-01",
+                "2024-01-02",
+                "latest_completed_trading_or_publication_date"
+            ],
+            "blocked_outputs": [
+                "ddl_generation",
+                "schema_apply",
+                "bounded_raw_sync",
+                "factor_backfill",
+                "p310_diagnostics",
+                "bounded_wfa",
+                "v19_train_selection"
+            ]
+        },
+        "stop_rules": [
+            "stop_if_vendor_terms_do_not_allow_storage_research_and_internal_trading_use",
+            "stop_if_vendor_cannot_provide_historical_payload_samples_with_source_published_at_or_auditable_availability",
+            "stop_if_only_current_snapshot_or_forward_revised_series_is_available",
+            "stop_if_event_type_or_direction_is_derived_from_future_returns",
+            "stop_if_symbol_mapping_requires_post_hoc_performance_weights",
+            "stop_if_sample_payload_cannot_preserve_stable_natural_key_and_raw_payload_hash",
+            "stop_if_sample_precision_or_event_semantics_are_equivalent_to_the_stopped_noisy_cninfo_daily_operation_pilot"
+        ],
+        "promotion_gate": blocked_promotion_gate,
+        "fallback_if_no_usable_vendor": "switch_to_announcement_text_broader_universe_pre_registered_plan_without_rescuing_current_4_symbol_pilot",
+        "next_step": "collect_candidate_vendor_terms_endpoint_dictionary_and_read_only_sample_payload_evidence_before_any_schema_or_sync_design"
+    })
+}
+
+fn ddl_contains_all(ddl: &str, required: &[&str]) -> (Vec<String>, Vec<String>) {
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
+    for item in required {
+        if ddl.contains(item) {
+            present.push((*item).to_string());
+        } else {
+            missing.push((*item).to_string());
+        }
+    }
+    (present, missing)
+}
+
+fn phase7_exchange_announcement_order_capacity_manual_schema_review() -> Value {
+    const DDL_PATH: &str = "sql/phase7_exchange_announcement_order_capacity_source.sql";
+    let ddl = include_str!("../../../sql/phase7_exchange_announcement_order_capacity_source.sql");
+
+    let required_fields = [
+        "vendor",
+        "vendor_endpoint",
+        "request_key",
+        "symbol",
+        "announcement_id",
+        "announcement_time",
+        "source_published_at",
+        "source_published_at_ts",
+        "source_published_date",
+        "source_published_at_quality",
+        "available_at",
+        "announcement_url",
+        "pdf_final_url",
+        "text_content",
+        "text_hash",
+        "text_hash_algorithm",
+        "timestamp_candidates",
+        "pdf_metadata_keys",
+        "raw_payload",
+        "raw_payload_hash",
+        "parser_used",
+        "parser_version",
+        "parser_errors",
+        "pdf_parse_status",
+        "event_type",
+        "evidence_spans",
+        "ingested_at",
+        "data_version_id",
+    ];
+    let required_constraints = [
+        "PRIMARY KEY (vendor, vendor_endpoint, announcement_id, symbol, raw_payload_hash)",
+        "CHECK (available_at >= announcement_time)",
+        "source_published_at_quality IN ('timestamp', 'date_only_next_session', 'missing')",
+        "text_hash_algorithm IN ('sha256')",
+        "source_published_at_quality = 'timestamp' AND source_published_at_ts IS NOT NULL",
+        "source_published_at_quality = 'date_only_next_session' AND source_published_date IS NOT NULL",
+        "order_or_contract_signed",
+        "capacity_expansion_or_commissioning",
+        "product_price_adjustment",
+        "major_supply_or_customer_agreement",
+        "scanned_pdf_ocr_required",
+    ];
+    let required_indexes = [
+        "idx_market_exchange_announcement_available_at",
+        "idx_market_exchange_announcement_symbol_available_at",
+        "idx_market_exchange_announcement_quality",
+        "idx_market_exchange_announcement_hash",
+        "idx_market_exchange_announcement_parser_status",
+    ];
+
+    let (present_fields, missing_fields) = ddl_contains_all(ddl, &required_fields);
+    let (present_constraints, missing_constraints) = ddl_contains_all(ddl, &required_constraints);
+    let (present_indexes, missing_indexes) = ddl_contains_all(ddl, &required_indexes);
+
+    let passed = missing_fields.is_empty()
+        && missing_constraints.is_empty()
+        && missing_indexes.is_empty()
+        && !ddl.contains("CREATE TABLE IF NOT EXISTS factor_")
+        && !ddl.contains("model_prediction")
+        && !ddl.contains("experiment_run");
+
+    json!({
+        "audit_version": "p3.24f-exchange-announcement-order-capacity-manual-schema-review-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24F",
+        "mode": "read_only_schema_contract_ddl_review_no_apply",
+        "write_enabled": false,
+        "ddl_path": DDL_PATH,
+        "schema_review_decision": if passed {
+            "passed_for_bounded_sync_design_only"
+        } else {
+            "blocked_schema_contract_or_pit_ddl_gap"
+        },
+        "pit_review": {
+            "timestamp_policy": "timestamp requires source_published_at_ts; intraday remains blocked unless decision-time ordering is proven",
+            "date_only_next_session_policy": if ddl.contains("date_only_next_session") && ddl.contains("source_published_date") {
+                "encoded"
+            } else {
+                "missing"
+            },
+            "available_at_policy": "available_at >= announcement_time is necessary but not sufficient; bounded sync must map date_only_next_session to the next open session",
+            "future_data_policy": "features must still require available_at <= trade_date; this review does not admit factor generation"
+        },
+        "ddl_checks": {
+            "required_fields": present_fields,
+            "missing_required_fields": missing_fields,
+            "missing_required_field_count": missing_fields.len(),
+            "required_constraints": present_constraints,
+            "missing_required_constraints": missing_constraints,
+            "missing_required_constraint_count": missing_constraints.len(),
+            "required_indexes": present_indexes,
+            "missing_required_indexes": missing_indexes,
+            "missing_required_index_count": missing_indexes.len(),
+            "raw_failure_sample_preservation": if ddl.contains("parser_errors") && ddl.contains("pdf_parse_status") {
+                "encoded"
+            } else {
+                "missing"
+            },
+            "text_evidence_preservation": if ddl.contains("evidence_spans JSONB") && ddl.contains("text_content TEXT") {
+                "encoded"
+            } else {
+                "missing"
+            }
+        },
+        "promotion_gate": {
+            "schema_apply": if passed {
+                "manual_review_passed_apply_still_requires_explicit_operator_action"
+            } else {
+                "blocked_until_schema_review_passes"
+            },
+            "bounded_sync": if passed {
+                "blocked_until_plan_only_bounded_sync_review"
+            } else {
+                "blocked"
+            },
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "guardrails": [
+            "this endpoint does not execute DDL or write raw tables",
+            "manual schema review passing is not data coverage readiness",
+            "date-only announcementTime may only be mapped to next open session",
+            "P3.10, WFA and v19 remain blocked until bounded sync, coverage, PIT, evidence precision and correlation audits pass"
+        ],
+        "next_required_steps": if passed {
+            json!([
+                "build_plan_only_calendar_day_symbol_category_bounded_sync_design",
+                "review_calendar_day_to_open_session_mapping",
+                "review_idempotent_raw_landing_and_failure_sample_policy",
+                "run_one_small_batch_after_operator_schema_apply"
+            ])
+        } else {
+            json!([
+                "fix_schema_contract_or_ddl_gaps",
+                "rerun_manual_schema_review_before_bounded_sync_design"
+            ])
+        }
+    })
+}
+
+fn exchange_announcement_order_capacity_sync_plan_response(
+    start: NaiveDate,
+    end: NaiveDate,
+    batch_mode: &str,
+    market: String,
+    symbols: Vec<String>,
+    categories: Vec<String>,
+    batches: Vec<AkshareAnalystRevisionSyncPlanBatch>,
+) -> Value {
+    let symbol_count = symbols.len();
+    let category_count = categories.len();
+    let request_keys_per_batch = symbol_count * category_count;
+    let batch_values = batches
+        .iter()
+        .map(|batch| {
+            let tiny_slice_count =
+                exchange_announcement_order_capacity_tiny_slices(batch.start_date, batch.end_date)
+                    .len();
+            let bounded_runner_query_units = tiny_slice_count * request_keys_per_batch;
+            let would_exceed_limit =
+                bounded_runner_query_units > EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_BOUNDED_SYNC_MAX_QUERY_UNITS;
+            json!({
+                "batch": batch.label,
+                "start_date": batch.start_date.format("%Y-%m-%d").to_string(),
+                "end_date": batch.end_date.format("%Y-%m-%d").to_string(),
+                "calendar_day_count": batch.calendar_day_count,
+                "symbol_count": symbol_count,
+                "category_count": category_count,
+                "request_key_count": request_keys_per_batch,
+                "tiny_slice_count": tiny_slice_count,
+                "query_count": bounded_runner_query_units,
+                "estimated_api_calls": bounded_runner_query_units,
+                "would_exceed_limit": would_exceed_limit,
+                "estimated_rows_basis": "unknown_before_small_batch; retain ok_empty and parser failures as auditable outcomes",
+                "future_bounded_sync_request": {
+                    "enabled": false,
+                    "plan_only": true,
+                    "market": market,
+                    "symbols": symbols,
+                    "categories": categories,
+                    "start_date": batch.start_date.format("%Y%m%d").to_string(),
+                    "end_date": batch.end_date.format("%Y%m%d").to_string(),
+                    "data_version_id": format!("exchange-announcement-order-capacity-{}", batch.label),
+                    "reason": "p3.24g plan-only design; actual sync endpoint intentionally disabled"
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let calendar_day_count = (end - start).num_days() + 1;
+    let request_key_count = batches.len() * request_keys_per_batch;
+    let estimated_api_calls = batch_values
+        .iter()
+        .filter_map(|batch| batch.get("estimated_api_calls").and_then(Value::as_u64))
+        .sum::<u64>();
+    let would_exceed_limit = batch_values
+        .iter()
+        .any(|batch| batch.get("would_exceed_limit").and_then(Value::as_bool) == Some(true));
+
+    json!({
+        "audit_version": "p3.24g-exchange-announcement-order-capacity-bounded-sync-plan-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24G",
+        "mode": "read_only_plan_only_calendar_day_symbol_category_sync_design",
+        "write_enabled": false,
+        "vendor": "akshare",
+        "upstream": "cninfo",
+        "vendor_endpoint": "stock_zh_a_disclosure_report_cninfo",
+        "market": market,
+        "symbols": symbols,
+        "categories": categories,
+        "date_range": {
+            "start_date": start.format("%Y%m%d").to_string(),
+            "end_date": end.format("%Y%m%d").to_string(),
+            "calendar_day_count": calendar_day_count,
+        },
+        "request_key_policy": "symbol+category+calendar_date_range; do not restrict to open trading days because weekend/holiday announcements must map to next open session",
+        "batch_mode": batch_mode,
+        "recommended_batch_granularity": "quarter",
+        "batch_count": batch_values.len(),
+        "request_key_count": request_key_count,
+        "query_count": estimated_api_calls,
+        "estimated_api_calls": estimated_api_calls,
+        "bounded_runner_query_unit_policy": "query_count equals tiny_slice_count * symbol_count * category_count, matching bounded-sync runner enforcement",
+        "bounded_sync_limit": {
+            "max_query_units": EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_BOUNDED_SYNC_MAX_QUERY_UNITS,
+            "would_exceed_limit": would_exceed_limit,
+        },
+        "sync_endpoint_status": if would_exceed_limit {
+            "blocked_plan_exceeds_bounded_runner_query_unit_limit"
+        } else {
+            "disabled_plan_only_design_until_operator_schema_apply_and_small_batch_review"
+        },
+        "pit_mapping_policy": {
+            "date_only_next_session": "announcementTime/date-only source_published_at must be mapped to the next open session before any trading feature can use it",
+            "timestamp": "if a trusted source_published_at_ts is later available, same-day daily use still requires available_at <= trade_date and intraday use requires source_published_at_ts <= decision timestamp",
+            "weekend_or_holiday_publication": "calendar-day sync must retain the publication date and map available_at to the next open trading session"
+        },
+        "raw_landing_policy": {
+            "idempotent_key": ["vendor", "vendor_endpoint", "announcement_id", "symbol", "raw_payload_hash"],
+            "permission_smoke_sample_cap": EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_ROWS,
+            "raw_sync_row_landing_cap": exchange_announcement_order_capacity_raw_sync_row_limit(),
+            "failure_sample_retention": "retain parser errors, ok_empty category outcomes, scanned_pdf_ocr_required and incomplete metadata as auditable raw outcomes",
+            "text_evidence_retention": "retain text_content, text_hash, timestamp_candidates, pdf_metadata_keys and evidence_spans for manual precision review"
+        },
+        "batches": batch_values,
+        "promotion_gate": {
+            "schema_apply": "operator_action_required_before_any_raw_sync",
+            "bounded_sync": "blocked_until_operator_schema_apply_and_small_batch_review",
+            "coverage_audit": "blocked_until_small_batch_raw_sync_completes",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "guardrails": [
+            "this endpoint never writes data_sync_task, raw tables, data versions, factors, WFA tasks, or strategy configs",
+            "future_bounded_sync_request is illustrative and disabled; no POST sync endpoint is exposed in P3.24G",
+            "do not collapse weekend or holiday announcements into previous trading days",
+            "do not enter P3.10 until bounded sync, coverage, PIT, evidence precision and low-correlation audits pass"
+        ],
+        "next_step": "after explicit operator schema apply, run one small manually reviewed batch and then build coverage_pit_quality_audit"
+    })
+}
+
+fn phase7_exchange_announcement_order_capacity_coverage_quality_audit_contract() -> Value {
+    json!({
+        "audit_version": "p3.24h-exchange-announcement-order-capacity-coverage-quality-audit-contract-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24H",
+        "status": "coverage_pit_quality_contract_defined_small_batch_audit_required_next",
+        "mode": "read_only_coverage_pit_quality_contract_no_raw_sync",
+        "write_enabled": false,
+        "endpoint": "GET /api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit-contract",
+        "depends_on": [
+            "p3.24f-exchange-announcement-order-capacity-manual-schema-review-v1",
+            "p3.24g-exchange-announcement-order-capacity-bounded-sync-plan-v1"
+        ],
+        "small_batch_preconditions": [
+            "operator_applies_sql_phase7_exchange_announcement_order_capacity_source_explicitly",
+            "run_one_small_calendar_day_symbol_category_raw_sync_after_schema_apply",
+            "retain ok_empty, parser_error, scanned_pdf_ocr_required and incomplete_metadata rows as auditable outcomes",
+            "do not start full-history raw sync before this contract is implemented as a real audit endpoint"
+        ],
+        "coverage_breakdowns": [
+            "year_market_category_symbol",
+            "calendar_day_publication_and_next_open_session",
+            "announcement_category_by_year_market",
+            "event_type_by_year_market_category",
+            "source_published_at_quality_by_year_category",
+            "pdf_parse_status_by_year_category",
+            "ok_empty_and_parser_error_by_request_key"
+        ],
+        "required_small_batch_audit_fields": [
+            "raw_row_count",
+            "request_key_count",
+            "covered_calendar_day_count",
+            "covered_open_session_count",
+            "missing_calendar_day_count",
+            "missing_next_open_session_count",
+            "year_market_category_symbol_breakdown",
+            "source_published_at_quality_distribution",
+            "announcement_time_to_available_at_mapping_sample",
+            "duplicate_announcement_id_rows",
+            "duplicate_raw_payload_hash_groups",
+            "missing_announcement_link_metadata_rows",
+            "missing_pdf_final_url_rows",
+            "parser_error_rows",
+            "scanned_pdf_ocr_required_rows",
+            "ocr_taxonomy_excluded_rows",
+            "trainable_scanned_pdf_blocking_rows",
+            "ok_empty_request_count",
+            "missing_text_hash_rows",
+            "missing_evidence_span_rows",
+            "event_taxonomy_manual_precision_sample",
+            "correlation_vs_existing_sources"
+        ],
+        "pit_audit": {
+            "announcement_time_source": "CNInfo link announcementTime plus PDF/detail timestamp candidates when available",
+            "date_only_next_session_mapping": "required_for_every_date_only_or_weekend_holiday_publication",
+            "timestamp_mapping": "trusted source_published_at_ts may use same daily session only when source_published_at_ts <= decision timestamp is proven; intraday remains blocked otherwise",
+            "open_session_calendar": "market_trade_calendar distinct open_date mapping; non-trading-day announcements map to the next open trading session",
+            "no_future_data_rule": "every feature row must require available_at <= feature_trade_date and raw ingested_at must never be used as source publication time",
+            "required_violation_checks": [
+                "available_at_before_source_published_at",
+                "available_at_after_feature_trade_date",
+                "date_only_mapped_to_previous_open_session",
+                "weekend_or_holiday_publication_dropped_or_backfilled_to_previous_session",
+                "source_published_at_quality_missing_used_for_training"
+            ]
+        },
+        "quality_thresholds": {
+            "pit_violation_rows": 0,
+            "missing_available_at_rows": 0,
+            "missing_source_published_at_quality_rows": 0,
+            "duplicate_announcement_id_rows": 0,
+            "duplicate_raw_payload_hash_groups": 0,
+            "missing_text_hash_rows_for_parsed_pdf": 0,
+            "missing_evidence_span_rows_for_event_rows": 0,
+            "missing_link_metadata_rows": 0,
+            "parser_error_rows_policy": "allowed_only_as_retained_raw_failures_not_as_trainable_rows",
+            "scanned_pdf_ocr_required_policy": "blocked_until_separate_ocr_runtime_and_audit_or_narrow_taxonomy_exclusion",
+            "ocr_taxonomy_exclusion_policy": "only pre-registered non-target special reports such as related-party funds, finance-company transaction reports, audit reports, legal opinions and financial-advisor reports may be excluded from trainable OCR blockers",
+            "trainable_scanned_pdf_blocking_rows": 0,
+            "ok_empty_policy": "allowed_as_request_coverage_outcome_but_not_as_positive_event_evidence",
+            "evidence_span_precision_manual_sample_min": "0.80",
+            "event_taxonomy_precision_manual_sample_min": "0.80",
+            "event_taxonomy_precision_sample_size_min": 50,
+            "max_abs_correlation_vs_existing_source_daily_score": "0.30"
+        },
+        "correlation_audit": {
+            "required_before_p310": true,
+            "compare_against": [
+                "moneyflow_congestion",
+                "liquidity",
+                "price_volume",
+                "financial_quality_change",
+                "earnings_recovery_persistence",
+                "event_post_return_overlay",
+                "multi_vendor_analyst_revision"
+            ],
+            "alignment_rule": "use conservative available_at aligned daily feature dates only; never align by announcement title date alone",
+            "decision_rule": "high correlation does not imply failure alone, but requires orthogonalization or source stop before P3.10"
+        },
+        "diagnostics_after_contract_and_small_batch_pass": [
+            "implement real coverage-quality-audit endpoint against market_exchange_announcement_text_raw",
+            "expand bounded raw sync by month or quarter only after small-batch audit passes",
+            "run full-history coverage/PIT/evidence/correlation audit before P3.10",
+            "run P3.10A-D diagnostics only after raw source audit passes"
+        ],
+        "promotion_gate": {
+            "schema_apply": "manual_review_passed_apply_still_requires_explicit_operator_action",
+            "bounded_sync": "blocked_until_operator_schema_apply_and_one_small_batch_raw_sync_review",
+            "coverage_quality_audit": "required_after_each_small_batch_and_before_any_full_history_sync",
+            "full_history_sync": "blocked_until_small_batch_coverage_quality_audit_passes",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "guardrails": [
+            "this endpoint is a read-only contract and never reads or writes raw data",
+            "do not promote raw source readiness to trainable readiness",
+            "do not mine keywords, event signs, horizons, or gates on the full OOS period",
+            "do not use same-session or intraday date-only announcements",
+            "do not enter P3.10, WFA or v19 until bounded sync, coverage, PIT, evidence precision and low-correlation audits pass"
+        ],
+        "next_step": "operator_schema_apply_then_one_small_batch_raw_sync_then_implement_real_coverage_quality_audit_endpoint"
+    })
+}
+
+fn build_exchange_announcement_order_capacity_sync_plan(
+    req: ExchangeAnnouncementOrderCapacitySyncPlanReq,
+) -> Result<Value, String> {
+    let today = Utc::now().date_naive();
+    let start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("exchange announcement sync-plan start_date cannot be after end_date".into());
+    }
+
+    let requested_symbols = exchange_announcement_order_capacity_csv_values(req.symbols);
+    let symbols = exchange_announcement_order_capacity_symbols(&requested_symbols);
+    if symbols.is_empty() {
+        return Err(
+            "exchange announcement sync-plan requires at least one comma-separated symbol".into(),
+        );
+    }
+    let requested_categories = exchange_announcement_order_capacity_csv_values(req.categories);
+    let categories = exchange_announcement_order_capacity_categories(&requested_categories);
+    if categories.is_empty() {
+        return Err("exchange announcement sync-plan requires at least one category".into());
+    }
+    let market = req
+        .market
+        .filter(|market| !market.trim().is_empty())
+        .unwrap_or_else(|| "沪深京".to_string());
+    let batch_mode = req
+        .batch
+        .unwrap_or_else(|| "quarter".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let batches = exchange_announcement_order_capacity_sync_plan_batches(start, end, &batch_mode)?;
+
+    Ok(exchange_announcement_order_capacity_sync_plan_response(
+        start,
+        end,
+        &batch_mode,
+        market,
+        symbols,
+        categories,
+        batches,
+    ))
 }
 
 fn phase7_akshare_analyst_revision_schema_contract() -> Value {
@@ -7831,9 +14240,70 @@ async fn validate_futures_price_chain_mapping_candidates(
     }))
 }
 
+fn phase7_exchange_announcement_order_capacity_candidate() -> Value {
+    json!({
+        "source_id": "exchange_announcement_order_capacity_text",
+        "source_family": "regulatory_exchange_announcement_real_operations_text",
+        "economic_hypothesis": "订单、合同、产能、投产、价格调整和重大供货协议等公告文本比常规财务/价量/资金流更接近真实经营边际变化；若能证明公告可得时间、文本证据和 broad-base 覆盖，可能提供低相关 PIT alpha source。",
+        "candidate_raw_sources": [
+            "akshare:stock_zh_a_disclosure_report_cninfo",
+            "cninfo:announcement_detail_page",
+            "licensed_vendor:broad_base_announcement_text_feed"
+        ],
+        "source_discovery_evidence": [
+            {
+                "candidate": "akshare:stock_zh_a_disclosure_report_cninfo",
+                "status": "read_only_sample_smoke_available_source_discovery_only",
+                "upstream": "cninfo",
+                "observed_smoke": {
+                    "as_of": "2026-06-25",
+                    "akshare_version": "1.18.64",
+                    "symbol": "000001",
+                    "market": "沪深京",
+                    "category": "日常经营",
+                    "date_range": "20230101..20231231",
+                    "row_count": 31,
+                    "fields": ["代码", "简称", "公告标题", "公告时间", "公告链接"]
+                },
+                "native_available_at_candidate": "公告时间",
+                "risk": "current smoke is one symbol/category only; category parser reliability, announcement detail text fetch and source_published_at timestamp are not audited",
+                "decision": "permission_history_category_smoke_required_before_schema_or_sync"
+            },
+            {
+                "candidate": "cninfo:announcement_detail_page",
+                "status": "source_discovery_required",
+                "required_from_link": ["announcementId", "orgId", "stockCode", "announcementTime"],
+                "required_audit": ["text_fetch_success_rate", "source_published_at_timestamp", "text_hash_stability", "manual_evidence_span_precision_sample"],
+                "decision": "do_not_sync_until_text_and_timestamp_audit_is_proven"
+            },
+            {
+                "candidate": "licensed_vendor:broad_base_announcement_text_feed",
+                "status": "source_discovery_required",
+                "reason": "if public CNInfo/AkShare feed cannot provide reliable timestamps, full history, text and category stability, a licensed timestamped announcement feed is required",
+                "decision": "restart_from_permission_schema_available_at_admission_if_vendor_is_available"
+            }
+        ],
+        "current_tables": [],
+        "schema_status": "schema_contract_defined_source_discovery_required",
+        "client_status": "read_only_manual_smoke_only_no_rust_client",
+        "sync_status": "not_started",
+        "coverage_status": "not_started",
+        "p310_status": "blocked",
+        "factor_builder": "blocked",
+        "bounded_wfa": "blocked",
+        "v19_train_selection": "blocked",
+        "pit_required": true,
+        "available_at_policy": "use source_published_at from official announcement detail/feed when available; if only announcement date exists, map to next open session and forbid same-session intraday use",
+        "schema_contract_endpoint": "GET /api/v1/quant/data/exchange-announcement-order-capacity/schema-contract",
+        "admission_decision": "source_discovery_required_before_schema_or_sync",
+        "blocked_reason": "sample feed proves candidate existence only; no full-history category replay, source_published_at timestamp audit, text fetch audit, evidence span precision audit, coverage audit, or correlation audit yet",
+        "next_step": "implement_read_only_permission_history_category_smoke_for_akshare_cninfo_disclosure_then_cninfo_detail_text_fetch_audit"
+    })
+}
+
 fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option<&Value>) -> Value {
     let mut admission = json!({
-        "stage": "P3.22",
+        "stage": "P3.24",
         "objective": "discover lower-correlation broad-base PIT alpha sources before any factor build, ML training, WFA admission, or v19 train selection",
         "hard_gate": "permission_schema_available_at_first",
         "global_policy": {
@@ -8303,6 +14773,7 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
         .get_mut("candidates")
         .and_then(|candidates| candidates.as_array_mut())
     {
+        candidates.push(phase7_exchange_announcement_order_capacity_candidate());
         candidates.push(phase7_multi_vendor_analyst_revision_candidate());
     }
     if let Some(readiness) = futures_price_chain_readiness {
@@ -10108,6 +16579,186 @@ pub async fn shareholder_structure_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_shareholder_structure_schema_contract()}))
 }
 
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/schema-contract
+pub async fn exchange_announcement_order_capacity_schema_contract() -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_exchange_announcement_order_capacity_schema_contract()
+    }))
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/next-source-admission-plan
+pub async fn exchange_announcement_order_capacity_next_source_admission_plan() -> impl IntoResponse
+{
+    Json(json!({
+        "code": 0,
+        "data": phase7_exchange_announcement_order_capacity_next_source_admission_plan()
+    }))
+}
+
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/source-contract
+pub async fn structured_order_capacity_price_chain_source_contract() -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_source_contract()
+    }))
+}
+
+/// GET /api/v1/quant/data/structured-order-capacity-price-chain/vendor-admission-plan
+pub async fn structured_order_capacity_price_chain_vendor_admission_plan() -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_structured_order_capacity_price_chain_vendor_admission_plan()
+    }))
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review
+pub async fn exchange_announcement_order_capacity_manual_schema_review() -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_exchange_announcement_order_capacity_manual_schema_review()
+    }))
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/sync-plan
+pub async fn exchange_announcement_order_capacity_sync_plan(
+    Query(req): Query<ExchangeAnnouncementOrderCapacitySyncPlanReq>,
+) -> impl IntoResponse {
+    match build_exchange_announcement_order_capacity_sync_plan(req) {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit-contract
+pub async fn exchange_announcement_order_capacity_coverage_quality_audit_contract(
+) -> impl IntoResponse {
+    Json(json!({
+        "code": 0,
+        "data": phase7_exchange_announcement_order_capacity_coverage_quality_audit_contract()
+    }))
+}
+
+/// POST /api/v1/quant/data/exchange-announcement-order-capacity/permission-smoke
+pub async fn exchange_announcement_order_capacity_permission_smoke(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExchangeAnnouncementOrderCapacitySmokeReq>,
+) -> impl IntoResponse {
+    match build_exchange_announcement_order_capacity_permission_smoke(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/exchange-announcement-order-capacity/detail-audit
+pub async fn exchange_announcement_order_capacity_detail_audit(
+    Json(req): Json<ExchangeAnnouncementOrderCapacityDetailAuditReq>,
+) -> impl IntoResponse {
+    match build_exchange_announcement_order_capacity_detail_audit(req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/pdf-parser-readiness
+pub async fn exchange_announcement_order_capacity_pdf_parser_readiness(
+    Query(req): Query<ExchangeAnnouncementOrderCapacityPdfParserReadinessReq>,
+) -> impl IntoResponse {
+    let python = exchange_announcement_order_capacity_pdf_audit_python_path(req.python);
+    let checks = probe_exchange_announcement_order_capacity_pdf_parsers(&python).await;
+    Json(json!({
+        "code": 0,
+        "data": exchange_announcement_order_capacity_pdf_parser_readiness_report(&python, checks)
+    }))
+}
+
+/// POST /api/v1/quant/data/exchange-announcement-order-capacity/pdf-detail-audit
+pub async fn exchange_announcement_order_capacity_pdf_detail_audit(
+    Json(req): Json<ExchangeAnnouncementOrderCapacityPdfDetailAuditReq>,
+) -> impl IntoResponse {
+    match build_exchange_announcement_order_capacity_pdf_detail_audit(req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/ocr-blocked-row-audit
+pub async fn exchange_announcement_order_capacity_ocr_blocked_row_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq>,
+) -> impl IntoResponse {
+    match build_exchange_announcement_order_capacity_ocr_blocked_row_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/exchange-announcement-order-capacity/sync
+pub async fn exchange_announcement_order_capacity_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExchangeAnnouncementOrderCapacitySyncReq>,
+) -> impl IntoResponse {
+    match run_exchange_announcement_order_capacity_tiny_sync(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/exchange-announcement-order-capacity/bounded-sync
+pub async fn exchange_announcement_order_capacity_bounded_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExchangeAnnouncementOrderCapacityBoundedSyncReq>,
+) -> impl IntoResponse {
+    match run_exchange_announcement_order_capacity_bounded_sync(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit
+pub async fn exchange_announcement_order_capacity_coverage_quality_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq>,
+) -> impl IntoResponse {
+    match build_exchange_announcement_order_capacity_coverage_quality_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/admission-readiness-audit
+pub async fn exchange_announcement_order_capacity_admission_readiness_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<ExchangeAnnouncementOrderCapacityAdmissionReadinessAuditReq>,
+) -> impl IntoResponse {
+    let coverage_req = ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
+        start_date: req.start_date,
+        end_date: req.end_date,
+    };
+    match build_exchange_announcement_order_capacity_coverage_quality_audit(&state, coverage_req)
+        .await
+    {
+        Ok(coverage) => Json(json!({
+            "code": 0,
+            "data": exchange_announcement_order_capacity_admission_readiness_report(&coverage)
+        })),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-precision-sample-audit
+pub async fn exchange_announcement_order_capacity_manual_precision_sample_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq>,
+) -> impl IntoResponse {
+    match build_exchange_announcement_order_capacity_manual_precision_sample_audit(&state, req)
+        .await
+    {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
 /// GET /api/v1/quant/data/futures-price-chain/readiness-audit
 pub async fn futures_price_chain_readiness_audit(
     State(state): State<Arc<AppState>>,
@@ -10819,6 +17470,493 @@ async fn build_akshare_analyst_revision_permission_smoke(
             "stock_research_report_em is treated as a low-fanout evidence layer until full symbol fanout coverage and pagination/history stability are audited.",
             "Snapshot or parser-unstable endpoints remain blocked even if a smoke call returns rows."
         ]
+    }))
+}
+
+async fn build_exchange_announcement_order_capacity_permission_smoke(
+    state: &AppState,
+    mut req: ExchangeAnnouncementOrderCapacitySmokeReq,
+) -> Result<Value, String> {
+    if req.symbols.is_empty() {
+        req.symbols = resolve_phase7_permission_smoke_symbols(state, &[])
+            .await?
+            .into_iter()
+            .collect();
+    }
+
+    let plan = exchange_announcement_order_capacity_smoke_plan(&req)?;
+    let symbols = plan
+        .get("symbols")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let categories = plan
+        .get("categories")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let market = plan
+        .get("market")
+        .and_then(Value::as_str)
+        .unwrap_or("沪深京")
+        .to_string();
+    let python = plan
+        .get("python")
+        .and_then(Value::as_str)
+        .unwrap_or("/tmp/akshare-smoke/bin/python")
+        .to_string();
+    let start_date = plan
+        .get("date_range")
+        .and_then(|date_range| date_range.get("start_date"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let end_date = plan
+        .get("date_range")
+        .and_then(|date_range| date_range.get("end_date"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let row_limit = plan
+        .get("row_limit_per_probe")
+        .and_then(Value::as_u64)
+        .unwrap_or(PHASE7_PERMISSION_SMOKE_MAX_ROWS as u64) as usize;
+
+    let mut probes = Vec::new();
+    for symbol in &symbols {
+        for category in &categories {
+            probes.push(
+                run_exchange_announcement_order_capacity_probe(
+                    &python,
+                    symbol,
+                    &market,
+                    category,
+                    &start_date,
+                    &end_date,
+                    row_limit,
+                )
+                .await,
+            );
+        }
+    }
+
+    let ok_probe_count = probes
+        .iter()
+        .filter(|probe| {
+            matches!(
+                probe.get("status").and_then(Value::as_str),
+                Some("ok" | "ok_empty")
+            )
+        })
+        .count();
+    let nonempty_probe_count = probes
+        .iter()
+        .filter(|probe| probe.get("status").and_then(Value::as_str) == Some("ok"))
+        .count();
+    let category_parser_error_count = probes
+        .iter()
+        .filter(|probe| {
+            probe.get("status").and_then(Value::as_str) == Some("category_parser_error")
+        })
+        .count();
+    let runtime_error_count = probes
+        .len()
+        .saturating_sub(ok_probe_count + category_parser_error_count);
+    let row_count_total = probes
+        .iter()
+        .filter_map(|probe| probe.get("row_count").and_then(Value::as_i64))
+        .sum::<i64>();
+    let incomplete_link_metadata_sample_rows = probes
+        .iter()
+        .filter_map(|probe| {
+            probe
+                .get("incomplete_link_metadata_sample_rows")
+                .and_then(Value::as_u64)
+        })
+        .sum::<u64>();
+
+    let admission_decision = if runtime_error_count > 0 {
+        "blocked_runtime_or_permission_errors_before_schema_apply"
+    } else if category_parser_error_count > 0 {
+        "blocked_category_parser_errors_before_schema_apply"
+    } else if nonempty_probe_count == 0 {
+        "blocked_no_nonempty_symbol_category_history_evidence"
+    } else if incomplete_link_metadata_sample_rows > 0 {
+        "blocked_incomplete_cninfo_link_metadata_before_detail_text_audit"
+    } else {
+        "permission_history_category_smoke_passed_detail_text_timestamp_audit_required_next"
+    };
+
+    Ok(json!({
+        "audit_version": "p3.24b-exchange-announcement-order-capacity-permission-history-category-smoke-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24B",
+        "mode": "read_only_permission_history_category_smoke_no_write",
+        "write_enabled": false,
+        "plan": plan,
+        "summary": {
+            "probe_count": probes.len(),
+            "ok_probe_count": ok_probe_count,
+            "nonempty_probe_count": nonempty_probe_count,
+            "category_parser_error_count": category_parser_error_count,
+            "runtime_error_count": runtime_error_count,
+            "row_count_total": row_count_total,
+            "incomplete_link_metadata_sample_rows": incomplete_link_metadata_sample_rows,
+        },
+        "probes": probes,
+        "admission_decision": admission_decision,
+        "promotion_gate": {
+            "schema_apply": "blocked_until_detail_text_timestamp_hash_and_manual_evidence_audit",
+            "bounded_sync": "blocked",
+            "factor_builder": "blocked",
+            "p310_status": "blocked",
+            "bounded_wfa": "blocked",
+            "v19_train_selection": "blocked"
+        },
+        "next_step": "if_smoke_passes_build_read_only_cninfo_detail_text_timestamp_audit_before_schema_apply",
+        "guardrails": [
+            "this endpoint never writes market_exchange_announcement_text_raw or data_sync_attempt",
+            "permission/category smoke does not prove trainable alpha; it only decides whether detail text/timestamp audit is worth building",
+            "category_parser_error and ok_empty are separate states and must not be treated as full-history coverage",
+            "P3.10, WFA and v19 remain blocked until full coverage/PIT/text-evidence/correlation gates pass"
+        ],
+    }))
+}
+
+async fn build_exchange_announcement_order_capacity_detail_audit(
+    req: ExchangeAnnouncementOrderCapacityDetailAuditReq,
+) -> Result<Value, String> {
+    let plan = exchange_announcement_order_capacity_detail_audit_plan(&req)?;
+    let python = plan
+        .get("python")
+        .and_then(Value::as_str)
+        .unwrap_or("/tmp/akshare-smoke/bin/python")
+        .to_string();
+    let links = plan
+        .get("announcement_links")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut probes = Vec::new();
+    for link in &links {
+        probes.push(run_exchange_announcement_detail_probe(&python, link).await);
+    }
+
+    let summary = summarize_exchange_announcement_detail_probes(&probes);
+
+    let decision = decide_exchange_announcement_detail_audit(
+        probes.len(),
+        summary.fetched_text_count,
+        summary.text_hash_count,
+        summary.source_published_at_count,
+        summary.incomplete_link_metadata_count,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.24c-exchange-announcement-order-capacity-detail-text-timestamp-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24C",
+        "mode": "read_only_cninfo_detail_text_timestamp_hash_audit_no_write",
+        "write_enabled": false,
+        "plan": plan,
+        "summary": {
+            "probe_count": probes.len(),
+            "fetched_text_count": summary.fetched_text_count,
+            "text_hash_count": summary.text_hash_count,
+            "source_published_at_count": summary.source_published_at_count,
+            "incomplete_link_metadata_count": summary.incomplete_link_metadata_count,
+            "pdf_parser_required_count": summary.pdf_parser_required_count,
+        },
+        "probes": probes,
+        "decision": decision,
+        "admission_decision": decision["admission_decision"].clone(),
+        "promotion_gate": decision["promotion_gate"].clone(),
+        "next_step": "if_detail_audit_passes_prepare_manual_schema_review_for_bounded_raw_sync_design",
+        "guardrails": [
+            "this detail audit never writes market_exchange_announcement_text_raw or data_sync_attempt",
+            "missing source_published_at timestamp blocks same-session and intraday use even when text fetch succeeds",
+            "manual evidence span precision and category taxonomy audits are still required before P3.10",
+            "schema review may proceed only after detail text/timestamp/hash audit passes"
+        ],
+    }))
+}
+
+async fn build_exchange_announcement_order_capacity_pdf_detail_audit(
+    req: ExchangeAnnouncementOrderCapacityPdfDetailAuditReq,
+) -> Result<Value, String> {
+    let plan = exchange_announcement_order_capacity_pdf_detail_audit_plan(&req)?;
+    let python = plan
+        .get("python")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let links = plan
+        .get("announcement_links")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut probes = Vec::new();
+    for link in &links {
+        probes.push(run_exchange_announcement_pdf_detail_probe(&python, link).await);
+    }
+
+    let summary = summarize_exchange_announcement_pdf_detail_probes(&probes);
+    let decision = decide_exchange_announcement_order_capacity_pdf_detail_audit(
+        probes.len(),
+        summary.parsed_pdf_count,
+        summary.stable_hash_count,
+        summary.availability_count,
+        summary.evidence_span_count,
+        summary.scanned_pdf_count,
+        summary.incomplete_link_metadata_count,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.24e-exchange-announcement-order-capacity-pdf-detail-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24E",
+        "mode": "read_only_pdf_detail_text_timestamp_span_audit_no_write",
+        "write_enabled": false,
+        "plan": plan,
+        "summary": {
+            "probe_count": probes.len(),
+            "parsed_pdf_count": summary.parsed_pdf_count,
+            "stable_hash_count": summary.stable_hash_count,
+            "availability_count": summary.availability_count,
+            "timestamp_count": summary.timestamp_count,
+            "next_session_policy_count": summary.next_session_policy_count,
+            "evidence_span_count": summary.evidence_span_count,
+            "incomplete_link_metadata_count": summary.incomplete_link_metadata_count,
+            "scanned_pdf_count": summary.scanned_pdf_count,
+            "runtime_not_configured_count": summary.runtime_not_configured_count,
+        },
+        "probes": probes,
+        "decision": decision,
+        "admission_decision": decision["admission_decision"].clone(),
+        "promotion_gate": decision["promotion_gate"].clone(),
+        "next_step": "if_pdf_detail_audit_passes_prepare_manual_schema_review_for_bounded_raw_sync_design",
+        "guardrails": [
+            "this pdf detail audit never writes market_exchange_announcement_text_raw or data_sync_attempt",
+            "date-only next-session availability can support daily PIT use but never same-session intraday use",
+            "scanned pdfs requiring OCR are blocked until a separate OCR admission path is reviewed",
+            "schema review may proceed only after pdf text, availability policy, stable hash and evidence span audits pass"
+        ],
+    }))
+}
+
+async fn build_exchange_announcement_order_capacity_ocr_blocked_row_audit(
+    state: &AppState,
+    req: ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq,
+) -> Result<Value, String> {
+    let plan = exchange_announcement_order_capacity_ocr_blocked_row_audit_plan(&req)?;
+    let python = plan
+        .get("python")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let start_date = plan
+        .get("date_range")
+        .and_then(|range| range.get("start_date"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "OCR blocked-row audit plan missing start_date".to_string())?;
+    let end_date = plan
+        .get("date_range")
+        .and_then(|range| range.get("end_date"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "OCR blocked-row audit plan missing end_date".to_string())?;
+    let start = parse_optional_date(Some(start_date))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end =
+        parse_optional_date(Some(end_date))?.ok_or_else(|| "end_date is required".to_string())?;
+    let symbols = plan
+        .get("symbols")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let row_limit = plan.get("row_limit").and_then(Value::as_u64).unwrap_or(4) as i64;
+
+    let table_exists = table_exists(&state.db, "market_exchange_announcement_text_raw").await?;
+    if !table_exists {
+        let decision = decide_exchange_announcement_order_capacity_ocr_blocked_row_audit(
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        );
+        return Ok(json!({
+            "audit_version": "p3.24t-exchange-announcement-order-capacity-scanned-pdf-ocr-audit-v1",
+            "source_id": "exchange_announcement_order_capacity_text",
+            "stage": "P3.24T",
+            "mode": "read_only_scanned_pdf_ocr_candidate_audit_no_write",
+            "write_enabled": false,
+            "table_exists": false,
+            "plan": plan,
+            "summary": {
+                "candidate_row_count": 0,
+                "table_missing": true,
+            },
+            "probes": [],
+            "decision": decision,
+            "admission_decision": "blocked_market_exchange_announcement_text_raw_missing",
+            "promotion_gate": decision["promotion_gate"].clone(),
+        }));
+    }
+
+    let raw_rows = if symbols.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT symbol, symbol_name, announcement_id, org_id, announcement_category,
+                   announcement_title, announcement_time, source_published_at,
+                   source_published_at_quality, available_at, announcement_url,
+                   pdf_final_url, event_type
+            FROM market_exchange_announcement_text_raw
+            WHERE announcement_time >= $1
+              AND announcement_time <= $2
+              AND pdf_parse_status = 'scanned_pdf_ocr_required'
+            ORDER BY announcement_time, symbol, announcement_id
+            LIMIT $3
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .bind(row_limit)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| format!("Failed to load scanned PDF rows for OCR audit: {error}"))?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT symbol, symbol_name, announcement_id, org_id, announcement_category,
+                   announcement_title, announcement_time, source_published_at,
+                   source_published_at_quality, available_at, announcement_url,
+                   pdf_final_url, event_type
+            FROM market_exchange_announcement_text_raw
+            WHERE announcement_time >= $1
+              AND announcement_time <= $2
+              AND pdf_parse_status = 'scanned_pdf_ocr_required'
+              AND symbol = ANY($3)
+            ORDER BY announcement_time, symbol, announcement_id
+            LIMIT $4
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .bind(&symbols)
+        .bind(row_limit)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| {
+            format!("Failed to load symbol-filtered scanned PDF rows for OCR audit: {error}")
+        })?
+    };
+
+    let rows = raw_rows
+        .into_iter()
+        .map(|row| {
+            let announcement_time = row
+                .try_get::<NaiveDate, _>("announcement_time")
+                .map(|date| date.to_string())
+                .unwrap_or_default();
+            let available_at = row
+                .try_get::<NaiveDate, _>("available_at")
+                .map(|date| date.to_string())
+                .unwrap_or_default();
+            json!({
+                "symbol": row.try_get::<String, _>("symbol").unwrap_or_default(),
+                "symbol_name": row.try_get::<Option<String>, _>("symbol_name").ok().flatten(),
+                "announcement_id": row.try_get::<String, _>("announcement_id").unwrap_or_default(),
+                "org_id": row.try_get::<String, _>("org_id").unwrap_or_default(),
+                "announcement_category": row.try_get::<String, _>("announcement_category").unwrap_or_default(),
+                "announcement_title": row.try_get::<String, _>("announcement_title").unwrap_or_default(),
+                "announcement_time": announcement_time,
+                "source_published_at": row.try_get::<String, _>("source_published_at").unwrap_or_default(),
+                "source_published_at_quality": row.try_get::<String, _>("source_published_at_quality").unwrap_or_default(),
+                "available_at": available_at,
+                "announcement_url": row.try_get::<String, _>("announcement_url").unwrap_or_default(),
+                "pdf_final_url": row.try_get::<Option<String>, _>("pdf_final_url").ok().flatten(),
+                "event_type": row.try_get::<Option<String>, _>("event_type").ok().flatten(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut probes = Vec::new();
+    for row in &rows {
+        probes.push(run_exchange_announcement_ocr_blocked_row_probe(&python, row.clone()).await);
+    }
+
+    let summary = summarize_exchange_announcement_ocr_blocked_row_probes(&probes);
+    let decision = decide_exchange_announcement_order_capacity_ocr_blocked_row_audit(
+        probes.len(),
+        summary.ocr_text_count,
+        summary.stable_hash_count,
+        summary.availability_count,
+        summary.quality_pass_count,
+        summary.evidence_span_count,
+        summary.runtime_missing_count,
+        summary.ocr_error_count,
+        summary.no_target_span_count,
+        summary.incomplete_raw_link_count,
+    );
+
+    Ok(json!({
+        "audit_version": "p3.24t-exchange-announcement-order-capacity-scanned-pdf-ocr-audit-v1",
+        "source_id": "exchange_announcement_order_capacity_text",
+        "stage": "P3.24T",
+        "mode": "read_only_scanned_pdf_ocr_candidate_audit_no_write",
+        "write_enabled": false,
+        "table_exists": true,
+        "plan": plan,
+        "summary": {
+            "candidate_row_count": rows.len(),
+            "ocr_text_count": summary.ocr_text_count,
+            "stable_hash_count": summary.stable_hash_count,
+            "availability_count": summary.availability_count,
+            "quality_pass_count": summary.quality_pass_count,
+            "evidence_span_count": summary.evidence_span_count,
+            "runtime_missing_count": summary.runtime_missing_count,
+            "ocr_error_count": summary.ocr_error_count,
+            "no_target_span_count": summary.no_target_span_count,
+            "incomplete_raw_link_count": summary.incomplete_raw_link_count,
+        },
+        "candidate_rows": rows,
+        "probes": probes,
+        "decision": decision,
+        "admission_decision": decision["admission_decision"].clone(),
+        "promotion_gate": decision["promotion_gate"].clone(),
+        "guardrails": [
+            "this audit never writes OCR output back to raw tables",
+            "passing OCR only allows manual taxonomy review and explicit backfill/exclusion design",
+            "factor_builder, P3.10, bounded WFA and v19 remain blocked"
+        ],
     }))
 }
 
@@ -16216,7 +23354,7 @@ async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, Strin
             "shareholder_structure": "shareholder low-fanout PIT factor passed single-factor P3.10 but bounded WFA skipped all windows by train robustness/cost-capacity gates; do not expand sleeve weights or enter v19."
         },
         "recommended_next_steps": [
-            "For P3.22, rank genuinely new low-correlation PIT broad-base sources by breadth, native available_at quality, permission, and economic hypothesis before permission smoke.",
+            "For P3.24, prioritize licensed broad-base consensus revision, exchange/CNInfo announcement text for orders/capacity/contracts/price adjustments, and valid equity-incentive execution sources before any factor work.",
             "Do not expand stopped futures_price_chain, equity_pledge_pressure, shareholder_structure, event, moneyflow, unlock, liquidity, industry-prosperity, or main-business same-family variants.",
             "Treat ML algorithm changes as secondary expression/ensemble work only after a source passes P3.10A-D economics; do not use model changes to rescue failed sources.",
             "For any new source, enforce permission/schema/available_at -> bounded sync -> coverage/PIT -> P3.10A-D -> bounded WFA before factor builder, ML training, or v19 train selection.",
@@ -16962,7 +24100,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(admission["stage"], "P3.22");
+        assert_eq!(admission["stage"], "P3.24");
         assert_eq!(
             admission["hard_gate"],
             "permission_schema_available_at_first"
@@ -17016,6 +24154,21 @@ mod tests {
             p322_inventory["ranked_candidates"][3]["status"],
             "stopped_after_p310_economics_failed"
         );
+
+        let announcement = by_source["exchange_announcement_order_capacity_text"];
+        assert_eq!(
+            announcement["admission_decision"],
+            "source_discovery_required_before_schema_or_sync"
+        );
+        assert_eq!(
+            announcement["schema_contract_endpoint"],
+            "GET /api/v1/quant/data/exchange-announcement-order-capacity/schema-contract"
+        );
+        assert_eq!(announcement["pit_required"], true);
+        assert_eq!(announcement["factor_builder"], "blocked");
+        assert_eq!(announcement["p310_status"], "blocked");
+        assert_eq!(announcement["bounded_wfa"], "blocked");
+        assert_eq!(announcement["v19_train_selection"], "blocked");
 
         let margin_detail = by_source["margin_detail_leverage_crowding"];
         assert_eq!(
@@ -18617,6 +25770,1730 @@ mod tests {
         assert!(ddl.contains("market_stock_margin_detail_core_nonnegative_check"));
         assert!(!ddl.contains("rzche IS NULL OR rzche >= 0"));
         assert!(!ddl.contains("rqchl IS NULL OR rqchl >= 0"));
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_contract_is_text_evidence_first() {
+        let contract = phase7_exchange_announcement_order_capacity_schema_contract();
+
+        assert_eq!(
+            contract["source_id"],
+            "exchange_announcement_order_capacity_text"
+        );
+        assert_eq!(contract["stage"], "P3.24A");
+        assert_eq!(
+            contract["mode"],
+            "read_only_source_admission_contract_no_sync"
+        );
+        assert_eq!(
+            contract["ddl_path"],
+            "sql/phase7_exchange_announcement_order_capacity_source.sql"
+        );
+        assert_eq!(
+            contract["raw_sources"][0]["vendor_endpoint"],
+            "stock_zh_a_disclosure_report_cninfo"
+        );
+        assert_eq!(
+            contract["tables"][0]["table"],
+            "market_exchange_announcement_text_raw"
+        );
+        assert!(contract["tables"][0]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "announcement_id"));
+        assert!(contract["tables"][0]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "evidence_spans"));
+        assert!(contract["tables"][0]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "pdf_final_url"));
+        assert!(contract["tables"][0]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "parser_used"));
+        assert!(contract["tables"][0]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "source_published_at_quality"));
+        assert_eq!(
+            contract["available_at_policy"]["date_only_policy"],
+            "if only announcement date is available, set available_at to next open session for trading decisions until source_published_at timestamp is audited"
+        );
+        assert_eq!(
+            contract["pdf_admission"]["runtime_default_python"],
+            "~/.local/share/quant-pdf-audit/venv/bin/python"
+        );
+        assert_eq!(
+            contract["pdf_admission"]["pdf_detail_audit_endpoint"],
+            "POST /api/v1/quant/data/exchange-announcement-order-capacity/pdf-detail-audit"
+        );
+        assert_eq!(
+            contract["manual_schema_review"]["endpoint"],
+            "GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review"
+        );
+        assert_eq!(contract["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(contract["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(contract["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_next_source_admission_plan_stops_current_pilot() {
+        let plan = phase7_exchange_announcement_order_capacity_next_source_admission_plan();
+
+        assert_eq!(
+            plan["source_id"],
+            "exchange_announcement_order_capacity_text"
+        );
+        assert_eq!(plan["stage"], "P3.25A");
+        assert_eq!(
+            plan["current_pilot_decision"],
+            "stopped_current_4_symbol_daily_operation_pilot_after_clean_target_recall_failed"
+        );
+        assert_eq!(
+            plan["current_pilot_evidence"]["admissible_target_event_rows"],
+            6
+        );
+        assert_eq!(
+            plan["current_pilot_evidence"]["manual_review_sample_shortfall"],
+            44
+        );
+        assert_eq!(
+            plan["current_pilot_evidence"]["raw_sync_quality"],
+            "passed_after_high_density_landing_cap_fix"
+        );
+        assert_eq!(
+            plan["stop_rules"][0],
+            "do_not_continue_month_or_quarter_raw_sync_for_current_4_symbol_daily_operation_pilot"
+        );
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_next_source_admission_plan_requires_new_source_gates() {
+        let plan = phase7_exchange_announcement_order_capacity_next_source_admission_plan();
+        let routes = plan["candidate_routes"].as_array().unwrap();
+        let by_route: BTreeMap<&str, &Value> = routes
+            .iter()
+            .map(|route| (route["route_id"].as_str().unwrap(), route))
+            .collect();
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            by_route["structured_order_capacity_contract_price_chain_source"]["priority"],
+            1
+        );
+        assert_eq!(
+            by_route["announcement_text_broader_universe"]["priority"],
+            2
+        );
+        assert!(
+            by_route["structured_order_capacity_contract_price_chain_source"]["required_gates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gate| gate == "available_at_source_published_at_audit")
+        );
+        assert!(
+            by_route["announcement_text_broader_universe"]["required_gates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gate| gate == "manual_precision_ge_0_80_with_min_50_clean_target_samples")
+        );
+        for route in routes {
+            assert_eq!(route["promotion_gate"]["schema_apply"], "blocked");
+            assert_eq!(route["promotion_gate"]["bounded_sync"], "blocked");
+            assert_eq!(route["promotion_gate"]["factor_builder"], "blocked");
+            assert_eq!(route["promotion_gate"]["p310_status"], "blocked");
+            assert_eq!(route["promotion_gate"]["bounded_wfa"], "blocked");
+            assert_eq!(route["promotion_gate"]["v19_train_selection"], "blocked");
+        }
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_source_contract_blocks_training_until_vendor_and_pit_pass(
+    ) {
+        let contract = phase7_structured_order_capacity_price_chain_source_contract();
+
+        assert_eq!(
+            contract["source_id"],
+            "structured_order_capacity_contract_price_chain_source"
+        );
+        assert_eq!(contract["stage"], "P3.25B");
+        assert_eq!(
+            contract["mode"],
+            "read_only_structured_source_admission_contract_no_sync"
+        );
+        assert_eq!(
+            contract["admission_decision"],
+            "blocked_vendor_permission_and_available_at_contract_required"
+        );
+        assert_eq!(
+            contract["legal_and_vendor_gate"]["status"],
+            "required_before_schema_or_sync"
+        );
+        assert!(contract["required_time_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "source_published_at"));
+        assert_eq!(
+            contract["available_at_policy"]["intraday_rule"],
+            "decision_timestamp must be >= source_published_at; date-only events are daily next-session only"
+        );
+        assert_eq!(contract["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(contract["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(contract["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_source_contract_requires_structured_event_schema_and_precision_gates(
+    ) {
+        let contract = phase7_structured_order_capacity_price_chain_source_contract();
+        let event_types = contract["event_schema"].as_array().unwrap();
+        let by_type: BTreeMap<&str, &Value> = event_types
+            .iter()
+            .map(|event_type| (event_type["event_type"].as_str().unwrap(), event_type))
+            .collect();
+
+        assert!(by_type.contains_key("order_or_contract_signed"));
+        assert!(by_type.contains_key("capacity_expansion_or_commissioning"));
+        assert!(by_type.contains_key("product_price_adjustment"));
+        assert!(by_type["order_or_contract_signed"]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "counterparty"));
+        assert!(
+            by_type["capacity_expansion_or_commissioning"]["required_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "capacity_or_capex")
+        );
+        assert!(contract["coverage_audit_required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gate| gate == "manual_precision_ge_0_80_with_min_50_clean_target_samples"));
+        assert!(contract["coverage_audit_required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gate| {
+                gate
+                == "correlation_vs_existing_moneyflow_liquidity_price_volume_quality_event_sources"
+            }));
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_vendor_admission_plan_lists_candidate_smoke_evidence()
+    {
+        let plan = phase7_structured_order_capacity_price_chain_vendor_admission_plan();
+
+        assert_eq!(
+            plan["source_id"],
+            "structured_order_capacity_contract_price_chain_source"
+        );
+        assert_eq!(plan["stage"], "P3.25C");
+        assert_eq!(
+            plan["mode"],
+            "read_only_vendor_source_candidate_discovery_plan_no_schema_no_sync"
+        );
+        assert_eq!(
+            plan["admission_decision"],
+            "blocked_until_vendor_permission_history_available_at_and_sample_payload_smoke_pass"
+        );
+        let candidate_sources = plan["candidate_sources"].as_array().unwrap();
+        assert!(candidate_sources.len() >= 3);
+        for candidate in candidate_sources {
+            assert!(candidate["vendor"].is_string());
+            assert!(candidate["source_name"].is_string());
+            assert!(candidate["legal_storage_use_status"].is_string());
+            assert!(candidate["endpoint_payload_availability"].is_string());
+            assert!(candidate["historical_coverage_range"].is_string());
+            assert!(candidate["source_published_at_semantics"].is_string());
+            assert!(candidate["symbol_mapping_requirement"].is_string());
+            assert!(candidate["sample_payload_evidence_required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "source_published_at_or_conservative_available_at"));
+        }
+        assert!(plan["required_sample_payload_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "vendor_event_id"));
+        assert!(plan["required_sample_payload_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "raw_payload_hash"));
+    }
+
+    #[test]
+    fn structured_order_capacity_price_chain_vendor_admission_plan_blocks_all_downstream_gates() {
+        let plan = phase7_structured_order_capacity_price_chain_vendor_admission_plan();
+
+        assert_eq!(plan["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(plan["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+        assert!(plan["stop_rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule == "stop_if_vendor_cannot_provide_historical_payload_samples_with_source_published_at_or_auditable_availability"));
+        assert_eq!(
+            plan["fallback_if_no_usable_vendor"],
+            "switch_to_announcement_text_broader_universe_pre_registered_plan_without_rescuing_current_4_symbol_pilot"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_manual_schema_review_allows_only_bounded_sync_design() {
+        let review = phase7_exchange_announcement_order_capacity_manual_schema_review();
+
+        assert_eq!(
+            review["audit_version"],
+            "p3.24f-exchange-announcement-order-capacity-manual-schema-review-v1"
+        );
+        assert_eq!(review["stage"], "P3.24F");
+        assert_eq!(review["write_enabled"], false);
+        assert_eq!(
+            review["ddl_path"],
+            "sql/phase7_exchange_announcement_order_capacity_source.sql"
+        );
+        assert_eq!(
+            review["schema_review_decision"],
+            "passed_for_bounded_sync_design_only"
+        );
+        assert_eq!(
+            review["promotion_gate"]["schema_apply"],
+            "manual_review_passed_apply_still_requires_explicit_operator_action"
+        );
+        assert_eq!(
+            review["promotion_gate"]["bounded_sync"],
+            "blocked_until_plan_only_bounded_sync_review"
+        );
+        assert_eq!(review["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(review["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(review["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(review["promotion_gate"]["v19_train_selection"], "blocked");
+        assert_eq!(
+            review["pit_review"]["date_only_next_session_policy"],
+            "encoded"
+        );
+        assert_eq!(review["ddl_checks"]["missing_required_field_count"], 0);
+        assert_eq!(review["ddl_checks"]["missing_required_constraint_count"], 0);
+        assert_eq!(review["ddl_checks"]["missing_required_index_count"], 0);
+        assert!(review["ddl_checks"]["required_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "source_published_at_quality"));
+        assert!(
+            review["next_required_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step
+                    == "build_plan_only_calendar_day_symbol_category_bounded_sync_design")
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_sync_plan_is_plan_only_calendar_day_batches() {
+        let req = ExchangeAnnouncementOrderCapacitySyncPlanReq {
+            symbols: Some("000001.SZ,002459.SZ".to_string()),
+            categories: Some("日常经营,重大事项".to_string()),
+            market: Some("沪深京".to_string()),
+            start_date: Some("20230101".to_string()),
+            end_date: Some("20230630".to_string()),
+            batch: Some("quarter".to_string()),
+        };
+
+        let plan = build_exchange_announcement_order_capacity_sync_plan(req).unwrap();
+
+        assert_eq!(
+            plan["audit_version"],
+            "p3.24g-exchange-announcement-order-capacity-bounded-sync-plan-v1"
+        );
+        assert_eq!(plan["stage"], "P3.24G");
+        assert_eq!(
+            plan["mode"],
+            "read_only_plan_only_calendar_day_symbol_category_sync_design"
+        );
+        assert_eq!(plan["write_enabled"], false);
+        assert_eq!(
+            plan["request_key_policy"],
+            "symbol+category+calendar_date_range; do not restrict to open trading days because weekend/holiday announcements must map to next open session"
+        );
+        assert_eq!(plan["batch_count"], 2);
+        assert_eq!(plan["request_key_count"], 8);
+        assert_eq!(plan["query_count"], 244);
+        assert_eq!(plan["estimated_api_calls"], 244);
+        assert_eq!(
+            plan["bounded_runner_query_unit_policy"],
+            "query_count equals tiny_slice_count * symbol_count * category_count, matching bounded-sync runner enforcement"
+        );
+        assert_eq!(plan["bounded_sync_limit"]["would_exceed_limit"], true);
+        assert_eq!(plan["batches"][0]["batch"], "2023Q1");
+        assert_eq!(plan["batches"][0]["calendar_day_count"], 90);
+        assert_eq!(plan["batches"][0]["request_key_count"], 4);
+        assert_eq!(plan["batches"][0]["tiny_slice_count"], 30);
+        assert_eq!(plan["batches"][0]["query_count"], 120);
+        assert_eq!(
+            plan["batches"][0]["future_bounded_sync_request"]["plan_only"],
+            true
+        );
+        assert_eq!(
+            plan["batches"][0]["future_bounded_sync_request"]["enabled"],
+            false
+        );
+        assert_eq!(
+            plan["pit_mapping_policy"]["date_only_next_session"],
+            "announcementTime/date-only source_published_at must be mapped to the next open session before any trading feature can use it"
+        );
+        assert_eq!(
+            plan["raw_landing_policy"]["failure_sample_retention"],
+            "retain parser errors, ok_empty category outcomes, scanned_pdf_ocr_required and incomplete metadata as auditable raw outcomes"
+        );
+        assert_eq!(
+            plan["sync_endpoint_status"],
+            "blocked_plan_exceeds_bounded_runner_query_unit_limit"
+        );
+        assert_eq!(
+            plan["promotion_gate"]["bounded_sync"],
+            "blocked_until_operator_schema_apply_and_small_batch_review"
+        );
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_sync_plan_uses_bounded_runner_query_units() {
+        let req = ExchangeAnnouncementOrderCapacitySyncPlanReq {
+            symbols: Some("002459.SZ,600519.SH,300750.SZ,000001.SZ".to_string()),
+            categories: Some("重大事项,股权激励".to_string()),
+            market: Some("沪深京".to_string()),
+            start_date: Some("20231001".to_string()),
+            end_date: Some("20231231".to_string()),
+            batch: Some("quarter".to_string()),
+        };
+
+        let plan = build_exchange_announcement_order_capacity_sync_plan(req).unwrap();
+
+        assert_eq!(plan["batch_count"], 1);
+        assert_eq!(plan["request_key_count"], 8);
+        assert_eq!(plan["query_count"], 248);
+        assert_eq!(plan["estimated_api_calls"], 248);
+        assert_eq!(
+            plan["bounded_runner_query_unit_policy"],
+            "query_count equals tiny_slice_count * symbol_count * category_count, matching bounded-sync runner enforcement"
+        );
+        assert_eq!(plan["bounded_sync_limit"]["max_query_units"], 120);
+        assert_eq!(plan["bounded_sync_limit"]["would_exceed_limit"], true);
+        assert_eq!(
+            plan["sync_endpoint_status"],
+            "blocked_plan_exceeds_bounded_runner_query_unit_limit"
+        );
+        assert_eq!(plan["batches"][0]["request_key_count"], 8);
+        assert_eq!(plan["batches"][0]["tiny_slice_count"], 31);
+        assert_eq!(plan["batches"][0]["query_count"], 248);
+        assert_eq!(plan["batches"][0]["estimated_api_calls"], 248);
+        assert_eq!(plan["batches"][0]["would_exceed_limit"], true);
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_contract_blocks_training_until_small_batch_audits_pass(
+    ) {
+        let contract =
+            phase7_exchange_announcement_order_capacity_coverage_quality_audit_contract();
+
+        assert_eq!(
+            contract["audit_version"],
+            "p3.24h-exchange-announcement-order-capacity-coverage-quality-audit-contract-v1"
+        );
+        assert_eq!(contract["stage"], "P3.24H");
+        assert_eq!(
+            contract["mode"],
+            "read_only_coverage_pit_quality_contract_no_raw_sync"
+        );
+        assert_eq!(contract["write_enabled"], false);
+        assert_eq!(
+            contract["coverage_breakdowns"][0],
+            "year_market_category_symbol"
+        );
+        assert_eq!(
+            contract["pit_audit"]["date_only_next_session_mapping"],
+            "required_for_every_date_only_or_weekend_holiday_publication"
+        );
+        assert_eq!(contract["quality_thresholds"]["pit_violation_rows"], 0);
+        assert_eq!(
+            contract["quality_thresholds"]["duplicate_announcement_id_rows"],
+            0
+        );
+        assert_eq!(
+            contract["quality_thresholds"]["evidence_span_precision_manual_sample_min"],
+            "0.80"
+        );
+        assert!(contract["required_small_batch_audit_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "source_published_at_quality_distribution"));
+        assert!(contract["required_small_batch_audit_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "trainable_scanned_pdf_blocking_rows"));
+        assert_eq!(
+            contract["quality_thresholds"]["trainable_scanned_pdf_blocking_rows"],
+            0
+        );
+        assert_eq!(
+            contract["promotion_gate"]["bounded_sync"],
+            "blocked_until_operator_schema_apply_and_one_small_batch_raw_sync_review"
+        );
+        assert_eq!(
+            contract["promotion_gate"]["coverage_quality_audit"],
+            "required_after_each_small_batch_and_before_any_full_history_sync"
+        );
+        assert_eq!(contract["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(contract["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(contract["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(contract["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_sync_request_is_tiny_and_synchronous() {
+        let req = ExchangeAnnouncementOrderCapacitySyncReq {
+            symbols: Some("000001.SZ,002459.SZ".to_string()),
+            categories: Some("日常经营".to_string()),
+            market: Some("沪深京".to_string()),
+            start_date: Some("20231031".to_string()),
+            end_date: Some("20231031".to_string()),
+            data_version_id: Some("exchange-announcement-smoke".to_string()),
+            python: None,
+            pdf_python: None,
+            background: false,
+        };
+
+        let validated = validate_exchange_announcement_order_capacity_sync_request(&req).unwrap();
+
+        assert_eq!(validated.symbols, vec!["000001", "002459"]);
+        assert_eq!(validated.categories, vec!["日常经营"]);
+        assert_eq!(validated.calendar_day_count, 1);
+        assert_eq!(validated.query_count, 2);
+        assert_eq!(validated.data_version_id, "exchange-announcement-smoke");
+
+        let too_many_days = ExchangeAnnouncementOrderCapacitySyncReq {
+            end_date: Some("20231110".to_string()),
+            ..req.clone()
+        };
+        assert!(
+            validate_exchange_announcement_order_capacity_sync_request(&too_many_days)
+                .unwrap_err()
+                .contains("above max")
+        );
+
+        let background = ExchangeAnnouncementOrderCapacitySyncReq {
+            background: true,
+            ..req
+        };
+        assert!(
+            validate_exchange_announcement_order_capacity_sync_request(&background)
+                .unwrap_err()
+                .contains("background=false")
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_bounded_sync_request_is_month_or_quarter_but_tiny_sliced(
+    ) {
+        let req = ExchangeAnnouncementOrderCapacityBoundedSyncReq {
+            symbols: Some("002459.SZ".to_string()),
+            categories: Some("日常经营".to_string()),
+            market: Some("沪深京".to_string()),
+            start_date: Some("20231001".to_string()),
+            end_date: Some("20231031".to_string()),
+            batch: Some("month".to_string()),
+            data_version_id: Some("exann-p324j-202310".to_string()),
+            python: None,
+            pdf_python: None,
+            background: false,
+            stop_on_audit_failure: None,
+        };
+
+        let validated =
+            validate_exchange_announcement_order_capacity_bounded_sync_request(&req).unwrap();
+
+        assert_eq!(validated.batch_mode, "month");
+        assert_eq!(validated.symbols, vec!["002459"]);
+        assert_eq!(validated.categories, vec!["日常经营"]);
+        assert_eq!(validated.calendar_day_count, 31);
+        assert_eq!(validated.slices.len(), 11);
+        assert_eq!(validated.total_query_units, 11);
+        assert_eq!(
+            validated.slices[0].start_date.format("%Y%m%d").to_string(),
+            "20231001"
+        );
+        assert_eq!(
+            validated.slices[0].end_date.format("%Y%m%d").to_string(),
+            "20231003"
+        );
+        assert!(validated.stop_on_audit_failure);
+
+        let crossing_month = ExchangeAnnouncementOrderCapacityBoundedSyncReq {
+            end_date: Some("20231101".to_string()),
+            ..req.clone()
+        };
+        assert!(
+            validate_exchange_announcement_order_capacity_bounded_sync_request(&crossing_month)
+                .unwrap_err()
+                .contains("single month")
+        );
+
+        let too_many_units = ExchangeAnnouncementOrderCapacityBoundedSyncReq {
+            symbols: Some("000001.SZ,000002.SZ,000063.SZ,002459.SZ,300750.SZ".to_string()),
+            categories: Some("日常经营,重大事项,股权激励,并购重组".to_string()),
+            ..req
+        };
+        assert!(
+            validate_exchange_announcement_order_capacity_bounded_sync_request(&too_many_units)
+                .unwrap_err()
+                .contains("query units")
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_probe_truncation_blocks_partial_raw_landing() {
+        let truncated = json!({
+            "status": "ok",
+            "row_count": 21,
+            "sample_rows": vec![json!({"公告链接": "a"}); 20],
+        });
+        assert!(exchange_announcement_order_capacity_probe_is_truncated(
+            &truncated
+        ));
+
+        let complete = json!({
+            "status": "ok",
+            "row_count": 2,
+            "sample_rows": [json!({"公告链接": "a"}), json!({"公告链接": "b"})],
+        });
+        assert!(!exchange_announcement_order_capacity_probe_is_truncated(
+            &complete
+        ));
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_raw_sync_uses_audited_landing_cap_above_smoke_sample_limit(
+    ) {
+        let raw_sync_limit = exchange_announcement_order_capacity_raw_sync_row_limit();
+        assert!(raw_sync_limit > EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_ROWS);
+        assert!(raw_sync_limit >= 30);
+
+        let high_density_cninfo_day = json!({
+            "status": "ok",
+            "row_count": 23,
+            "sample_rows": vec![json!({"公告链接": "a"}); 23],
+        });
+        assert!(!exchange_announcement_order_capacity_probe_is_truncated(
+            &high_density_cninfo_day
+        ));
+
+        let still_too_dense = json!({
+            "status": "ok",
+            "row_count": (raw_sync_limit as i64) + 1,
+            "sample_rows": vec![json!({"公告链接": "a"}); raw_sync_limit],
+        });
+        assert!(exchange_announcement_order_capacity_probe_is_truncated(
+            &still_too_dense
+        ));
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_probe_normalizes_only_akshare_empty_dataframe_key_error(
+    ) {
+        let empty_payload = json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error_type": "KeyError",
+            "error": "\"None of [Index(['代码', '简称', '公告标题', '公告时间', 'announcementId', 'orgId'], dtype='str')] are in the [columns]\""
+        });
+
+        let empty = normalize_exchange_announcement_order_capacity_probe_payload(empty_payload);
+
+        assert_eq!(empty["status"], "ok_empty");
+        assert_eq!(empty["permission"], "available");
+        assert_eq!(empty["row_count"], 0);
+        assert_eq!(
+            empty["normalized_from_error"]["reason"],
+            "akshare_empty_dataframe_missing_expected_columns"
+        );
+
+        let unsupported_category_payload = json!({
+            "status": "error",
+            "permission": "unknown_or_unavailable",
+            "error_type": "KeyError",
+            "error": "'重大事项'"
+        });
+
+        let unsupported = normalize_exchange_announcement_order_capacity_probe_payload(
+            unsupported_category_payload,
+        );
+
+        assert_eq!(unsupported["status"], "category_parser_error");
+        assert_eq!(unsupported["parser_reliability"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_db_source_codes_fit_metadata_columns() {
+        assert!(
+            EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_TASK_SOURCE
+                .chars()
+                .count()
+                <= 32,
+            "data_sync_task.source and data_version.source are VARCHAR(32)"
+        );
+        assert!(
+            EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE
+                .chars()
+                .count()
+                <= 64,
+            "data_sync_attempt.source is VARCHAR(64)"
+        );
+    }
+
+    fn exchange_announcement_order_capacity_test_metrics(
+        row_count: i64,
+        target_event_rows: i64,
+        target_event_missing_evidence_span_rows: i64,
+        completed_attempts: i64,
+        completed_empty_attempts: i64,
+        failed_attempts: i64,
+    ) -> ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+        ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+            table_exists: true,
+            row_count,
+            distinct_symbol_count: if row_count > 0 { 1 } else { 0 },
+            distinct_category_count: if row_count > 0 { 1 } else { 0 },
+            evidence_span_rows: target_event_rows - target_event_missing_evidence_span_rows,
+            target_event_rows,
+            target_event_missing_evidence_span_rows,
+            completed_attempts,
+            completed_empty_attempts,
+            failed_attempts,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_decision_blocks_until_small_batch_rows_exist(
+    ) {
+        let empty = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            exchange_announcement_order_capacity_test_metrics(0, 0, 0, 0, 0, 0),
+        );
+
+        assert_eq!(
+            empty["admission_decision"],
+            "bounded_sync_required_before_coverage_quality_audit"
+        );
+        assert_eq!(empty["p310_status"], "blocked");
+        assert_eq!(empty["bounded_wfa"], "blocked");
+        assert_eq!(empty["v19_train_selection"], "blocked");
+
+        let passed = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            exchange_announcement_order_capacity_test_metrics(3, 2, 0, 1, 0, 0),
+        );
+        assert_eq!(
+            passed["admission_decision"],
+            "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only"
+        );
+        assert_eq!(passed["p310_status"], "blocked");
+        assert_eq!(
+            passed["next_step"],
+            "expand_by_month_or_quarter_then_rerun_coverage_quality_audit"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_allows_non_target_announcements_for_taxonomy_accounting_only(
+    ) {
+        let non_target = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            exchange_announcement_order_capacity_test_metrics(1, 0, 0, 1, 0, 0),
+        );
+
+        assert_eq!(
+            non_target["admission_decision"],
+            "raw_coverage_passed_no_target_event_rows_for_taxonomy_accounting_only"
+        );
+        assert_eq!(
+            non_target["bounded_sync"],
+            "continue_bounded_sync_and_track_target_event_yield"
+        );
+        assert_eq!(non_target["summary"]["target_event_rows"], json!(0));
+        assert_eq!(
+            non_target["summary"]["target_event_missing_evidence_span_rows"],
+            json!(0)
+        );
+        assert_eq!(non_target["factor_builder"], "blocked");
+        assert_eq!(non_target["p310_status"], "blocked");
+        assert_eq!(non_target["bounded_wfa"], "blocked");
+        assert_eq!(non_target["v19_train_selection"], "blocked");
+
+        let bad_target = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            exchange_announcement_order_capacity_test_metrics(1, 1, 1, 1, 0, 0),
+        );
+        assert_eq!(
+            bad_target["admission_decision"],
+            "blocked_until_target_event_evidence_spans_are_repaired"
+        );
+        assert_eq!(
+            bad_target["bounded_sync"],
+            "blocked_until_small_batch_audit_passes"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_surfaces_taxonomy_and_ocr_gates() {
+        let passed = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            exchange_announcement_order_capacity_test_metrics(3, 2, 0, 1, 0, 0),
+        );
+
+        assert_eq!(
+            passed["ocr_quality_gate"]["status"],
+            "passed_or_not_observed"
+        );
+        assert_eq!(
+            passed["taxonomy_precision_gate"]["status"],
+            "passed_or_not_observed"
+        );
+        assert_eq!(
+            passed["taxonomy_precision_gate"]["admissible_target_event_rows"],
+            json!(2)
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_event_type_blocks_admin_finance_titles_before_target_labeling(
+    ) {
+        let noisy_spans = json!([
+            {"theme": "order_contract", "keyword": "协议", "snippet": "签订募集资金专户存储监管协议"},
+            {"theme": "capacity", "keyword": "项目", "snippet": "募集资金投资项目实施方式"}
+        ]);
+
+        assert_eq!(
+            exchange_announcement_event_type_from_title_and_spans(
+                "关于设立募集资金专户并授权签署募集资金专户存储监管协议的公告",
+                &noisy_spans,
+            ),
+            None
+        );
+
+        assert_eq!(
+            exchange_announcement_event_type_from_title_and_spans(
+                "关于签订日常经营重大合同的公告",
+                &noisy_spans,
+            ),
+            Some("order_or_contract_signed".to_string())
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_blocks_taxonomy_risk_and_ocr_rows() {
+        let ocr_blocked = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+                row_count: 9,
+                distinct_symbol_count: 4,
+                distinct_category_count: 1,
+                evidence_span_rows: 4,
+                target_event_rows: 4,
+                scanned_pdf_ocr_required_rows: 2,
+                trainable_scanned_pdf_blocking_rows: 2,
+                completed_attempts: 9,
+                completed_empty_attempts: 7,
+                ..exchange_announcement_order_capacity_test_metrics(9, 4, 0, 9, 7, 0)
+            },
+        );
+        assert_eq!(
+            ocr_blocked["admission_decision"],
+            "blocked_until_scanned_pdf_ocr_runtime_and_audit_pass"
+        );
+        assert_eq!(ocr_blocked["ocr_quality_gate"]["status"], "blocked");
+        assert_eq!(
+            ocr_blocked["ocr_quality_gate"]["scanned_pdf_ocr_required_rows"],
+            json!(2)
+        );
+        assert_eq!(
+            ocr_blocked["bounded_sync"],
+            "blocked_until_small_batch_audit_passes"
+        );
+
+        let taxonomy_blocked = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+                row_count: 9,
+                distinct_symbol_count: 4,
+                distinct_category_count: 1,
+                evidence_span_rows: 4,
+                target_event_rows: 4,
+                taxonomy_blocked_target_event_rows: 4,
+                taxonomy_risk_category_rows: 9,
+                completed_attempts: 9,
+                completed_empty_attempts: 7,
+                ..exchange_announcement_order_capacity_test_metrics(9, 4, 0, 9, 7, 0)
+            },
+        );
+        assert_eq!(
+            taxonomy_blocked["admission_decision"],
+            "blocked_until_category_aware_taxonomy_precision_manual_review_passes"
+        );
+        assert_eq!(
+            taxonomy_blocked["taxonomy_precision_gate"]["status"],
+            "blocked"
+        );
+        assert_eq!(
+            taxonomy_blocked["taxonomy_precision_gate"]["taxonomy_blocked_target_event_rows"],
+            json!(4)
+        );
+        assert_eq!(
+            taxonomy_blocked["taxonomy_precision_gate"]["admissible_target_event_rows"],
+            json!(0)
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_keeps_excluded_category_parser_failures_non_blocking(
+    ) {
+        assert!(
+            exchange_announcement_order_capacity_is_excluded_unsupported_category_attempt(
+                "000001:重大事项",
+                "'重大事项'",
+            )
+        );
+        assert!(
+            !exchange_announcement_order_capacity_is_excluded_unsupported_category_attempt(
+                "000001:日常经营",
+                "'重大事项'",
+            )
+        );
+        assert!(
+            !exchange_announcement_order_capacity_is_excluded_unsupported_category_attempt(
+                "000001:重大事项",
+                "timeout fetching cninfo",
+            )
+        );
+
+        let passed_with_excluded_failure =
+            decide_exchange_announcement_order_capacity_coverage_quality_audit(
+                ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+                    total_failed_attempts: 4,
+                    excluded_unsupported_category_failed_attempts: 4,
+                    ..exchange_announcement_order_capacity_test_metrics(5, 2, 0, 4, 2, 0)
+                },
+            );
+        assert_eq!(
+            passed_with_excluded_failure["admission_decision"],
+            "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only"
+        );
+        assert_eq!(
+            passed_with_excluded_failure["summary"]["failed_attempts"],
+            json!(0)
+        );
+        assert_eq!(
+            passed_with_excluded_failure["summary"]["total_failed_attempts"],
+            json!(4)
+        );
+        assert_eq!(
+            passed_with_excluded_failure["summary"]
+                ["excluded_unsupported_category_failed_attempts"],
+            json!(4)
+        );
+
+        let blocked_with_real_failure =
+            decide_exchange_announcement_order_capacity_coverage_quality_audit(
+                ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+                    total_failed_attempts: 5,
+                    excluded_unsupported_category_failed_attempts: 4,
+                    ..exchange_announcement_order_capacity_test_metrics(5, 2, 0, 4, 2, 1)
+                },
+            );
+        assert_eq!(
+            blocked_with_real_failure["admission_decision"],
+            "blocked_until_failed_small_batch_attempts_are_repaired"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_admission_readiness_blocks_p310_until_manual_precision_and_correlation_pass(
+    ) {
+        let coverage = json!({
+            "decision": {
+                "admission_decision": "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only",
+                "status": "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only",
+            },
+            "summary": {
+                "row_count": 155,
+                "target_event_rows": 91,
+                "admissible_target_event_rows": 91,
+                "pit_violation_rows": 0,
+                "duplicate_announcement_id_rows": 0,
+                "duplicate_raw_payload_hash_groups": 0,
+                "failed_attempts": 0,
+                "trainable_scanned_pdf_blocking_rows": 0,
+                "target_event_missing_evidence_span_rows": 0,
+            },
+            "target_event_yield": {
+                "target_event_evidence_span_coverage_ratio": 1.0,
+            },
+            "year_category_breakdown": [
+                {"year": 2024, "category": "日常经营", "rows": 155, "symbols": 4}
+            ],
+            "symbol_event_breakdown": [
+                {"symbol": "002459", "rows": 30, "target_event_rows": 17},
+                {"symbol": "600519", "rows": 30, "target_event_rows": 7},
+                {"symbol": "300750", "rows": 70, "target_event_rows": 50},
+                {"symbol": "000001", "rows": 25, "target_event_rows": 17}
+            ]
+        });
+
+        let readiness = exchange_announcement_order_capacity_admission_readiness_report(&coverage);
+
+        assert_eq!(
+            readiness["coverage_pit_quality_gate"]["status"],
+            "passed_pilot_scope"
+        );
+        assert_eq!(
+            readiness["manual_evidence_span_precision_gate"]["status"],
+            "blocked_manual_review_required"
+        );
+        assert_eq!(
+            readiness["event_taxonomy_precision_gate"]["status"],
+            "blocked_manual_review_required"
+        );
+        assert_eq!(
+            readiness["correlation_gate"]["status"],
+            "blocked_correlation_audit_required"
+        );
+        assert_eq!(
+            readiness["effective_coverage_gate"]["status"],
+            "pilot_scope_only_not_full_history"
+        );
+        assert_eq!(
+            readiness["promotion_gate"]["p310_status"],
+            "blocked_until_manual_precision_effective_coverage_and_correlation_pass"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_manual_precision_sample_report_requires_human_review_before_p310(
+    ) {
+        let report = exchange_announcement_order_capacity_manual_precision_sample_report(
+            91,
+            50,
+            50,
+            5,
+            vec![
+                json!({
+                    "symbol": "300750",
+                    "announcement_title": "宁德时代：关于签订日常经营重大合同的公告",
+                    "event_type": "order_or_contract_signed",
+                    "evidence_spans": [{"keyword": "合同", "snippet": "签订日常经营重大合同"}],
+                }),
+                json!({
+                    "symbol": "002459",
+                    "announcement_title": "晶澳科技：关于投资建设产能项目的公告",
+                    "event_type": "capacity_expansion_or_commissioning",
+                    "evidence_spans": [{"keyword": "产能", "snippet": "投资建设产能项目"}],
+                }),
+            ],
+        );
+
+        assert_eq!(report["status"], "manual_review_sample_ready");
+        assert_eq!(report["required_target_sample_size_min"], json!(50));
+        assert_eq!(report["target_sample_rows"], json!(50));
+        assert_eq!(report["negative_sample_rows"], json!(5));
+        assert_eq!(
+            report["manual_evidence_span_precision_gate"]["status"],
+            "blocked_until_human_labels_are_recorded"
+        );
+        assert_eq!(
+            report["event_taxonomy_precision_gate"]["status"],
+            "blocked_until_human_labels_are_recorded"
+        );
+        assert_eq!(
+            report["promotion_gate"]["p310_status"],
+            "blocked_until_manual_precision_review_passes"
+        );
+
+        let undersized = exchange_announcement_order_capacity_manual_precision_sample_report(
+            20,
+            50,
+            20,
+            3,
+            vec![],
+        );
+        assert_eq!(
+            undersized["status"],
+            "blocked_insufficient_target_review_sample"
+        );
+        assert_eq!(undersized["target_sample_shortfall"], json!(30));
+        assert_eq!(
+            undersized["promotion_gate"]["p310_status"],
+            "blocked_until_manual_precision_review_passes"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_taxonomy_risk_title_filter_blocks_admin_finance_false_positives(
+    ) {
+        let false_positive_titles = [
+            "关于2023年度计提减值准备的公告",
+            "关于部分募投项目延期的公告",
+            "关联交易公告",
+            "关于2024年度日常关联交易预计的公告",
+            "关于向金融机构申请2024年度综合授信额度的公告",
+            "关于完成注册资本工商变更登记的公告",
+            "关于实际控制人解除一致行动关系暨变更实际控制人的提示性公告",
+            "2024年半年度财务报告",
+            "关于参与投资福建时代泽远碳中和股权投资基金合伙企业（有限合伙）的公告",
+            "关于股东部分股份质押的公告",
+            "贵州茅台2024年第三季度主要经营数据公告",
+            "贵州茅台关于贵州茅台集团财务有限公司的风险评估报告",
+            "关于聘请H股发行并上市审计机构的公告",
+            "贵州茅台章程（修订草案）",
+            "2023年年度审计报告英文版（2023 Audit Report）",
+            "关于开展基础设施公募REITs申报发行工作的公告",
+            "关于收购控股子公司部分股权的公告",
+            "关于2023年度计提资产减值准备的公告",
+            "关于续聘2024年度审计机构的公告",
+            "2023年度董事会工作报告",
+            "内部控制自我评价报告",
+            "关于续聘2024年度会计师事务所的公告",
+            "关于2024年度委托理财计划的公告",
+            "关于2025年度公司与下属公司担保额度预计的公告",
+            "关于2024年半年度募集资金存放与使用情况的专项报告",
+            "公司章程修正案",
+            "独立董事候选人声明与承诺",
+            "关于会计政策变更的公告",
+            "2023年环境、社会及治理（ESG）报告",
+            "2024年可持续发展报告",
+            "平安银行股份有限公司估值提升计划",
+            "关于制定及修订公司制度的公告",
+            "关于就公司发行H股股票制定及修订公司制度的公告",
+            "关于境外全资子公司在境外发行债券并由公司提供担保的公告",
+        ];
+        for title in false_positive_titles {
+            assert_eq!(
+                exchange_announcement_order_capacity_taxonomy_risk_title_reason("日常经营", title),
+                Some("admin_finance_governance_false_positive")
+            );
+        }
+
+        let true_target_titles = [
+            "关于签署《关于进一步加强和深化合作的协议》的公告",
+            "关于公司与Stellantis合资建厂的公告",
+            "关于投资建设高效电池产能项目的公告",
+            "关于签订日常经营重大合同的公告",
+            "贵州茅台重大事项公告",
+        ];
+        for title in true_target_titles {
+            assert_eq!(
+                exchange_announcement_order_capacity_taxonomy_risk_title_reason("日常经营", title),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_ocr_taxonomy_exclusion_is_narrow_for_special_reports() {
+        assert_eq!(
+            exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
+                "日常经营",
+                "贵州茅台：关于贵州茅台酒股份有限公司控股股东及其他关联方资金占用情况的专项说明"
+            ),
+            Some("special_report_related_party_funds")
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
+                "日常经营",
+                "关于宁德时代新能源科技股份有限公司2024年度募集资金存放与使用情况鉴证报告",
+            ),
+            Some("special_report_fundraising_use_assurance")
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
+                "日常经营",
+                "半年度非经营性资金占用及其他关联资金往来情况汇总表"
+            ),
+            Some("special_report_related_party_funds")
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
+                "日常经营",
+                "贵州茅台：关于贵州茅台酒股份有限公司2023年度涉及财务公司关联交易的存款、贷款等金融业务的专项说明"
+            ),
+            Some("special_report_related_party_finance")
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
+                "日常经营",
+                "某公司：关于签订重大销售合同的公告"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_excludes_ocr_special_reports_without_unblocking_training(
+    ) {
+        let excluded_only = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+                table_exists: true,
+                row_count: 2,
+                distinct_symbol_count: 1,
+                distinct_category_count: 1,
+                scanned_pdf_ocr_required_rows: 2,
+                ocr_taxonomy_excluded_rows: 2,
+                trainable_scanned_pdf_blocking_rows: 0,
+                completed_attempts: 1,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            excluded_only["admission_decision"],
+            "raw_coverage_passed_no_target_event_rows_for_taxonomy_accounting_only"
+        );
+        assert_eq!(
+            excluded_only["ocr_quality_gate"]["status"],
+            "passed_with_taxonomy_exclusions_only"
+        );
+        assert_eq!(
+            excluded_only["ocr_quality_gate"]["ocr_taxonomy_excluded_rows"],
+            json!(2)
+        );
+        assert_eq!(
+            excluded_only["ocr_quality_gate"]["trainable_scanned_pdf_blocking_rows"],
+            json!(0)
+        );
+        assert_eq!(excluded_only["factor_builder"], "blocked");
+        assert_eq!(excluded_only["p310_status"], "blocked");
+        assert_eq!(excluded_only["bounded_wfa"], "blocked");
+        assert_eq!(excluded_only["v19_train_selection"], "blocked");
+
+        let one_unresolved = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
+                table_exists: true,
+                row_count: 3,
+                distinct_symbol_count: 2,
+                distinct_category_count: 1,
+                scanned_pdf_ocr_required_rows: 3,
+                ocr_taxonomy_excluded_rows: 2,
+                trainable_scanned_pdf_blocking_rows: 1,
+                completed_attempts: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            one_unresolved["admission_decision"],
+            "blocked_until_scanned_pdf_ocr_runtime_and_audit_pass"
+        );
+        assert_eq!(one_unresolved["ocr_quality_gate"]["status"], "blocked");
+        assert_eq!(
+            one_unresolved["ocr_quality_gate"]["trainable_scanned_pdf_blocking_rows"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_target_event_yield_report_blocks_training() {
+        let report =
+            exchange_announcement_order_capacity_target_event_yield_report(5, 2, 2, 0, 1, 1, 0, 1);
+
+        assert_eq!(report["raw_row_count"], json!(5));
+        assert_eq!(report["target_event_rows"], json!(2));
+        assert_eq!(report["admissible_target_event_rows"], json!(1));
+        assert_eq!(report["taxonomy_blocked_target_event_rows"], json!(1));
+        assert_eq!(report["scanned_pdf_ocr_required_rows"], json!(1));
+        assert_eq!(report["ocr_taxonomy_excluded_rows"], json!(0));
+        assert_eq!(report["trainable_scanned_pdf_blocking_rows"], json!(1));
+        assert_eq!(report["target_event_with_evidence_span_rows"], json!(2));
+        assert_eq!(report["target_event_missing_evidence_span_rows"], json!(0));
+        assert_eq!(report["target_event_yield_ratio"], json!(0.4));
+        assert_eq!(report["admissible_target_event_yield_ratio"], json!(0.2));
+        assert_eq!(
+            report["target_event_evidence_span_coverage_ratio"],
+            json!(1.0)
+        );
+        assert_eq!(
+            report["admission_scope"],
+            "raw_coverage_taxonomy_accounting_only"
+        );
+        assert_eq!(report["factor_builder"], "blocked");
+        assert_eq!(report["p310_status"], "blocked");
+        assert_eq!(report["bounded_wfa"], "blocked");
+        assert_eq!(report["v19_train_selection"], "blocked");
+
+        let empty =
+            exchange_announcement_order_capacity_target_event_yield_report(0, 0, 0, 0, 0, 0, 0, 0);
+        assert_eq!(empty["target_event_yield_ratio"], Value::Null);
+        assert_eq!(empty["admissible_target_event_yield_ratio"], Value::Null);
+        assert_eq!(
+            empty["target_event_evidence_span_coverage_ratio"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_coverage_quality_allows_synced_empty_windows_for_accounting_only(
+    ) {
+        let synced_empty = decide_exchange_announcement_order_capacity_coverage_quality_audit(
+            exchange_announcement_order_capacity_test_metrics(0, 0, 0, 1, 1, 0),
+        );
+
+        assert_eq!(
+            synced_empty["admission_decision"],
+            "synced_empty_no_event_rows_passed_for_coverage_accounting_only"
+        );
+        assert_eq!(
+            synced_empty["bounded_sync"],
+            "continue_bounded_sync_for_coverage_accounting_only"
+        );
+        assert_eq!(
+            synced_empty["next_step"],
+            "continue_next_tiny_slice_or_batch_then_rerun_full_window_audit"
+        );
+        assert_eq!(synced_empty["factor_builder"], "blocked");
+        assert_eq!(synced_empty["p310_status"], "blocked");
+        assert_eq!(synced_empty["bounded_wfa"], "blocked");
+        assert_eq!(synced_empty["v19_train_selection"], "blocked");
+        assert_eq!(synced_empty["summary"]["completed_attempts"], json!(1));
+        assert_eq!(
+            synced_empty["summary"]["completed_empty_attempts"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_smoke_plan_blocks_schema_and_training() {
+        let req = ExchangeAnnouncementOrderCapacitySmokeReq {
+            symbols: vec!["000001.SZ".to_string(), "600000.SH".to_string()],
+            categories: vec!["日常经营".to_string(), "股权激励".to_string()],
+            market: Some("沪深京".to_string()),
+            start_date: Some("20230101".to_string()),
+            end_date: Some("20230331".to_string()),
+            limit: Some(3),
+            python: Some("/tmp/akshare-smoke/bin/python".to_string()),
+        };
+
+        let plan = exchange_announcement_order_capacity_smoke_plan(&req).unwrap();
+
+        assert_eq!(
+            plan["audit_version"],
+            "p3.24b-exchange-announcement-order-capacity-permission-history-category-smoke-v1"
+        );
+        assert_eq!(
+            plan["mode"],
+            "read_only_permission_history_category_smoke_no_write"
+        );
+        assert_eq!(plan["vendor"], "akshare");
+        assert_eq!(
+            plan["vendor_endpoint"],
+            "stock_zh_a_disclosure_report_cninfo"
+        );
+        assert_eq!(plan["write_enabled"], false);
+        assert_eq!(plan["market"], "沪深京");
+        assert_eq!(plan["query_count"], 4);
+        assert_eq!(plan["promotion_gate"]["schema_apply"], "blocked");
+        assert_eq!(plan["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+        assert_eq!(
+            plan["next_step"],
+            "run_this_read_only_smoke_then_audit_cninfo_detail_text_timestamp_and_text_hash_before_schema_apply"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_parses_cninfo_link_metadata() {
+        let parsed = parse_cninfo_announcement_link_metadata("https://static.cninfo.com.cn/finalpage/2023-03-31/1216340215.PDF?announcementId=1216340215&orgId=gssz0000001&stockCode=000001&announcementTime=2023-03-31");
+
+        assert_eq!(parsed["announcement_id"], "1216340215");
+        assert_eq!(parsed["org_id"], "gssz0000001");
+        assert_eq!(parsed["stock_code"], "000001");
+        assert_eq!(parsed["announcement_time"], "2023-03-31");
+        assert_eq!(parsed["metadata_complete"], true);
+        assert!(parsed["missing_fields"].as_array().unwrap().is_empty());
+
+        let incomplete = parse_cninfo_announcement_link_metadata(
+            "https://static.cninfo.com.cn/finalpage/2023-03-31/1216340215.PDF",
+        );
+        assert_eq!(incomplete["announcement_id"], "1216340215");
+        assert_eq!(incomplete["metadata_complete"], false);
+        assert!(incomplete["missing_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "orgId"));
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_raw_row_preserves_cninfo_timestamp_param() {
+        let list_row = json!({
+            "代码": "300750",
+            "简称": "宁德时代",
+            "公告标题": "关于项目投资合作的公告",
+            "公告时间": "2023-11-02 19:30:21",
+            "公告链接": "https://static.cninfo.com.cn/finalpage/2023-11-02/1218233333.PDF?announcementId=1218233333&orgId=gssz300750&stockCode=300750&announcementTime=2023-11-02%2019:30:21"
+        });
+        let pdf_probe = json!({
+            "status": "ok",
+            "source_published_at": "2023-11-02 19:30:21",
+            "source_published_at_quality": "timestamp",
+            "timestamp_candidates": [{
+                "source": "announcement_time_param",
+                "value": "2023-11-02 19:30:21",
+                "quality": "timestamp"
+            }],
+            "evidence_spans": [{
+                "theme": "capacity",
+                "keyword": "项目",
+                "page": 1,
+                "snippet": "关于项目投资合作的公告"
+            }],
+            "parser_errors": [],
+            "pdf_metadata_keys": [],
+            "text_hash": "abc123",
+            "text_sample": "关于项目投资合作的公告"
+        });
+        let open_dates = vec![NaiveDate::from_ymd_opt(2023, 11, 3).unwrap()];
+
+        let row = exchange_announcement_raw_row_from_list_and_pdf_probe(
+            &list_row,
+            "日常经营",
+            "300750:日常经营",
+            &pdf_probe,
+            &open_dates,
+            "p324-timestamp-test",
+        )
+        .unwrap();
+
+        assert_eq!(
+            row.announcement_time,
+            NaiveDate::from_ymd_opt(2023, 11, 2).unwrap()
+        );
+        assert_eq!(
+            row.available_at,
+            NaiveDate::from_ymd_opt(2023, 11, 3).unwrap()
+        );
+        assert_eq!(row.source_published_at_quality, "timestamp");
+        assert_eq!(row.source_published_date, None);
+        assert_eq!(
+            row.source_published_at_ts.unwrap().to_rfc3339(),
+            "2023-11-02T11:30:21+00:00"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_detail_audit_plan_blocks_training() {
+        let req = ExchangeAnnouncementOrderCapacityDetailAuditReq {
+            announcement_links: vec![
+                "http://www.cninfo.com.cn/new/disclosure/detail?stockCode=000001&announcementId=1216072959&orgId=gssz0000001&announcementTime=2023-03-09".to_string(),
+            ],
+            limit: Some(1),
+            python: Some("/tmp/akshare-smoke/bin/python".to_string()),
+        };
+
+        let plan = exchange_announcement_order_capacity_detail_audit_plan(&req).unwrap();
+
+        assert_eq!(
+            plan["audit_version"],
+            "p3.24c-exchange-announcement-order-capacity-detail-text-timestamp-audit-v1"
+        );
+        assert_eq!(plan["stage"], "P3.24C");
+        assert_eq!(
+            plan["mode"],
+            "read_only_cninfo_detail_text_timestamp_hash_audit_no_write"
+        );
+        assert_eq!(plan["write_enabled"], false);
+        assert_eq!(plan["link_count"], 1);
+        assert_eq!(
+            plan["promotion_gate"]["schema_apply"],
+            "blocked_until_detail_audit_passes"
+        );
+        assert_eq!(plan["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_detail_audit_decision_requires_text_hash_and_timestamp()
+    {
+        let passed = decide_exchange_announcement_detail_audit(3, 3, 3, 3, 0);
+        assert_eq!(
+            passed["admission_decision"],
+            "detail_text_timestamp_hash_audit_passed_schema_review_allowed_next"
+        );
+        assert_eq!(
+            passed["promotion_gate"]["schema_apply"],
+            "manual_review_required"
+        );
+        assert_eq!(passed["promotion_gate"]["bounded_sync"], "blocked");
+
+        let missing_timestamp = decide_exchange_announcement_detail_audit(3, 3, 3, 1, 0);
+        assert_eq!(
+            missing_timestamp["admission_decision"],
+            "blocked_missing_source_published_at_timestamp"
+        );
+
+        let incomplete_metadata = decide_exchange_announcement_detail_audit(3, 3, 3, 3, 1);
+        assert_eq!(
+            incomplete_metadata["admission_decision"],
+            "blocked_incomplete_announcement_link_metadata"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_detail_probe_summary_rejects_pdf_binary_as_text() {
+        let probes = vec![json!({
+            "status": "pdf_text_parser_required",
+            "text_length": 222260,
+            "text_hash": "4555445a49d356b6",
+            "source_published_at_quality": "missing_or_date_only",
+            "link_metadata": {
+                "metadata_complete": true
+            }
+        })];
+
+        let summary = summarize_exchange_announcement_detail_probes(&probes);
+
+        assert_eq!(summary.fetched_text_count, 0);
+        assert_eq!(summary.text_hash_count, 0);
+        assert_eq!(summary.source_published_at_count, 0);
+        assert_eq!(summary.pdf_parser_required_count, 1);
+        assert_eq!(summary.incomplete_link_metadata_count, 0);
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_pdf_parser_readiness_blocks_when_no_parser() {
+        let readiness = exchange_announcement_order_capacity_pdf_parser_readiness_report(
+            "/tmp/akshare-smoke/bin/python",
+            vec![
+                json!({"tool": "pdftotext", "kind": "binary", "available": false}),
+                json!({"tool": "pypdf", "kind": "python_module", "available": false}),
+                json!({"tool": "PyPDF2", "kind": "python_module", "available": false}),
+                json!({"tool": "pdfplumber", "kind": "python_module", "available": false}),
+                json!({"tool": "fitz", "kind": "python_module", "available": false}),
+            ],
+        );
+
+        assert_eq!(readiness["stage"], "P3.24D");
+        assert_eq!(
+            readiness["mode"],
+            "read_only_pdf_parser_source_timestamp_readiness_no_write"
+        );
+        assert_eq!(readiness["write_enabled"], false);
+        assert_eq!(readiness["parser_status"], "missing");
+        assert_eq!(
+            readiness["admission_decision"],
+            "blocked_pdf_parser_missing"
+        );
+        assert_eq!(readiness["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(readiness["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(readiness["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(
+            readiness["promotion_gate"]["v19_train_selection"],
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_pdf_parser_readiness_requires_timestamp_audit_even_when_parser_exists(
+    ) {
+        let readiness = exchange_announcement_order_capacity_pdf_parser_readiness_report(
+            "/tmp/akshare-smoke/bin/python",
+            vec![
+                json!({"tool": "pdftotext", "kind": "binary", "available": true}),
+                json!({"tool": "pypdf", "kind": "python_module", "available": false}),
+            ],
+        );
+
+        assert_eq!(readiness["parser_status"], "available");
+        assert_eq!(
+            readiness["admission_decision"],
+            "pdf_parser_available_detail_timestamp_audit_required_next"
+        );
+        assert_eq!(
+            readiness["promotion_gate"]["schema_apply"],
+            "blocked_until_pdf_text_and_source_published_at_audit_passes"
+        );
+        assert_eq!(readiness["promotion_gate"]["bounded_sync"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_pdf_detail_audit_plan_uses_isolated_runtime() {
+        let req = ExchangeAnnouncementOrderCapacityPdfDetailAuditReq {
+            announcement_links: vec![
+                "https://static.cninfo.com.cn/finalpage/2023-03-31/1216340215.PDF?announcementId=1216340215&orgId=gssz0000001&stockCode=000001&announcementTime=2023-03-31".to_string(),
+            ],
+            limit: Some(1),
+            python: Some("/Users/gaocheng/.local/share/quant-pdf-audit/venv/bin/python".to_string()),
+        };
+
+        let plan = exchange_announcement_order_capacity_pdf_detail_audit_plan(&req).unwrap();
+
+        assert_eq!(
+            plan["audit_version"],
+            "p3.24e-exchange-announcement-order-capacity-pdf-detail-audit-v1"
+        );
+        assert_eq!(plan["stage"], "P3.24E");
+        assert_eq!(
+            plan["mode"],
+            "read_only_pdf_detail_text_timestamp_span_audit_no_write"
+        );
+        assert_eq!(plan["write_enabled"], false);
+        assert_eq!(
+            plan["python"],
+            "/Users/gaocheng/.local/share/quant-pdf-audit/venv/bin/python"
+        );
+        assert_eq!(
+            plan["promotion_gate"]["schema_apply"],
+            "blocked_until_pdf_detail_audit_passes"
+        );
+        assert_eq!(plan["promotion_gate"]["bounded_sync"], "blocked");
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_pdf_detail_audit_decision_requires_hash_availability_and_spans(
+    ) {
+        let passed =
+            decide_exchange_announcement_order_capacity_pdf_detail_audit(2, 2, 2, 2, 2, 0, 0);
+        assert_eq!(
+            passed["admission_decision"],
+            "pdf_detail_audit_passed_manual_schema_review_allowed_next"
+        );
+        assert_eq!(
+            passed["promotion_gate"]["schema_apply"],
+            "manual_review_required"
+        );
+
+        let missing_availability =
+            decide_exchange_announcement_order_capacity_pdf_detail_audit(2, 2, 2, 1, 2, 0, 0);
+        assert_eq!(
+            missing_availability["admission_decision"],
+            "blocked_missing_pdf_source_published_at_or_next_session_policy"
+        );
+
+        let missing_spans =
+            decide_exchange_announcement_order_capacity_pdf_detail_audit(2, 2, 2, 2, 1, 0, 0);
+        assert_eq!(
+            missing_spans["admission_decision"],
+            "blocked_missing_relevant_evidence_spans"
+        );
+
+        let scanned =
+            decide_exchange_announcement_order_capacity_pdf_detail_audit(2, 2, 2, 2, 2, 1, 0);
+        assert_eq!(
+            scanned["admission_decision"],
+            "blocked_scanned_pdf_ocr_required"
+        );
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_ocr_blocked_row_audit_plan_is_read_only() {
+        let req = ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq {
+            start_date: Some("20240401".to_string()),
+            end_date: Some("20240403".to_string()),
+            symbols: Some("600519.SH,300750.SZ".to_string()),
+            limit: Some(2),
+            python: Some(
+                "/Users/gaocheng/.local/share/quant-pdf-audit/venv/bin/python".to_string(),
+            ),
+        };
+
+        let plan = exchange_announcement_order_capacity_ocr_blocked_row_audit_plan(&req).unwrap();
+
+        assert_eq!(
+            plan["audit_version"],
+            "p3.24t-exchange-announcement-order-capacity-scanned-pdf-ocr-audit-v1"
+        );
+        assert_eq!(plan["stage"], "P3.24T");
+        assert_eq!(
+            plan["mode"],
+            "read_only_scanned_pdf_ocr_candidate_audit_no_write"
+        );
+        assert_eq!(plan["write_enabled"], false);
+        assert_eq!(plan["symbols"], json!(["600519", "300750"]));
+        assert_eq!(plan["row_limit"], 2);
+        assert_eq!(plan["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(plan["promotion_gate"]["p310_status"], "blocked");
+        assert_eq!(plan["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_ocr_blocked_row_audit_decision_blocks_missing_runtime()
+    {
+        let decision = decide_exchange_announcement_order_capacity_ocr_blocked_row_audit(
+            2, 0, 0, 0, 0, 0, 2, 0, 0, 0,
+        );
+
+        assert_eq!(
+            decision["admission_decision"],
+            "blocked_ocr_runtime_missing_or_incomplete"
+        );
+        assert_eq!(decision["ocr_quality_gate"]["status"], "blocked");
+        assert_eq!(decision["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(decision["promotion_gate"]["bounded_wfa"], "blocked");
+        assert_eq!(decision["promotion_gate"]["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn exchange_announcement_order_capacity_ocr_blocked_row_audit_decision_allows_manual_review_only(
+    ) {
+        let decision = decide_exchange_announcement_order_capacity_ocr_blocked_row_audit(
+            2, 2, 2, 2, 2, 1, 0, 0, 1, 0,
+        );
+
+        assert_eq!(
+            decision["admission_decision"],
+            "ocr_text_quality_audit_passed_manual_taxonomy_review_required"
+        );
+        assert_eq!(
+            decision["ocr_quality_gate"]["status"],
+            "passed_for_manual_review_only"
+        );
+        assert_eq!(
+            decision["promotion_gate"]["coverage_quality_audit"],
+            "manual_review_required_before_unblocking_scanned_pdf_rows"
+        );
+        assert_eq!(decision["promotion_gate"]["factor_builder"], "blocked");
+        assert_eq!(decision["promotion_gate"]["p310_status"], "blocked");
     }
 
     #[test]

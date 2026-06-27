@@ -252,6 +252,74 @@ async fn main() {
             get(routes::sync::shareholder_structure_schema_contract),
         )
         .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/schema-contract",
+            get(routes::sync::exchange_announcement_order_capacity_schema_contract),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/next-source-admission-plan",
+            get(routes::sync::exchange_announcement_order_capacity_next_source_admission_plan),
+        )
+        .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/source-contract",
+            get(routes::sync::structured_order_capacity_price_chain_source_contract),
+        )
+        .route(
+            "/api/v1/quant/data/structured-order-capacity-price-chain/vendor-admission-plan",
+            get(routes::sync::structured_order_capacity_price_chain_vendor_admission_plan),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review",
+            get(routes::sync::exchange_announcement_order_capacity_manual_schema_review),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/sync-plan",
+            get(routes::sync::exchange_announcement_order_capacity_sync_plan),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit-contract",
+            get(routes::sync::exchange_announcement_order_capacity_coverage_quality_audit_contract),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit",
+            get(routes::sync::exchange_announcement_order_capacity_coverage_quality_audit),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/admission-readiness-audit",
+            get(routes::sync::exchange_announcement_order_capacity_admission_readiness_audit),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/manual-precision-sample-audit",
+            get(routes::sync::exchange_announcement_order_capacity_manual_precision_sample_audit),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/sync",
+            post(routes::sync::exchange_announcement_order_capacity_sync),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/bounded-sync",
+            post(routes::sync::exchange_announcement_order_capacity_bounded_sync),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/permission-smoke",
+            post(routes::sync::exchange_announcement_order_capacity_permission_smoke),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/detail-audit",
+            post(routes::sync::exchange_announcement_order_capacity_detail_audit),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/pdf-parser-readiness",
+            get(routes::sync::exchange_announcement_order_capacity_pdf_parser_readiness),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/pdf-detail-audit",
+            post(routes::sync::exchange_announcement_order_capacity_pdf_detail_audit),
+        )
+        .route(
+            "/api/v1/quant/data/exchange-announcement-order-capacity/ocr-blocked-row-audit",
+            get(routes::sync::exchange_announcement_order_capacity_ocr_blocked_row_audit),
+        )
+        .route(
             "/api/v1/quant/data/margin-detail/readiness-audit",
             get(routes::sync::margin_detail_readiness_audit),
         )
