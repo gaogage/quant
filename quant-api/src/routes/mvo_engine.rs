@@ -202,18 +202,12 @@ pub async fn simulate_v19_daily_returns(
 
         // Trailing drawdown 降仓覆盖层 v3（双峰值版）
         // PIT 合规：peak 只使用历史净值
-        // 长期峰值(peak_nav)：全期历史最高，识别系统性风险
-        // 近期峰值(recent_peak_nav)：~126日窗口最高，识别近期趋势
-        // 降仓触发：用近期回撤(dd_recent)判断，而非历史回撤(dd_hist)
-        //   - 近期回撤>8% 且 历史回撤>15% → 降仓（确认是系统性熊市）
-        //   - 仅近期回撤>8% 但历史回撤<15% → 不降仓（可能只是正常回调后恢复中）
-        //   - 仅历史回撤>15% 但近期回撤<8% → 不降仓（已经恢复）
+        // 双确认：近期回撤>8% 且 历史回撤>15% 才降仓（避免牛市正常回调误触发）
         recent_peak_age += 1;
         if acct_nav > recent_peak_nav {
             recent_peak_nav = acct_nav;
             recent_peak_age = 0;
         }
-        // 近期峰值衰减：超过126个交易日未创新高，峰值向当前值衰减
         if recent_peak_age > 126 {
             recent_peak_nav = recent_peak_nav * 0.995 + acct_nav * 0.005;
         }
@@ -227,10 +221,9 @@ pub async fn simulate_v19_daily_returns(
         } else {
             0.0
         };
-        // 双确认：近期回撤>8% 且 历史回撤>15% 才降仓
         let in_bear = dd_recent > 0.08 && dd_hist > 0.15;
         let dd_factor = if !in_bear {
-            1.00 // 非熊市状态：满仓
+            1.00
         } else if dd_recent > 0.18 {
             0.20
         } else if dd_recent > 0.12 {

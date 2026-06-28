@@ -3198,12 +3198,11 @@ async fn compute_lw_mvo_weights(
             // dynamic_target 上限 0.06：高 target(0.18) 会把 MinVariance 逼向单资产集中、
             // DD 翻倍(13%→25%)。0.06 与 ROADMAP 验证 v19 22.6% 时的原始配置一致，保持跨资产分散。
             // 可用 MVO_TARGET_CAP 覆盖做调参实验。
-            // target 上限：优先读策略配置 sc.dynamic_target_cap（生产持久化），
-            // MVO_TARGET_CAP env 仍可覆盖做调参实验。
-            let target_cap = std::env::var("MVO_TARGET_CAP")
-                .ok()
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(sc.dynamic_target_cap);
+            // target 上限：唯一来源为策略配置 sc.dynamic_target_cap。
+            // 不再使用 MVO_TARGET_CAP 环境变量——async 并发环境下 std::env::set_var 是
+            // 进程全局状态，会导致不同账号/请求之间互相污染（2026-06-28 排查确认）。
+            // 杠杆/无杠杆差异化通过独立的 strategy_config 记录实现（v21 vs v21_lev）。
+            let target_cap = sc.dynamic_target_cap;
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 =
                     a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
