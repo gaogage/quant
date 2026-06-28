@@ -9,21 +9,22 @@ use crate::Route;
 #[component]
 pub fn LoginPage() -> Element {
     let nav = use_navigator();
-
-    // 已登录直接跳转仪表盘
-    if AuthState::is_logged_in() {
-        nav.replace(Route::DashboardPage {});
-        return rsx! { div {} };
-    }
-
     let mut username = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
     let mut show_pwd = use_signal(|| false);
     let mut error = use_signal(|| String::new());
     let mut loading = use_signal(|| false);
 
-    let on_keydown = move |evt: KeyboardEvent| {
-        if evt.key() == Key::Enter {
+    // 已登录直接跳转仪表盘（必须在所有 hooks 之后）
+    if AuthState::is_logged_in() {
+        nav.replace(Route::DashboardPage {});
+        return rsx! { div {} };
+    }
+
+    // 提取登录逻辑为独立函数，避免闭包被多次消费
+    let mut do_login = {
+        let nav = nav.clone();
+        move || {
             if loading() { return; }
             let uname = username.read().clone();
             let passwd = password.read().clone();
@@ -33,12 +34,12 @@ pub fn LoginPage() -> Element {
             }
             loading.set(true);
             error.set(String::new());
-            let nav = nav.clone();
+            let nav_clone = nav.clone();
             spawn(async move {
                 match api::login(&uname, &passwd).await {
                     Ok(data) => {
                         AuthState::login(&data.access_token, &data.refresh_token, data.user);
-                        nav.replace(Route::DashboardPage {});
+                        nav_clone.replace(Route::DashboardPage {});
                     }
                     Err(e) => {
                         error.set(e);
@@ -78,7 +79,6 @@ pub fn LoginPage() -> Element {
                             placeholder: "请输入用户名",
                             value: "{username}",
                             oninput: move |evt| username.set(evt.value()),
-                            onkeydown: on_keydown,
                         }
                     }
                     // 密码
@@ -93,7 +93,6 @@ pub fn LoginPage() -> Element {
                                 placeholder: "请输入密码",
                                 value: "{password}",
                                 oninput: move |evt| password.set(evt.value()),
-                                onkeydown: on_keydown,
                             }
                             // 显示/隐藏密码切换
                             button {
@@ -111,30 +110,7 @@ pub fn LoginPage() -> Element {
                                 disabled:text-gray-500 text-white font-medium rounded-lg transition
                                 focus:outline-none focus:ring-2 focus:ring-blue-500",
                         disabled: *loading.read(),
-                        onclick: move |_| {
-                            if loading() { return; }
-                            let uname = username.read().clone();
-                            let passwd = password.read().clone();
-                            if uname.is_empty() || passwd.is_empty() {
-                                error.set("请输入用户名和密码".to_string());
-                                return;
-                            }
-                            loading.set(true);
-                            error.set(String::new());
-                            let nav_clone = nav.clone();
-                            spawn(async move {
-                                match api::login(&uname, &passwd).await {
-                                    Ok(data) => {
-                                        AuthState::login(&data.access_token, &data.refresh_token, data.user);
-                                        nav_clone.replace(Route::DashboardPage {});
-                                    }
-                                    Err(e) => {
-                                        error.set(e);
-                                        loading.set(false);
-                                    }
-                                }
-                            });
-                        },
+                        onclick: move |_| { do_login(); },
                         if *loading.read() {
                             span { class: "inline-flex items-center gap-2",
                                 svg {
