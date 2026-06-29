@@ -15,6 +15,7 @@ pub mod portfolio;
 pub mod rebalance;
 pub mod scheduler;
 pub mod strategies;
+pub mod strategy;
 pub mod sync;
 pub mod trading;
 pub mod users;
