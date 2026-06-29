@@ -9,7 +9,6 @@
 //! 启动时通过 tokio::spawn 在后台运行，每 60 秒检查一次。
 
 use super::sync::{check_paper_account_data_readiness, DataReadinessGate};
-use super::trading;
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use ndarray::Array2;
 use quant_common::mvo;
@@ -1547,7 +1546,7 @@ async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
     Ok(row.and_then(|(v,)| v).unwrap_or(false))
 }
 
-async fn a_share_trade_block_reason(
+pub(crate) async fn a_share_trade_block_reason(
     db: &PgPool,
     symbol: &str,
     trade_date: NaiveDate,
@@ -2228,7 +2227,7 @@ async fn send_dingtalk_alert(db: &PgPool, msg: &str) {
         }
     }
 }
-async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
+pub(crate) async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
     let accounts = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT name, dingtalk_webhook_url FROM paper_account WHERE status='active' AND dingtalk_webhook_url IS NOT NULL"
     )
@@ -2660,260 +2659,16 @@ async fn sync_positions_from_backtest(
     leverage_multiplier: f64,
     leverage_mode: &str,
 ) -> Result<usize, String> {
-    let positions = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
-        "SELECT symbol, quantity, market_value FROM backtest_position
-         WHERE task_id = $1 AND position_date = (SELECT MAX(position_date) FROM backtest_position WHERE task_id = $1)
-         ORDER BY market_value DESC",
-    ).bind(task_id).fetch_all(db).await.map_err(|e| format!("pos: {}", e))?;
-
-    // Get initial capital (use cash as base if NAV not computed yet)
-    let (initial_cap, cash_on_hand): (rust_decimal::Decimal, rust_decimal::Decimal) =
-        sqlx::query_as(
-            "SELECT initial_capital, cash FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_one(db)
-        .await
-        .map_err(|e| format!("cap: {}", e))?;
-
-    let capital = if cash_on_hand > rust_decimal::Decimal::ZERO {
-        cash_on_hand
-    } else {
-        initial_cap
-    };
-
-    if positions.is_empty() {
-        info!(
-            "[paper] A股选股结果为空，仍执行 ETF 仓位分配 cap={}",
-            capital
-        );
-    }
-
-    // ── LW-MVO 自动发现权重（季度调仓，同季度复用缓存）──
-    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, sc).await;
-
-    // ── 体制检测 + 降仓 ──
-    let regime_exposure = detect_regime_exposure(db, date).await;
-    let mvo_a_pct = mvo_weights[0] * regime_exposure;
-    let mvo_gold_pct = mvo_weights[1] * regime_exposure;
-    let mvo_bond_pct = mvo_weights[2] * regime_exposure;
-    let mvo_sp500_pct = mvo_weights[3] * regime_exposure;
-    let mvo_nq_pct = mvo_weights[4] * regime_exposure;
-    let mvo_color_pct = mvo_weights.get(5).copied().unwrap_or(0.03) * regime_exposure;
-    let mvo_meal_pct = mvo_weights.get(6).copied().unwrap_or(0.03) * regime_exposure;
-    let mvo_oil_pct = mvo_weights.get(7).copied().unwrap_or(0.02) * regime_exposure;
-    let cash_pct = 1.0 - regime_exposure; // 现金/货币基金
-
-    if regime_exposure < 0.99 {
-        info!(
-            "[Regime] 降仓至 {:.0}%, 现金 {:.0}%",
-            regime_exposure * 100.0,
-            cash_pct * 100.0
-        );
-    }
-
-    let a_share_capital = capital
-        * rust_decimal::Decimal::from_f64_retain(mvo_a_pct)
-            .unwrap_or(rust_decimal::Decimal::from_f64_retain(0.25).unwrap());
-    let total_stock_mv: rust_decimal::Decimal = positions.iter().filter_map(|(_, _, mv)| *mv).sum();
-    let base_scale = if total_stock_mv > rust_decimal::Decimal::ZERO {
-        a_share_capital / total_stock_mv
-    } else {
-        rust_decimal::Decimal::ONE
-    };
-
-    // 杠杆：regime green(>0.9) + leverage_enabled → 使用配置的倍率
-    let mut leverage_mult =
-        if leverage_enabled && regime_exposure > 0.9 && leverage_multiplier > 1.0 {
-            if leverage_mode == "vol_target" {
-                // 波动率目标杠杆: 目标20%年化波动率, 根据trailing 60日实际波动率动态调整
-                let vol_lev = compute_vol_target_leverage(db, account_id, sc).await;
-                info!(
-                    "[paper] Vol-target leverage {:.2}x applied for {}",
-                    vol_lev, account_id
-                );
-                rust_decimal::Decimal::from_f64_retain(vol_lev)
-                    .unwrap_or(rust_decimal::Decimal::ONE)
-            } else {
-                info!(
-                    "[paper] Fixed leverage {}x applied for {}",
-                    leverage_multiplier, account_id
-                );
-                rust_decimal::Decimal::from_f64_retain(leverage_multiplier)
-                    .unwrap_or(rust_decimal::Decimal::ONE)
-            }
-        } else {
-            rust_decimal::Decimal::ONE
-        };
-
-    // ── 维保比例门控（与回放 mvo_engine 口径一致，真实券商风控）──
-    // 维保 = 总资产/融资额 = (上一日持仓市值 + cash) / margin_amount。
-    // < 平仓线: 杠杆降至 1.0（实盘不强行卖出 A 股，但停止一切融资加仓，等下次调仓自然去杠杆）。
-    // < 警告线: 杠杆 clamp ≤ 1.0（只许去杠杆、禁新增融资仓）。
-    // 阈值从账号读(不写死)；仅杠杆账号(margin_amount>0)生效。
-    if leverage_enabled {
-        let (mv, cash_now, margin, liq_thr, warn_thr): (
-            rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal, Option<f64>, Option<f64>,
-        ) = sqlx::query_as(
-            "SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1),
-                    COALESCE(cash,0), COALESCE(margin_amount,0), liquidation_threshold, warning_threshold
-             FROM paper_account WHERE paper_account_id=$1",
-        )
-        .bind(account_id).fetch_one(db).await.map_err(|e| format!("maint query: {}", e))?;
-        let margin_f = margin.to_string().parse::<f64>().unwrap_or(0.0);
-        if margin_f > 1e-6 {
-            let total_assets = (mv + cash_now).to_string().parse::<f64>().unwrap_or(0.0);
-            let maint = total_assets / margin_f;
-            if liq_thr.is_some_and(|t| maint < t) {
-                warn!(
-                    "[paper] 维保 {:.0}% < 平仓线 {:.0}% — 停止融资加仓({})",
-                    maint * 100.0,
-                    liq_thr.unwrap() * 100.0,
-                    account_id
-                );
-                leverage_mult = rust_decimal::Decimal::ONE;
-            } else if warn_thr.is_some_and(|t| maint < t) {
-                warn!(
-                    "[paper] 维保 {:.0}% < 警告线 {:.0}% — 禁止新增杠杆仓({})",
-                    maint * 100.0,
-                    warn_thr.unwrap() * 100.0,
-                    account_id
-                );
-                leverage_mult = leverage_mult.min(rust_decimal::Decimal::ONE);
-            }
-        }
-    }
-    let scale = base_scale * leverage_mult;
-
-    // Create A-share positions (scaled by MVO weight)
-    for (symbol, qty, mkt_val) in &positions {
-        let q = qty.unwrap_or(rust_decimal::Decimal::ZERO);
-        let m = mkt_val.unwrap_or(rust_decimal::Decimal::ZERO);
-        if q <= rust_decimal::Decimal::ZERO || m <= rust_decimal::Decimal::ZERO {
-            continue;
-        }
-        let price = if q > rust_decimal::Decimal::ZERO {
-            m / q
-        } else {
-            rust_decimal::Decimal::ZERO
-        };
-        if price <= rust_decimal::Decimal::ZERO {
-            continue;
-        }
-        match a_share_trade_block_reason(db, symbol, date).await {
-            Ok(Some(reason)) => {
-                warn!("[paper] 跳过 A股计划交易: {}", reason);
-                send_quality_alert(db, &[format!("{}: {}", account_id, reason)]).await;
-                continue;
-            }
-            Ok(None) => {}
-            Err(e) => return Err(e),
-        }
-        let scaled_q = q * scale;
-        let scaled_m = m * scale;
-
-        // 统一交易路径：计划+实际交易经 trading 模块落库（与回放一致）
-        let trade = trading::PlannedTrade {
-            account_id: account_id.to_string(),
-            symbol: symbol.clone(),
-            side: "buy".into(),
-            target_quantity: scaled_q,
-            target_price: price,
-            price_upper_limit: None,
-            price_lower_limit: None,
-            slippage_pct: 0.0,
-            target_value: scaled_m,
-            reason: Some(format!(
-                "v19实盘调仓 A股 regime={:.0}%",
-                regime_exposure * 100.0
-            )),
-            strategy_version_id: Some("phase7-professional-v1".to_string()),
-        };
-        trading::execute_simulated_trade(db, &trade)
-            .await
-            .map_err(|e| format!("a trade: {}", e))?;
-        let pid = format!("pp-{}", short_id());
-        sqlx::query("INSERT INTO paper_position (paper_position_id,paper_account_id,symbol,quantity,avg_cost,market_price,market_value,target_weight) VALUES ($1,$2,$3,$4,$5,$5,$6,$7) ON CONFLICT (paper_account_id,symbol) DO UPDATE SET quantity=EXCLUDED.quantity,market_price=EXCLUDED.market_price,market_value=EXCLUDED.market_value,avg_cost=EXCLUDED.avg_cost")
-            .bind(&pid).bind(account_id).bind(symbol).bind(scaled_q).bind(price).bind(scaled_m).bind(rust_decimal::Decimal::from_f64_retain(mvo_a_pct / positions.len().max(1) as f64).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("pos:{}",e))?;
-    }
-
-    // v16: 7资产MVO Grid Search统一优化 (精简相关性冗余)
-    let mut etf_allocations = vec![
-        ("518880.SH", "黄金ETF", mvo_gold_pct),
-        ("511010.SH", "国债ETF", mvo_bond_pct),
-        ("513500.SH", "标普500", mvo_sp500_pct),
-        ("513100.SH", "纳指ETF", mvo_nq_pct),
-        ("159980.SZ", "有色ETF", mvo_color_pct),
-        ("159985.SZ", "豆粕ETF", mvo_meal_pct),
-        ("501018.SH", "原油LOF", mvo_oil_pct),
-    ];
-    // 体制降仓时加入货币基金
-    if cash_pct > 0.01 {
-        etf_allocations.push(("511880.SH", "银华日利(现金)", cash_pct));
-    }
-
-    // ETF 实时价格（盘中通过 Tushare fund_daily 获取当日数据，回退昨日收盘价）
-    let etf_syms: Vec<String> = etf_allocations
-        .iter()
-        .filter(|(_, _, p)| *p > 0.0)
-        .map(|(s, _, _)| s.to_string())
-        .collect();
-    let etf_prices = fetch_intraday_etf_prices(tushare, &etf_syms, date, db).await;
-
-    for (etf_symbol, _etf_name, alloc_pct) in &etf_allocations {
-        if *alloc_pct <= 0.0 {
-            continue;
-        }
-        let alloc_amount = capital
-            * rust_decimal::Decimal::from_f64_retain(*alloc_pct)
-                .unwrap_or(rust_decimal::Decimal::ZERO);
-        if alloc_amount <= rust_decimal::Decimal::ZERO {
-            continue;
-        }
-
-        // 使用盘中实时价格（从 HashMap 获取，fallback 到 1.0）
-        let price_val = etf_prices.get(*etf_symbol).copied().unwrap_or(1.0);
-        let price =
-            rust_decimal::Decimal::from_f64_retain(price_val).unwrap_or(rust_decimal::Decimal::ONE);
-        let qty = if price > rust_decimal::Decimal::ZERO {
-            alloc_amount / price
-        } else {
-            rust_decimal::Decimal::ZERO
-        };
-
-        let trade = trading::PlannedTrade {
-            account_id: account_id.to_string(),
-            symbol: etf_symbol.to_string(),
-            side: "buy".into(),
-            target_quantity: qty,
-            target_price: price,
-            price_upper_limit: None,
-            price_lower_limit: None,
-            slippage_pct: 0.0,
-            target_value: alloc_amount,
-            reason: Some(format!("v19实盘调仓 ETF w={:.1}%", *alloc_pct * 100.0)),
-            strategy_version_id: Some("phase7-professional-v1".to_string()),
-        };
-        trading::execute_simulated_trade(db, &trade)
-            .await
-            .map_err(|e| format!("etf trade: {}", e))?;
-        let pid = format!("pp-{}", short_id());
-        sqlx::query("INSERT INTO paper_position (paper_position_id,paper_account_id,symbol,quantity,avg_cost,market_price,market_value,target_weight) VALUES ($1,$2,$3,$4,$5,$5,$6,$7) ON CONFLICT (paper_account_id,symbol) DO UPDATE SET quantity=EXCLUDED.quantity,market_price=EXCLUDED.market_price,market_value=EXCLUDED.market_value,avg_cost=EXCLUDED.avg_cost")
-            .bind(&pid).bind(account_id).bind(etf_symbol).bind(qty).bind(price).bind(alloc_amount).bind(rust_decimal::Decimal::from_f64_retain(*alloc_pct).unwrap_or(rust_decimal::Decimal::ZERO)).execute(db).await.map_err(|e|format!("etf pos:{}",e))?;
-    }
-
-    sqlx::query("UPDATE paper_account SET cash=initial_capital-(SELECT COALESCE(SUM(quantity*avg_cost),0) FROM paper_position WHERE paper_account_id=$1), current_nav=initial_capital-(SELECT COALESCE(SUM(quantity*avg_cost),0) FROM paper_position WHERE paper_account_id=$1)+(SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1), total_trades=(SELECT COUNT(*) FROM paper_order WHERE paper_account_id=$1) WHERE paper_account_id=$1")
-        .bind(account_id).execute(db).await.map_err(|e|format!("acct:{}",e))?;
-
-    // 更新净资产并尝试自动归还融资
-    if let Err(e) = trading::update_current_nav(db, account_id).await {
-        warn!("[paper] {} 更新净资产失败: {}", account_id, e);
-    }
-    if let Err(e) = trading::try_auto_repay(db, account_id).await {
-        warn!("[paper] {} 自动归还融资失败: {}", account_id, e);
-    }
-
-    Ok(positions.len() + etf_allocations.iter().filter(|(_, _, p)| *p > 0.0).count())
+    // 建仓逻辑统一委托 rebalance_account(实盘=Intraday 价格源)。
+    // NAV 由 rebalance_account 末尾的 update_current_nav 统一重算(正确口径:持仓市值+cash-margin)。
+    // 旧的手写 NAV SQL(cash=initial_capital-SUM(...),忽略 margin)已删除。
+    crate::routes::rebalance::rebalance_account(
+        db, account_id, sc, date, task_id,
+        crate::routes::rebalance::PriceSource::Intraday,
+        mvo_cache, tushare,
+        leverage_enabled, leverage_multiplier, leverage_mode,
+    )
+    .await
 }
 
 /// 体制检测：Trailing 12-month CSI300 return。
@@ -3214,12 +2969,13 @@ pub(crate) async fn compute_lw_mvo_weights(
             // 进程全局状态，会导致不同账号/请求之间互相污染（2026-06-28 排查确认）。
             // 杠杆/无杠杆差异化通过独立的 strategy_config 记录实现（v21 vs v21_lev）。
             let target_cap = sc.dynamic_target_cap;
+            let target_floor = sc.dynamic_target_floor;
             let dynamic_target = if a_monthly.len() >= 12 {
                 let trail_12m: f64 =
                     a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
-                (trail_12m + 0.05).clamp(0.08_f64.min(target_cap), target_cap)
+                (trail_12m + 0.05).clamp(target_floor.min(target_cap), target_cap)
             } else {
-                0.12_f64.min(target_cap)
+                target_floor.min(target_cap)
             };
             // Momentum-adjusted expected returns (50/50 blend)
             let hist_mu = ndarray::Array1::from_vec(
@@ -4068,8 +3824,8 @@ pub async fn run_historical_replay(
                                     })
                                     .collect(),
                             );
-                            // v19: 50/50 momentum blend (更快响应牛市趋势)
-                            let bw = if is_v19 { 0.5 } else { momentum_blend_ratio };
+                            // momentum blend 权重统一用配置 momentum_blend_ratio(v19 在 strategy_config 配 0.5)
+                            let bw = momentum_blend_ratio;
                             let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
                             let cm: mvo::CovMethod =
                                 cov_method.parse().unwrap_or(mvo::CovMethod::LinearLW);

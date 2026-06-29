@@ -18,7 +18,7 @@ Task 8 回放绩效基于 current_nav(非 load_a_share_daily 累乘),循环:sele
 - [x] Task 4: complete (commits 99e22ee..8af431a, review clean) — 直接执行(TDD:计划测试用 from_f64_retain 有浮点噪声致失败,改 Decimal::new(2,3) 精确构造后 2 测试 PASS;execute_simulated_trade 注入滑点,编译通过)
 - [x] Task 5: complete (commits 8af431a..HEAD, review clean) — 直接执行(分类器临时故障;实现 rebalance_account 增量调仓+mark_to_market+apply_fill_to_position,自审发现并修复 cash/margin 流转缺失:买扣 cash 不足自动融资 margin+=缺口,卖 cash+=fill_amount,编译+2测试 PASS)
 - [x] Task 6: complete (commits e168be5..HEAD, review clean) — 子代理(haiku)执行 4 处改动(struct 字段+default 函数、Default panic、load_strategy_config panic+SQL 追加 dynamic_target_floor、无 strategy_version_id 跳过);主代理补修行445单测(default→test_strategy_config 字面量)+ 行2265 函数参数 sc→_sc(shadow 后未用);编译+7测试 PASS
-- [ ] Task 7: scheduler 建仓段委托 + 修 NAV bug
+- [x] Task 7: complete (commits e168be5..HEAD, review clean) — 直接执行(分类器临时故障);sync_positions_from_backtest 整体简化为委托 rebalance_account(Intraday);删 0.12 硬编码改 sc.dynamic_target_floor;删 bw is_v19 分支(=momentum_blend_ratio);A 股交易阻断 a_share_trade_block_reason 下沉到 rebalance_account(改 pub(crate));删 use super::trading;编译通过+7测试 PASS
 - [ ] Task 8: 回放逐日真实建仓(绩效基于盯市 current_nav)
 - [ ] Task 9: paper_replay 去版本化重命名
 - [ ] Task 10: mvo_engine 去版本化重命名 + 端到端验证
@@ -26,3 +26,4 @@ Task 8 回放绩效基于 current_nav(非 load_a_share_daily 累乘),循环:sele
 
 ## Minor findings(待最终整支审查 triage)
 - **行768/868/556/1637 仍硬编码 `"v19"`**:Default panic 后,若 DB 无 strategy_id="v19" active 记录会 panic。行868 的 sc 参数已改 _sc(未用),Task 7/10 清理函数签名时一并处理。行556(equity_curve_update 定时任务)、行1637 独立调用,依赖 DB 有 v19 记录(数据前提 Task 11 验证)。
+- **run_historical_replay 内 is_v19/is_v20 版本路由(行3453/3455/3519)**:Task 7 删除路径A(simulate_v19_daily_returns 外层 bw 分支)的 is_v19,但路径B run_historical_replay 内的 is_v19 与 is_v20 耦合(版本路由选择不同回放逻辑),保留留待 Task 10 端到端验证时统一处理路径A/B 去版本化去留。

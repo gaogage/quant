@@ -15,8 +15,8 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::warn;
 
-use crate::routes::scheduler::{MvoWeightCache, StrategyConfig};
 use quant_data::tushare::client::TushareClient;
 
 /// 价格源(回放/实盘唯一差异)
@@ -67,8 +67,9 @@ pub async fn select_positions(
 // rebalance_account 与 mark_to_market 由 Task 5 在此追加
 
 use crate::routes::scheduler::{
-    compute_lw_mvo_weights, compute_vol_target_leverage, detect_regime_exposure,
-    fetch_intraday_etf_prices,
+    a_share_trade_block_reason, compute_lw_mvo_weights, compute_vol_target_leverage,
+    detect_regime_exposure, fetch_intraday_etf_prices, send_quality_alert, MvoWeightCache,
+    StrategyConfig,
 };
 use crate::routes::trading::{execute_simulated_trade, try_auto_repay, update_current_nav};
 use std::collections::HashMap;
@@ -201,6 +202,16 @@ pub async fn rebalance_account(
             continue;
         }
         target_symbols.insert(p.symbol.clone());
+        // A 股交易阻断(停牌/涨跌停)——回放实盘统一风控
+        match a_share_trade_block_reason(db, &p.symbol, date).await {
+            Ok(Some(reason)) => {
+                warn!("[rebalance] 跳过 A股交易: {}", reason);
+                send_quality_alert(db, &[format!("{}: {}", account_id, reason)]).await;
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        }
         let target_qty = p.quantity * scale;
         let cur_qty = current_positions
             .get(&p.symbol)
