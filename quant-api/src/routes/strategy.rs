@@ -5,6 +5,8 @@
 //!
 //! MVO 是 composite 的固有属性(strategy_type='composite' ⟹ 必有 MVO),非开关字段。
 
+use sqlx::PgPool;
+
 /// 解析后的完整策略树(composite 或单 asset 账号都会解析成此结构)
 #[derive(Debug, Clone)]
 pub struct ResolvedStrategy {
@@ -88,6 +90,204 @@ pub struct SecurityConfig {
     pub max_single_bull: f64,       // 牛市单票上限(仅 a_share)
 }
 
+// ===== DB 行映射(sqlx::FromRow) =====
+
+#[derive(Debug, sqlx::FromRow)]
+struct CompositeRow {
+    strategy_id: String,
+    name: String,
+    strategy_type: String,
+    rebalance_freq: Option<String>,
+    vol_target: Option<f64>,
+    leverage_cap: Option<f64>,
+    leverage_floor: Option<f64>,
+    default_weights: Option<serde_json::Value>,
+    min_stock: Option<f64>,
+    momentum_blend_ratio: Option<f64>,
+    ga_population: Option<i64>,
+    ga_generations: Option<i64>,
+    ga_elite_count: Option<i64>,
+    regime_bull_threshold: Option<f64>,
+    regime_bear_threshold: Option<f64>,
+    regime_bull_min_stock: Option<i64>,
+    regime_bear_min_stock: Option<i64>,
+    dynamic_target_cap: Option<f64>,
+    dynamic_target_floor: Option<f64>,
+    risk_free_rate: Option<f64>,
+    grid_step: Option<f64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct AssetRow {
+    strategy_id: String,
+    asset_class: String,
+    signal_source: Option<String>,
+    combo_name: Option<String>,
+    top_n: Option<i64>,
+    prediction_set_id: Option<String>,
+    prediction_blend_weight: Option<f64>,
+    score_direction: Option<String>,
+    candidate_tier: Option<String>,
+    equity_curve_task_id: Option<String>,
+    etf_symbols: Option<serde_json::Value>,
+    default_weights: Option<serde_json::Value>,
+    max_single: Option<f64>,
+    max_single_bull: Option<f64>,
+}
+
+fn parse_f64_array(v: &Option<serde_json::Value>) -> Vec<f64> {
+    v.as_ref()
+        .and_then(|j| j.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_f64()).collect())
+        .unwrap_or_default()
+}
+
+fn parse_str_array(v: &Option<serde_json::Value>) -> Vec<String> {
+    v.as_ref()
+        .and_then(|j| j.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 从 DB 加载策略树。composite 加载 MVO + 子 asset 行;单 asset 账号 mvo=None,assets=[自身]。
+pub async fn load_resolved_strategy(
+    db: &PgPool,
+    strategy_id: &str,
+) -> Result<ResolvedStrategy, String> {
+    // 1. 主行
+    let main: Option<CompositeRow> = sqlx::query_as::<_, CompositeRow>(
+        "SELECT strategy_id, name, strategy_type,
+                rebalance_freq, vol_target, leverage_cap, leverage_floor,
+                default_weights, min_stock, momentum_blend_ratio,
+                ga_population, ga_generations, ga_elite_count,
+                regime_bull_threshold, regime_bear_threshold,
+                regime_bull_min_stock, regime_bear_min_stock,
+                dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step
+         FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
+    )
+    .bind(strategy_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("load main row: {}", e))?;
+
+    let main = main.ok_or_else(|| format!("strategy not found: {}", strategy_id))?;
+
+    let stype = if main.strategy_type == "asset" {
+        StrategyType::Asset
+    } else {
+        StrategyType::Composite
+    };
+
+    match stype {
+        StrategyType::Asset => {
+            // 单 asset 账号:mvo=None,assets=[自身]
+            let asset_row = load_asset_row(db, strategy_id).await?;
+            Ok(ResolvedStrategy {
+                strategy_id: main.strategy_id,
+                name: main.name,
+                strategy_type: StrategyType::Asset,
+                mvo: None,
+                assets: vec![asset_row],
+                rebalance_freq: main.rebalance_freq.unwrap_or_else(|| "quarterly".into()),
+            })
+        }
+        StrategyType::Composite => {
+            // composite:加载 MVO + 所有子 asset 行
+            let asset_rows = load_child_asset_rows(db, strategy_id).await?;
+            if asset_rows.is_empty() {
+                return Err(format!("composite 无资产子策略: {}", strategy_id));
+            }
+            let mvo = MvoParams {
+                vol_target: main.vol_target.unwrap_or(0.2),
+                leverage_cap: main.leverage_cap.unwrap_or(2.5),
+                leverage_floor: main.leverage_floor.unwrap_or(1.0),
+                default_weights: parse_f64_array(&main.default_weights),
+                min_stock: main.min_stock.unwrap_or(0.12),
+                momentum_blend_ratio: main.momentum_blend_ratio.unwrap_or(0.5),
+                ga_population: main.ga_population.unwrap_or(600) as usize,
+                ga_generations: main.ga_generations.unwrap_or(250) as usize,
+                ga_elite_count: main.ga_elite_count.unwrap_or(10) as usize,
+                regime_bull_threshold: main.regime_bull_threshold.unwrap_or(0.0),
+                regime_bear_threshold: main.regime_bear_threshold.unwrap_or(0.0),
+                regime_bull_min_stock: main.regime_bull_min_stock.unwrap_or(0),
+                regime_bear_min_stock: main.regime_bear_min_stock.unwrap_or(0),
+                dynamic_target_cap: main.dynamic_target_cap.unwrap_or(0.30),
+                dynamic_target_floor: main.dynamic_target_floor.unwrap_or(0.12),
+                risk_free_rate: main.risk_free_rate.unwrap_or(0.03),
+                grid_step: main.grid_step.unwrap_or(0.0),
+            };
+            Ok(ResolvedStrategy {
+                strategy_id: main.strategy_id,
+                name: main.name,
+                strategy_type: StrategyType::Composite,
+                mvo: Some(mvo),
+                assets: asset_rows,
+                rebalance_freq: main.rebalance_freq.unwrap_or_else(|| "quarterly".into()),
+            })
+        }
+    }
+}
+
+async fn load_asset_row(db: &PgPool, strategy_id: &str) -> Result<AssetStrategy, String> {
+    let row: Option<AssetRow> = sqlx::query_as::<_, AssetRow>(
+        "SELECT strategy_id, asset_class, signal_source, combo_name, top_n,
+                prediction_set_id, prediction_blend_weight, score_direction, candidate_tier,
+                equity_curve_task_id, etf_symbols, default_weights, max_single, max_single_bull
+         FROM strategy_config WHERE strategy_id = $1",
+    )
+    .bind(strategy_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("load asset row: {}", e))?;
+    let row = row.ok_or_else(|| format!("asset row not found: {}", strategy_id))?;
+    build_asset_strategy(row)
+}
+
+async fn load_child_asset_rows(
+    db: &PgPool,
+    parent_strategy_id: &str,
+) -> Result<Vec<AssetStrategy>, String> {
+    let rows: Vec<AssetRow> = sqlx::query_as::<_, AssetRow>(
+        "SELECT strategy_id, asset_class, signal_source, combo_name, top_n,
+                prediction_set_id, prediction_blend_weight, score_direction, candidate_tier,
+                equity_curve_task_id, etf_symbols, default_weights, max_single, max_single_bull
+         FROM strategy_config
+         WHERE parent_strategy_id = $1 AND status = 'active'
+         ORDER BY asset_class",
+    )
+    .bind(parent_strategy_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("load child assets: {}", e))?;
+    rows.into_iter().map(build_asset_strategy).collect()
+}
+
+fn build_asset_strategy(row: AssetRow) -> Result<AssetStrategy, String> {
+    let asset_class = AssetClass::from_db(&row.asset_class)?;
+    Ok(AssetStrategy {
+        strategy_id: row.strategy_id,
+        asset_class,
+        security: SecurityConfig {
+            signal_source: row.signal_source.unwrap_or_else(|| "fixed".into()),
+            combo_name: row.combo_name.unwrap_or_default(),
+            top_n: row.top_n.unwrap_or(30),
+            prediction_set_id: row.prediction_set_id,
+            prediction_blend_weight: row.prediction_blend_weight.unwrap_or(0.5),
+            score_direction: row.score_direction.unwrap_or_else(|| "descending".into()),
+            candidate_tier: row.candidate_tier.unwrap_or_else(|| "research_baseline".into()),
+            equity_curve_task_id: row.equity_curve_task_id,
+            fixed_symbols: parse_str_array(&row.etf_symbols),
+            default_weights: parse_f64_array(&row.default_weights),
+            max_single: row.max_single.unwrap_or(0.75),
+            max_single_bull: row.max_single_bull.unwrap_or(0.75),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +336,37 @@ mod tests {
         };
         assert_eq!(rs.strategy_type, StrategyType::Composite);
         assert!(rs.mvo.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_load_resolved_strategy_v19() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("connect db");
+
+        let rs = load_resolved_strategy(&db, "v19").await.expect("load v19");
+        assert_eq!(rs.strategy_type, StrategyType::Composite);
+        assert!(rs.mvo.is_some(), "composite 必有 MVO");
+        let mvo = rs.mvo.as_ref().unwrap();
+        assert!((mvo.min_stock - 0.12).abs() < 1e-6, "min_stock=0.12");
+        assert_eq!(mvo.default_weights.len(), 7, "7维 ETF 权重");
+        assert_eq!(rs.assets.len(), 4, "v19 有 4 个 asset 子行");
+        // a_share asset 必须有 equity_curve_task_id
+        let a_share = rs.assets.iter().find(|a| a.asset_class == AssetClass::AShare);
+        assert!(a_share.is_some(), "必有 a_share asset");
+        assert!(a_share.unwrap().security.equity_curve_task_id.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_load_resolved_strategy_invalid() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("connect db");
+
+        let r = load_resolved_strategy(&db, "nonexistent_strategy").await;
+        assert!(r.is_err(), "查无主行应报错");
+        assert!(r.unwrap_err().contains("strategy not found"));
     }
 }
