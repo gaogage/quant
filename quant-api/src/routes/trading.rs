@@ -128,14 +128,24 @@ pub async fn execute_simulated_trade(
     trade: &PlannedTrade,
 ) -> Result<(String, String), String> {
     let order_id = create_planned_trade(db, trade).await?;
+    // 实际成交价 = 计划价 × (1 ± slippage_pct);买入抬高成本,卖出反向
+    let slip = Decimal::from_f64_retain(trade.slippage_pct).unwrap_or(Decimal::ZERO);
+    let multiplier = match trade.side.as_str() {
+        "sell" => Decimal::ONE - slip,
+        _ => Decimal::ONE + slip, // buy
+    };
+    let fill_price = trade.target_price * multiplier;
+    let fill_quantity = trade.target_quantity;
+    let fill_amount = fill_price * fill_quantity;
+    let slippage = (fill_price - trade.target_price) * fill_quantity;
     let fill = ActualTrade {
         planned_order_id: order_id.clone(),
-        fill_price: trade.target_price,
-        fill_quantity: trade.target_quantity,
-        fill_amount: trade.target_value,
-        commission: Decimal::ZERO,
+        fill_price,
+        fill_quantity,
+        fill_amount,
+        commission: Decimal::ZERO, // 手续费留 strategy_config 字段后续注入,当前保持0
         tax: Decimal::ZERO,
-        slippage: Decimal::ZERO,
+        slippage,
         fill_status: "filled".to_string(),
     };
     let fill_id = execute_actual_trade(db, &trade.account_id, &order_id, &fill).await?;
@@ -279,4 +289,30 @@ pub async fn update_current_nav(db: &PgPool, account_id: &str) -> Result<(), Str
     .await
     .map_err(|e| format!("update_nav: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn slippage_buy_inflates_fill_price() {
+        // 买入:实际价 = 计划价 × (1 + slippage_pct)
+        let target_price = Decimal::new(10000, 2); // 100.00
+        let slip = Decimal::new(2, 3); // 0.002 精确构造(from_f64_retain 会引入浮点噪声)
+        let fill_price = target_price * (Decimal::ONE + slip);
+        assert_eq!(fill_price, Decimal::new(10020, 2)); // 100.20
+        let qty = Decimal::new(100, 0);
+        let slippage = (fill_price - target_price) * qty;
+        assert_eq!(slippage, Decimal::new(2000, 2)); // 0.20×100 = 20.00
+    }
+
+    #[test]
+    fn slippage_sell_deflates_fill_price() {
+        // 卖出:实际价 = 计划价 × (1 - slippage_pct)
+        let target_price = Decimal::new(10000, 2);
+        let slip = Decimal::new(2, 3); // 0.002
+        let fill_price = target_price * (Decimal::ONE - slip);
+        assert_eq!(fill_price, Decimal::new(9980, 2)); // 99.80
+    }
 }
