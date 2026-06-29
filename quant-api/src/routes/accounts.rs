@@ -14,10 +14,123 @@ use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use chrono::Datelike;
+
 use crate::auth::middleware::UserContext;
+use crate::routes::mvo_engine::compute_metrics;
 use crate::AppState;
 
-/// 账号列表行（含 strategy_config 杠杆上限 + paper_replay 绩效，LEFT JOIN）。
+/// 绩效唯一数据源 = 每日 NAV 累计（paper_nav_snapshot）。
+/// 模拟回放 / 每日盘中调仓更新 NAV 后，绩效自然随之变动。
+/// 统一用 compute_metrics 算（与回写 paper_replay 同公式），保证标题栏、指标区、回放三处一致。
+struct NavPerf {
+    annual_return_pct: Option<f64>,
+    cumulative_return_pct: Option<f64>,
+    sharpe_ratio: Option<f64>,
+    sortino_ratio: Option<f64>,
+    calmar_ratio: Option<f64>,
+    max_drawdown_pct: Option<f64>,
+    trading_days: i64,
+    yearly_returns: Option<serde_json::Value>,
+}
+
+impl NavPerf {
+    fn empty() -> Self {
+        NavPerf {
+            annual_return_pct: None,
+            cumulative_return_pct: None,
+            sharpe_ratio: None,
+            sortino_ratio: None,
+            calmar_ratio: None,
+            max_drawdown_pct: None,
+            trading_days: 0,
+            yearly_returns: None,
+        }
+    }
+}
+
+/// 从 paper_nav_snapshot 实时计算单个账号的绩效。
+/// 返回 None 表示无快照数据（新账号尚未回放/调仓）。
+async fn compute_perf_from_nav(
+    db: &sqlx::PgPool,
+    account_id: &str,
+    initial_capital: f64,
+) -> Option<NavPerf> {
+    // 逐日 NAV + 日期，按 snapshot_date 排序
+    let rows: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as(
+        "SELECT snapshot_date, nav::double precision
+         FROM paper_nav_snapshot WHERE paper_account_id = $1 ORDER BY snapshot_date",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await
+    .ok()?;
+
+    if rows.len() < 2 {
+        return Some(NavPerf::empty());
+    }
+
+    // 逐日收益率
+    let returns: Vec<f64> = rows
+        .windows(2)
+        .map(|w| w[1].1 / w[0].1 - 1.0)
+        .collect();
+    if returns.is_empty() {
+        return Some(NavPerf::empty());
+    }
+
+    let m = compute_metrics(&returns);
+    let final_nav = rows.last().unwrap().1;
+    let cum_pct = if initial_capital > 0.0 {
+        (final_nav / initial_capital - 1.0) * 100.0
+    } else {
+        0.0
+    };
+
+    // 逐年收益（按日收益复利聚合），与 paper_v19_replay::compute_yearly 同口径
+    let mut yearly: Vec<serde_json::Value> = Vec::new();
+    let mut cur_year = 0i32;
+    let mut yr_nav = 1.0f64;
+    // rows[0] 为首日（无前值收益），用于锚定起始年份；rows[1..] 对应 returns[i-1]
+    for (i, (d, _)) in rows.iter().enumerate() {
+        if i == 0 {
+            cur_year = d.year();
+            yr_nav = 1.0;
+            continue;
+        }
+        let y = d.year();
+        if y != cur_year {
+            if cur_year != 0 {
+                yearly.push(serde_json::json!({
+                    "year": cur_year.to_string(),
+                    "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0
+                }));
+            }
+            cur_year = y;
+            yr_nav = 1.0;
+        }
+        yr_nav *= 1.0 + returns[i - 1];
+    }
+    if cur_year != 0 {
+        yearly.push(serde_json::json!({
+            "year": cur_year.to_string(),
+            "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0
+        }));
+    }
+
+    Some(NavPerf {
+        annual_return_pct: Some((m.annual_return * 10000.0).round() / 100.0),
+        cumulative_return_pct: Some((cum_pct * 100.0).round() / 100.0),
+        sharpe_ratio: Some((m.sharpe * 100.0).round() / 100.0),
+        sortino_ratio: Some((m.sortino * 100.0).round() / 100.0),
+        calmar_ratio: Some((m.calmar * 100.0).round() / 100.0),
+        max_drawdown_pct: Some((m.max_drawdown * 1000.0).round() / 10.0),
+        trading_days: m.trading_days as i64,
+        yearly_returns: Some(serde_json::Value::Array(yearly)),
+    })
+}
+
+/// 账号列表行（含 strategy_config 杠杆上限 + 从 paper_nav_snapshot 实时算的绩效）。
 /// 用 FromRow struct 突破 sqlx 16 元组列限制。
 #[derive(sqlx::FromRow)]
 struct AccountListRow {
@@ -37,11 +150,6 @@ struct AccountListRow {
     reserve_amount: f64,
     strategy_version_id: Option<String>,
     leverage_cap: Option<f64>,
-    annual_return_pct: Option<f64>,
-    cumulative_return_pct: Option<f64>,
-    sharpe_ratio: Option<f64>,
-    sortino_ratio: Option<f64>,
-    calmar_ratio: Option<f64>,
 }
 
 // ── 请求体 ──────────────────────────────────────────────
@@ -156,18 +264,9 @@ pub async fn list_accounts(
                 COALESCE(pa.margin_amount,0)::double precision AS margin_amount,
                 COALESCE(pa.reserve_amount,0)::double precision AS reserve_amount,
                 pa.strategy_version_id,
-                sc.leverage_cap::double precision AS leverage_cap,
-                rp.annual_return_pct::double precision AS annual_return_pct,
-                rp.cumulative_return_pct::double precision AS cumulative_return_pct,
-                rp.sharpe_ratio::double precision AS sharpe_ratio,
-                rp.sortino_ratio::double precision AS sortino_ratio,
-                rp.calmar_ratio::double precision AS calmar_ratio
+                sc.leverage_cap::double precision AS leverage_cap
          FROM paper_account pa
          LEFT JOIN strategy_config sc ON sc.strategy_id = pa.strategy_version_id AND sc.status = 'active'
-         LEFT JOIN LATERAL (
-             SELECT annual_return_pct, cumulative_return_pct, sharpe_ratio, sortino_ratio, calmar_ratio
-             FROM paper_replay WHERE paper_account_id = pa.paper_account_id LIMIT 1
-         ) rp ON true
          WHERE {}
          ORDER BY pa.status ASC, pa.created_at DESC",
         where_sql
@@ -178,27 +277,29 @@ pub async fn list_accounts(
         .await
         .unwrap_or_default();
 
-    let list: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "account_id": r.paper_account_id, "account_type": r.account_type,
-                "name": r.name, "initial_capital": r.initial_capital,
-                "leverage_enabled": r.leverage_enabled, "leverage_mode": r.leverage_mode,
-                "leverage_multiplier": r.leverage_multiplier, "status": r.status,
-                "owner": r.user_id.unwrap_or_default(),
-                "current_nav": r.current_nav, "cash": r.cash, "max_drawdown": r.max_drawdown_pct,
-                "leverage_cap": r.leverage_cap,
-                "margin_amount": r.margin_amount, "reserve_amount": r.reserve_amount,
-                "strategy_version_id": r.strategy_version_id.unwrap_or_default(),
-                "annual_return_pct": r.annual_return_pct,
-                "cumulative_return_pct": r.cumulative_return_pct,
-                "sharpe_ratio": r.sharpe_ratio,
-                "sortino_ratio": r.sortino_ratio,
-                "calmar_ratio": r.calmar_ratio,
-            })
-        })
-        .collect();
+    // 绩效统一从 paper_nav_snapshot 实时算（唯一数据源 = 每日 NAV 累计）
+    let mut list: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let perf = compute_perf_from_nav(&state.db, &r.paper_account_id, r.initial_capital)
+            .await
+            .unwrap_or_else(NavPerf::empty);
+        list.push(serde_json::json!({
+            "account_id": r.paper_account_id, "account_type": r.account_type,
+            "name": r.name, "initial_capital": r.initial_capital,
+            "leverage_enabled": r.leverage_enabled, "leverage_mode": r.leverage_mode,
+            "leverage_multiplier": r.leverage_multiplier, "status": r.status,
+            "owner": r.user_id.unwrap_or_default(),
+            "current_nav": r.current_nav, "cash": r.cash, "max_drawdown": r.max_drawdown_pct,
+            "leverage_cap": r.leverage_cap,
+            "margin_amount": r.margin_amount, "reserve_amount": r.reserve_amount,
+            "strategy_version_id": r.strategy_version_id.unwrap_or_default(),
+            "annual_return_pct": perf.annual_return_pct,
+            "cumulative_return_pct": perf.cumulative_return_pct,
+            "sharpe_ratio": perf.sharpe_ratio,
+            "sortino_ratio": perf.sortino_ratio,
+            "calmar_ratio": perf.calmar_ratio,
+        }));
+    }
 
     Json(serde_json::json!({"code": 0, "data": list}))
 }
@@ -267,131 +368,22 @@ pub async fn account_detail(
         return Json(serde_json::json!({"code": 404, "message": "账号不存在"})).into_response();
     };
 
-    // 绩效指标：从 paper_nav_snapshot 计算
-    let metrics = sqlx::query_as::<_, (Option<f64>,)>(
-        "SELECT (nav / LAG(nav) OVER (ORDER BY snapshot_date) - 1.0)::double precision as daily_ret
-         FROM paper_nav_snapshot WHERE paper_account_id = $1 ORDER BY snapshot_date",
-    )
-    .bind(&account_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let returns: Vec<f64> = metrics.iter().filter_map(|(r,)| *r).collect();
-    let n = returns.len() as f64;
-    let annual_return = if n > 20.0 {
-        let mean_daily = returns.iter().sum::<f64>() / n;
-        let ann = (1.0 + mean_daily).powi(252) - 1.0;
-        (ann * 10000.0).round() / 100.0
-    } else {
-        0.0
-    };
-    let sharpe = if n > 1.0 {
-        let mean = returns.iter().sum::<f64>() / n;
-        let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        let daily_vol = var.sqrt();
-        let annual_vol = daily_vol * (252.0_f64).sqrt();
-        if annual_vol > 0.0 {
-            (annual_return / 100.0) / annual_vol
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-    let sortino = if n > 1.0 {
-        let down_var = returns
-            .iter()
-            .filter(|&&r| r < 0.0)
-            .map(|r| r.powi(2))
-            .sum::<f64>()
-            / n;
-        let down_vol = down_var.sqrt() * (252.0_f64).sqrt();
-        if down_vol > 0.0 {
-            (annual_return / 100.0) / down_vol
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-    let cum_ret = if cap > 0.0 {
-        (nav - cap) / cap * 100.0
-    } else {
-        0.0
-    };
-    let calmar = if let Some(m) = mdd {
-        if m > 0.01 {
-            annual_return / m
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-
-    // 如果快照无有效收益数据（回放产生的是聚合指标），从 paper_replay 读取
-    let mut yearly_returns_json: Option<serde_json::Value> = None;
-    let mut benchmarks_json: Option<serde_json::Value> = None;
-    let (annual_return, sharpe, sortino, cum_ret, calmar, mdd, replay_days) =
-        if annual_return == 0.0 && n > 1.0 {
-            // 检查是否有回放记录
-            let replay: Option<(
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-                Option<i32>,
-                Option<serde_json::Value>,
-                Option<serde_json::Value>,
-            )> = sqlx::query_as(
-                "SELECT annual_return_pct, cumulative_return_pct, sharpe_ratio, sortino_ratio,
-                 calmar_ratio, max_drawdown_pct, volatility_pct, trading_days,
-                 yearly_returns, benchmarks
-                 FROM paper_replay WHERE paper_account_id = $1 LIMIT 1",
-            )
-            .bind(&account_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
-            if let Some((ar, cr, sh, so, ca, md, _vol, td, yr, bm)) = replay {
-                yearly_returns_json = yr;
-                benchmarks_json = bm;
-                (
-                    ar.unwrap_or(0.0),
-                    sh.unwrap_or(0.0),
-                    so.unwrap_or(0.0),
-                    cr.unwrap_or(0.0),
-                    ca.unwrap_or(0.0),
-                    md,
-                    td.unwrap_or(0) as i64,
-                )
-            } else {
-                (
-                    annual_return,
-                    sharpe,
-                    sortino,
-                    cum_ret,
-                    calmar,
-                    mdd,
-                    n as i64,
-                )
-            }
-        } else {
-            (
-                annual_return,
-                sharpe,
-                sortino,
-                cum_ret,
-                calmar,
-                mdd,
-                n as i64,
-            )
-        };
+    // 绩效指标：统一从 paper_nav_snapshot 实时算（唯一数据源 = 每日 NAV 累计）。
+    // 模拟回放/每日调仓更新 NAV 后绩效自然变动，不再依赖 paper_replay 存死的聚合值。
+    let perf = compute_perf_from_nav(&state.db, &account_id, cap)
+        .await
+        .unwrap_or_else(NavPerf::empty);
+    let annual_return = perf.annual_return_pct.unwrap_or(0.0);
+    let sharpe = perf.sharpe_ratio.unwrap_or(0.0);
+    let sortino = perf.sortino_ratio.unwrap_or(0.0);
+    let cum_ret = perf.cumulative_return_pct.unwrap_or(0.0);
+    let calmar = perf.calmar_ratio.unwrap_or(0.0);
+    // 最大回撤：优先用从 NAV 序列实时算的值；无快照时回退账号字段
+    let mdd = perf.max_drawdown_pct.or(mdd);
+    let replay_days = perf.trading_days;
+    let yearly_returns_json = perf.yearly_returns;
+    // benchmarks 为另一套回放(paper.rs)的产物，v19/v21 回放本就未写入，保持 None
+    let benchmarks_json: Option<serde_json::Value> = None;
 
     // 当前持仓
     let positions: Vec<serde_json::Value> = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
