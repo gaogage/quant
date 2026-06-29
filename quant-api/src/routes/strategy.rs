@@ -172,7 +172,7 @@ pub async fn load_resolved_strategy(
     .bind(strategy_id)
     .fetch_optional(db)
     .await
-    .map_err(|e| format!("load main row: {}", e))?;
+    .map_err(|e| format!("load main row ({}): {}", strategy_id, e))?;
 
     let main = main.ok_or_else(|| format!("strategy not found: {}", strategy_id))?;
 
@@ -237,12 +237,12 @@ async fn load_asset_row(db: &PgPool, strategy_id: &str) -> Result<AssetStrategy,
         "SELECT strategy_id, asset_class, signal_source, combo_name, top_n,
                 prediction_set_id, prediction_blend_weight, score_direction, candidate_tier,
                 equity_curve_task_id, etf_symbols, default_weights, max_single, max_single_bull
-         FROM strategy_config WHERE strategy_id = $1",
+         FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)
     .fetch_optional(db)
     .await
-    .map_err(|e| format!("load asset row: {}", e))?;
+    .map_err(|e| format!("load asset row ({}): {}", strategy_id, e))?;
     let row = row.ok_or_else(|| format!("asset row not found: {}", strategy_id))?;
     build_asset_strategy(row)
 }
@@ -262,12 +262,13 @@ async fn load_child_asset_rows(
     .bind(parent_strategy_id)
     .fetch_all(db)
     .await
-    .map_err(|e| format!("load child assets: {}", e))?;
+    .map_err(|e| format!("load child assets ({}): {}", parent_strategy_id, e))?;
     rows.into_iter().map(build_asset_strategy).collect()
 }
 
 fn build_asset_strategy(row: AssetRow) -> Result<AssetStrategy, String> {
-    let asset_class = AssetClass::from_db(&row.asset_class)?;
+    let asset_class = AssetClass::from_db(&row.asset_class)
+        .map_err(|e| format!("asset {} ({}): {}", row.strategy_id, row.asset_class, e))?;
     Ok(AssetStrategy {
         strategy_id: row.strategy_id,
         asset_class,
@@ -285,7 +286,7 @@ fn build_asset_strategy(row: AssetRow) -> Result<AssetStrategy, String> {
             fixed_symbols: parse_str_array(&row.etf_symbols),
             default_weights: parse_f64_array(&row.default_weights),
             max_single: row.max_single.unwrap_or(0.75),
-            max_single_bull: row.max_single_bull.unwrap_or(0.75),
+            max_single_bull: row.max_single_bull.unwrap_or(0.80),
         },
     })
 }
