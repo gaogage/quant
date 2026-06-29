@@ -161,12 +161,35 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     // 8. 逐年收益
     let yearly = compute_yearly(&daily);
 
-    // 9. 更新账号最终状态
-    sqlx::query("UPDATE paper_account SET current_nav=$1,total_trades=$2,max_drawdown_pct=$3,updated_at=NOW() WHERE paper_account_id=$4")
-        .bind(Decimal::from_f64_retain(final_nav).unwrap_or(init_cap))
-        .bind(total_trades as i64).bind(max_dd * 100.0).bind(&account_id).execute(db).await.ok();
+    // 9. 更新账号最终状态 —— 用回放结果完整填充，使标题栏与绩效指标一致
+    let peak_nav_val = peak;
+    sqlx::query(
+        "UPDATE paper_account SET
+            current_nav=$1,
+            peak_nav=$2,
+            cash=0,
+            max_drawdown_pct=$3,
+            total_trades=$4,
+            updated_at=NOW()
+         WHERE paper_account_id=$5",
+    )
+    .bind(Decimal::from_f64_retain(final_nav).unwrap_or(init_cap))
+    .bind(Decimal::from_f64_retain(peak_nav_val).unwrap_or(init_cap))
+    .bind(max_dd * 100.0)
+    .bind(total_trades as i64)
+    .bind(&account_id)
+    .execute(db)
+    .await
+    .ok();
 
-    // 10. 写 paper_replay
+    // 10. 删除旧回放记录，确保每个账号只有一条回放
+    sqlx::query("DELETE FROM paper_replay WHERE paper_account_id = $1")
+        .bind(&account_id)
+        .execute(db)
+        .await
+        .ok();
+
+    // 11. 写 paper_replay
     let rid = format!(
         "rp-{}",
         uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
