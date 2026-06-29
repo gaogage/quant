@@ -205,6 +205,8 @@ pub struct StrategyConfig {
     pub prediction_set_id: Option<String>,
     #[serde(default = "default_dynamic_target_cap")]
     pub dynamic_target_cap: f64,
+    #[serde(default = "default_dynamic_target_floor")]
+    pub dynamic_target_floor: f64,
     #[serde(default = "default_score_direction")]
     pub score_direction: String,
     #[serde(default = "default_candidate_tier")]
@@ -226,6 +228,9 @@ fn default_top_n() -> i64 {
 fn default_dynamic_target_cap() -> f64 {
     0.30
 }
+fn default_dynamic_target_floor() -> f64 {
+    0.12
+}
 fn default_score_direction() -> String {
     "descending".into()
 }
@@ -235,37 +240,8 @@ fn default_candidate_tier() -> String {
 
 impl Default for StrategyConfig {
     fn default() -> Self {
-        Self {
-            strategy_id: "v19".into(),
-            name: "v19 (hardcoded fallback)".into(),
-            etf_symbols: vec![
-                "518880.SH".into(),
-                "511010.SH".into(),
-                "513500.SH".into(),
-                "513100.SH".into(),
-                "159980.SZ".into(),
-                "159985.SZ".into(),
-                "501018.SH".into(),
-            ],
-            equity_curve_task_id: "fbt-36e18e12-effc-40fe-9fc0-d539a336bf2e".into(),
-            min_stock: 0.12,
-            max_single: 0.75,
-            max_single_bull: 0.80,
-            momentum_blend_ratio: 0.5,
-            ga_population: 500,
-            ga_generations: 200,
-            vol_target: 0.20,
-            leverage_cap: 2.0,
-            default_weights: vec![0.12, 0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
-            signal_source: "prediction_blend".into(),
-            prediction_blend_weight: 0.5,
-            combo_name: "full_pit_icir_37f".into(),
-            top_n: 30,
-            prediction_set_id: None,
-            dynamic_target_cap: 0.30,
-            score_direction: "descending".into(),
-            candidate_tier: "research_baseline".into(),
-        }
+        // 策略配置必须从 strategy_config 表加载,不允许代码硬编码 fallback。
+        panic!("StrategyConfig::default() 被调用 — 策略配置必须从 DB 加载,检查 load_strategy_config 调用方");
     }
 }
 
@@ -397,6 +373,34 @@ async fn latest_market_level_trade_date(db: &PgPool, source: &str) -> Option<Nai
 mod tests {
     use super::*;
 
+    /// 测试用 StrategyConfig 字面量(显式构造,避免触发 panic 版 Default)。
+    fn test_strategy_config() -> StrategyConfig {
+        StrategyConfig {
+            strategy_id: "test".into(),
+            name: "test".into(),
+            etf_symbols: vec![],
+            equity_curve_task_id: String::new(),
+            min_stock: 0.0,
+            max_single: 0.0,
+            max_single_bull: 0.0,
+            momentum_blend_ratio: 0.0,
+            ga_population: 0,
+            ga_generations: 0,
+            vol_target: 0.0,
+            leverage_cap: 0.0,
+            default_weights: vec![],
+            signal_source: String::new(),
+            prediction_blend_weight: 0.0,
+            combo_name: String::new(),
+            top_n: 0,
+            prediction_set_id: None,
+            dynamic_target_cap: 0.0,
+            dynamic_target_floor: 0.0,
+            score_direction: String::new(),
+            candidate_tier: String::new(),
+        }
+    }
+
     #[test]
     fn normalize_cron_expr_accepts_existing_five_field_task_crons() {
         assert_eq!(normalize_cron_expr("0 9 * * 1-5"), "0 0 9 * * 1-5");
@@ -466,8 +470,11 @@ mod tests {
 
     #[test]
     fn pre_trade_factor_combo_uses_active_strategy_combo_not_price_volume_fallback() {
-        let mut strategy = StrategyConfig::default();
-        strategy.combo_name = "full_pit_icir_37f".to_string();
+        // StrategyConfig::default() 已改 panic(配置必须从 DB 加载),测试手工构造。
+        let strategy = StrategyConfig {
+            combo_name: "full_pit_icir_37f".to_string(),
+            ..test_strategy_config()
+        };
 
         assert_eq!(pre_trade_factor_combo(&strategy), "full_pit_icir_37f");
     }
@@ -483,9 +490,9 @@ mod tests {
     }
 }
 
-/// 从数据库加载活跃策略配置，失败时回退到硬编码默认值
+/// 从数据库加载活跃策略配置，失败时 panic（策略配置必须从 DB 加载，不允许硬编码 fallback）
 pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig {
-    match sqlx::query_as::<_, (serde_json::Value,)>(
+    let row: Option<(serde_json::Value,)> = sqlx::query_as::<_, (serde_json::Value,)>(
         "SELECT jsonb_build_object(
             'strategy_id', strategy_id,
             'name', name,
@@ -506,6 +513,7 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'top_n', top_n,
             'prediction_set_id', prediction_set_id,
             'dynamic_target_cap', dynamic_target_cap,
+            'dynamic_target_floor', dynamic_target_floor,
             'score_direction', score_direction,
             'candidate_tier', candidate_tier
         ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
@@ -513,20 +521,20 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
     .bind(strategy_id)
     .fetch_optional(db)
     .await
-    {
-        Ok(Some((row,))) => {
-            let cfg: StrategyConfig = serde_json::from_value(row).unwrap_or_default();
+    .ok()
+    .flatten();
+
+    match row {
+        Some((v,)) => {
+            let cfg: StrategyConfig = serde_json::from_value(v)
+                .unwrap_or_else(|e| panic!("策略配置 {} 反序列化失败: {}", strategy_id, e));
             info!("[scheduler] 策略配置加载: {} (DB)", cfg.strategy_id);
             cfg
         }
-        _ => {
-            let cfg = StrategyConfig::default();
-            warn!(
-                "[scheduler] 策略配置加载失败, 使用硬编码fallback: {}",
-                cfg.name
-            );
-            cfg
-        }
+        None => panic!(
+            "[scheduler] 策略配置加载失败 strategy_id={},strategy_config 表无此 active 记录",
+            strategy_id
+        ),
     }
 }
 
@@ -2254,7 +2262,7 @@ async fn generate_paper_signals_for_all(
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
     port: u16,
     date: NaiveDate,
-    sc: &StrategyConfig,
+    _sc: &StrategyConfig,
     tushare: &TushareClient,
 ) -> Result<(), String> {
     let accounts = sqlx::query_as::<_, (String, String, bool, f64, String, Option<String>)>(
@@ -2280,12 +2288,15 @@ async fn generate_paper_signals_for_all(
         let leverage_enabled = *leverage_enabled;
         let leverage_multiplier = *leverage_multiplier;
         let leverage_mode = leverage_mode.as_str();
-        // 账号挂策略(strategy_version_id) → 加载该策略配置；A股选股方式从策略读，不再挂账号
-        let acct_sc = load_strategy_config(
-            db,
-            strategy_version_id.as_deref().unwrap_or(&sc.strategy_id),
-        )
-        .await;
+        // 账号挂策略(strategy_version_id) → 加载该策略配置;无配置则跳过
+        let strategy_version_id = match strategy_version_id.as_deref() {
+            Some(s) => s,
+            None => {
+                warn!("[paper] 账号 {} 未配置 strategy_version_id,跳过", account_id);
+                continue;
+            }
+        };
+        let acct_sc = load_strategy_config(db, strategy_version_id).await;
         let sc = &acct_sc;
         let signal_source = sc.signal_source.as_str();
         info!(
