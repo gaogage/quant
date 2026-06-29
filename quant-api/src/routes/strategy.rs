@@ -37,8 +37,8 @@ pub struct MvoParams {
     pub ga_elite_count: usize,
     pub regime_bull_threshold: f64,
     pub regime_bear_threshold: f64,
-    pub regime_bull_min_stock: i64,
-    pub regime_bear_min_stock: i64,
+    pub regime_bull_min_stock: f64,
+    pub regime_bear_min_stock: f64,
     pub dynamic_target_cap: f64,
     pub dynamic_target_floor: f64,
     pub risk_free_rate: f64,
@@ -104,13 +104,13 @@ struct CompositeRow {
     default_weights: Option<serde_json::Value>,
     min_stock: Option<f64>,
     momentum_blend_ratio: Option<f64>,
-    ga_population: Option<i64>,
-    ga_generations: Option<i64>,
-    ga_elite_count: Option<i64>,
+    ga_population: Option<i32>,
+    ga_generations: Option<i32>,
+    ga_elite_count: Option<i32>,
     regime_bull_threshold: Option<f64>,
     regime_bear_threshold: Option<f64>,
-    regime_bull_min_stock: Option<i64>,
-    regime_bear_min_stock: Option<i64>,
+    regime_bull_min_stock: Option<f64>,
+    regime_bear_min_stock: Option<f64>,
     dynamic_target_cap: Option<f64>,
     dynamic_target_floor: Option<f64>,
     risk_free_rate: Option<f64>,
@@ -123,7 +123,7 @@ struct AssetRow {
     asset_class: String,
     signal_source: Option<String>,
     combo_name: Option<String>,
-    top_n: Option<i64>,
+    top_n: Option<i32>,
     prediction_set_id: Option<String>,
     prediction_blend_weight: Option<f64>,
     score_direction: Option<String>,
@@ -213,8 +213,8 @@ pub async fn load_resolved_strategy(
                 ga_elite_count: main.ga_elite_count.unwrap_or(10) as usize,
                 regime_bull_threshold: main.regime_bull_threshold.unwrap_or(0.0),
                 regime_bear_threshold: main.regime_bear_threshold.unwrap_or(0.0),
-                regime_bull_min_stock: main.regime_bull_min_stock.unwrap_or(0),
-                regime_bear_min_stock: main.regime_bear_min_stock.unwrap_or(0),
+                regime_bull_min_stock: main.regime_bull_min_stock.unwrap_or(0.0),
+                regime_bear_min_stock: main.regime_bear_min_stock.unwrap_or(0.0),
                 dynamic_target_cap: main.dynamic_target_cap.unwrap_or(0.30),
                 dynamic_target_floor: main.dynamic_target_floor.unwrap_or(0.12),
                 risk_free_rate: main.risk_free_rate.unwrap_or(0.03),
@@ -274,11 +274,13 @@ fn build_asset_strategy(row: AssetRow) -> Result<AssetStrategy, String> {
         security: SecurityConfig {
             signal_source: row.signal_source.unwrap_or_else(|| "fixed".into()),
             combo_name: row.combo_name.unwrap_or_default(),
-            top_n: row.top_n.unwrap_or(30),
+            top_n: row.top_n.unwrap_or(30) as i64,
             prediction_set_id: row.prediction_set_id,
             prediction_blend_weight: row.prediction_blend_weight.unwrap_or(0.5),
             score_direction: row.score_direction.unwrap_or_else(|| "descending".into()),
-            candidate_tier: row.candidate_tier.unwrap_or_else(|| "research_baseline".into()),
+            candidate_tier: row
+                .candidate_tier
+                .unwrap_or_else(|| "research_baseline".into()),
             equity_curve_task_id: row.equity_curve_task_id,
             fixed_symbols: parse_str_array(&row.etf_symbols),
             default_weights: parse_f64_array(&row.default_weights),
@@ -324,8 +326,8 @@ mod tests {
                 ga_elite_count: 10,
                 regime_bull_threshold: 0.0,
                 regime_bear_threshold: 0.0,
-                regime_bull_min_stock: 0,
-                regime_bear_min_stock: 0,
+                regime_bull_min_stock: 0.0,
+                regime_bear_min_stock: 0.0,
                 dynamic_target_cap: 0.30,
                 dynamic_target_floor: 0.12,
                 risk_free_rate: 0.03,
@@ -353,7 +355,10 @@ mod tests {
         assert_eq!(mvo.default_weights.len(), 7, "7维 ETF 权重");
         assert_eq!(rs.assets.len(), 4, "v19 有 4 个 asset 子行");
         // a_share asset 必须有 equity_curve_task_id
-        let a_share = rs.assets.iter().find(|a| a.asset_class == AssetClass::AShare);
+        let a_share = rs
+            .assets
+            .iter()
+            .find(|a| a.asset_class == AssetClass::AShare);
         assert!(a_share.is_some(), "必有 a_share asset");
         assert!(a_share.unwrap().security.equity_curve_task_id.is_some());
     }
