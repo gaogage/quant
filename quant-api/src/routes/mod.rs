@@ -12,6 +12,7 @@ pub mod optimization;
 pub mod paper;
 pub mod paper_v19_replay;
 pub mod portfolio;
+pub mod rebalance;
 pub mod scheduler;
 pub mod strategies;
 pub mod sync;
