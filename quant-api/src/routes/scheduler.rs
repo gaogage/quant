@@ -67,7 +67,7 @@ async fn first_open_trade_date_on_or_after(
 
 /// 盘中调仓时获取 ETF 当日实时价格（通过 Tushare fund_daily API）
 /// 若 Tushare 尚未有当日数据（T+1限制），回退到昨日收盘价。
-async fn fetch_intraday_etf_prices(
+pub(crate) async fn fetch_intraday_etf_prices(
     tushare: &TushareClient,
     etf_symbols: &[String],
     today: chrono::NaiveDate,
@@ -2589,7 +2589,7 @@ async fn generate_paper_signals_for_all(
 
 /// 波动率目标杠杆：根据 trailing 60日组合NAV变化计算波动率，动态调整杠杆。
 /// 目标年化波动率 20%，杠杆 = 20% / trailing_vol，clamp [0.5, 2.0]。
-async fn compute_vol_target_leverage(db: &PgPool, account_id: &str, sc: &StrategyConfig) -> f64 {
+pub(crate) async fn compute_vol_target_leverage(db: &PgPool, account_id: &str, sc: &StrategyConfig) -> f64 {
     let target_vol = sc.vol_target;
     let rows = sqlx::query_as::<_, (rust_decimal::Decimal,)>(
         "SELECT nav FROM paper_nav_snapshot
@@ -3068,7 +3068,7 @@ async fn apply_etf_trend_filter(
 /// LW-MVO 自动发现权重：Ledoit-Wolf shrinkage + Grid Search 季度调仓。
 /// 返回 (a_share, gold, bond, sp500, nasdaq) 权重（和为 1.0）。
 /// ETF 从实际有数据的日期开始纳入 MVO 计算。
-async fn compute_lw_mvo_weights(
+pub(crate) async fn compute_lw_mvo_weights(
     db: &PgPool,
     date: NaiveDate,
     cache: &Mutex<Option<MvoWeightCache>>,
