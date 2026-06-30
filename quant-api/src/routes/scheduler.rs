@@ -19,6 +19,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+use crate::routes::strategy::{AssetClass, ResolvedStrategy};
+
 /// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
 async fn get_latest_data_version(db: &PgPool) -> String {
     let row: Option<(String,)> = sqlx::query_as(
@@ -487,6 +489,208 @@ mod tests {
         assert!(!is_a_share_symbol("513500.SH"));
         assert!(!is_a_share_symbol("AAPL.US"));
     }
+
+    #[test]
+    fn test_resolved_to_legacy_sc_mapping() {
+        use crate::routes::strategy::{
+            AssetClass, AssetStrategy, MvoParams, ResolvedStrategy, SecurityConfig, StrategyType,
+        };
+        let rs = ResolvedStrategy {
+            strategy_id: "v19".into(),
+            name: "v19策略".into(),
+            strategy_type: StrategyType::Composite,
+            mvo: Some(MvoParams {
+                vol_target: 0.2,
+                leverage_cap: 2.5,
+                leverage_floor: 1.0,
+                default_weights: vec![0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
+                min_stock: 0.12,
+                momentum_blend_ratio: 0.5,
+                ga_population: 600,
+                ga_generations: 250,
+                ga_elite_count: 10,
+                regime_bull_threshold: 0.0,
+                regime_bear_threshold: 0.0,
+                regime_bull_min_stock: 0.0,
+                regime_bear_min_stock: 0.0,
+                dynamic_target_cap: 0.30,
+                dynamic_target_floor: 0.12,
+                risk_free_rate: 0.03,
+                grid_step: 0.0,
+            }),
+            assets: vec![
+                AssetStrategy {
+                    strategy_id: "v19-commodity".into(),
+                    asset_class: AssetClass::Commodity,
+                    security: SecurityConfig {
+                        signal_source: "fixed".into(),
+                        combo_name: String::new(),
+                        top_n: 30,
+                        prediction_set_id: None,
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "research_baseline".into(),
+                        equity_curve_task_id: None,
+                        fixed_symbols: vec![
+                            "518880.SH".into(),
+                            "159980.SZ".into(),
+                            "501018.SH".into(),
+                            "159985.SZ".into(),
+                        ],
+                        default_weights: vec![0.22, 0.03, 0.03, 0.03],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+                AssetStrategy {
+                    strategy_id: "v19-bond".into(),
+                    asset_class: AssetClass::Bond,
+                    security: SecurityConfig {
+                        signal_source: "fixed".into(),
+                        combo_name: String::new(),
+                        top_n: 30,
+                        prediction_set_id: None,
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "research_baseline".into(),
+                        equity_curve_task_id: None,
+                        fixed_symbols: vec!["511010.SH".into()],
+                        default_weights: vec![0.28],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+                AssetStrategy {
+                    strategy_id: "v19-us_stock".into(),
+                    asset_class: AssetClass::UsStock,
+                    security: SecurityConfig {
+                        signal_source: "fixed".into(),
+                        combo_name: String::new(),
+                        top_n: 30,
+                        prediction_set_id: None,
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "research_baseline".into(),
+                        equity_curve_task_id: None,
+                        fixed_symbols: vec!["513500.SH".into(), "513100.SH".into()],
+                        default_weights: vec![0.05, 0.10],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+                AssetStrategy {
+                    strategy_id: "v19-a_share".into(),
+                    asset_class: AssetClass::AShare,
+                    security: SecurityConfig {
+                        signal_source: "prediction_blend".into(),
+                        combo_name: "full_pit_icir_37f".into(),
+                        top_n: 30,
+                        prediction_set_id: Some("ps-1".into()),
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "professional_observation".into(),
+                        equity_curve_task_id: Some("fbt-ab3eecf6".into()),
+                        fixed_symbols: vec![],
+                        default_weights: vec![],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+            ],
+            // etf_symbols 取 MVO 标准顺序(composite 行加载的值)
+            etf_symbols: vec![
+                "518880.SH".into(),
+                "511010.SH".into(),
+                "513500.SH".into(),
+                "513100.SH".into(),
+                "159980.SZ".into(),
+                "159985.SZ".into(),
+                "501018.SH".into(),
+            ],
+            rebalance_freq: "quarterly".into(),
+        };
+        let sc = resolved_to_legacy_sc(&rs);
+        // MVO 参数映射
+        assert!((sc.min_stock - 0.12).abs() < 1e-9, "min_stock 映射");
+        assert!((sc.vol_target - 0.2).abs() < 1e-9, "vol_target 映射");
+        assert!((sc.leverage_cap - 2.5).abs() < 1e-9, "leverage_cap 映射");
+        assert_eq!(
+            sc.default_weights,
+            vec![0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
+            "default_weights 映射"
+        );
+        // a_share 取参
+        assert_eq!(
+            sc.equity_curve_task_id, "fbt-ab3eecf6",
+            "equity_curve_task_id 取自 a_share"
+        );
+        assert_eq!(sc.signal_source, "prediction_blend", "signal_source 取自 a_share");
+        assert_eq!(sc.combo_name, "full_pit_icir_37f", "combo_name 取自 a_share");
+        assert_eq!(
+            sc.candidate_tier, "professional_observation",
+            "candidate_tier 取自 a_share"
+        );
+        assert!((sc.max_single - 0.75).abs() < 1e-9, "max_single 取自 a_share");
+        assert!((sc.max_single_bull - 0.80).abs() < 1e-9, "max_single_bull 取自 a_share");
+        // etf_symbols 保持 MVO 标准顺序(黄金/国债/标普/纳指/有色/豆粕/原油)
+        assert_eq!(
+            sc.etf_symbols,
+            vec![
+                "518880.SH", "511010.SH", "513500.SH", "513100.SH",
+                "159980.SZ", "159985.SZ", "501018.SH"
+            ],
+            "etf_symbols 保持 MVO 标准顺序"
+        );
+    }
+}
+
+/// 反向桥接:ResolvedStrategy 树 → 平铺 StrategyConfig。
+/// 三个 MVO 函数(compute_lw_mvo_weights/compute_mvo_weights_for_date/compute_vol_target_leverage)
+/// 本轮不改签名仍接 &StrategyConfig,rebalance_account 接 &ResolvedStrategy 后调此函数得到临时视图传入。
+pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> StrategyConfig {
+    let mvo = rs.mvo.as_ref();
+    let a_share = rs.assets.iter().find(|a| a.asset_class == AssetClass::AShare);
+    StrategyConfig {
+        strategy_id: rs.strategy_id.clone(),
+        name: rs.name.clone(),
+        etf_symbols: rs_to_legacy_etf_symbols(rs),
+        equity_curve_task_id: a_share
+            .and_then(|a| a.security.equity_curve_task_id.clone())
+            .unwrap_or_default(),
+        min_stock: mvo.map(|m| m.min_stock).unwrap_or(0.12),
+        max_single: a_share.map(|a| a.security.max_single).unwrap_or(0.75),
+        max_single_bull: a_share.map(|a| a.security.max_single_bull).unwrap_or(0.80),
+        momentum_blend_ratio: mvo.map(|m| m.momentum_blend_ratio).unwrap_or(0.5),
+        ga_population: mvo.map(|m| m.ga_population).unwrap_or(600),
+        ga_generations: mvo.map(|m| m.ga_generations).unwrap_or(250),
+        vol_target: mvo.map(|m| m.vol_target).unwrap_or(0.2),
+        leverage_cap: mvo.map(|m| m.leverage_cap).unwrap_or(2.5),
+        default_weights: mvo.map(|m| m.default_weights.clone()).unwrap_or_default(),
+        signal_source: a_share
+            .map(|a| a.security.signal_source.clone())
+            .unwrap_or_else(|| "fixed".into()),
+        prediction_blend_weight: a_share
+            .map(|a| a.security.prediction_blend_weight)
+            .unwrap_or(0.5),
+        combo_name: a_share.map(|a| a.security.combo_name.clone()).unwrap_or_default(),
+        top_n: a_share.map(|a| a.security.top_n).unwrap_or(30),
+        prediction_set_id: a_share.and_then(|a| a.security.prediction_set_id.clone()),
+        dynamic_target_cap: mvo.map(|m| m.dynamic_target_cap).unwrap_or(0.30),
+        dynamic_target_floor: mvo.map(|m| m.dynamic_target_floor).unwrap_or(0.12),
+        score_direction: a_share
+            .map(|a| a.security.score_direction.clone())
+            .unwrap_or_else(|| "descending".into()),
+        candidate_tier: a_share
+            .map(|a| a.security.candidate_tier.clone())
+            .unwrap_or_else(|| "research_baseline".into()),
+    }
+}
+
+/// 从 ResolvedStrategy 提取 MVO 标准顺序的 7 ETF 列表(MVO 8 维权重的第 1-7 列)。
+/// 顺序:[黄金,国债,标普,纳指,有色,豆粕,原油]。
+/// ResolvedStrategy.etf_symbols 已在 load 时从 composite 行加载(正确 MVO 顺序),直接 clone。
+pub(crate) fn rs_to_legacy_etf_symbols(rs: &ResolvedStrategy) -> Vec<String> {
+    rs.etf_symbols.clone()
 }
 
 /// 从数据库加载活跃策略配置，失败时 panic（策略配置必须从 DB 加载，不允许硬编码 fallback）
@@ -2291,7 +2495,10 @@ async fn generate_paper_signals_for_all(
         let strategy_version_id = match strategy_version_id.as_deref() {
             Some(s) => s,
             None => {
-                warn!("[paper] 账号 {} 未配置 strategy_version_id,跳过", account_id);
+                warn!(
+                    "[paper] 账号 {} 未配置 strategy_version_id,跳过",
+                    account_id
+                );
                 continue;
             }
         };
@@ -2599,7 +2806,11 @@ async fn generate_paper_signals_for_all(
 
 /// 波动率目标杠杆：根据 trailing 60日组合NAV变化计算波动率，动态调整杠杆。
 /// 目标年化波动率 20%，杠杆 = 20% / trailing_vol，clamp [0.5, 2.0]。
-pub(crate) async fn compute_vol_target_leverage(db: &PgPool, account_id: &str, sc: &StrategyConfig) -> f64 {
+pub(crate) async fn compute_vol_target_leverage(
+    db: &PgPool,
+    account_id: &str,
+    sc: &StrategyConfig,
+) -> f64 {
     let target_vol = sc.vol_target;
     let rows = sqlx::query_as::<_, (rust_decimal::Decimal,)>(
         "SELECT nav FROM paper_nav_snapshot
@@ -2663,10 +2874,17 @@ async fn sync_positions_from_backtest(
     // NAV 由 rebalance_account 末尾的 update_current_nav 统一重算(正确口径:持仓市值+cash-margin)。
     // 旧的手写 NAV SQL(cash=initial_capital-SUM(...),忽略 margin)已删除。
     crate::routes::rebalance::rebalance_account(
-        db, account_id, sc, date, task_id,
+        db,
+        account_id,
+        sc,
+        date,
+        task_id,
         crate::routes::rebalance::PriceSource::Intraday,
-        mvo_cache, tushare,
-        leverage_enabled, leverage_multiplier, leverage_mode,
+        mvo_cache,
+        tushare,
+        leverage_enabled,
+        leverage_multiplier,
+        leverage_mode,
     )
     .await
 }
