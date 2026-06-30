@@ -1,7 +1,7 @@
 //! 共享建仓模块 —— 回放与实盘走同一套选股→建仓→盯市链路。
 //! 唯一差异:价格源(PriceSource)。选股统一为"读某 task_id 的 backtest_position 当日截面"
 //! (实盘 task_id 由 generate_paper_signals_for_all 的 run-factor 产生并传入,
-//!  回放 task_id 用 sc.equity_curve_task_id)。
+//!  回放 task_id 用 rs 的 a_share equity_curve_task_id 由调用方传入)。
 //!
 //! NAV 恒等式:current_nav = 持仓市值 + cash - margin_amount(经 trading::update_current_nav)
 //!
@@ -36,7 +36,7 @@ pub struct Position {
 }
 
 /// 统一选股:读指定 task_id 的 backtest_position 当日截面。
-/// task_id 来源:实盘=run-factor 产生;回放=sc.equity_curve_task_id。
+/// task_id 来源:实盘=run-factor 当日产生;回放=rs 的 a_share asset equity_curve_task_id(调用方传入)。
 pub async fn select_positions(
     db: &PgPool,
     task_id: &str,
@@ -68,9 +68,10 @@ pub async fn select_positions(
 
 use crate::routes::scheduler::{
     a_share_trade_block_reason, compute_lw_mvo_weights, compute_vol_target_leverage,
-    detect_regime_exposure, fetch_intraday_etf_prices, send_quality_alert, MvoWeightCache,
-    StrategyConfig,
+    detect_regime_exposure, fetch_intraday_etf_prices, resolved_to_legacy_sc,
+    send_quality_alert, MvoWeightCache, StrategyConfig,
 };
+use crate::routes::strategy::ResolvedStrategy;
 use crate::routes::trading::{execute_simulated_trade, try_auto_repay, update_current_nav};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -86,12 +87,12 @@ fn short_id() -> String {
 
 /// 共享建仓:回放(EodClose)/实盘(Intraday)走同一套资金→权重→体制→杠杆→维保→建仓→NAV。
 /// 目标持仓驱动增量调仓:读当前持仓,算 delta(买不足/卖多余/清不在目标集的),经 trading 落计划+实际交易记录(含滑点)。
-/// task_id:实盘=run-factor 产生;回放=sc.equity_curve_task_id。
+/// task_id:实盘=run-factor 当日产生;回放=rs 的 a_share asset equity_curve_task_id(由调用方传入)。
 /// 返回建仓笔数。
 pub async fn rebalance_account(
     db: &PgPool,
     account_id: &str,
-    sc: &StrategyConfig,
+    rs: &ResolvedStrategy,
     date: NaiveDate,
     task_id: &str,
     price_source: PriceSource,
@@ -101,6 +102,9 @@ pub async fn rebalance_account(
     leverage_multiplier: f64,
     leverage_mode: &str,
 ) -> Result<usize, String> {
+    // 桥接:ResolvedStrategy → 平铺 StrategyConfig(MVO 函数/sc_slippage_pct 仍接 &StrategyConfig)。
+    // task_id 保留参数:实盘由调用方传 run-factor 当日 task;回放传 rs 的 a_share equity_curve_task_id。
+    let sc = resolved_to_legacy_sc(rs);
     // 1. 资金基准:统一用 current_nav(非 initial_capital);NULL 则降级 initial_capital
     let current_nav: Decimal = sqlx::query_scalar(
         "SELECT COALESCE(current_nav, initial_capital) FROM paper_account WHERE paper_account_id = $1",
@@ -439,12 +443,11 @@ async fn apply_fill_to_position(
         .execute(db)
         .await;
         // qty 归零的行删除(保持持仓表干净)
-        let _ = sqlx::query(
-            "DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0",
-        )
-        .bind(account_id)
-        .execute(db)
-        .await;
+        let _ =
+            sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
+                .bind(account_id)
+                .execute(db)
+                .await;
         // 资金回流:cash += fill_amount(末尾 try_auto_repay 会把超出 reserve 的部分还给 margin)
         let _ = sqlx::query(
             "UPDATE paper_account SET cash = COALESCE(cash,0) + $2 WHERE paper_account_id = $1",
@@ -466,13 +469,41 @@ fn build_etf_allocations(
     regime: f64,
 ) -> Vec<(&'static str, &'static str, f64)> {
     let mut v = vec![
-        ("518880.SH", "黄金ETF", mvo_weights.get(1).copied().unwrap_or(0.0) * regime),
-        ("511010.SH", "国债ETF", mvo_weights.get(2).copied().unwrap_or(0.0) * regime),
-        ("513500.SH", "标普500", mvo_weights.get(3).copied().unwrap_or(0.0) * regime),
-        ("513100.SH", "纳指ETF", mvo_weights.get(4).copied().unwrap_or(0.0) * regime),
-        ("159980.SZ", "有色ETF", mvo_weights.get(5).copied().unwrap_or(0.03) * regime),
-        ("159985.SZ", "豆粕ETF", mvo_weights.get(6).copied().unwrap_or(0.03) * regime),
-        ("501018.SH", "原油LOF", mvo_weights.get(7).copied().unwrap_or(0.02) * regime),
+        (
+            "518880.SH",
+            "黄金ETF",
+            mvo_weights.get(1).copied().unwrap_or(0.0) * regime,
+        ),
+        (
+            "511010.SH",
+            "国债ETF",
+            mvo_weights.get(2).copied().unwrap_or(0.0) * regime,
+        ),
+        (
+            "513500.SH",
+            "标普500",
+            mvo_weights.get(3).copied().unwrap_or(0.0) * regime,
+        ),
+        (
+            "513100.SH",
+            "纳指ETF",
+            mvo_weights.get(4).copied().unwrap_or(0.0) * regime,
+        ),
+        (
+            "159980.SZ",
+            "有色ETF",
+            mvo_weights.get(5).copied().unwrap_or(0.03) * regime,
+        ),
+        (
+            "159985.SZ",
+            "豆粕ETF",
+            mvo_weights.get(6).copied().unwrap_or(0.03) * regime,
+        ),
+        (
+            "501018.SH",
+            "原油LOF",
+            mvo_weights.get(7).copied().unwrap_or(0.02) * regime,
+        ),
     ];
     if 1.0 - regime > 0.01 {
         v.push(("511880.SH", "银华日利(现金)", 1.0 - regime));

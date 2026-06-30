@@ -2502,12 +2502,28 @@ async fn generate_paper_signals_for_all(
                 continue;
             }
         };
-        let acct_sc = load_strategy_config(db, strategy_version_id).await;
-        let sc = &acct_sc;
-        let signal_source = sc.signal_source.as_str();
+        let rs = match crate::routes::strategy::load_resolved_strategy(db, strategy_version_id)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("[paper] {} 策略加载失败,跳过: {}", account_id, e);
+                continue;
+            }
+        };
+        // 桥接出平铺 StrategyConfig 视图:run-factor body 取参(combo_name/top_n 等)继续用 sc。
+        // 传给 sync_positions_from_backtest 时传 &rs(不再传 &sc)。
+        let sc = resolved_to_legacy_sc(&rs);
+        let a_share = rs
+            .assets
+            .iter()
+            .find(|a| a.asset_class == AssetClass::AShare);
+        let signal_source = a_share
+            .map(|a| a.security.signal_source.as_str())
+            .unwrap_or("fixed");
         info!(
             "[paper] {} ({}) strategy={} leverage={}x mode={} signal={}",
-            name, account_id, sc.strategy_id, leverage_multiplier, leverage_mode, signal_source
+            name, account_id, rs.strategy_id, leverage_multiplier, leverage_mode, signal_source
         );
 
         // 检查今日是否已有交易
@@ -2789,7 +2805,7 @@ async fn generate_paper_signals_for_all(
             &task_id,
             mvo_cache,
             date,
-            sc,
+            &rs,
             tushare,
             leverage_enabled,
             leverage_multiplier,
@@ -2864,7 +2880,7 @@ async fn sync_positions_from_backtest(
     task_id: &str,
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
     date: NaiveDate,
-    sc: &StrategyConfig,
+    rs: &ResolvedStrategy,
     tushare: &TushareClient,
     leverage_enabled: bool,
     leverage_multiplier: f64,
@@ -2876,7 +2892,7 @@ async fn sync_positions_from_backtest(
     crate::routes::rebalance::rebalance_account(
         db,
         account_id,
-        sc,
+        rs,
         date,
         task_id,
         crate::routes::rebalance::PriceSource::Intraday,
