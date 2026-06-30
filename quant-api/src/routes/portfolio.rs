@@ -1652,6 +1652,8 @@ pub struct MvoSimulateRequest {
     /// 杠杆倍率 (fixed模式, 默认1.0)
     #[serde(default = "mvo_sim_default_leverage_mult")]
     pub leverage_multiplier: f64,
+    /// 在线模拟绑定的 paper_account_id（必传，杠杆属性从该账号读）
+    pub paper_account_id: String,
 }
 
 fn mvo_sim_default_etfs() -> Vec<String> {
@@ -1698,16 +1700,29 @@ async fn run_mvo_simulate(
     task_id: &str,
     req: &MvoSimulateRequest,
 ) -> Result<Value, String> {
-    // 统一到共享 v19 核心：权重来自 scheduler::compute_mvo_weights_for_date（真 v19 GA），
-    // 不再用已被 ROADMAP 判定为负优化的 sortino-max / MA200趋势 / 体制25-35% 逻辑。
+    // 统一到共享 v19 核心：权重来自真 v19 GA（compute_mvo_weights_for_date），
+    // 经 run_daily_simulation 盯市复利，与回放/实盘同口径。
     let task_id = task_id.trim();
+    let account_id = req.paper_account_id.trim();
+    if account_id.is_empty() {
+        return Err("在线模拟必传 paper_account_id".into());
+    }
 
     // 以 v19 策略配置为基底，用传入的回测曲线作为 A 股权益源。
     // ETF 阵容固定用 v19 的 7 资产（统一到真 v19，不受请求默认 4-ETF 影响）。
-    let mut sc = crate::routes::scheduler::load_strategy_config(db, "v19").await;
-    sc.equity_curve_task_id = task_id.to_string();
+    let mut rs = crate::routes::strategy::load_resolved_strategy(db, "v19")
+        .await
+        .map_err(|e| format!("load strategy: {}", e))?;
+    // 用传入 task_id 覆盖 a_share asset 的 equity_curve_task_id（在线模拟用请求的回测曲线）
+    if let Some(a) = rs
+        .assets
+        .iter_mut()
+        .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare)
+    {
+        a.security.equity_curve_task_id = Some(task_id.to_string());
+    }
 
-    // 曲线日期范围
+    // 曲线日期范围（从 a_share asset 的 equity_curve_task_id 取）
     let (first_d, last_d): (NaiveDate, NaiveDate) = sqlx::query_as(
         "SELECT MIN(trade_date), MAX(trade_date) FROM backtest_equity_curve WHERE task_id = $1",
     )
@@ -1716,75 +1731,48 @@ async fn run_mvo_simulate(
     .await
     .map_err(|e| format!("加载权益曲线失败: {e}"))?;
 
-    let lev_enabled = req.leverage_mode == "vol_target" || req.leverage_multiplier > 1.0;
+    // 杠杆属性从账号读（列名 leverage_*）
+    let (lev_enabled, lev_mult, lev_mode): (bool, f64, String) = sqlx::query_as(
+        "SELECT COALESCE(leverage_enabled,false), COALESCE(leverage_multiplier,1.0), COALESCE(leverage_mode,'fixed')
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("query account: {e}"))?
+    .unwrap_or((false, 1.0, "fixed".into()));
 
-    // 共享核心逐日模拟（含 regime 降仓 + vol_target/fixed 杠杆）
-    let (daily, _) = crate::routes::mvo_engine::simulate_v19_daily_returns(
+    // 共享逐日模拟（reset=false，EodClose）——在线模拟不清表
+    let tushare = quant_data::tushare::client::TushareClient::from_env()
+        .map_err(|e| format!("tushare: {}", e))?;
+    let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+        None::<crate::routes::scheduler::MvoWeightCache>,
+    ));
+    let navs = crate::routes::mvo_engine::run_daily_simulation(
         db,
-        &sc,
+        account_id,
+        &rs,
         first_d,
         last_d,
+        crate::routes::rebalance::PriceSource::EodClose,
+        &cache,
+        &tushare,
+        false, // 在线模拟 reset=false
         lev_enabled,
-        req.leverage_multiplier,
-        &req.leverage_mode,
-        None,
-        None,
+        lev_mult,
+        &lev_mode,
     )
     .await?;
-    if daily.len() < 252 {
+    if navs.len() < 252 {
         return Err("回测数据不足（需至少 1 年）".into());
     }
 
-    let mvo_rets: Vec<f64> = daily.iter().map(|d| d.net_return).collect();
-    let gross_rets: Vec<f64> = daily.iter().map(|d| d.gross_return).collect();
+    // 单序列绩效（基于 navs 的 net_return）——废弃 mvo_gross/a_share_only 对比口径
+    let net_rets: Vec<f64> = navs.iter().map(|d| d.net_return).collect();
+    let m = crate::routes::mvo_engine::compute_metrics(&net_rets);
 
-    // 纯 A 股日收益（对照基准）
-    let a_eq = sqlx::query_as::<_, (NaiveDate, Decimal)>(
-        "SELECT trade_date, portfolio_value FROM backtest_equity_curve WHERE task_id = $1 ORDER BY trade_date",
-    )
-    .bind(task_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
-    let a_navs: Vec<f64> = a_eq
-        .iter()
-        .map(|(_, v)| v.to_string().parse::<f64>().unwrap_or(0.0))
-        .filter(|v| *v > 0.0)
-        .collect();
-    let mut a_rets: Vec<f64> = Vec::new();
-    for i in 1..a_navs.len() {
-        if a_navs[i - 1] > 0.0 {
-            let r = a_navs[i] / a_navs[i - 1] - 1.0;
-            if r.abs() <= 0.5 {
-                a_rets.push(r);
-            }
-        }
-    }
-
-    let mvo_m = crate::routes::mvo_engine::compute_metrics(&mvo_rets);
-    let gross_m = crate::routes::mvo_engine::compute_metrics(&gross_rets);
-    let a_m = crate::routes::mvo_engine::compute_metrics(&a_rets);
-
-    // 逐年收益（基于 MVO 杠杆后日收益）
-    let mut yearly: Vec<Value> = Vec::new();
-    {
-        let mut cur_year = 0i32;
-        let mut yr_nav = 1.0f64;
-        for d in &daily {
-            let y = d.date.year();
-            if y != cur_year {
-                if cur_year != 0 {
-                    yearly.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
-                }
-                cur_year = y;
-                yr_nav = 1.0;
-            }
-            yr_nav *= 1.0 + d.net_return;
-        }
-        if cur_year != 0 {
-            yearly.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
-        }
-    }
+    // 逐年收益（内联本地实现，避免跨模块调私有 fn）
+    let yearly = compute_yearly_from_navs(&navs);
 
     let metrics_json = |m: &crate::routes::mvo_engine::Metrics| {
         json!({
@@ -1802,6 +1790,7 @@ async fn run_mvo_simulate(
 
     Ok(json!({
         "backtest_task_id": task_id,
+        "paper_account_id": account_id,
         "date_range": {
             "full_start": first_d.format("%Y-%m-%d").to_string(),
             "full_end": last_d.format("%Y-%m-%d").to_string(),
@@ -1809,16 +1798,39 @@ async fn run_mvo_simulate(
         },
         "config": {
             "engine": "v19_shared_core",
-            "etf_symbols": sc.etf_symbols,
-            "n_assets": 1 + sc.etf_symbols.len(),
-            "leverage_mode": req.leverage_mode,
-            "leverage_multiplier": req.leverage_multiplier,
+            "etf_symbols": rs.etf_symbols,
+            "n_assets": 1 + rs.etf_symbols.len(),
+            "strategy_id": rs.strategy_id,
+            "leverage_mode": lev_mode,
+            "leverage_multiplier": lev_mult,
+            "leverage_enabled": lev_enabled,
         },
-        "a_share_only": metrics_json(&a_m),
-        "mvo_gross": metrics_json(&gross_m),
-        "mvo_blended": metrics_json(&mvo_m),
+        "metrics": metrics_json(&m),
         "yearly_returns": yearly,
     }))
+}
+
+/// 逐年收益（基于 navs 的 net_return 复利聚合）→ jsonb 数组
+/// 与 paper_v19_replay::compute_yearly_from_navs 同逻辑（本地副本，避免跨模块私有 fn）。
+fn compute_yearly_from_navs(navs: &[crate::routes::mvo_engine::DailyNav]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut cur_year = 0i32;
+    let mut yr_nav = 1.0f64;
+    for d in navs {
+        let y = d.date.year();
+        if y != cur_year {
+            if cur_year != 0 {
+                out.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
+            }
+            cur_year = y;
+            yr_nav = 1.0;
+        }
+        yr_nav *= 1.0 + d.net_return;
+    }
+    if cur_year != 0 {
+        out.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
+    }
+    out
 }
 
 #[cfg(test)]

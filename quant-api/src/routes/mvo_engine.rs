@@ -124,6 +124,7 @@ async fn load_etf_prices(
 ///
 /// 权重逐季度由 `compute_mvo_weights_for_date` 刷新（真 v19 GA），叠加 regime 降仓 + 杠杆。
 /// 强平：账号峰值回撤≥liq_threshold→后续清仓(net_return=0)；≥warn_threshold→禁止加杠杆(lev≤1)。
+#[deprecated(note = "改用 run_daily_simulation（盯市 NAV 复利，回放/在线模拟/实盘同口径）")]
 pub async fn simulate_v19_daily_returns(
     db: &PgPool,
     sc: &StrategyConfig,
