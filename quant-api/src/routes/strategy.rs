@@ -15,6 +15,7 @@ pub struct ResolvedStrategy {
     pub strategy_type: StrategyType,
     pub mvo: Option<MvoParams>,     // 仅 composite 非空;asset 账号 None
     pub assets: Vec<AssetStrategy>, // composite=多个;单 asset 账号=1个
+    pub etf_symbols: Vec<String>,   // MVO 8 维的第 1-7 列标的(标准顺序,取自 composite 行)
     pub rebalance_freq: String,     // quarterly/monthly/weekly
 }
 
@@ -98,6 +99,7 @@ struct CompositeRow {
     name: String,
     strategy_type: String,
     rebalance_freq: Option<String>,
+    etf_symbols: Option<serde_json::Value>,
     vol_target: Option<f64>,
     leverage_cap: Option<f64>,
     leverage_floor: Option<f64>,
@@ -161,7 +163,7 @@ pub async fn load_resolved_strategy(
     // 1. 主行
     let main: Option<CompositeRow> = sqlx::query_as::<_, CompositeRow>(
         "SELECT strategy_id, name, strategy_type,
-                rebalance_freq, vol_target, leverage_cap, leverage_floor,
+                rebalance_freq, etf_symbols, vol_target, leverage_cap, leverage_floor,
                 default_weights, min_stock, momentum_blend_ratio,
                 ga_population, ga_generations, ga_elite_count,
                 regime_bull_threshold, regime_bear_threshold,
@@ -192,6 +194,7 @@ pub async fn load_resolved_strategy(
                 strategy_type: StrategyType::Asset,
                 mvo: None,
                 assets: vec![asset_row],
+                etf_symbols: parse_str_array(&main.etf_symbols),
                 rebalance_freq: main.rebalance_freq.unwrap_or_else(|| "quarterly".into()),
             })
         }
@@ -226,6 +229,7 @@ pub async fn load_resolved_strategy(
                 strategy_type: StrategyType::Composite,
                 mvo: Some(mvo),
                 assets: asset_rows,
+                etf_symbols: parse_str_array(&main.etf_symbols),
                 rebalance_freq: main.rebalance_freq.unwrap_or_else(|| "quarterly".into()),
             })
         }
@@ -335,6 +339,15 @@ mod tests {
                 grid_step: 0.0,
             }),
             assets: vec![],
+            etf_symbols: vec![
+                "518880.SH".into(),
+                "511010.SH".into(),
+                "513500.SH".into(),
+                "513100.SH".into(),
+                "159980.SZ".into(),
+                "159985.SZ".into(),
+                "501018.SH".into(),
+            ],
             rebalance_freq: "quarterly".into(),
         };
         assert_eq!(rs.strategy_type, StrategyType::Composite);
@@ -355,6 +368,20 @@ mod tests {
         assert!((mvo.min_stock - 0.12).abs() < 1e-6, "min_stock=0.12");
         assert_eq!(mvo.default_weights.len(), 7, "7维 ETF 权重");
         assert_eq!(rs.assets.len(), 4, "v19 有 4 个 asset 子行");
+        // etf_symbols 保持 MVO 标准顺序(黄金/国债/标普/纳指/有色/豆粕/原油)
+        assert_eq!(
+            rs.etf_symbols,
+            vec![
+                "518880.SH",
+                "511010.SH",
+                "513500.SH",
+                "513100.SH",
+                "159980.SZ",
+                "159985.SZ",
+                "501018.SH"
+            ],
+            "etf_symbols MVO 标准顺序"
+        );
         // a_share asset 必须有 equity_curve_task_id
         let a_share = rs
             .assets
