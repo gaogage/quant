@@ -749,7 +749,7 @@ mod tests {
         let end = NaiveDate::from_ymd_opt(2024, 6, 14).unwrap();
         let navs = run_daily_simulation(
             &db,
-            "paper-test-v19",
+            "pa-v19-active-full-unlev-20260615",
             &rs,
             start,
             end,
@@ -767,7 +767,7 @@ mod tests {
         assert!(navs.len() >= 5, "至少 5 个交易日 nav");
         // NAV 恒等式：每条 snapshot 的 nav 应等于当时 paper_account.current_nav
         let db_nav: f64 = sqlx::query_scalar(
-            "SELECT current_nav::double precision FROM paper_account WHERE paper_account_id='paper-test-v19'",
+            "SELECT current_nav::double precision FROM paper_account WHERE paper_account_id='pa-v19-active-full-unlev-20260615'",
         )
         .fetch_one(&db)
         .await
