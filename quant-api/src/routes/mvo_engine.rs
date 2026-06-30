@@ -1030,7 +1030,8 @@ mod tests {
         let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
             .await
             .unwrap();
-        let tushare = quant_data::tushare::client::TushareClient::from_env();
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             None::<crate::routes::scheduler::MvoWeightCache>,
         ));
