@@ -153,7 +153,7 @@ pub async fn simulate_v19_daily_returns(
     let mut acct_nav = 1.0_f64;
     let mut peak_nav = 1.0_f64;
     let mut recent_peak_nav = 1.0_f64; // 近期峰值（~126交易日/6月），用于判断恢复
-    let mut recent_peak_age = 0;       // 距近期峰值的交易日数
+    let mut recent_peak_age = 0; // 距近期峰值的交易日数
 
     // 上一交易日（用于 ETF 收益的 prev/cur 取价）
     let mut prev_date: Option<NaiveDate> = None;

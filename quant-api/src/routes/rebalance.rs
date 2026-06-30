@@ -119,7 +119,7 @@ pub async fn rebalance_account(
     }
 
     // 2. MVO 权重 + 体制(共享)
-    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, sc).await;
+    let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, &sc).await;
     let regime = detect_regime_exposure(db, date).await;
     let mvo_a_pct = mvo_weights.get(0).copied().unwrap_or(0.0) * regime;
 
@@ -137,7 +137,7 @@ pub async fn rebalance_account(
     // 4. 杠杆(共享 compute_vol_target_leverage)
     let mut leverage_mult = if leverage_enabled && regime > 0.9 && leverage_multiplier > 1.0 {
         if leverage_mode == "vol_target" {
-            Decimal::from_f64_retain(compute_vol_target_leverage(db, account_id, sc).await)
+            Decimal::from_f64_retain(compute_vol_target_leverage(db, account_id, &sc).await)
                 .unwrap_or(Decimal::ONE)
         } else {
             Decimal::from_f64_retain(leverage_multiplier).unwrap_or(Decimal::ONE)
@@ -194,7 +194,7 @@ pub async fn rebalance_account(
     .collect();
 
     // 7. A 股目标持仓 → 增量调仓(买不足/卖多余)
-    let slippage = sc_slippage_pct(sc);
+    let slippage = sc_slippage_pct(&sc);
     let mut n = 0usize;
     let mut target_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
     for p in &positions {

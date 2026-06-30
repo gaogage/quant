@@ -71,10 +71,7 @@ async fn compute_perf_from_nav(
     }
 
     // 逐日收益率
-    let returns: Vec<f64> = rows
-        .windows(2)
-        .map(|w| w[1].1 / w[0].1 - 1.0)
-        .collect();
+    let returns: Vec<f64> = rows.windows(2).map(|w| w[1].1 / w[0].1 - 1.0).collect();
     if returns.is_empty() {
         return Some(NavPerf::empty());
     }
