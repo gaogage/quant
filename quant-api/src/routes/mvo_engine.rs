@@ -16,9 +16,12 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::routes::rebalance::{mark_to_market, rebalance_account, PriceSource};
 use crate::routes::scheduler::{
     compute_mvo_weights_for_date, detect_regime_exposure, StrategyConfig,
 };
+use crate::routes::strategy::ResolvedStrategy;
+use crate::routes::trading::update_current_nav;
 
 /// 逐日模拟结果：日期 + 杠杆后组合日收益。
 #[derive(Debug, Clone)]
@@ -28,6 +31,16 @@ pub struct DailyReturn {
     pub net_return: f64,   // 叠加 vol_target/fixed 杠杆后日收益
     pub leverage: f64,     // 当日杠杆
     pub regime: f64,       // 当日体制暴露 0-1
+}
+
+/// 统一逐日模拟的盯市 NAV 结果（绩效口径：current_nav 复利）。
+#[derive(Debug, Clone)]
+pub struct DailyNav {
+    pub date: NaiveDate,
+    pub nav: f64,        // 盯市 current_nav（真实持仓市值+cash-margin）
+    pub net_return: f64, // 日收益 = nav/prev_nav - 1
+    pub leverage: f64,
+    pub regime: f64,
 }
 
 /// 季度再平衡事件：记录权重变化，用于落交易。
@@ -394,6 +407,171 @@ pub struct Metrics {
     pub calmar: f64,
     pub win_rate: f64,
     pub trading_days: usize,
+}
+
+/// 统一逐日模拟引擎 —— 回放/在线模拟共用，实盘走单日增量（不循环）。
+/// 绩效口径：盯市 current_nav 复利（全口径统一，废弃 load_a_share_daily 累乘）。
+pub async fn run_daily_simulation(
+    db: &PgPool,
+    account_id: &str,
+    rs: &ResolvedStrategy,
+    start: NaiveDate,
+    end: NaiveDate,
+    price_source: PriceSource,
+    mvo_cache: &std::sync::Arc<tokio::sync::Mutex<Option<crate::routes::scheduler::MvoWeightCache>>>,
+    tushare: &quant_data::tushare::client::TushareClient,
+    reset_account: bool,
+    leverage_enabled: bool,
+    leverage_multiplier: f64,
+    leverage_mode: &str,
+) -> Result<Vec<DailyNav>, String> {
+    // 0. 账号绑校验
+    let (strategy_version_id, init_cap): (Option<String>, Decimal) = sqlx::query_as(
+        "SELECT strategy_version_id, initial_capital FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("query account: {}", e))?
+    .ok_or_else(|| "account not found".to_string())?;
+    if strategy_version_id.as_deref().unwrap_or("").is_empty() {
+        return Err(format!("账号 {} 未挂策略（strategy_version_id 空）", account_id));
+    }
+    let init_cap_f: f64 = init_cap.to_string().parse().unwrap_or(1_000_000.0);
+
+    // 1. 账号重置（回放专用）
+    if reset_account {
+        for table in &[
+            "paper_order",
+            "paper_fill",
+            "paper_position",
+            "paper_nav_snapshot",
+            "paper_replay",
+            "paper_margin_trade",
+        ] {
+            sqlx::query(&format!("DELETE FROM {} WHERE paper_account_id = $1", table))
+                .bind(account_id)
+                .execute(db)
+                .await
+                .map_err(|e| format!("clean {}: {}", table, e))?;
+        }
+        sqlx::query(
+            "UPDATE paper_account SET current_nav=$1, peak_nav=$1, cash=$1, max_drawdown_pct=0, margin_amount=0, total_trades=0 WHERE paper_account_id=$2",
+        )
+        .bind(init_cap)
+        .bind(account_id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("reset: {}", e))?;
+    }
+
+    // 2. 交易日序列（从 a_share asset 的 backtest_equity_curve 取）+ task_id（回放传 rs 的 equity_curve_task_id）
+    let a_task_id = rs
+        .assets
+        .iter()
+        .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare)
+        .and_then(|a| a.security.equity_curve_task_id.as_deref())
+        .ok_or_else(|| "策略无 a_share asset，equity_curve_task_id 缺失".to_string())?;
+    let dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT trade_date FROM backtest_equity_curve WHERE task_id = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date",
+    )
+    .bind(a_task_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("load dates: {}", e))?;
+    if dates.is_empty() {
+        return Err(format!("交易日序列为空（task={}, {}~{}）", a_task_id, start, end));
+    }
+
+    // 3. 逐日
+    let mut prev_nav = init_cap_f;
+    let mut out: Vec<DailyNav> = Vec::with_capacity(dates.len());
+    let mut last_marker: Option<(i32, u32)> = None; // 调仓频率 marker（年/季/月）
+
+    for d in &dates {
+        let d = *d;
+        // 3a. 调仓日控制（读 rebalance_freq）
+        if is_rebalance_day(d, &rs.rebalance_freq, &mut last_marker) {
+            rebalance_account(
+                db,
+                account_id,
+                rs,
+                d,
+                a_task_id,
+                price_source,
+                mvo_cache,
+                tushare,
+                leverage_enabled,
+                leverage_multiplier,
+                leverage_mode,
+            )
+            .await?;
+        }
+        // 3b. 每日盯市
+        mark_to_market(db, account_id, d).await?;
+        // 3c. NAV 重算
+        update_current_nav(db, account_id).await?;
+        // 3d. 读真实盯市 NAV 算日收益
+        let nav: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(current_nav, initial_capital)::double precision FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(db)
+        .await
+        .map_err(|e| format!("read nav: {}", e))?;
+        let net = if prev_nav > 0.0 {
+            nav / prev_nav - 1.0
+        } else {
+            0.0
+        };
+        let regime = crate::routes::scheduler::detect_regime_exposure(db, d).await;
+        // 3e. 写 paper_nav_snapshot
+        let sid = format!("ns-{}", uuid::Uuid::new_v4());
+        let cum = if init_cap_f > 0.0 {
+            nav / init_cap_f - 1.0
+        } else {
+            0.0
+        };
+        sqlx::query(
+            "INSERT INTO paper_nav_snapshot (nav_snapshot_id,paper_account_id,snapshot_date,nav,cash,market_value,position_count,daily_return,cumulative_return,max_drawdown)
+             VALUES ($1,$2,$3,$4,0,$4,0,$5,$6,0) ON CONFLICT DO NOTHING",
+        )
+        .bind(&sid)
+        .bind(account_id)
+        .bind(d)
+        .bind(Decimal::from_f64_retain(nav).unwrap_or(init_cap))
+        .bind(Decimal::from_f64_retain(net).unwrap_or(Decimal::ZERO))
+        .bind(Decimal::from_f64_retain(cum).unwrap_or(Decimal::ZERO))
+        .execute(db)
+        .await
+        .ok();
+        prev_nav = nav;
+        out.push(DailyNav {
+            date: d,
+            nav,
+            net_return: net,
+            leverage: 1.0,
+            regime,
+        });
+    }
+    Ok(out)
+}
+
+/// 调仓日判断：quarterly（季首）/monthly（月首）/weekly（周首）。
+fn is_rebalance_day(d: NaiveDate, freq: &str, last_marker: &mut Option<(i32, u32)>) -> bool {
+    let marker = match freq {
+        "monthly" => Some((d.year(), d.month())),
+        "weekly" => Some((d.year(), d.iso_week().week())),
+        _ => Some((d.year(), (d.month() - 1) / 3 + 1)), // quarterly 默认
+    };
+    if *last_marker == marker {
+        false
+    } else {
+        *last_marker = marker;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -839,5 +1017,58 @@ mod tests {
             }
         }
         std::env::remove_var("MVO_TARGET_CAP");
+    }
+
+    /// Task 7: run_daily_simulation NAV 恒等式验证（盯市 current_nav 复利）。
+    /// DATABASE_URL=postgres://gaocheng@localhost/quant cargo test --lib routes::mvo_engine::tests::test_run_daily_simulation_nav_identity -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_run_daily_simulation_nav_identity() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("connect db");
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
+            .await
+            .unwrap();
+        let tushare = quant_data::tushare::client::TushareClient::from_env();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            None::<crate::routes::scheduler::MvoWeightCache>,
+        ));
+
+        // 小区间 10 个交易日
+        let start = NaiveDate::from_ymd_opt(2024, 6, 3).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 6, 14).unwrap();
+        let navs = run_daily_simulation(
+            &db,
+            "paper-test-v19",
+            &rs,
+            start,
+            end,
+            crate::routes::rebalance::PriceSource::EodClose,
+            &cache,
+            &tushare,
+            true,
+            false,
+            1.0,
+            "fixed",
+        )
+        .await
+        .expect("sim");
+
+        assert!(navs.len() >= 5, "至少 5 个交易日 nav");
+        // NAV 恒等式：每条 snapshot 的 nav 应等于当时 paper_account.current_nav
+        let db_nav: f64 = sqlx::query_scalar(
+            "SELECT current_nav::double precision FROM paper_account WHERE paper_account_id='paper-test-v19'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(0.0);
+        let last_sim_nav = navs.last().unwrap().nav;
+        assert!(
+            (db_nav - last_sim_nav).abs() < 1.0,
+            "NAV 恒等式: db={} sim={}",
+            db_nav,
+            last_sim_nav
+        );
     }
 }
