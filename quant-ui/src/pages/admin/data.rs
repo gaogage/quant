@@ -478,11 +478,15 @@ fn EquityCurveSyncItem(
                 .and_then(|c| c.get("trade_day_count"))
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            let etf_days = d.get("etf_price_coverage")
-                .and_then(|c| c.get("trade_day_count"))
+            let etf_listed = d.get("etf_price_coverage")
+                .and_then(|c| c.get("listed_etfs"))
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            (ready, format!("权益曲线 {} 天 · ETF价格 {} 天", trade_days, etf_days))
+            let etf_total = d.get("etf_price_coverage")
+                .and_then(|c| c.get("total_etfs"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            (ready, format!("权益曲线 {} 天 · ETF {}/{}", trade_days, etf_listed, etf_total))
         }
         None => (false, "未获取".to_string()),
     };
