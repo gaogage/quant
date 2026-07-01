@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 
 /// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
-async fn get_latest_data_version(db: &PgPool) -> String {
+pub(crate) async fn get_latest_data_version(db: &PgPool) -> String {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT data_version_id FROM data_version
          WHERE data_version_id LIKE 'dv-eod-%'

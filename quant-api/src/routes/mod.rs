@@ -5,6 +5,7 @@ pub mod blueprint;
 pub mod cleanup;
 pub mod data_validation;
 pub mod dingtalk;
+pub mod equity_curve_sync;
 pub mod factors;
 pub mod ml;
 pub mod mvo_engine;
