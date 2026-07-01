@@ -104,7 +104,7 @@ pub async fn rebalance_account(
 ) -> Result<usize, String> {
     // 桥接:ResolvedStrategy → 平铺 StrategyConfig(MVO 函数/sc_slippage_pct 仍接 &StrategyConfig)。
     // task_id 保留参数:实盘由调用方传 run-factor 当日 task;回放传 rs 的 a_share equity_curve_task_id。
-    let sc = resolved_to_legacy_sc(rs);
+    let sc = resolved_to_legacy_sc(rs)?;
     // 1. 资金基准:统一用 current_nav(非 initial_capital);NULL 则降级 initial_capital
     let current_nav: Decimal = sqlx::query_scalar(
         "SELECT COALESCE(current_nav, initial_capital) FROM paper_account WHERE paper_account_id = $1",

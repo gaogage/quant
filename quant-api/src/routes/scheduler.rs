@@ -609,8 +609,7 @@ mod tests {
             ],
             rebalance_freq: "quarterly".into(),
         };
-        let sc = resolved_to_legacy_sc(&rs);
-        // MVO 参数映射
+        let sc = resolved_to_legacy_sc(&rs).unwrap();
         assert!((sc.min_stock - 0.12).abs() < 1e-9, "min_stock 映射");
         assert!((sc.vol_target - 0.2).abs() < 1e-9, "vol_target 映射");
         assert!((sc.leverage_cap - 2.5).abs() < 1e-9, "leverage_cap 映射");
@@ -642,48 +641,186 @@ mod tests {
             "etf_symbols 保持 MVO 标准顺序"
         );
     }
+
+    #[test]
+    fn test_resolved_to_legacy_sc_missing_mvo_errors() {
+        use crate::routes::strategy::{
+            AssetClass, AssetStrategy, MvoParams, ResolvedStrategy, SecurityConfig, StrategyType,
+        };
+        let rs = ResolvedStrategy {
+            strategy_id: "v19".into(),
+            name: "v19策略".into(),
+            strategy_type: StrategyType::Composite,
+            mvo: None,
+            assets: vec![
+                AssetStrategy {
+                    strategy_id: "v19-commodity".into(),
+                    asset_class: AssetClass::Commodity,
+                    security: SecurityConfig {
+                        signal_source: "fixed".into(),
+                        combo_name: String::new(),
+                        top_n: 30,
+                        prediction_set_id: None,
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "research_baseline".into(),
+                        equity_curve_task_id: None,
+                        fixed_symbols: vec![],
+                        default_weights: vec![],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+                AssetStrategy {
+                    strategy_id: "v19-a_share".into(),
+                    asset_class: AssetClass::AShare,
+                    security: SecurityConfig {
+                        signal_source: "prediction_blend".into(),
+                        combo_name: "full_pit_icir_37f".into(),
+                        top_n: 30,
+                        prediction_set_id: Some("ps-1".into()),
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "professional_observation".into(),
+                        equity_curve_task_id: Some("fbt-ab3eecf6".into()),
+                        fixed_symbols: vec![],
+                        default_weights: vec![],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+            ],
+            etf_symbols: vec![],
+            rebalance_freq: "quarterly".into(),
+        };
+        let result = resolved_to_legacy_sc(&rs);
+        assert!(result.is_err(), "mvo=None 必须报错");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("缺 mvo 配置"),
+            "错误消息应包含 '缺 mvo 配置',实际: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolved_to_legacy_sc_missing_a_share_errors() {
+        use crate::routes::strategy::{
+            AssetClass, AssetStrategy, MvoParams, ResolvedStrategy, SecurityConfig, StrategyType,
+        };
+        let rs = ResolvedStrategy {
+            strategy_id: "v19".into(),
+            name: "v19策略".into(),
+            strategy_type: StrategyType::Composite,
+            mvo: Some(MvoParams {
+                vol_target: 0.2,
+                leverage_cap: 2.5,
+                leverage_floor: 1.0,
+                default_weights: vec![0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
+                min_stock: 0.12,
+                momentum_blend_ratio: 0.5,
+                ga_population: 600,
+                ga_generations: 250,
+                ga_elite_count: 10,
+                regime_bull_threshold: 0.0,
+                regime_bear_threshold: 0.0,
+                regime_bull_min_stock: 0.0,
+                regime_bear_min_stock: 0.0,
+                dynamic_target_cap: 0.30,
+                dynamic_target_floor: 0.12,
+                risk_free_rate: 0.03,
+                grid_step: 0.0,
+            }),
+            assets: vec![
+                AssetStrategy {
+                    strategy_id: "v19-commodity".into(),
+                    asset_class: AssetClass::Commodity,
+                    security: SecurityConfig {
+                        signal_source: "fixed".into(),
+                        combo_name: String::new(),
+                        top_n: 30,
+                        prediction_set_id: None,
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "research_baseline".into(),
+                        equity_curve_task_id: None,
+                        fixed_symbols: vec![],
+                        default_weights: vec![],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+                AssetStrategy {
+                    strategy_id: "v19-bond".into(),
+                    asset_class: AssetClass::Bond,
+                    security: SecurityConfig {
+                        signal_source: "fixed".into(),
+                        combo_name: String::new(),
+                        top_n: 30,
+                        prediction_set_id: None,
+                        prediction_blend_weight: 0.5,
+                        score_direction: "descending".into(),
+                        candidate_tier: "research_baseline".into(),
+                        equity_curve_task_id: None,
+                        fixed_symbols: vec![],
+                        default_weights: vec![],
+                        max_single: 0.75,
+                        max_single_bull: 0.80,
+                    },
+                },
+            ],
+            // 注意:无 AssetClass::AShare 的 asset
+            etf_symbols: vec![],
+            rebalance_freq: "quarterly".into(),
+        };
+        let result = resolved_to_legacy_sc(&rs);
+        assert!(result.is_err(), "缺 a_share asset 必须报错");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("缺 a_share asset"),
+            "错误消息应包含 '缺 a_share asset',实际: {}",
+            err
+        );
+    }
 }
 
 /// 反向桥接:ResolvedStrategy 树 → 平铺 StrategyConfig。
 /// 三个 MVO 函数(compute_lw_mvo_weights/compute_mvo_weights_for_date/compute_vol_target_leverage)
 /// 本轮不改签名仍接 &StrategyConfig,rebalance_account 接 &ResolvedStrategy 后调此函数得到临时视图传入。
-pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> StrategyConfig {
-    let mvo = rs.mvo.as_ref();
-    let a_share = rs.assets.iter().find(|a| a.asset_class == AssetClass::AShare);
-    StrategyConfig {
+pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyConfig, String> {
+    let mvo = rs
+        .mvo
+        .as_ref()
+        .ok_or_else(|| format!("策略 {} 缺 mvo 配置", rs.strategy_id))?;
+    let a_share = rs
+        .assets
+        .iter()
+        .find(|a| a.asset_class == AssetClass::AShare)
+        .ok_or_else(|| format!("策略 {} 缺 a_share asset", rs.strategy_id))?;
+    Ok(StrategyConfig {
         strategy_id: rs.strategy_id.clone(),
         name: rs.name.clone(),
         etf_symbols: rs_to_legacy_etf_symbols(rs),
-        equity_curve_task_id: a_share
-            .and_then(|a| a.security.equity_curve_task_id.clone())
-            .unwrap_or_default(),
-        min_stock: mvo.map(|m| m.min_stock).unwrap_or(0.12),
-        max_single: a_share.map(|a| a.security.max_single).unwrap_or(0.75),
-        max_single_bull: a_share.map(|a| a.security.max_single_bull).unwrap_or(0.80),
-        momentum_blend_ratio: mvo.map(|m| m.momentum_blend_ratio).unwrap_or(0.5),
-        ga_population: mvo.map(|m| m.ga_population).unwrap_or(600),
-        ga_generations: mvo.map(|m| m.ga_generations).unwrap_or(250),
-        vol_target: mvo.map(|m| m.vol_target).unwrap_or(0.2),
-        leverage_cap: mvo.map(|m| m.leverage_cap).unwrap_or(2.5),
-        default_weights: mvo.map(|m| m.default_weights.clone()).unwrap_or_default(),
-        signal_source: a_share
-            .map(|a| a.security.signal_source.clone())
-            .unwrap_or_else(|| "fixed".into()),
-        prediction_blend_weight: a_share
-            .map(|a| a.security.prediction_blend_weight)
-            .unwrap_or(0.5),
-        combo_name: a_share.map(|a| a.security.combo_name.clone()).unwrap_or_default(),
-        top_n: a_share.map(|a| a.security.top_n).unwrap_or(30),
-        prediction_set_id: a_share.and_then(|a| a.security.prediction_set_id.clone()),
-        dynamic_target_cap: mvo.map(|m| m.dynamic_target_cap).unwrap_or(0.30),
-        dynamic_target_floor: mvo.map(|m| m.dynamic_target_floor).unwrap_or(0.12),
-        score_direction: a_share
-            .map(|a| a.security.score_direction.clone())
-            .unwrap_or_else(|| "descending".into()),
-        candidate_tier: a_share
-            .map(|a| a.security.candidate_tier.clone())
-            .unwrap_or_else(|| "research_baseline".into()),
-    }
+        equity_curve_task_id: a_share.security.equity_curve_task_id.clone().unwrap_or_default(),
+        min_stock: mvo.min_stock,
+        max_single: a_share.security.max_single,
+        max_single_bull: a_share.security.max_single_bull,
+        momentum_blend_ratio: mvo.momentum_blend_ratio,
+        ga_population: mvo.ga_population,
+        ga_generations: mvo.ga_generations,
+        vol_target: mvo.vol_target,
+        leverage_cap: mvo.leverage_cap,
+        default_weights: mvo.default_weights.clone(),
+        signal_source: a_share.security.signal_source.clone(),
+        prediction_blend_weight: a_share.security.prediction_blend_weight,
+        combo_name: a_share.security.combo_name.clone(),
+        top_n: a_share.security.top_n,
+        prediction_set_id: a_share.security.prediction_set_id.clone(),
+        dynamic_target_cap: mvo.dynamic_target_cap,
+        dynamic_target_floor: mvo.dynamic_target_floor,
+        score_direction: a_share.security.score_direction.clone(),
+        candidate_tier: a_share.security.candidate_tier.clone(),
+    })
 }
 
 /// 从 ResolvedStrategy 提取 MVO 标准顺序的 7 ETF 列表(MVO 8 维权重的第 1-7 列)。
@@ -2431,7 +2568,7 @@ async fn generate_paper_signals_for_all(
         };
         // 桥接出平铺 StrategyConfig 视图:run-factor body 取参(combo_name/top_n 等)继续用 sc。
         // 传给 sync_positions_from_backtest 时传 &rs(不再传 &sc)。
-        let sc = resolved_to_legacy_sc(&rs);
+        let sc = resolved_to_legacy_sc(&rs)?;
         let a_share = rs
             .assets
             .iter()
