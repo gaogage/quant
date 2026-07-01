@@ -763,98 +763,16 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 run_data_quality_check(db).await;
             }
             "equity_curve_update" => {
-                // 从 v19 策略配置读 A股选股方式，权益曲线与策略一致（因子+ML混合）
-                let sc = load_strategy_config(db, "v19").await;
-                let combo = params
-                    .get("combo_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(sc.combo_name.as_str());
-                let top_n = params
-                    .get("top_n")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(sc.top_n as u64) as usize;
-                info!(
-                    "[scheduler] 权益曲线更新: combo={} top_n={} signal={}",
-                    combo, top_n, sc.signal_source
-                );
-                let client = reqwest::Client::new();
-                let end_date = chrono::Utc::now().format("%Y%m%d").to_string();
-                let end_date_naive = chrono::Utc::now().date_naive();
-                let requested_start_date = params
-                    .get("start_date")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_scheduler_date)
-                    .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2014, 1, 2).unwrap());
-                let start_date =
-                    first_open_trade_date_on_or_after(db, requested_start_date, end_date_naive)
-                        .await
-                        .unwrap_or(requested_start_date)
-                        .format("%Y%m%d")
-                        .to_string();
-                let dv = get_latest_data_version(db).await;
-                let mut payload = serde_json::json!({
-                    "combo_name": combo, "strategy_version_id": "factor-combo-v1",
-                    "data_version_id": dv, "top_n": top_n,
-                    "rebalance": params.get("rebalance").and_then(|v| v.as_str()).unwrap_or("10"),
-                    "start_date": start_date, "end_date": end_date,
-                    "max_position_pct": 0.10, "max_gross_exposure": 0.95,
-                    "benchmark": "000300.SH", "universe_profile": "main_board_non_st",
-                    "score_direction": sc.score_direction,
-                    "effective_coverage": {
-                        "enabled": true,
-                        "mode": "guard_only",
-                        "min_rows": top_n.max(30),
-                        "include_rebalance_warmup": false
-                    }
-                });
-                // 因子+ML混合：带上策略指定的全周期预测集（无则选最新覆盖区间的 PIT 集）
-                if sc.signal_source == "prediction_blend" || sc.signal_source == "prediction" {
-                    let pid = if let Some(ref p) = sc.prediction_set_id {
-                        Some(p.clone())
+                // 自动同步所有活跃账号关联策略的权益曲线(combo 去重)。
+                // 消除硬编码 v19:v21/v21_lev 等策略也会被同步。
+                let results = crate::routes::equity_curve_sync::sync_active_strategies_equity_curves(db).await;
+                for r in &results {
+                    if r.status == "success" {
+                        info!("[scheduler] 权益曲线同步成功: {} task_id={:?} 更新策略 {:?}",
+                              r.strategy_id, r.task_id, r.updated_strategy_ids);
                     } else {
-                        sqlx::query_scalar::<_, String>(
-                            "SELECT prediction_set_id FROM prediction_set WHERE status='ready' AND training_end_date IS NOT NULL
-                             ORDER BY (end_date - start_date) DESC, end_date DESC LIMIT 1"
-                        ).fetch_optional(db).await.ok().flatten()
-                    };
-                    if let Some(pid) = pid {
-                        payload["prediction_set_id"] = serde_json::json!(pid);
-                        payload["prediction_blend_weight"] =
-                            serde_json::json!(sc.prediction_blend_weight);
-                        payload["kelly_fraction"] = serde_json::json!(0.25);
-                        payload["score_candidate_pool_size"] = serde_json::json!(200);
-                        info!(
-                            "[scheduler] 权益曲线启用 prediction_blend: set={} w={}",
-                            pid, sc.prediction_blend_weight
-                        );
+                        warn!("[scheduler] 权益曲线同步失败: {} err={:?}", r.strategy_id, r.error);
                     }
-                }
-                let api_base = format!(
-                    "http://localhost:{}",
-                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
-                );
-                match client
-                    .post(format!("{}/api/v1/quant/backtests/run-factor", api_base))
-                    .json(&payload)
-                    .timeout(std::time::Duration::from_secs(600))
-                    .send()
-                    .await
-                {
-                    Ok(resp) => {
-                        if let Ok(result) = resp.json::<serde_json::Value>().await {
-                            if let Some(tid) = result["data"]["task_id"].as_str() {
-                                info!("[scheduler] 新权益曲线已生成: task_id={}, 自动更新strategy_config", tid);
-                                let _ = sqlx::query(
-                                    "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() WHERE strategy_id = 'v19' AND status = 'active'"
-                                ).bind(tid).execute(db).await;
-                                // 同时保持 v20 同步（如果存在）
-                                let _ = sqlx::query(
-                                    "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() WHERE strategy_id = 'v20' AND status = 'active'"
-                                ).bind(tid).execute(db).await;
-                            }
-                        }
-                    }
-                    Err(e) => warn!("[scheduler] 权益曲线更新失败: {}", e),
                 }
             }
             "factor_backfill" => {
