@@ -110,7 +110,7 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
 
     // 4. 绩效指标（基于 navs 的 net_return）
     let net_rets: Vec<f64> = navs.iter().map(|d| d.net_return).collect();
-    let m = compute_metrics(&net_rets);
+    let m = compute_metrics(&net_rets, rs.mvo.as_ref().unwrap().risk_free_rate);
     let final_nav = navs.last().unwrap().nav;
     // 峰值与最大回撤从 navs 推导（替代旧累乘循环里的 peak/max_dd）
     let peak = navs.iter().map(|d| d.nav).fold(cap_f64, f64::max);

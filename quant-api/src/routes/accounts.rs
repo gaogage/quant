@@ -76,7 +76,8 @@ async fn compute_perf_from_nav(
         return Some(NavPerf::empty());
     }
 
-    let m = compute_metrics(&returns);
+    // TODO: compute_perf_from_nav 无 ResolvedStrategy 上下文，暂用默认无风险利率；后续应从账号关联策略读 risk_free_rate
+    let m = compute_metrics(&returns, crate::routes::mvo_engine::DEFAULT_RISK_FREE_RATE);
     let final_nav = rows.last().unwrap().1;
     let cum_pct = if initial_capital > 0.0 {
         (final_nav / initial_capital - 1.0) * 100.0

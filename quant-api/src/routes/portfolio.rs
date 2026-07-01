@@ -1769,7 +1769,8 @@ async fn run_mvo_simulate(
 
     // 单序列绩效（基于 navs 的 net_return）——废弃 mvo_gross/a_share_only 对比口径
     let net_rets: Vec<f64> = navs.iter().map(|d| d.net_return).collect();
-    let m = crate::routes::mvo_engine::compute_metrics(&net_rets);
+    // TODO: mvo_backtest 路径无 ResolvedStrategy 上下文，暂用默认无风险利率；后续应从策略配置读 risk_free_rate
+    let m = crate::routes::mvo_engine::compute_metrics(&net_rets, crate::routes::mvo_engine::DEFAULT_RISK_FREE_RATE);
 
     // 逐年收益（内联本地实现，避免跨模块调私有 fn）
     let yearly = compute_yearly_from_navs(&navs);

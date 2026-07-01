@@ -19,6 +19,10 @@ use crate::routes::rebalance::{mark_to_market, rebalance_account, PriceSource};
 use crate::routes::strategy::ResolvedStrategy;
 use crate::routes::trading::update_current_nav;
 
+/// 默认无风险利率（年化）。历史硬编码值 0.02，作为无策略上下文路径的 fallback。
+/// 生产路径应从 `MvoParams.risk_free_rate` 读真实值传入 `compute_metrics`。
+pub const DEFAULT_RISK_FREE_RATE: f64 = 0.02;
+
 /// 统一逐日模拟的盯市 NAV 结果（绩效口径：current_nav 复利）。
 #[derive(Debug, Clone)]
 pub struct DailyNav {
@@ -30,7 +34,11 @@ pub struct DailyNav {
 }
 
 /// 从逐日收益计算聚合绩效指标。
-pub fn compute_metrics(rets: &[f64]) -> Metrics {
+///
+/// `risk_free_rate` 用于 Sharpe / Sortino 的分子（年化无风险利率），
+/// 上游应从 `MvoParams.risk_free_rate` 读入；纯回测/无策略上下文路径
+/// 传 `DEFAULT_RISK_FREE_RATE`（0.02）保持历史行为。
+pub fn compute_metrics(rets: &[f64], risk_free_rate: f64) -> Metrics {
     let n = rets.len() as f64;
     if n < 2.0 {
         return Metrics::default();
@@ -41,7 +49,7 @@ pub fn compute_metrics(rets: &[f64]) -> Metrics {
     let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
     let ann_vol = std * (252.0_f64).sqrt();
     let sharpe = if ann_vol > 0.0 {
-        (ann_ret - 0.02) / ann_vol
+        (ann_ret - risk_free_rate) / ann_vol
     } else {
         0.0
     };
@@ -64,7 +72,7 @@ pub fn compute_metrics(rets: &[f64]) -> Metrics {
             downside.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (downside.len() - 1) as f64;
         let ds = dv.sqrt() * (252.0_f64).sqrt();
         if ds > 0.0 {
-            (ann_ret - 0.02) / ds
+            (ann_ret - risk_free_rate) / ds
         } else {
             0.0
         }
@@ -271,7 +279,7 @@ mod tests {
     #[test]
     fn test_metrics_constant_positive() {
         let rets: Vec<f64> = (0..252).map(|_| 0.0005).collect();
-        let m = compute_metrics(&rets);
+        let m = compute_metrics(&rets, DEFAULT_RISK_FREE_RATE);
         assert!(m.annual_return > 0.10, "AR={}", m.annual_return);
         assert_eq!(m.max_drawdown, 0.0, "恒正收益无回撤");
         assert!(m.win_rate > 0.99);
@@ -283,9 +291,37 @@ mod tests {
         rets.extend((0..100).map(|_| 0.005));
         rets.extend((0..50).map(|_| -0.005));
         rets.extend((0..102).map(|_| 0.005));
-        let m = compute_metrics(&rets);
+        let m = compute_metrics(&rets, DEFAULT_RISK_FREE_RATE);
         assert!(m.max_drawdown > 0.0, "应有回撤");
         assert!(m.max_drawdown < 0.30, "回撤={}", m.max_drawdown);
+    }
+
+    /// 验证 risk_free_rate 参数确实影响 Sharpe / Sortino（P4.0d 回归测试）。
+    /// 相同收益序列，rfr 越高 Sharpe 越低；rfr=0 时 Sharpe 最高。
+    #[test]
+    fn test_metrics_risk_free_rate_affects_sharpe() {
+        let rets: Vec<f64> = (0..252).map(|_| 0.0005).collect();
+        let m_zero = compute_metrics(&rets, 0.0);
+        let m_low = compute_metrics(&rets, 0.02);
+        let m_high = compute_metrics(&rets, 0.10);
+        assert!(
+            m_zero.sharpe > m_low.sharpe,
+            "rfr=0 Sharpe {} 应 > rfr=0.02 Sharpe {}",
+            m_zero.sharpe,
+            m_low.sharpe
+        );
+        assert!(
+            m_low.sharpe > m_high.sharpe,
+            "rfr=0.02 Sharpe {} 应 > rfr=0.10 Sharpe {}",
+            m_low.sharpe,
+            m_high.sharpe
+        );
+        assert!(
+            m_zero.sortino > m_low.sortino,
+            "rfr=0 Sortino {} 应 > rfr=0.02 Sortino {}",
+            m_zero.sortino,
+            m_low.sortino
+        );
     }
 
     /// 全周期 v19 模拟验证（需本地 quant 库）。
@@ -325,7 +361,7 @@ mod tests {
         .await
         .expect("unlev sim");
         let unlev_rets: Vec<f64> = unlev.iter().map(|d| d.net_return).collect();
-        let m_unlev = compute_metrics(&unlev_rets);
+        let m_unlev = compute_metrics(&unlev_rets, rs.mvo.as_ref().unwrap().risk_free_rate);
         println!(
             "[v19 unlev] AR={:.1}% DD={:.1}% Sharpe={:.2} Sortino={:.2} cum={:.0}% days={}",
             m_unlev.annual_return * 100.0,
@@ -353,7 +389,7 @@ mod tests {
         .await
         .expect("lev sim");
         let lev_rets: Vec<f64> = lev.iter().map(|d| d.net_return).collect();
-        let m_lev = compute_metrics(&lev_rets);
+        let m_lev = compute_metrics(&lev_rets, rs.mvo.as_ref().unwrap().risk_free_rate);
         println!(
             "[v19 lev]   AR={:.1}% DD={:.1}% Sharpe={:.2} Sortino={:.2} cum={:.0}%",
             m_lev.annual_return * 100.0,
@@ -425,7 +461,7 @@ mod tests {
             )
             .await
             .expect("u");
-            let mu = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+            let mu = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_v.mvo.as_ref().unwrap().risk_free_rate);
             let l = run_daily_simulation(
                 &db,
                 "pa-v19-active-full-lev-20260615",
@@ -442,7 +478,7 @@ mod tests {
             )
             .await
             .expect("l");
-            let ml = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>());
+            let ml = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_v.mvo.as_ref().unwrap().risk_free_rate);
             println!(
                 "{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2} | {:>4.1}% {:>4.1}% {:>5.2}",
                 cap,
@@ -516,7 +552,7 @@ mod tests {
                 )
                 .await
                 .expect("u");
-                let m = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                let m = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
                 println!(
                     "{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
                     cap,
@@ -589,7 +625,7 @@ mod tests {
                 )
                 .await
                 .expect("is");
-                let mis = compute_metrics(&is_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                let mis = compute_metrics(&is_u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
                 let oos_u = run_daily_simulation(
                     &db,
                     "pa-v19-active-full-unlev-20260615",
@@ -606,7 +642,7 @@ mod tests {
                 )
                 .await
                 .expect("oos");
-                let moos = compute_metrics(&oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                let moos = compute_metrics(&oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
                 let oos_l = run_daily_simulation(
                     &db,
                     "pa-v19-active-full-lev-20260615",
@@ -623,7 +659,7 @@ mod tests {
                 )
                 .await
                 .expect("oosl");
-                let mlev = compute_metrics(&oos_l.iter().map(|d| d.net_return).collect::<Vec<_>>());
+                let mlev = compute_metrics(&oos_l.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
                 println!("{:>4} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2}",
                          cap,
                          mis.annual_return*100.0, mis.max_drawdown*100.0, mis.sharpe,
@@ -658,7 +694,7 @@ mod tests {
         // 绩效打印（只打印 run_daily_simulation 绩效，audit 维保审计已删——
         // 强平门控内建在 rebalance_account，从 paper_account 列读，无需独立审计闭包）。
         let perf = |label: String, rets: Vec<f64>| {
-            let m = compute_metrics(&rets);
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
             println!(
                 "{:<16} | {:>5.1}% {:>5.1}% {:>5.2} {:>5.2} {:>5.2}",
                 label,
