@@ -3,9 +3,27 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// JWT secret from env, with fallback for dev.
+/// 启动时校验 JWT_SECRET(release 未设置则 panic)。
+/// 在 main 初始化早期调用,使缺失密钥的服务启动即失败(fail-fast)。
+pub fn validate_secret_at_startup() {
+    let _ = jwt_secret();
+}
+
+/// JWT secret from env.
+/// release 构建必须设置 JWT_SECRET,否则启动 panic;
+/// debug 构建允许默认密钥但记录警告(仅限本地开发)。
 fn jwt_secret() -> String {
-    std::env::var("JWT_SECRET").unwrap_or_else(|_| "quant-dev-secret-change-in-production".into())
+    std::env::var("JWT_SECRET").unwrap_or_else(|_| {
+        #[cfg(not(debug_assertions))]
+        {
+            panic!("JWT_SECRET 环境变量未设置(release 构建必须配置)");
+        }
+        #[cfg(debug_assertions)]
+        {
+            tracing::warn!("JWT_SECRET 未设置,使用开发默认密钥(仅限 debug 构建)");
+            "quant-dev-secret-change-in-production".into()
+        }
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -36,6 +36,9 @@ async fn main() {
 
     dotenv::dotenv().ok();
 
+    // 启动时校验 JWT_SECRET:release 构建未设置则 panic(fail-fast)。
+    auth::jwt::validate_secret_at_startup();
+
     // 数据库连接池
     let db = quant_data::db::pool_from_env()
         .await

@@ -216,6 +216,8 @@ pub struct StrategyConfig {
     pub leverage_regime_threshold: f64,
     #[serde(default = "default_slippage_pct")]
     pub slippage_pct: f64,
+    #[serde(default = "default_mvo_objective")]
+    pub mvo_objective: String,
 }
 
 fn default_signal_source() -> String {
@@ -247,6 +249,9 @@ fn default_leverage_regime_threshold() -> f64 {
 }
 fn default_slippage_pct() -> f64 {
     0.002
+}
+fn default_mvo_objective() -> String {
+    "minvariance".into()
 }
 
 impl Default for StrategyConfig {
@@ -411,6 +416,7 @@ mod tests {
             candidate_tier: String::new(),
             leverage_regime_threshold: 0.9,
             slippage_pct: 0.002,
+            mvo_objective: "minvariance".into(),
         }
     }
 
@@ -836,6 +842,9 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         // load_strategy_config 从 DB 读真实值;此路径(回放/实盘用 ResolvedStrategy)用默认。
         leverage_regime_threshold: 0.9,
         slippage_pct: 0.002,
+        // mvo_objective:ResolvedStrategy/MvoParams 无此字段,用默认 minvariance。
+        // load_strategy_config 从 DB strategy_config.mvo_objective 读真实值。
+        mvo_objective: default_mvo_objective(),
     })
 }
 
@@ -873,7 +882,8 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'score_direction', score_direction,
             'candidate_tier', candidate_tier,
             'leverage_regime_threshold', leverage_regime_threshold,
-            'slippage_pct', slippage_pct
+            'slippage_pct', slippage_pct,
+            'mvo_objective', mvo_objective
         ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)
@@ -3331,8 +3341,8 @@ pub(crate) async fn compute_lw_mvo_weights(
             } else {
                 adaptive_min_stock
             };
-            // 目标函数实验开关 MVO_OBJECTIVE=maxsharpe（默认 minvariance）
-            let mvo_result = if std::env::var("MVO_OBJECTIVE").as_deref() == Ok("maxsharpe") {
+            // 目标函数:从 strategy_config.mvo_objective 字段读(maxsharpe / minvariance)
+            let mvo_result = if sc.mvo_objective == "maxsharpe" {
                 mvo::mvo_allocate_ga_maxsharpe_with_max_single(
                     &arr,
                     &adj_mu,
