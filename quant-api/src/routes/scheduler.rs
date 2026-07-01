@@ -212,6 +212,10 @@ pub struct StrategyConfig {
     pub score_direction: String,
     #[serde(default = "default_candidate_tier")]
     pub candidate_tier: String,
+    #[serde(default = "default_leverage_regime_threshold")]
+    pub leverage_regime_threshold: f64,
+    #[serde(default = "default_slippage_pct")]
+    pub slippage_pct: f64,
 }
 
 fn default_signal_source() -> String {
@@ -237,6 +241,12 @@ fn default_score_direction() -> String {
 }
 fn default_candidate_tier() -> String {
     "research_baseline".into()
+}
+fn default_leverage_regime_threshold() -> f64 {
+    0.9
+}
+fn default_slippage_pct() -> f64 {
+    0.002
 }
 
 impl Default for StrategyConfig {
@@ -399,6 +409,8 @@ mod tests {
             dynamic_target_floor: 0.0,
             score_direction: String::new(),
             candidate_tier: String::new(),
+            leverage_regime_threshold: 0.9,
+            slippage_pct: 0.002,
         }
     }
 
@@ -820,6 +832,10 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         dynamic_target_floor: mvo.dynamic_target_floor,
         score_direction: a_share.security.score_direction.clone(),
         candidate_tier: a_share.security.candidate_tier.clone(),
+        // rebalance 级参数:ResolvedStrategy 无来源(MvoParams/SecurityConfig 均无),暂用默认值。
+        // load_strategy_config 从 DB 读真实值;此路径(回放/实盘用 ResolvedStrategy)用默认。
+        leverage_regime_threshold: 0.9,
+        slippage_pct: 0.002,
     })
 }
 
@@ -855,7 +871,9 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'dynamic_target_cap', dynamic_target_cap,
             'dynamic_target_floor', dynamic_target_floor,
             'score_direction', score_direction,
-            'candidate_tier', candidate_tier
+            'candidate_tier', candidate_tier,
+            'leverage_regime_threshold', leverage_regime_threshold,
+            'slippage_pct', slippage_pct
         ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)

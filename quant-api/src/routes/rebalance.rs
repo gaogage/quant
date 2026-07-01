@@ -135,7 +135,7 @@ pub async fn rebalance_account(
     };
 
     // 4. 杠杆(共享 compute_vol_target_leverage)
-    let mut leverage_mult = if leverage_enabled && regime > 0.9 && leverage_multiplier > 1.0 {
+    let mut leverage_mult = if leverage_enabled && regime > sc.leverage_regime_threshold && leverage_multiplier > 1.0 {
         if leverage_mode == "vol_target" {
             Decimal::from_f64_retain(compute_vol_target_leverage(db, account_id, &sc).await)
                 .unwrap_or(Decimal::ONE)
@@ -475,9 +475,9 @@ async fn apply_fill_to_position(
     }
 }
 
-/// 策略级滑点(当前默认 20bp;后续可从 strategy_config.slippage_pct 字段读)
-fn sc_slippage_pct(_sc: &StrategyConfig) -> f64 {
-    0.002
+/// 策略级滑点(从 strategy_config.slippage_pct 字段读,默认 0.002=20bp)
+fn sc_slippage_pct(sc: &StrategyConfig) -> f64 {
+    sc.slippage_pct
 }
 
 fn build_etf_allocations(
@@ -548,5 +548,36 @@ mod tests {
         assert!((allocs[0].1 - 0.22).abs() < 1e-9);
         assert_eq!(allocs[1].0, "511010.SH");
         assert!((allocs[1].1 - 0.28).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_sc_slippage_pct_reads_field() {
+        let sc = StrategyConfig {
+            strategy_id: "test".into(),
+            name: "test".into(),
+            etf_symbols: vec![],
+            equity_curve_task_id: String::new(),
+            min_stock: 0.0,
+            max_single: 0.0,
+            max_single_bull: 0.0,
+            momentum_blend_ratio: 0.0,
+            ga_population: 0,
+            ga_generations: 0,
+            vol_target: 0.0,
+            leverage_cap: 0.0,
+            default_weights: vec![],
+            signal_source: String::new(),
+            prediction_blend_weight: 0.0,
+            combo_name: String::new(),
+            top_n: 0,
+            prediction_set_id: None,
+            dynamic_target_cap: 0.0,
+            dynamic_target_floor: 0.0,
+            score_direction: String::new(),
+            candidate_tier: String::new(),
+            leverage_regime_threshold: 0.9,
+            slippage_pct: 0.005,
+        };
+        assert!((sc_slippage_pct(&sc) - 0.005).abs() < 1e-12);
     }
 }
