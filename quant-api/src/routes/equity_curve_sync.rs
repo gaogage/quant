@@ -10,7 +10,9 @@
 //! - UPDATE 时需同时写 composite 行和 a_share 子行,保持两处一致(否则 load_strategy_config
 //!   读 composite 行、load_resolved_strategy 读 a_share 子行会看到不同值)。
 
+use axum::{extract::Path, Json};
 use chrono::NaiveDate;
+use serde::Deserialize;
 use sqlx::PgPool;
 use tracing::{info, warn};
 
@@ -381,6 +383,66 @@ pub async fn audit_equity_curve_readiness(
         missing_items: missing,
         ready,
     })
+}
+
+// ===== HTTP handler =====
+
+#[derive(Debug, Deserialize)]
+pub struct EquityCurveSyncRequest {
+    pub start_date: Option<String>,  // YYYYMMDD
+    pub end_date: Option<String>,
+    pub background: Option<bool>,
+}
+
+/// POST /api/v1/strategies/{strategy_id}/equity-curve/sync
+pub async fn handle_equity_curve_sync(
+    Path(strategy_id): Path<String>,
+    Json(req): Json<EquityCurveSyncRequest>,
+) -> Json<serde_json::Value> {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+    let db = match sqlx::PgPool::connect(&url).await {
+        Ok(db) => db,
+        Err(e) => return Json(serde_json::json!({"code": 1, "message": format!("db: {}", e)})),
+    };
+    let parse_date = |s: &Option<String>, default: chrono::NaiveDate| -> Result<chrono::NaiveDate, String> {
+        match s {
+            Some(d) => chrono::NaiveDate::parse_from_str(d, "%Y%m%d")
+                .or_else(|_| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d"))
+                .map_err(|e| format!("日期格式错误 {}: {}", d, e)),
+            None => Ok(default),
+        }
+    };
+    let start = match parse_date(&req.start_date, chrono::NaiveDate::from_ymd_opt(2014, 1, 2).unwrap()) {
+        Ok(d) => d, Err(e) => return Json(serde_json::json!({"code": 1, "message": e})),
+    };
+    let end = match parse_date(&req.end_date, chrono::Utc::now().date_naive()) {
+        Ok(d) => d, Err(e) => return Json(serde_json::json!({"code": 1, "message": e})),
+    };
+    if start > end {
+        return Json(serde_json::json!({"code": 1, "message": "start_date > end_date"}));
+    }
+    let background = req.background.unwrap_or(false);
+    match sync_strategy_equity_curve(&db, &strategy_id, start, end, background).await {
+        Ok(r) => Json(serde_json::json!({"code": 0, "data": r})),
+        Err(e) => Json(serde_json::json!({"code": 1, "message": e})),
+    }
+}
+
+/// GET /api/v1/strategies/{strategy_id}/equity-curve/readiness-audit
+pub async fn handle_equity_curve_readiness_audit(
+    Path(strategy_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+    let db = match sqlx::PgPool::connect(&url).await {
+        Ok(db) => db,
+        Err(e) => return Json(serde_json::json!({"code": 1, "message": format!("db: {}", e)})),
+    };
+    match audit_equity_curve_readiness(&db, &strategy_id).await {
+        Ok(r) => Json(serde_json::json!({"code": 0, "data": r})),
+        Err(e) => Json(serde_json::json!({"code": 1, "message": e})),
+    }
 }
 
 // ===== 集成测试(需 DB,默认 ignore) =====

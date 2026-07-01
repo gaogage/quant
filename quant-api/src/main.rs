@@ -933,6 +933,14 @@ async fn main() {
             "/api/v1/strategies/{id}",
             axum::routing::delete(routes::strategies::delete_strategy),
         )
+        .route(
+            "/api/v1/strategies/{id}/equity-curve/sync",
+            post(routes::equity_curve_sync::handle_equity_curve_sync),
+        )
+        .route(
+            "/api/v1/strategies/{id}/equity-curve/readiness-audit",
+            get(routes::equity_curve_sync::handle_equity_curve_readiness_audit),
+        )
         // ── 账号 ──
         .route("/api/v1/accounts", get(routes::accounts::list_accounts))
         .route("/api/v1/accounts", post(routes::accounts::create_account))
