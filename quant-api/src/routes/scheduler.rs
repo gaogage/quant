@@ -3004,7 +3004,18 @@ pub(crate) async fn compute_lw_mvo_weights(
         }
     }
 
-    let etf_symbols: Vec<&str> = sc.etf_symbols.iter().map(|s| s.as_str()).collect();
+    // 过滤当日未发行的 ETF:MVO 只对已发行标的分配,未发行的不占维度
+    // 用循环而非 .filter()+await(闭包不能 async)
+    let mut listed_etf_symbols: Vec<String> = Vec::new();
+    let mut listed_default_weights: Vec<f64> = Vec::new();
+    for (s, w) in sc.etf_symbols.iter().zip(sc.default_weights.iter()) {
+        if crate::routes::equity_curve_sync::is_etf_listed_on(db, s, date).await {
+            listed_etf_symbols.push(s.clone());
+            listed_default_weights.push(*w);
+        }
+    }
+
+    let etf_symbols: Vec<&str> = listed_etf_symbols.iter().map(|s| s.as_str()).collect();
     let n_total_assets = 1 + etf_symbols.len();
     let min_stock = sc.min_stock;
 
@@ -3063,7 +3074,7 @@ pub(crate) async fn compute_lw_mvo_weights(
 
     // 默认权重从策略配置读取 (数据不足时的fallback)
     let default_weights: Vec<f64> = {
-        let mut w = sc.default_weights.clone();
+        let mut w = listed_default_weights.clone();
         w.insert(0, adaptive_min_stock); // A股权重在第一位
         w
     };

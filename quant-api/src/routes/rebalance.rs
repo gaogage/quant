@@ -293,17 +293,25 @@ pub async fn rebalance_account(
     }
 
     // 8. ETF 建仓(按 price_source 取价:EodClose 从 DB / Intraday 从 tushare HashMap)
-    let etf_allocations = build_etf_allocations(&mvo_weights, regime);
+    // etf_symbols 必须与 mvo_weights 同源:只含当日已发行 ETF(compute_lw_mvo_weights 已过滤),
+    // 否则 mvo_weights.get(i+1) 索引会与全量 sc.etf_symbols 错位。
+    let mut listed_etf_symbols: Vec<String> = Vec::new();
+    for s in &sc.etf_symbols {
+        if crate::routes::equity_curve_sync::is_etf_listed_on(db, s, date).await {
+            listed_etf_symbols.push(s.clone());
+        }
+    }
+    let etf_allocations = build_etf_allocations(&mvo_weights, regime, &listed_etf_symbols);
     let intraday_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::Intraday) {
         let syms: Vec<String> = etf_allocations
             .iter()
-            .map(|(s, _, _)| s.to_string())
+            .map(|(s, _)| s.to_string())
             .collect();
         fetch_intraday_etf_prices(tushare, &syms, date, db).await
     } else {
         HashMap::new()
     };
-    for (etf_symbol, _name, alloc_pct) in &etf_allocations {
+    for (etf_symbol, alloc_pct) in &etf_allocations {
         if *alloc_pct <= 0.0 {
             continue;
         }
@@ -312,14 +320,14 @@ pub async fn rebalance_account(
         if alloc_amount <= Decimal::ZERO {
             continue;
         }
-        let price_val = fetch_etf_price(db, etf_symbol, date, price_source, &intraday_prices).await;
+        let price_val = fetch_etf_price(db, etf_symbol.as_str(), date, price_source, &intraday_prices).await;
         let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ONE);
         if price <= Decimal::ZERO {
             continue;
         }
         let target_qty = alloc_amount / price;
         let cur_qty = current_positions
-            .get(*etf_symbol)
+            .get(etf_symbol.as_str())
             .map(|(q, _)| *q)
             .unwrap_or(Decimal::ZERO);
         let delta = target_qty - cur_qty;
@@ -353,7 +361,7 @@ pub async fn rebalance_account(
                 Decimal::ONE + slip_d
             };
             let fill_price = price * mult;
-            apply_fill_to_position(db, account_id, etf_symbol, side, qty, fill_price).await;
+            apply_fill_to_position(db, account_id, etf_symbol.as_str(), side, qty, fill_price).await;
             n += 1;
         }
     }
@@ -467,46 +475,19 @@ fn sc_slippage_pct(_sc: &StrategyConfig) -> f64 {
 fn build_etf_allocations(
     mvo_weights: &[f64],
     regime: f64,
-) -> Vec<(&'static str, &'static str, f64)> {
-    let mut v = vec![
-        (
-            "518880.SH",
-            "黄金ETF",
-            mvo_weights.get(1).copied().unwrap_or(0.0) * regime,
-        ),
-        (
-            "511010.SH",
-            "国债ETF",
-            mvo_weights.get(2).copied().unwrap_or(0.0) * regime,
-        ),
-        (
-            "513500.SH",
-            "标普500",
-            mvo_weights.get(3).copied().unwrap_or(0.0) * regime,
-        ),
-        (
-            "513100.SH",
-            "纳指ETF",
-            mvo_weights.get(4).copied().unwrap_or(0.0) * regime,
-        ),
-        (
-            "159980.SZ",
-            "有色ETF",
-            mvo_weights.get(5).copied().unwrap_or(0.03) * regime,
-        ),
-        (
-            "159985.SZ",
-            "豆粕ETF",
-            mvo_weights.get(6).copied().unwrap_or(0.03) * regime,
-        ),
-        (
-            "501018.SH",
-            "原油LOF",
-            mvo_weights.get(7).copied().unwrap_or(0.02) * regime,
-        ),
-    ];
+    etf_symbols: &[String],
+) -> Vec<(String, f64)> {
+    let mut v: Vec<(String, f64)> = etf_symbols
+        .iter()
+        .enumerate()
+        .map(|(i, sym)| {
+            // mvo_weights[0]=A股, mvo_weights[1..]=已发行 ETF 权重(顺序与 etf_symbols 一致)
+            (sym.clone(), mvo_weights.get(i + 1).copied().unwrap_or(0.0) * regime)
+        })
+        .collect();
+    // 现金段:regime < 1 时补银华日利
     if 1.0 - regime > 0.01 {
-        v.push(("511880.SH", "银华日利(现金)", 1.0 - regime));
+        v.push(("511880.SH".to_string(), 1.0 - regime));
     }
     v
 }
@@ -543,4 +524,21 @@ async fn fetch_eod_price(db: &PgPool, symbol: &str, date: NaiveDate) -> f64 {
     .ok()
     .flatten()
     .unwrap_or(1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_etf_allocations_dynamic_symbols() {
+        let weights = vec![0.12, 0.22, 0.28, 0.05]; // A股 + 2 ETF
+        let symbols = vec!["518880.SH".to_string(), "511010.SH".to_string()];
+        let allocs = build_etf_allocations(&weights, 1.0, &symbols);
+        assert_eq!(allocs.len(), 2);
+        assert_eq!(allocs[0].0, "518880.SH");
+        assert!((allocs[0].1 - 0.22).abs() < 1e-9);
+        assert_eq!(allocs[1].0, "511010.SH");
+        assert!((allocs[1].1 - 0.28).abs() < 1e-9);
+    }
 }
