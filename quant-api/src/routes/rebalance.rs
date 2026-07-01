@@ -577,6 +577,7 @@ mod tests {
             candidate_tier: String::new(),
             leverage_regime_threshold: 0.9,
             slippage_pct: 0.005,
+            mvo_objective: "minvariance".into(),
         };
         assert!((sc_slippage_pct(&sc) - 0.005).abs() < 1e-12);
     }
