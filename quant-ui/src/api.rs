@@ -354,7 +354,7 @@ pub async fn run_historical_replay(
     start_date: &str,
     end_date: &str,
 ) -> Result<Value, String> {
-    post("/api/v1/quant/paper/historical-replay-v19", &serde_json::json!({
+    post("/api/v1/quant/paper/historical-replay", &serde_json::json!({
         "paper_account_id": paper_account_id,
         "start_date": start_date,
         "end_date": end_date,
