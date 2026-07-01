@@ -224,6 +224,21 @@ pub async fn delete_strategy(id: &str) -> Result<Value, String> {
     delete(&format!("/api/v1/strategies/{}", id)).await
 }
 
+pub async fn equity_curve_readiness_audit(strategy_id: &str) -> Result<Value, String> {
+    get(&format!("/api/v1/strategies/{}/equity-curve/readiness-audit", strategy_id)).await
+}
+
+pub async fn equity_curve_sync(
+    strategy_id: &str,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    background: Option<bool>,
+) -> Result<Value, String> {
+    post(&format!("/api/v1/strategies/{}/equity-curve/sync", strategy_id), &serde_json::json!({
+        "start_date": start_date, "end_date": end_date, "background": background,
+    })).await
+}
+
 // ── Accounts ──────────────────────────────────────────
 
 pub async fn list_accounts(filter: &str) -> Result<Value, String> {

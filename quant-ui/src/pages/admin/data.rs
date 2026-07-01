@@ -41,6 +41,8 @@ pub fn DataSyncPage() -> Element {
             }
 
             AccountDataHealthSection {}
+
+            EquityCurveSyncSection {}
         }
     }
 }
@@ -376,6 +378,169 @@ fn AccountDataHealthItem(check: serde_json::Value, on_repaired: Callback<()>) ->
                         onclick: do_fix,
                         if fixing() { "..." } else { "修复" }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// 权益曲线同步区块:展示每个策略的 readiness 状态 + 手工触发同步。
+#[component]
+pub fn EquityCurveSyncSection() -> Element {
+    let mut strategies = use_signal(Vec::<Value>::new);
+    let mut readiness = use_signal(std::collections::HashMap::<String, Value>::new);
+    let mut loading = use_signal(|| true);
+
+    let mut load = move || {
+        loading.set(true);
+        spawn(async move {
+            if let Ok(v) = api::list_strategies().await {
+                if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
+                    strategies.set(arr.clone());
+                    // 拉每个策略的 readiness
+                    let mut map = std::collections::HashMap::<String, Value>::new();
+                    for s in arr.iter() {
+                        let sid = s.get("strategy_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        if sid.is_empty() { continue; }
+                        if let Ok(r) = api::equity_curve_readiness_audit(&sid).await {
+                            map.insert(sid.clone(), r);
+                        }
+                    }
+                    readiness.set(map);
+                }
+            }
+            loading.set(false);
+        });
+    };
+
+    use_effect(move || { load(); });
+
+    rsx! {
+        div { class: "mt-6 border-t border-gray-200 dark:border-gray-700 pt-4",
+            div { class: "flex items-center justify-between mb-3",
+                h3 { class: "text-lg font-semibold text-gray-800 dark:text-gray-100",
+                    "权益曲线同步"
+                }
+                button {
+                    class: "px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50",
+                    disabled: *loading.read(),
+                    onclick: move |_| { load(); },
+                    if *loading.read() { "加载中..." } else { "刷新" }
+                }
+            }
+
+            if *loading.read() {
+                div { class: "animate-spin h-6 w-6 border-3 border-blue-500 border-t-transparent rounded-full" }
+            }
+
+            div { class: "space-y-2",
+                for s in strategies.read().iter() {
+                    {
+                        let sid = s.get("strategy_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
+                        let rd = readiness.read().get(&sid).cloned();
+                        let mut readiness_handle = readiness;
+                        let sid_for_cb = sid.clone();
+                        rsx! {
+                            EquityCurveSyncItem {
+                                key: "{sid}",
+                                strategy_id: sid.clone(),
+                                strategy_name: name,
+                                readiness: rd,
+                                on_synced: Callback::new(move |new_rd: Value| {
+                                    readiness_handle.write().insert(sid_for_cb.clone(), new_rd);
+                                }),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 单个策略的权益曲线同步行:策略名 | readiness 徽标 | [同步] 按钮。
+#[component]
+fn EquityCurveSyncItem(
+    strategy_id: String,
+    strategy_name: String,
+    readiness: Option<Value>,
+    on_synced: Callback<Value>,
+) -> Element {
+    let mut msg = use_signal(String::new);
+    let mut syncing = use_signal(|| false);
+
+    // 解析 readiness
+    let (ready, coverage_text) = match readiness.as_ref().and_then(|r| r.get("data")) {
+        Some(d) => {
+            let ready = d.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+            let trade_days = d.get("equity_curve_coverage")
+                .and_then(|c| c.get("trade_day_count"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let etf_days = d.get("etf_price_coverage")
+                .and_then(|c| c.get("trade_day_count"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            (ready, format!("权益曲线 {} 天 · ETF价格 {} 天", trade_days, etf_days))
+        }
+        None => (false, "未获取".to_string()),
+    };
+
+    let sid_for_sync = strategy_id.clone();
+    let sid_for_refresh = strategy_id.clone();
+    let cb = on_synced;
+    let do_sync = move |_| {
+        if *syncing.read() { return; }
+        syncing.set(true);
+        msg.set("同步中...".to_string());
+        let sid = sid_for_sync.clone();
+        let sid_rd = sid_for_refresh.clone();
+        let cb = cb;
+        spawn(async move {
+            match api::equity_curve_sync(&sid, None, None, None).await {
+                Ok(v) => {
+                    let code = v["code"].as_i64().unwrap_or(-1);
+                    if code == 0 {
+                        let m = v["message"].as_str().unwrap_or("同步完成");
+                        msg.set(format!("✅ {}", m));
+                        // 重新拉 readiness 并回传父组件更新
+                        if let Ok(r) = api::equity_curve_readiness_audit(&sid_rd).await {
+                            cb(r);
+                        }
+                    } else {
+                        let m = v["message"].as_str().unwrap_or("同步失败");
+                        msg.set(format!("❌ {}", m));
+                    }
+                }
+                Err(e) => msg.set(format!("❌ {}", e)),
+            }
+            syncing.set(false);
+        });
+    };
+
+    let (badge_cls, badge_text) = if ready {
+        ("bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-400", "就绪")
+    } else {
+        ("bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-400", "未就绪")
+    };
+
+    rsx! {
+        div { class: "flex items-center justify-between py-2 px-3 rounded bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800",
+            div { class: "flex items-center gap-3 min-w-0",
+                span { class: "text-sm text-gray-800 dark:text-gray-200 font-medium", "{strategy_name}" }
+                span { class: "text-xs text-gray-400", "{coverage_text}" }
+            }
+            div { class: "flex items-center gap-2 flex-shrink-0",
+                if !msg.read().is_empty() {
+                    span { class: "text-xs text-gray-500 dark:text-gray-400", "{msg}" }
+                }
+                span { class: "text-xs px-2 py-0.5 rounded-full {badge_cls}", "{badge_text}" }
+                button {
+                    class: "text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 cursor-pointer transition",
+                    disabled: *syncing.read(),
+                    onclick: do_sync,
+                    if *syncing.read() { "同步中..." } else { "同步" }
                 }
             }
         }
