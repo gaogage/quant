@@ -496,6 +496,8 @@ impl TushareClient {
                 "fund_type",
                 "market",
                 "status",
+                "list_date",
+                "delist_date",
             ],
         )
         .await

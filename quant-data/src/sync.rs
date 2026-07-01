@@ -915,13 +915,36 @@ pub async fn sync_fund_basic(pool: &PgPool, client: &TushareClient) -> Result<us
                 continue;
             } // skip delisted
 
+            // exchange 按 ts_code 后缀判定(SH→SSE, SZ→SZSE),修正原硬编码 SSE
+            let exchange = if ts_code.ends_with(".SH") {
+                "SSE"
+            } else if ts_code.ends_with(".SZ") {
+                "SZSE"
+            } else {
+                "SSE"
+            };
+            // list_date/delist_date:tushare 返回 "YYYYMMDD" 字符串,转 NaiveDate;空串→NULL
+            let list_date = item["list_date"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
+            let delist_date = item["delist_date"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
+
             sqlx::query(
-                "INSERT INTO market_stock (symbol, name, exchange, list_status, is_st)
-                 VALUES ($1, $2, 'SSE', 'L', false)
-                 ON CONFLICT (symbol) DO UPDATE SET name = EXCLUDED.name",
+                "INSERT INTO market_stock (symbol, name, exchange, list_status, is_st, list_date, delist_date)
+                 VALUES ($1, $2, $3, 'L', false, $4, $5)
+                 ON CONFLICT (symbol) DO UPDATE SET name = EXCLUDED.name, exchange = EXCLUDED.exchange,
+                   list_date = COALESCE(EXCLUDED.list_date, market_stock.list_date),
+                   delist_date = COALESCE(EXCLUDED.delist_date, market_stock.delist_date)",
             )
             .bind(ts_code)
             .bind(format!("{} ({})", name, fund_type))
+            .bind(exchange)
+            .bind(list_date)
+            .bind(delist_date)
             .execute(pool)
             .await
             .map_err(|e| format!("insert failed: {}", e))?;
@@ -8243,5 +8266,24 @@ mod tests {
             row.pre_date,
             Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_sync_fund_basic_writes_list_date() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let pool = sqlx::PgPool::connect(&url).await.expect("pool");
+        let client = crate::tushare::client::TushareClient::from_env().expect("tushare");
+        let n = sync_fund_basic(&pool, &client).await.expect("sync");
+        assert!(n > 0, "应同步到 ETF");
+        // 验证 518880 list_date 非 NULL
+        let ld: Option<chrono::NaiveDate> = sqlx::query_scalar(
+            "SELECT list_date FROM market_stock WHERE symbol = '518880.SH'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query");
+        assert!(ld.is_some(), "518880.SH list_date 应被回填");
     }
 }
