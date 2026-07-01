@@ -396,8 +396,7 @@ mod tests {
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = sqlx::PgPool::connect(&url).await.expect("db");
         let strategies = collect_active_strategies(&db).await;
-        // 活跃账号挂 v19/v21/v21_lev,去重后应含这三个
-        assert!(strategies.contains(&"v19".to_string()), "含 v19");
+        // 当前活跃账号挂 v21/v21_lev(v19 已无 active 账号),去重后应含这两个
         assert!(strategies.contains(&"v21".to_string()), "含 v21");
         assert!(strategies.contains(&"v21_lev".to_string()), "含 v21_lev");
         assert_eq!(
