@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod admin;
+pub mod asset_meta;
 pub mod backtest;
 pub mod blueprint;
 pub mod cleanup;

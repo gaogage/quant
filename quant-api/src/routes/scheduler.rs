@@ -3103,16 +3103,7 @@ async fn apply_etf_trend_filter(
             let latest: f64 = rows[0].0.to_string().parse::<f64>().unwrap_or(0.0);
 
             if latest < ma200 {
-                let etf_name = match *sym {
-                    "518880.SH" => "黄金",
-                    "511010.SH" => "国债",
-                    "513500.SH" => "SP500",
-                    "513100.SH" => "纳指",
-                    "159980.SZ" => "有色",
-                    "159985.SZ" => "豆粕",
-                    "501018.SH" => "原油",
-                    _ => *sym,
-                };
+                let etf_name = crate::routes::asset_meta::etf_display_name(sym);
                 info!(
                     "[ETF Trend] {} ({}) 跌破MA200 ({:.3} < {:.3}), 权重 {:.0}% → 0%",
                     etf_name,

@@ -707,7 +707,7 @@ fn asset_allocation(positions: &[serde_json::Value]) -> Vec<serde_json::Value> {
             .and_then(|v| v.as_str())
             .unwrap_or("0");
         let mv: f64 = mv_str.parse().unwrap_or(0.0);
-        let cat = classify_asset(sym);
+        let cat = crate::routes::asset_meta::classify_asset(sym);
         *categories.entry(cat).or_default() += mv;
     }
     let total: f64 = categories.values().sum();
@@ -729,20 +729,6 @@ fn asset_allocation(positions: &[serde_json::Value]) -> Vec<serde_json::Value> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     result
-}
-
-fn classify_asset(symbol: &str) -> String {
-    match symbol {
-        "511010.SH" | "511260.SH" => "国债ETF".into(),
-        "518880.SH" => "黄金ETF".into(),
-        "513100.SH" => "纳指ETF".into(),
-        "513500.SH" => "标普ETF".into(),
-        "501018.SH" => "原油LOF".into(),
-        "159980.SZ" => "商品ETF".into(),
-        "159985.SZ" => "商品ETF".into(),
-        s if s.ends_with(".SH") || s.ends_with(".SZ") => "A股".into(),
-        _ => "其他".into(),
-    }
 }
 
 // ── 钉钉推送（单账号） ──────────────────────────────────
