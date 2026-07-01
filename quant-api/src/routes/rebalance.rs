@@ -366,6 +366,14 @@ pub async fn rebalance_account(
         }
     }
 
+    // 建仓 0 笔 + A股选股空 + 账号当前无持仓 → 报错(不产出假绩效)
+    if n == 0 && positions.is_empty() && current_positions.is_empty() {
+        let msg = format!("建仓 0 笔:策略 {} 当日已发行标的均无建仓,可能权益曲线/ETF价格数据缺失", rs.strategy_id);
+        warn!("[rebalance] {}", msg);
+        crate::routes::scheduler::send_quality_alert(db, &[msg.clone()]).await;
+        return Err(msg);
+    }
+
     // 9. NAV 重算:统一走 trading::update_current_nav(正确口径:持仓市值+cash-margin)
     update_current_nav(db, account_id).await?;
     try_auto_repay(db, account_id).await.ok();
