@@ -240,9 +240,15 @@ fn StrategyEquityCurve(strategy_id: String) -> Element {
                 Ok(v) => {
                     let code = v["code"].as_i64().unwrap_or(-1);
                     if code == 0 {
-                        let m = v["message"].as_str().unwrap_or("同步完成");
-                        msg.set(format!("✅ {}", m));
-                        // 成功后重拉 readiness 更新本地状态
+                        let status = v["data"]["status"].as_str().unwrap_or("unknown");
+                        if status == "success" {
+                            let tid = v["data"]["task_id"].as_str().unwrap_or("?");
+                            msg.set(format!("✅ 同步完成 task_id={}", tid));
+                        } else {
+                            let err = v["data"]["error"].as_str().unwrap_or("未知错误");
+                            msg.set(format!("❌ 同步失败: {}", err));
+                        }
+                        // 无论成败都重拉 readiness
                         if let Ok(r) = api::equity_curve_readiness_audit(&sid_rd).await {
                             readiness.set(Some(r));
                         }
