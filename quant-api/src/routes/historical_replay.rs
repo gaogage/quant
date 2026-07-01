@@ -1,8 +1,8 @@
-//! v19 策略历史回放 —— 复用共享 MVO 核心 `mvo_engine::run_daily_simulation`，
-//! 与在线模拟/实盘走同一套逐日盯市 NAV 复利（真 v19 GA 权重 + 体制 + 杠杆），
+//! 策略历史回放 —— 复用共享 MVO 核心 `mvo_engine::run_daily_simulation`，
+//! 与在线模拟/实盘走同一套逐日盯市 NAV 复利（策略权重 + 体制 + 杠杆），
 //! run_daily_simulation(reset=true) 内部清表/重置账号 + 写 snapshot + 落交易。
 //!
-//! POST /api/v1/quant/paper/historical-replay-v19
+//! POST /api/v1/quant/paper/historical-replay
 
 use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Datelike, NaiveDate};
@@ -17,17 +17,17 @@ use crate::routes::sync::{check_paper_account_data_readiness, DataReadinessGate}
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
-pub struct V19ReplayRequest {
+pub struct HistoricalReplayRequest {
     pub paper_account_id: String,
     pub start_date: String,
     pub end_date: String,
 }
 
-pub async fn historical_replay_v19(
+pub async fn historical_replay(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<V19ReplayRequest>,
+    Json(req): Json<HistoricalReplayRequest>,
 ) -> impl IntoResponse {
-    match run_v19_replay(&state.db, req).await {
+    match run_historical_replay(&state.db, req).await {
         Ok(data) => Json(json!({"code": 0, "data": data})).into_response(),
         Err(e) => Json(json!({"code": 1, "message": e})).into_response(),
     }
@@ -44,7 +44,7 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
     Err(format!("日期格式错误: {} (需要 YYYYMMDD 或 YYYY-MM-DD)", s))
 }
 
-async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Value, String> {
+async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) -> Result<Value, String> {
     let account_id = req.paper_account_id.trim().to_string();
     let start = parse_date(&req.start_date)?;
     let end = parse_date(&req.end_date)?;
@@ -62,13 +62,9 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     let cap_f64: f64 = init_cap.to_string().parse().unwrap_or(1_000_000.0);
 
     // 2. 加载策略配置（A股选股方式 + ETF + 杠杆参数都在策略里）
-    // 杠杆感知：杠杆账号用保守 tc=0.30 策略，无杠杆用高 tc=0.80 策略
-    let strategy_id_override = if lev_enabled {
-        "v21_lev"
-    } else {
-        strategy_id.as_deref().unwrap_or("v19")
-    };
-    let rs = crate::routes::strategy::load_resolved_strategy(db, strategy_id_override)
+    // 账号挂的 strategy_version_id 决定策略；杠杆参数读账号 leverage_* 字段。
+    let sid = strategy_id.as_deref().ok_or("账号未挂策略（strategy_version_id 空）")?;
+    let rs = crate::routes::strategy::load_resolved_strategy(db, sid)
         .await
         .map_err(|e| format!("load strategy: {}", e))?;
 
@@ -77,7 +73,7 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
         &account_id,
         Some((start, end)),
         DataReadinessGate::BlockRequiredRed,
-        "paper_replay_v19",
+        "paper_replay",
     )
     .await?;
 
@@ -105,7 +101,7 @@ async fn run_v19_replay(db: &sqlx::PgPool, req: V19ReplayRequest) -> Result<Valu
     )
     .await?;
     if navs.is_empty() {
-        return Err("v19 模拟无有效交易日".into());
+        return Err("回放无有效交易日".into());
     }
 
     // 4. 绩效指标（基于 navs 的 net_return）

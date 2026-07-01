@@ -790,11 +790,7 @@ async fn main() {
         )
         .route(
             "/api/v1/quant/paper/historical-replay",
-            post(routes::paper::historical_replay),
-        )
-        .route(
-            "/api/v1/quant/paper/historical-replay-v19",
-            post(routes::paper_v19_replay::historical_replay_v19),
+            post(routes::historical_replay::historical_replay),
         )
         // 参数优化
         .route(

@@ -85,7 +85,7 @@ async fn compute_perf_from_nav(
         0.0
     };
 
-    // 逐年收益（按日收益复利聚合），与 paper_v19_replay::compute_yearly 同口径
+    // 逐年收益（按日收益复利聚合），与 historical_replay::compute_yearly 同口径
     let mut yearly: Vec<serde_json::Value> = Vec::new();
     let mut cur_year = 0i32;
     let mut yr_nav = 1.0f64;

@@ -1812,7 +1812,7 @@ async fn run_mvo_simulate(
 }
 
 /// 逐年收益（基于 navs 的 net_return 复利聚合）→ jsonb 数组
-/// 与 paper_v19_replay::compute_yearly_from_navs 同逻辑（本地副本，避免跨模块私有 fn）。
+/// 与 historical_replay::compute_yearly_from_navs 同逻辑（本地副本，避免跨模块私有 fn）。
 fn compute_yearly_from_navs(navs: &[crate::routes::mvo_engine::DailyNav]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut cur_year = 0i32;
