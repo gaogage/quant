@@ -189,8 +189,9 @@ fn StrategyEquityCurve(strategy_id: String) -> Element {
     let mut msg = use_signal(String::new);
     let mut syncing = use_signal(|| false);
 
+    let sid_for_load = strategy_id.clone();
     let mut load_readiness = move || {
-        let sid = strategy_id.clone();
+        let sid = sid_for_load.clone();
         loading.set(true);
         spawn(async move {
             match api::equity_curve_readiness_audit(&sid).await {
