@@ -297,10 +297,13 @@ mod tests {
     }
 
     /// 验证 risk_free_rate 参数确实影响 Sharpe / Sortino（P4.0d 回归测试）。
-    /// 相同收益序列，rfr 越高 Sharpe 越低；rfr=0 时 Sharpe 最高。
+    /// 相同收益序列，rfr 越高 Sharpe/Sortino 越低；rfr=0 时最高。
+    /// 用正负混合序列(让 downside 非空,Sortino 可计算)。
     #[test]
     fn test_metrics_risk_free_rate_affects_sharpe() {
-        let rets: Vec<f64> = (0..252).map(|_| 0.0005).collect();
+        let rets: Vec<f64> = (0..252)
+            .map(|i| if i % 7 == 0 { -0.004 } else { 0.001 })
+            .collect();
         let m_zero = compute_metrics(&rets, 0.0);
         let m_low = compute_metrics(&rets, 0.02);
         let m_high = compute_metrics(&rets, 0.10);
