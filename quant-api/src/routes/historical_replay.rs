@@ -243,11 +243,14 @@ fn split_oos_windows(trade_days: &[NaiveDate], oos_window_days: usize) -> Vec<(u
 }
 
 /// 把各窗 DailyNav 的 net_return 首尾相接拼成 stitched 收益序列。
-/// 每窗 reset 后首日 net_return 是相对初始资金的真实收益，拼接后复利累乘得连续 NAV。
+/// 每窗 reset 后首日 net_return 是相对初始资金的建仓跳变,非连续市场持有收益,
+/// 拼入 stitched 会虚增总收益(见 P4.1a Task 3 实测偏差),故每窗从第 2 天起取。
 fn stitch_window_returns(windows: &[Vec<DailyNav>]) -> Vec<f64> {
     let mut rets = Vec::new();
     for w in windows {
-        rets.extend(w.iter().map(|d| d.net_return));
+        // 跳过每窗首日:reset 后首日 net_return 是"从初始资金建仓到收盘"的跳变,
+        // 非连续市场持有收益,拼入 stitched 会虚增总收益。从第 2 天起取。
+        rets.extend(w.iter().skip(1).map(|d| d.net_return));
     }
     rets
 }
@@ -448,6 +451,7 @@ mod tests {
             DailyNav { date: d("2024-01-04"), nav: 1.03, net_return: -0.01, leverage: 1.0, regime: 0.0 },
         ];
         let rets = stitch_window_returns(&[w1, w2]);
-        assert_eq!(rets, vec![0.01, 0.02, 0.03, -0.01]);
+        // 每窗跳过首日建仓跳变:第1窗保留 0.02,第2窗保留 -0.01
+        assert_eq!(rets, vec![0.02, -0.01]);
     }
 }

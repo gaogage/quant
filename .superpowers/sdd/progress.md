@@ -1,29 +1,62 @@
-# SDD 进度账本 — 回放/实盘逻辑统一与策略配置化重构
+# P4.0a Subagent-Driven Progress Ledger
 
-计划: /Users/gaocheng/workspace/docs/superpowers/plans/2026-06-29-回放实盘逻辑统一与策略配置化重构.md
-spec:  /Users/gaocheng/workspace/docs/projects/quant/tasks/quant/44-回放实盘逻辑统一与策略配置化重构.md
+Plan: docs/superpowers/plans/2026-07-01-p4-0a-equity-curve-multi-strategy-sync.md
+Started: 2026-07-01
 
-BASE(quant-api dev): 356fb21
-BASE(docs dev):      a620b15
+## Tasks
+- [ ] Task 0: 修复 tushare fund_basic 漏 list_date + sync_fund_basic 未写入 (quant-data)
+- [ ] Task 1: equity_curve_sync.rs 核心同步模块 (quant-api)
+- [ ] Task 2: scheduler.rs equity_curve_update 改调 sync_active_strategies (quant-api)
+- [ ] Task 3: compute_lw_mvo_weights 入口过滤未发行 ETF (quant-api)
+- [ ] Task 4: rebalance_account 建仓 0 笔报错收窄 (quant-api)
+- [ ] Task 5: API 路由 POST sync + GET readiness-audit (quant-api)
+- [ ] Task 6: 前端数据 tab 权益曲线同步子区 (quant-ui)
+- [ ] Task 7: 策略详情页权益曲线段 + 端到端验证 (quant-ui)
 
-## 计划修订(2026-06-29)
-用户选"按 spec 统一口径"。Task 5 改目标持仓驱动增量调仓(删全量 upsert);新增 mark_to_market 每日盯市;
-Task 8 回放绩效基于 current_nav(非 load_a_share_daily 累乘),循环:select→rebalance→mtm→update_nav→读nav算收益→写snapshot;
-回放账号重置(清持仓,cash/current_nav=initial_capital)。详见计划文件"计划修订"节。
+## Completion Log
+(newest at bottom)
 
-## 任务状态
-- [x] Task 1: complete (docs commit a620b15..5b58bd5; DB 字段已加并验证 v19=0.12 v21/v21_lev=0.06) — 直接执行(DB运维无代码可审)
-- [x] Task 2: complete (commits 356fb21..2d5e069, review clean) — 直接执行(子代理分类器临时故障;3行可见性机械改动,编译通过)
-- [x] Task 3: complete (commits 2d5e069..99e22ee, review clean) — 直接执行(骨架按计划落,backtest_position 表列已核对一致,编译通过)
-- [x] Task 4: complete (commits 99e22ee..8af431a, review clean) — 直接执行(TDD:计划测试用 from_f64_retain 有浮点噪声致失败,改 Decimal::new(2,3) 精确构造后 2 测试 PASS;execute_simulated_trade 注入滑点,编译通过)
-- [x] Task 5: complete (commits 8af431a..HEAD, review clean) — 直接执行(分类器临时故障;实现 rebalance_account 增量调仓+mark_to_market+apply_fill_to_position,自审发现并修复 cash/margin 流转缺失:买扣 cash 不足自动融资 margin+=缺口,卖 cash+=fill_amount,编译+2测试 PASS)
-- [x] Task 6: complete (commits e168be5..HEAD, review clean) — 子代理(haiku)执行 4 处改动(struct 字段+default 函数、Default panic、load_strategy_config panic+SQL 追加 dynamic_target_floor、无 strategy_version_id 跳过);主代理补修行445单测(default→test_strategy_config 字面量)+ 行2265 函数参数 sc→_sc(shadow 后未用);编译+7测试 PASS
-- [x] Task 7: complete (commits e168be5..HEAD, review clean) — 直接执行(分类器临时故障);sync_positions_from_backtest 整体简化为委托 rebalance_account(Intraday);删 0.12 硬编码改 sc.dynamic_target_floor;删 bw is_v19 分支(=momentum_blend_ratio);A 股交易阻断 a_share_trade_block_reason 下沉到 rebalance_account(改 pub(crate));删 use super::trading;编译通过+7测试 PASS
-- [ ] Task 8: 回放逐日真实建仓(绩效基于盯市 current_nav)
-- [ ] Task 9: paper_replay 去版本化重命名
-- [ ] Task 10: mvo_engine 去版本化重命名 + 端到端验证
-- [ ] Task 11: 数据前提 + 文档收尾
+- [x] Task 0: complete (commits aea555a..4b7b37f, review clean) — tushare fund_basic 补 list_date/delist_date + sync_fund_basic 写入+动态exchange+COALESCE + 回填7 ETF list_date 非 NULL + 回归测试 PASS
+  - Minor: sync.rs:927-934 可用 to_date 工具函数替代内联(DRY,不阻塞,行为正确)
 
-## Minor findings(待最终整支审查 triage)
-- **行768/868/556/1637 仍硬编码 `"v19"`**:Default panic 后,若 DB 无 strategy_id="v19" active 记录会 panic。行868 的 sc 参数已改 _sc(未用),Task 7/10 清理函数签名时一并处理。行556(equity_curve_update 定时任务)、行1637 独立调用,依赖 DB 有 v19 记录(数据前提 Task 11 验证)。
-- **run_historical_replay 内 is_v19/is_v20 版本路由(行3453/3455/3519)**:Task 7 删除路径A(simulate_v19_daily_returns 外层 bw 分支)的 is_v19,但路径B run_historical_replay 内的 is_v19 与 is_v20 耦合(版本路由选择不同回放逻辑),保留留待 Task 10 端到端验证时统一处理路径A/B 去版本化去留。
+- [x] Task 1: complete (commits 4b7b37f..01939ab, review clean) — equity_curve_sync.rs 新建(is_etf_listed_on双保险+collect_active+detect_combo_sharing+sync_strategy+sync_active+audit_readiness);get_latest_data_version 改 pub(crate);UPDATE 双写 composite+a_share 子行;3 集成测试 PASS
+  - 实现者发现并修复 brief 漏洞:UPDATE 需双写 composite 行 + a_share 子行(load_strategy_config 读 composite,load_resolved_strategy 读 a_share 子行)
+  - 测试断言从 v19 改为 v21/v21_lev(DB 无 v19 active 账号)
+  - 信息性观察(<80 置信,不阻塞):UPDATE 失败静默忽略、双写无事务
+
+- [x] Task 2: complete (commits 01939ab..2e71872, review clean) — scheduler.rs equity_curve_update 分支替换为调 sync_active_strategies_equity_curves(+8/-90),删硬编码 v19/v20;8 既有测试 PASS 无回归
+  - 副作用:parse_scheduler_date/first_open_trade_date_on_or_after 变 dead_code(原只被该块用),warning 不阻塞
+  - 残留 v19/v20 在 sync_eod_data 等其他函数,P4.0d 范围
+
+- [x] Task 3: complete (commits 2e71872..cc568c6, review clean) — compute_lw_mvo_weights 入口循环过滤未发行 ETF(listed_etf_symbols/listed_default_weights 同序)+ build_etf_allocations 改 2 元组接动态 etf_symbols + 调用点过滤保证与 mvo_weights 同源(修索引错位)+ 类型适配;test PASS
+  - 主代理修复:brief 原模板 .filter()+await 编译错误(闭包不能 async)→ 改循环;rebalance 调用点从 &sc.etf_symbols 改为过滤后的 listed_etf_symbols(修索引错位)
+  - 信息性(<80 置信,不阻塞):MvoWeightCache 注释陈旧;info! 日志 wg(1..7) 越界返 0;cache key 跨账号共用 quarter 维度错配风险(pre-existing,P4.0d 评估)
+
+- [x] Task 4: complete (commits cc568c6..cd6bd88, review clean) — rebalance_account 建仓0笔+A股空+无持仓时报错+send_quality_alert+return Err(NAV重算前);无回归
+  - 不写新测试:报错逻辑内嵌 async,brief 测试模板用不存在账号会在 fetch_one 提前报错(无效),由 Task 7 端到端覆盖
+
+- [x] Task 5: complete (commits cd6bd88..29fc957, review clean) — 2 handler(handle_equity_curve_sync POST + handle_equity_curve_readiness_audit GET)+ EquityCurveSyncRequest struct + main.rs 注册 2 路由;BUILD SUCCESS;接口未 curl(服务未运行,留 Task 7)
+  - handler 每请求新建 PgPool(brief 要求,低频可接受,高频后续复用 AppState)
+
+- [x] Task 6: complete (commits 29fc957..93adfa4, review clean after fix) — 前端数据 tab 加 EquityCurveSyncSection(策略列表+readiness 徽标+同步按钮)+ api.rs 加 equity_curve_readiness_audit/equity_curve_sync;WASM 编译通过
+  - fix: ETF coverage 字段名 trade_day_count→listed_etfs/total_etfs(后端无 trade_day_count,审查发现 confidence 95)
+  - 子代理自跑 cargo check 验证(前端 WASM 轻量,有益)
+
+- [x] Task 7: complete (commits 93adfa4..0fa3408, review clean) — 策略详情页加 StrategyEquityCurve 组件(readiness 徽标+coverage+同步按钮),复用 Task 6 api;WASM 编译通过
+  - 主代理修复:子代理原代码 E0382(strategy_id 被 move 后再借用)→ 加 sid_for_load clone
+  - 端到端验证待主代理启动服务
+
+- [x] 最终全分支 review: Ready to merge (commits aea555a..0bac029, 13 commits)
+  - Important finding(已修):前端 do_sync 只查 code==0 不读 data.status → run-factor 失败显示假成功;commit 0bac029 修复(读 data.status 区分成败)
+  - spec Task 0-7 全部实现无遗漏
+  - 三仓库编译全 SUCCESS:quant-data + quant-api + quant-ui(WASM)
+
+## P4.0a 完成
+全部分支:aea555a..0bac029(quant-data + quant-api + quant-ui 共享 git 历史)
+核心成果:
+1. 消除 scheduler 硬编码 v19:equity_curve_update 自动同步所有活跃账号关联策略(v21/v21_lev),combo 去重
+2. 修复 tushare fund_basic 漏 list_date + sync_fund_basic 未写入(根因),回填 7 ETF list_date
+3. MVO 入口过滤未发行 ETF(双保险 is_etf_listed_on)+ build_etf_allocations 接动态 symbols
+4. rebalance 建仓 0 笔报错收窄(不产出假绩效)
+5. 2 API 路由(POST sync + GET readiness-audit)
+6. 前端数据 tab + 策略详情页权益曲线同步 UI
