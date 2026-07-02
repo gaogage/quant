@@ -9,6 +9,7 @@ pub mod data_validation;
 pub mod dingtalk;
 pub mod equity_curve_sync;
 pub mod factors;
+pub mod factor_analysis;
 pub mod historical_replay;
 pub mod ml;
 pub mod mvo_engine;
