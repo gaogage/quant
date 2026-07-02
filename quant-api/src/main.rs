@@ -792,6 +792,11 @@ async fn main() {
             "/api/v1/quant/paper/historical-replay",
             post(routes::historical_replay::historical_replay),
         )
+        // 回撤归因
+        .route(
+            "/api/v1/quant/attribution/drawdown",
+            post(routes::attribution::drawdown_attribution),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",

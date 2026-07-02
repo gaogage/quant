@@ -176,6 +176,107 @@ pub fn aggregate_by_dimension(contributions: &[Contribution], dimension: &str) -
     out
 }
 
+// ===== 回撤归因 API (P4.1b Task3) =====
+
+/// POST /api/v1/quant/attribution/drawdown 请求体。
+#[derive(Debug, serde::Deserialize)]
+pub struct DrawdownAttributionRequest {
+    pub strategy_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    /// task_id(可选);缺省从 strategy_id 的 a_share asset 取 equity_curve_task_id。
+    pub task_id: Option<String>,
+}
+
+/// Axum handler:回撤归因。
+pub async fn drawdown_attribution(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DrawdownAttributionRequest>,
+) -> impl IntoResponse {
+    match run_drawdown_attribution(&state.db, req).await {
+        Ok(data) => Json(json!({ "code": 0, "data": data })).into_response(),
+        Err(e) => Json(json!({ "code": 1, "message": e })).into_response(),
+    }
+}
+
+/// 回撤归因核心:取持仓 → 市值分桶 → 收益贡献 → 维度聚合 → top 贡献者。
+async fn run_drawdown_attribution(
+    db: &sqlx::PgPool,
+    req: DrawdownAttributionRequest,
+) -> Result<Value, String> {
+    let start = parse_date(&req.start_date)?;
+    let end = parse_date(&req.end_date)?;
+
+    // 1. 取 task_id(优先 req.task_id,否则从 strategy 加载 a_share asset)
+    let task_id = match req.task_id.as_deref() {
+        Some(t) => t.to_string(),
+        None => {
+            let rs = crate::routes::strategy::load_resolved_strategy(db, &req.strategy_id)
+                .await
+                .map_err(|e| format!("load strategy: {}", e))?;
+            rs.assets
+                .iter()
+                .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare)
+                .and_then(|a| a.security.equity_curve_task_id.clone())
+                .ok_or_else(|| "策略无 a_share asset,equity_curve_task_id 缺失".to_string())?
+        }
+    };
+
+    // 2. 取 start 日持仓 + 行业
+    let positions = fetch_positions_with_industry(db, &task_id, start).await?;
+    if positions.is_empty() {
+        return Err(format!("{} 在 {} 无持仓(task={})", req.strategy_id, start, task_id));
+    }
+    let symbols: Vec<String> = positions.iter().map(|p| p.symbol.clone()).collect();
+
+    // 3. 取市值分桶
+    let market_caps = fetch_market_cap(db, &symbols, start).await?;
+
+    // 4. 算收益贡献
+    let contributions = compute_return_contribution(db, &positions, &market_caps, start, end).await?;
+
+    // 5. 维度聚合
+    let by_industry = aggregate_by_dimension(&contributions, "industry");
+    let by_market_cap = aggregate_by_dimension(&contributions, "market_cap");
+
+    // 6. top 贡献者(正/负各 5)
+    let mut sorted = contributions.clone();
+    sorted.sort_by(|a, b| a.contribution.partial_cmp(&b.contribution).unwrap_or(std::cmp::Ordering::Equal));
+    let worst: Vec<&Contribution> = sorted.iter().take(5).collect();
+    let best: Vec<&Contribution> = sorted.iter().rev().take(5).collect();
+
+    Ok(json!({
+        "strategy_id": req.strategy_id,
+        "task_id": task_id,
+        "period": { "start": start.to_string(), "end": end.to_string() },
+        "n_positions": positions.len(),
+        "return_attribution": {
+            "by_industry": by_industry,
+            "by_market_cap": by_market_cap,
+        },
+        "top_drawdown_contributors": worst.iter().map(|c| json!({
+            "symbol": c.symbol, "industry": c.industry, "cap_bucket": c.cap_bucket,
+            "weight": c.weight_avg, "return": c.stock_return, "contribution": c.contribution,
+        })).collect::<Vec<_>>(),
+        "top_gain_contributors": best.iter().map(|c| json!({
+            "symbol": c.symbol, "industry": c.industry, "cap_bucket": c.cap_bucket,
+            "weight": c.weight_avg, "return": c.stock_return, "contribution": c.contribution,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// 解析日期:支持 YYYYMMDD / YYYY-MM-DD。
+fn parse_date(s: &str) -> Result<NaiveDate, String> {
+    let s = s.trim();
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y%m%d") {
+        return Ok(d);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(d);
+    }
+    Err(format!("日期格式错误: {} (需要 YYYYMMDD 或 YYYY-MM-DD)", s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
