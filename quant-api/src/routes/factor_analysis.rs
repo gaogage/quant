@@ -104,8 +104,8 @@ where
         .collect()
 }
 
-/// 取因子值(PIT:available_at <= trade_date,但 factor_value 表无 available_at 列,
-/// 用 trade_date 当日值,符合 PIT——因子值在 trade_date 已可得)。
+/// 取因子值(PIT:available_at <= trade_date 过滤,与 evaluate.rs 口径一致——
+/// available_at 是因子值的公告可得日,晚于 trade_date 的属前瞻数据,必须剔除)。
 pub async fn fetch_factor_values(
     db: &sqlx::PgPool,
     factor_code: &str,
@@ -117,6 +117,7 @@ pub async fn fetch_factor_values(
          FROM factor_value
          WHERE factor_code = $1 AND trade_date BETWEEN $2 AND $3
            AND normalized_value IS NOT NULL
+           AND available_at <= trade_date
          ORDER BY trade_date",
     )
     .bind(factor_code)
