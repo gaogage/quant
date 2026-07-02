@@ -129,32 +129,35 @@ pub async fn fetch_factor_values(
     Ok(rows)
 }
 
-/// 取 1-day forward return:t 日收盘到 t+1 日收盘的收益。
-/// key=(symbol, t日),value=(close_{t+1}-close_t)/close_t。
-/// PIT:t+1 收盘价在 t+1 日已知,查询区间 end 需包含 t+1 才能取到 t 日的 forward return。
+/// 取 h-day forward return:t 日收盘到 t+h 日收盘的收益(close_{t+h}/close_t - 1)。
+/// key=(symbol, t日),value=(close_{t+h}-close_t)/close_t。
+/// PIT:t+h 收盘价在 t+h 日已知,查询区间 end 需包含 t+h 才能取到 t 日的 forward return。
+/// horizon=1 即单日 forward return(与原口径一致)。
 pub async fn fetch_forward_returns(
     db: &sqlx::PgPool,
     symbols: &[String],
     start: NaiveDate,
     end: NaiveDate,
+    horizon: usize,
 ) -> Result<HashMap<(String, NaiveDate), f64>, String> {
-    // LEAD 在分区最后一行返回 NULL(无 t+1),用 Option<f64> 接收避免 sqlx 解码 NULL 报错。
+    // LEAD(close, horizon) 在分区末 h 行返回 NULL(无 t+h),用 Option<f64> 接收避免 sqlx 解码 NULL 报错。
     let rows: Vec<(String, NaiveDate, Option<f64>)> = sqlx::query_as(
         "SELECT symbol, trade_date,
-         (LEAD(close) OVER (PARTITION BY symbol ORDER BY trade_date) - close)::double precision / close AS fwd_ret
+         (LEAD(close, $4) OVER (PARTITION BY symbol ORDER BY trade_date) - close)::double precision / close AS fwd_ret
          FROM market_stock_daily_bar_adj
          WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3 AND close > 0",
     )
     .bind(symbols)
     .bind(start)
     .bind(end)
+    .bind(horizon as i64)
     .fetch_all(db)
     .await
-    .map_err(|e| format!("fetch forward_returns: {}", e))?;
+    .map_err(|e| format!("fetch forward_returns(h={}): {}", horizon, e))?;
     Ok(rows
         .into_iter()
         .filter_map(|(s, d, r)| {
-            // None(末行 NULL)或 NaN 跳过;PIT 注释:t+1 收盘在 t+1 日已知,末日无 t+1 故丢弃
+            // None(末 h 行 NULL)或 NaN 跳过;PIT 注释:t+h 收盘在 t+h 日已知,末日无 t+h 故丢弃
             r.filter(|v| v.is_finite()).map(|v| ((s, d), v))
         })
         .collect())
@@ -269,6 +272,9 @@ pub struct BucketedIcRequest {
     pub end_date: String,
     /// 分桶日期(取该日持仓截面分桶;缺省用 start_date)。
     pub bucket_date: Option<String>,
+    /// forward return horizon 列表(单位:交易日);缺省 [1]。
+    /// 多个 horizon 时产出 decay_curve,overall/分桶仍用 horizons[0]。
+    pub horizons: Option<Vec<usize>>,
 }
 
 /// POST /api/v1/quant/factors/analysis/bucketed-ic
@@ -295,6 +301,7 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
 }
 
 /// 分桶 IC 分析核心:取因子值→forward_returns→全市场IC→分桶 labels→按 industry/market_cap 分桶。
+/// horizons 多于 1 时额外产出 decay_curve(各 horizon 的全市场 IC)。
 async fn run_bucketed_ic(db: &sqlx::PgPool, req: BucketedIcRequest) -> Result<Value, String> {
     let start = parse_date(&req.start_date)?;
     let end = parse_date(&req.end_date)?;
@@ -302,6 +309,15 @@ async fn run_bucketed_ic(db: &sqlx::PgPool, req: BucketedIcRequest) -> Result<Va
         Some(d) => parse_date(d)?,
         None => start,
     };
+
+    // horizons 去重排序(缺省 [1]);overall/分桶用首个 horizon
+    let mut horizons: Vec<usize> = req.horizons.clone().unwrap_or_else(|| vec![1]);
+    horizons.sort_unstable();
+    horizons.dedup();
+    if horizons.is_empty() {
+        horizons = vec![1];
+    }
+    let primary_h = horizons[0];
 
     // 1. 因子值
     let fvs = fetch_factor_values(db, &req.factor_code, start, end).await?;
@@ -316,8 +332,8 @@ async fn run_bucketed_ic(db: &sqlx::PgPool, req: BucketedIcRequest) -> Result<Va
         .into_iter()
         .collect();
 
-    // 2. forward_returns
-    let forward_returns = fetch_forward_returns(db, &symbols, start, end).await?;
+    // 2. forward_returns(primary horizon,用于 overall + 分桶)
+    let forward_returns = fetch_forward_returns(db, &symbols, start, end, primary_h).await?;
 
     // 3. 全市场 IC
     let overall = compute_ic(&fvs, &forward_returns);
@@ -335,14 +351,78 @@ async fn run_bucketed_ic(db: &sqlx::PgPool, req: BucketedIcRequest) -> Result<Va
         labels.get(sym).map(|(_, cap)| cap.clone())
     });
 
+    // 7. decay_curve(多 horizon 时产出:各 horizon 的全市场 IC + 半衰期估计)
+    let decay_curve = if horizons.len() > 1 {
+        let mut entries: Vec<Value> = Vec::with_capacity(horizons.len());
+        for h in &horizons {
+            // primary horizon 已算过,复用避免重复查询
+            let ic = if *h == primary_h {
+                overall.clone()
+            } else {
+                let fr = fetch_forward_returns(db, &symbols, start, end, *h).await?;
+                compute_ic(&fvs, &fr)
+            };
+            entries.push(json!({
+                "horizon": h,
+                "mean_ic": ic.mean_ic,
+                "ic_ir": ic.ic_ir,
+                "mean_rank_ic": ic.mean_rank_ic,
+                "rank_ic_ir": ic.rank_ic_ir,
+                "n_obs": ic.n_obs,
+            }));
+        }
+        // 半衰期:rank_ic 衰减到首日一半的 horizon(线性插值,粗估)
+        let half_life = estimate_half_life(&entries);
+        json!({ "entries": entries, "half_life_horizon": half_life })
+    } else {
+        json!(null)
+    };
+
     Ok(json!({
         "factor_code": req.factor_code,
         "period": { "start": start.to_string(), "end": end.to_string() },
+        "horizon": primary_h,
         "n_symbols": symbols.len(),
         "overall_ic": overall,
         "by_industry": by_industry,
         "by_market_cap": by_market_cap,
+        "decay_curve": decay_curve,
     }))
+}
+
+/// 估计 IC 半衰期:rank_ic 衰减到首 horizon 一半时的 horizon(线性插值)。
+/// 无衰减或反向衰减返回 None。
+fn estimate_half_life(entries: &[Value]) -> Option<f64> {
+    if entries.len() < 2 {
+        return None;
+    }
+    let points: Vec<(f64, f64)> = entries
+        .iter()
+        .filter_map(|e| {
+            let h = e.get("horizon")?.as_f64()?;
+            let ic = e.get("mean_rank_ic")?.as_f64()?;
+            Some((h, ic))
+        })
+        .collect();
+    if points.len() < 2 {
+        return None;
+    }
+    let (_, ic0) = points[0];
+    if ic0.abs() < 1e-9 {
+        return None; // 首 horizon IC 近零,无法定义半衰期
+    }
+    let target = ic0 / 2.0;
+    // 找 rank_ic 跨越 target 的相邻点,线性插值
+    for w in points.windows(2) {
+        let (h1, ic1) = w[0];
+        let (h2, ic2) = w[1];
+        // ic 递减场景:ic1 >= target >= ic2
+        if (ic1 - target) * (ic2 - target) <= 0.0 && (ic2 - ic1).abs() > 1e-12 {
+            let frac = (target - ic1) / (ic2 - ic1);
+            return Some(h1 + frac * (h2 - h1));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
