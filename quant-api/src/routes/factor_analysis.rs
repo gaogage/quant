@@ -150,7 +150,7 @@ pub async fn fetch_forward_returns(
     .bind(symbols)
     .bind(start)
     .bind(end)
-    .bind(horizon as i64)
+    .bind(horizon as i32)
     .fetch_all(db)
     .await
     .map_err(|e| format!("fetch forward_returns(h={}): {}", horizon, e))?;
