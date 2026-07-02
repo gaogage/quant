@@ -137,7 +137,8 @@ pub async fn fetch_forward_returns(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<HashMap<(String, NaiveDate), f64>, String> {
-    let rows: Vec<(String, NaiveDate, f64)> = sqlx::query_as(
+    // LEAD 在分区最后一行返回 NULL(无 t+1),用 Option<f64> 接收避免 sqlx 解码 NULL 报错。
+    let rows: Vec<(String, NaiveDate, Option<f64>)> = sqlx::query_as(
         "SELECT symbol, trade_date,
          (LEAD(close) OVER (PARTITION BY symbol ORDER BY trade_date) - close)::double precision / close AS fwd_ret
          FROM market_stock_daily_bar_adj
@@ -151,7 +152,10 @@ pub async fn fetch_forward_returns(
     .map_err(|e| format!("fetch forward_returns: {}", e))?;
     Ok(rows
         .into_iter()
-        .filter_map(|(s, d, r)| if r.is_finite() { Some(((s, d), r)) } else { None })
+        .filter_map(|(s, d, r)| {
+            // None(末行 NULL)或 NaN 跳过;PIT 注释:t+1 收盘在 t+1 日已知,末日无 t+1 故丢弃
+            r.filter(|v| v.is_finite()).map(|v| ((s, d), v))
+        })
         .collect())
 }
 
