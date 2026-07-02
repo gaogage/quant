@@ -71,7 +71,7 @@ pub fn bucket_market_cap(mv_yi: f64) -> &'static str {
 }
 
 /// 取 symbol 在 [start, end] 的区间收益(end 收盘 / start 收盘 - 1)。
-/// 用 market_stock_daily_bar_adj.close,PIT 取不晚于 date 的最近价。
+/// 用 market_stock_daily_bar_adj.close,PIT 取 [start, end] 区间内已知收盘价。
 async fn fetch_stock_period_return(
     db: &sqlx::PgPool,
     symbol: &str,
