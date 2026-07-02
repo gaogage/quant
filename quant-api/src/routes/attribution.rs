@@ -52,7 +52,7 @@ pub async fn fetch_market_cap(
     date: NaiveDate,
 ) -> Result<HashMap<String, f64>, String> {
     let rows: Vec<(String, f64)> = sqlx::query_as(
-        "SELECT DISTINCT ON (symbol) symbol, total_mv::double precision / 1e8 AS mv_yi
+        "SELECT DISTINCT ON (symbol) symbol, total_mv::double precision / 1e4 AS mv_yi
          FROM market_stock_daily_basic
          WHERE symbol = ANY($1) AND trade_date <= $2 AND total_mv > 0
          ORDER BY symbol, trade_date DESC",
