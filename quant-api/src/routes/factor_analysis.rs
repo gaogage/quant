@@ -104,6 +104,99 @@ where
         .collect()
 }
 
+/// 取因子值(PIT:available_at <= trade_date,但 factor_value 表无 available_at 列,
+/// 用 trade_date 当日值,符合 PIT——因子值在 trade_date 已可得)。
+pub async fn fetch_factor_values(
+    db: &sqlx::PgPool,
+    factor_code: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<(String, NaiveDate, f64)>, String> {
+    let rows: Vec<(String, NaiveDate, f64)> = sqlx::query_as(
+        "SELECT symbol, trade_date, normalized_value::double precision
+         FROM factor_value
+         WHERE factor_code = $1 AND trade_date BETWEEN $2 AND $3
+           AND normalized_value IS NOT NULL
+         ORDER BY trade_date",
+    )
+    .bind(factor_code)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("fetch factor_values: {}", e))?;
+    Ok(rows)
+}
+
+/// 取 1-day forward return:t 日收盘到 t+1 日收盘的收益。
+/// key=(symbol, t日),value=(close_{t+1}-close_t)/close_t。
+/// PIT:t+1 收盘价在 t+1 日已知,查询区间 end 需包含 t+1 才能取到 t 日的 forward return。
+pub async fn fetch_forward_returns(
+    db: &sqlx::PgPool,
+    symbols: &[String],
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<HashMap<(String, NaiveDate), f64>, String> {
+    let rows: Vec<(String, NaiveDate, f64)> = sqlx::query_as(
+        "SELECT symbol, trade_date,
+         (LEAD(close) OVER (PARTITION BY symbol ORDER BY trade_date) - close)::double precision / close AS fwd_ret
+         FROM market_stock_daily_bar_adj
+         WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3 AND close > 0",
+    )
+    .bind(symbols)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("fetch forward_returns: {}", e))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(s, d, r)| if r.is_finite() { Some(((s, d), r)) } else { None })
+        .collect())
+}
+
+/// 取 symbols 在 date 的行业 + 市值(亿元),用于分桶。
+/// industry 来自 market_stock 静态表;total_mv 取 trade_date <= date 最近值(万元→亿元,÷1e4)。
+/// 返回 HashMap<symbol, (industry, market_cap_bucket)>。
+pub async fn fetch_bucket_labels(
+    db: &sqlx::PgPool,
+    symbols: &[String],
+    date: NaiveDate,
+) -> Result<HashMap<String, (Option<String>, String)>, String> {
+    let rows: Vec<(String, Option<String>, f64)> = sqlx::query_as(
+        "SELECT DISTINCT ON (ms.symbol) ms.symbol, ms.industry,
+         COALESCE(b.total_mv, 0)::double precision / 1e4 AS mv_yi
+         FROM market_stock ms
+         LEFT JOIN LATERAL (
+             SELECT total_mv FROM market_stock_daily_basic
+             WHERE symbol = ms.symbol AND trade_date <= $2 AND total_mv > 0
+             ORDER BY trade_date DESC LIMIT 1
+         ) b ON true
+         WHERE ms.symbol = ANY($1)
+         ORDER BY ms.symbol",
+    )
+    .bind(symbols)
+    .bind(date)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("fetch bucket_labels: {}", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(s, ind, mv)| {
+            let cap = if mv > 500.0 {
+                "large"
+            } else if mv > 100.0 {
+                "mid"
+            } else if mv > 0.0 {
+                "small"
+            } else {
+                "unknown"
+            };
+            (s, (ind, cap.to_string()))
+        })
+        .collect())
+}
+
 /// Spearman rank IC:对 factor_value 和 forward_return 分别排名后算 Pearson。
 fn spearman_rank_ic(pairs: &[(f64, f64)]) -> f64 {
     let ranks_fv = rank(pairs.iter().map(|(fv, _)| *fv).collect::<Vec<_>>().as_slice());
