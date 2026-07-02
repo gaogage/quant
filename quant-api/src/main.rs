@@ -797,6 +797,11 @@ async fn main() {
             "/api/v1/quant/attribution/drawdown",
             post(routes::attribution::drawdown_attribution),
         )
+        // 因子分桶 IC 分析
+        .route(
+            "/api/v1/quant/factors/analysis/bucketed-ic",
+            post(routes::factor_analysis::bucketed_ic_analysis),
+        )
         // 参数优化
         .route(
             "/api/v1/quant/optimizations",

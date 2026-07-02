@@ -258,6 +258,92 @@ fn rank(values: &[f64]) -> Vec<f64> {
     ranks
 }
 
+// ===== 分桶 IC API handler =====
+
+/// 分桶 IC 分析请求。
+#[derive(Debug, serde::Deserialize)]
+pub struct BucketedIcRequest {
+    pub factor_code: String,
+    pub start_date: String,
+    pub end_date: String,
+    /// 分桶日期(取该日持仓截面分桶;缺省用 start_date)。
+    pub bucket_date: Option<String>,
+}
+
+/// POST /api/v1/quant/factors/analysis/bucketed-ic
+pub async fn bucketed_ic_analysis(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BucketedIcRequest>,
+) -> impl IntoResponse {
+    match run_bucketed_ic(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})).into_response(),
+        Err(e) => Json(json!({"code": 1, "message": e})).into_response(),
+    }
+}
+
+/// 解析日期(支持 YYYYMMDD 或 YYYY-MM-DD)。
+fn parse_date(s: &str) -> Result<NaiveDate, String> {
+    let s = s.trim();
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y%m%d") {
+        return Ok(d);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(d);
+    }
+    Err(format!("日期格式错误: {} (需 YYYYMMDD 或 YYYY-MM-DD)", s))
+}
+
+/// 分桶 IC 分析核心:取因子值→forward_returns→全市场IC→分桶 labels→按 industry/market_cap 分桶。
+async fn run_bucketed_ic(db: &sqlx::PgPool, req: BucketedIcRequest) -> Result<Value, String> {
+    let start = parse_date(&req.start_date)?;
+    let end = parse_date(&req.end_date)?;
+    let bucket_date = match req.bucket_date.as_deref() {
+        Some(d) => parse_date(d)?,
+        None => start,
+    };
+
+    // 1. 因子值
+    let fvs = fetch_factor_values(db, &req.factor_code, start, end).await?;
+    if fvs.is_empty() {
+        return Err(format!("因子 {} 在 {}~{} 无数据", req.factor_code, start, end));
+    }
+    // symbols 用 HashSet 去重(factor_values 里同 symbol 多日)
+    let symbols: Vec<String> = fvs
+        .iter()
+        .map(|(s, _, _)| s.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // 2. forward_returns
+    let forward_returns = fetch_forward_returns(db, &symbols, start, end).await?;
+
+    // 3. 全市场 IC
+    let overall = compute_ic(&fvs, &forward_returns);
+
+    // 4. 分桶(用 bucket_date 的行业+市值标签,简化:全周期用同一日标签)
+    let labels = fetch_bucket_labels(db, &symbols, bucket_date).await?;
+
+    // 5. 按 industry 分桶
+    let by_industry = compute_ic_by_bucket(&fvs, &forward_returns, |sym, _| {
+        labels.get(sym).and_then(|(ind, _)| ind.clone())
+    });
+
+    // 6. 按 market_cap 分桶
+    let by_market_cap = compute_ic_by_bucket(&fvs, &forward_returns, |sym, _| {
+        labels.get(sym).map(|(_, cap)| cap.clone())
+    });
+
+    Ok(json!({
+        "factor_code": req.factor_code,
+        "period": { "start": start.to_string(), "end": end.to_string() },
+        "n_symbols": symbols.len(),
+        "overall_ic": overall,
+        "by_industry": by_industry,
+        "by_market_cap": by_market_cap,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
