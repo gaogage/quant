@@ -11625,19 +11625,23 @@ fn phase7_large_cap_momentum_reversal_backfill_sql(
                 ) AS prev_mom_close
             FROM market_stock_daily_bar_adj
             WHERE close IS NOT NULL AND trade_date <= $4
+              AND trade_date >= ($3::date - INTERVAL '120 days')
+        ),
+        -- 大盘股池:用 start_date($3) 当日市值固定分桶(PIT,与 P4.1c 口径一致),
+        -- 避免逐日 LATERAL 市值查询的性能开销。大盘股池相对稳定,固定分桶是可接受的简化。
+        large_cap_symbols AS (
+            SELECT DISTINCT ON (symbol) symbol
+            FROM market_stock_daily_basic
+            WHERE trade_date <= $3 AND total_mv > {threshold_wan}
+            ORDER BY symbol, trade_date DESC
         ),
         large_cap AS (
-            SELECT DISTINCT ON (p.symbol) p.symbol, p.trade_date, p.close, p.prev_rev_close, p.prev_mom_close
+            SELECT p.symbol, p.trade_date, p.close, p.prev_rev_close, p.prev_mom_close
             FROM priced p
-            LEFT JOIN LATERAL (
-                SELECT total_mv FROM market_stock_daily_basic
-                WHERE symbol = p.symbol AND trade_date <= p.trade_date AND total_mv > 0
-                ORDER BY trade_date DESC LIMIT 1
-            ) b ON true
+            JOIN large_cap_symbols l ON p.symbol = l.symbol
             WHERE p.trade_date BETWEEN $3 AND $4
               AND p.prev_rev_close IS NOT NULL AND p.prev_mom_close IS NOT NULL
               AND p.prev_rev_close <> 0.0 AND p.prev_mom_close <> 0.0
-              AND COALESCE(b.total_mv, 0) > {threshold_wan}
         ),
         raw AS (
             SELECT
