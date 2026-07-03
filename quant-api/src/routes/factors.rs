@@ -16285,6 +16285,65 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
     Ok(total)
 }
 
+/// P4.2b overlay combo 物化:等权平均两个交互特征(normalized_value)。
+/// combo = p42b_large_cap_alpha_overlay_v1,成分:large_cap_mom_rev_daily_std +
+/// defensive_lowvol_quality_daily_std。两因子均正向 IC(descending 有效),等权起点。
+/// 后续可升级为 ICIR 加权(需先 evaluate 两因子)。
+/// PIT:用 available_at <= trade_date 过滤;写入 multi_factor_value。
+pub async fn materialize_p42b_overlay_combo(
+    db: &sqlx::PgPool,
+    combo_name: &str,
+    factor_version: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<u64, String> {
+    // 等权平均两因子的 normalized_value(均已是 0-1 截面 percent_rank,可直接平均)。
+    // 只保留两因子都有值的 (symbol, trade_date),避免单因子缺失致偏差。
+    let sql = r#"
+WITH pairs AS (
+    SELECT a.symbol, a.trade_date,
+        a.normalized_value AS a_val,
+        b.normalized_value AS b_val,
+        GREATEST(COALESCE(a.available_at, a.trade_date), COALESCE(b.available_at, b.trade_date)) AS available_at
+    FROM factor_value a
+    JOIN factor_value b
+      ON a.symbol = b.symbol AND a.trade_date = b.trade_date
+    WHERE a.factor_code = 'large_cap_mom_rev_daily_std'
+      AND a.factor_version = $2
+      AND b.factor_code = 'defensive_lowvol_quality_daily_std'
+      AND b.factor_version = $2
+      AND a.trade_date BETWEEN $3 AND $4
+      AND a.normalized_value IS NOT NULL
+      AND b.normalized_value IS NOT NULL
+      AND a.available_at <= a.trade_date
+      AND b.available_at <= b.trade_date
+)
+INSERT INTO multi_factor_value
+    (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+SELECT $1, $2, symbol, trade_date,
+    (a_val + b_val) / 2.0 AS raw_score,
+    (a_val + b_val) / 2.0 AS normalized_score,
+    available_at
+FROM pairs
+ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+    raw_score = EXCLUDED.raw_score,
+    normalized_score = EXCLUDED.normalized_score,
+    available_at = EXCLUDED.available_at,
+    created_at = NOW()
+"#;
+    let res = sqlx::query(sql)
+        .bind(combo_name)
+        .bind(factor_version)
+        .bind(start_date)
+        .bind(end_date)
+        .execute(db)
+        .await
+        .map_err(|e| format!("materialize_p42b_overlay_combo: {}", e))?;
+    let total = res.rows_affected();
+    info!(combo = combo_name, rows = total, "P4.2b overlay combo 物化完成");
+    Ok(total)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MaterializePitComboRequest {
     pub combo_name: String,
@@ -16790,6 +16849,85 @@ pub async fn materialize_pit_combo_background(
     });
 
     Json(json!({"code": 0, "data": {"task_id": task_id, "status": "running"}}))
+}
+
+/// POST /api/v1/quant/factors/p42b-overlay-combo/materialize/background
+///
+/// P4.2b overlay combo 物化:等权平均 large_cap_mom_rev_daily_std +
+/// defensive_lowvol_quality_daily_std,写入 multi_factor_value(combo_name 默认
+/// p42b_large_cap_alpha_overlay_v1)。两因子均正向 IC,等权起点,后续可升级 ICIR。
+pub async fn materialize_p42b_overlay_combo_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MaterializeP42bOverlayComboRequest>,
+) -> impl IntoResponse {
+    let start = req
+        .start_date
+        .as_deref()
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok())
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2014, 1, 1).unwrap());
+    let end = req
+        .end_date
+        .as_deref()
+        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive());
+    let combo_name = req
+        .combo_name
+        .clone()
+        .unwrap_or_else(|| "p42b_large_cap_alpha_overlay_v1".to_string());
+    let version = req.version.clone();
+    let task_id = background_factor_task_id();
+
+    let _ = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at, started_at)
+         VALUES ($1, 'materialize_p42b_overlay_combo', 'factor', $2, $3, 'running', 0, 0, 0, 0, now(), now())",
+    )
+    .bind(&task_id)
+    .bind(start)
+    .bind(end)
+    .execute(&state.db)
+    .await;
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    tokio::spawn(async move {
+        match materialize_p42b_overlay_combo(&state.db, &combo_name, &version, start, end).await {
+            Ok(rows) => {
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task SET status='completed', total_count=$2, success_count=$2,
+                     progress=100, last_heartbeat_at=now(), completed_at=now() WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(rows as i32)
+                .execute(&state.db)
+                .await;
+                info!(task_id = %tid, rows = rows, "P4.2b overlay combo 物化完成");
+            }
+            Err(e) => {
+                tracing::error!(task_id = %tid, error = %e, "P4.2b overlay combo 物化失败");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task SET status='failed', error_message=$2,
+                     last_heartbeat_at=now(), completed_at=now() WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&e)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({"code": 0, "data": {"task_id": task_id, "status": "running"}}))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MaterializeP42bOverlayComboRequest {
+    pub combo_name: Option<String>,
+    #[serde(default = "default_pit_combo_version")]
+    pub version: String,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
 }
 
 fn phase7_alpha_blend_backfill_sql(combo_method: &str) -> &'static str {

@@ -549,6 +549,10 @@ async fn main() {
             post(routes::factors::materialize_pit_combo_background),
         )
         .route(
+            "/api/v1/quant/factors/p42b-overlay-combo/materialize/background",
+            post(routes::factors::materialize_p42b_overlay_combo_background),
+        )
+        .route(
             "/api/v1/quant/factors/evaluate-rolling-pit/background",
             post(routes::factors::evaluate_rolling_pit_background),
         )
