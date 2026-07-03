@@ -611,6 +611,13 @@ enum Phase7BackfillFactorKind {
         /// 大盘市值阈值(亿元),total_mv > 此值才入选
         large_cap_threshold_yi: i32,
     },
+    /// P4.2b 防御板块低波质量交互特征:防御行业池内 low_volatility × fin_roe。
+    /// 补偿生产 combo ascending 在防御板块的失效(P4.1c 发现保险正 IC/银行白酒近零)。
+    DefensiveLowVolQuality {
+        volatility_period: i32,
+        /// 防御行业列表(申万行业名)
+        industries: &'static [&'static str],
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2525,6 +2532,30 @@ fn p42b_large_cap_momentum_reversal_specs() -> Vec<Phase7BackfillFactorSpec> {
             reversal_period: 5,
             momentum_period: 60,
             large_cap_threshold_yi: 500,
+        },
+        weight: 1.0,
+    }]
+}
+
+/// P4.2b 防御板块列表(申万行业名,据 P4.1c 发现的 ascending 失效/近零 IC 板块)。
+const P42B_DEFENSIVE_INDUSTRIES: &[&str] = &[
+    "保险",
+    "银行",
+    "白酒",
+    "黄金",
+    "机场",
+    "电信运营",
+    "啤酒",
+];
+
+fn p42b_defensive_low_vol_quality_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![Phase7BackfillFactorSpec {
+        factor_code: "defensive_lowvol_quality_daily_std",
+        name: "P4.2b defensive low-volatility quality interaction rank",
+        period: 20,
+        kind: Phase7BackfillFactorKind::DefensiveLowVolQuality {
+            volatility_period: 20,
+            industries: P42B_DEFENSIVE_INDUSTRIES,
         },
         weight: 1.0,
     }]
@@ -5626,6 +5657,192 @@ impl P42bLargeCapMomentumReversalBackfillRequest {
             category: "price_volume",
             phase: "P4.2b",
             dependencies: &["market_stock_daily_bar_adj", "market_stock_daily_basic"],
+            combo_method: "equal_weight",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
+/// POST /api/v1/quant/factors/p42b-defensive-low-vol-quality-backfill/background
+///
+/// Set-based daily backfill for the P4.2b defensive low-volatility quality
+/// interaction factor (`defensive_lowvol_quality_daily_std`): within the
+/// defensive industry pool, CUME_DIST(-volatility) x CUME_DIST(fin_roe)
+/// interaction, cross-sectional percent_rank normalization.
+pub async fn backfill_p42b_defensive_low_vol_quality_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<P42bDefensiveLowVolQualityBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create p42b defensive low-vol quality backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_p42b_defensive_low_vol_quality_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = report.total_rows();
+                let total_rows = usize_to_i32(total_rows);
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = p42b_defensive_low_vol_quality_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist P4.2b defensive low-vol quality backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "P4.2b defensive low-vol quality backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "P4.2b defensive low-vol quality backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct P42bDefensiveLowVolQualityBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+impl P42bDefensiveLowVolQualityBackfillRequest {
+    fn into_plan(self) -> Result<SetBasedFactorBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "defensive_lowvol_quality_daily_std",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(SetBasedFactorBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "p42b_defensive_low_vol_quality_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "defensive_lowvol_quality_daily_std",
+            category: "price_volume",
+            phase: "P4.2b",
+            dependencies: &["market_stock_daily_bar_adj", "market_stock", "factor_value"],
             combo_method: "equal_weight",
             experiment_type: "phase7_factor_backfill_profile",
             source_combos: Vec::new(),
@@ -9456,6 +9673,16 @@ async fn run_p42b_large_cap_momentum_reversal_backfill(
     run_set_based_factor_backfill(db, task_id, job).await
 }
 
+async fn run_p42b_defensive_low_vol_quality_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let specs = p42b_defensive_low_vol_quality_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
 async fn run_phase7_financial_quality_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -11549,6 +11776,10 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             momentum_period,
             large_cap_threshold_yi,
         ),
+        Phase7BackfillFactorKind::DefensiveLowVolQuality {
+            volatility_period,
+            industries,
+        } => phase7_defensive_low_vol_quality_backfill_sql(volatility_period, industries),
     }
 }
 
@@ -11669,6 +11900,109 @@ fn phase7_large_cap_momentum_reversal_backfill_sql(
                 percent_rank() OVER (PARTITION BY trade_date ORDER BY rev_dist * mom_dist) AS normalized_value
             FROM interaction
             WHERE rev_dist IS NOT NULL AND mom_dist IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, trade_date
+        FROM ranked
+        WHERE raw_value IS NOT NULL
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+/// P4.2b 防御板块低波质量交互特征 backfill SQL。
+/// 防御行业池(银行/保险/白酒/黄金/机场/电信运营/啤酒)内,low_volatility × fin_roe 交互:
+/// raw_value = CUME_DIST(-volatility) × CUME_DIST(fin_roe),捕获"既低波又高质量"的非线性协同。
+/// 低波(防御性)+ 高质量(高 ROE)是防御板块的核心选股逻辑,补偿 ascending 在此失效。
+/// PIT:量价当日已知;fin_roe 用 available_at <= trade_date;available_at = trade_date。
+fn phase7_defensive_low_vol_quality_backfill_sql(
+    volatility_period: i32,
+    industries: &[&str],
+) -> String {
+    let preceding = volatility_period - 1;
+    // 行业列表展开为 SQL IN 列表:'银行','白酒',...
+    let industry_list: String = industries
+        .iter()
+        .map(|s| format!("'{}'", s))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH ret AS (
+            SELECT
+                symbol,
+                trade_date,
+                CASE
+                    WHEN prev_close > 0.0 THEN (close - prev_close) / prev_close
+                    ELSE NULL
+                END AS ret
+            FROM (
+                SELECT
+                    symbol,
+                    trade_date,
+                    close::double precision AS close,
+                    LAG(close::double precision) OVER (
+                        PARTITION BY symbol ORDER BY trade_date
+                    ) AS prev_close
+                FROM market_stock_daily_bar_adj
+                WHERE close IS NOT NULL
+                  AND trade_date <= $4
+                  AND trade_date >= ($3::date - INTERVAL '120 days')
+            ) bars
+        ),
+        vol AS (
+            SELECT
+                symbol,
+                trade_date,
+                SQRT(
+                    AVG(POWER(ret, 2)) OVER (
+                        PARTITION BY symbol ORDER BY trade_date
+                        ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW
+                    ) * 252.0
+                ) AS volatility
+            FROM ret
+            WHERE ret IS NOT NULL
+        ),
+        defensive AS (
+            SELECT v.symbol, v.trade_date, v.volatility, fv.normalized_value AS fin_roe
+            FROM vol v
+            JOIN market_stock ms ON v.symbol = ms.symbol
+            JOIN LATERAL (
+                SELECT normalized_value FROM factor_value
+                WHERE factor_code = 'fin_roe_daily_std'
+                  AND factor_version = '1.0.0'
+                  AND symbol = v.symbol
+                  AND trade_date = v.trade_date
+                  AND normalized_value IS NOT NULL
+                  AND available_at <= v.trade_date
+                ORDER BY available_at DESC LIMIT 1
+            ) fv ON true
+            WHERE v.trade_date BETWEEN $3 AND $4
+              AND v.volatility IS NOT NULL AND v.volatility > 0.0
+              AND ms.industry IN ({industry_list})
+        ),
+        interaction AS (
+            SELECT
+                symbol,
+                trade_date,
+                volatility,
+                fin_roe,
+                CUME_DIST() OVER (PARTITION BY trade_date ORDER BY -volatility) AS lowvol_dist,
+                CUME_DIST() OVER (PARTITION BY trade_date ORDER BY fin_roe) AS quality_dist
+            FROM defensive
+            WHERE fin_roe IS NOT NULL
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                lowvol_dist * quality_dist AS raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY lowvol_dist * quality_dist) AS normalized_value
+            FROM interaction
+            WHERE lowvol_dist IS NOT NULL AND quality_dist IS NOT NULL
         )
         INSERT INTO factor_value
             (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)

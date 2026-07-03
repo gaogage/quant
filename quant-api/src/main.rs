@@ -541,6 +541,10 @@ async fn main() {
             post(routes::factors::backfill_p42b_large_cap_momentum_reversal_background),
         )
         .route(
+            "/api/v1/quant/factors/p42b-defensive-low-vol-quality-backfill/background",
+            post(routes::factors::backfill_p42b_defensive_low_vol_quality_background),
+        )
+        .route(
             "/api/v1/quant/factors/materialize-pit-combo/background",
             post(routes::factors::materialize_pit_combo_background),
         )
