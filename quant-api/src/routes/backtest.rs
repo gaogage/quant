@@ -24,7 +24,8 @@ use quant_backtest::signal_generator::{
     load_open_trading_days_cached, prewarm_factor_signal_batch_feature_cache,
     prewarm_market_feature_cache, score_days_for_signal_dates, CandidateRankingProfile,
     CandidateRiskFilterProfile, CapacityRiskBudgetProfile, CashUtilizationProfile, EventGateConfig,
-    EventGateMode, ExecutionImpactBudgetProfile, FactorSignalBatchPrewarmReport,
+    EventGateMode, ExecutionImpactBudgetProfile, FactorScoreOverlayConfig,
+    FactorSignalBatchPrewarmReport,
     FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport, MarketFeatureSnapshotScope,
     MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig,
     ReturnRiskFeatureCacheMode, RiskContributionControlProfile, ScoreDirection, SignalConfig,
@@ -1146,6 +1147,13 @@ pub struct RunFactorBacktestReq {
     pub mode: Option<String>,
     pub persistence_mode: Option<String>,
     pub return_risk_feature_cache_mode: Option<String>,
+    /// P4.2b score overlay:叠加第二个 combo 到主 combo,带独立 score_direction + weight。
+    /// 缺省 None。设置后 SignalConfig.score_overlay 生效,用于验证 overlay alpha 补偿。
+    pub overlay_combo_name: Option<String>,
+    #[serde(default = "default_combo_version")]
+    pub overlay_version: String,
+    pub overlay_score_direction: Option<String>,
+    pub overlay_weight: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1482,6 +1490,28 @@ fn build_event_gate_config(req: &RunFactorBacktestReq) -> Result<Option<EventGat
         min_score,
         boost_weight,
         active_regimes,
+    }))
+}
+
+/// P4.2b:从请求构造 score overlay 配置。overlay_combo_name 缺省 None → 不启用 overlay。
+fn build_score_overlay_config(
+    req: &RunFactorBacktestReq,
+) -> Result<Option<FactorScoreOverlayConfig>, String> {
+    let Some(combo_name) = req.overlay_combo_name.as_ref() else {
+        return Ok(None);
+    };
+    if combo_name.trim().is_empty() {
+        return Ok(None);
+    }
+    let direction = parse_score_direction(
+        req.overlay_score_direction.as_deref().unwrap_or("descending"),
+    )?;
+    let weight = req.overlay_weight.unwrap_or(0.3).clamp(0.0, 1.0);
+    Ok(Some(FactorScoreOverlayConfig {
+        combo_name: combo_name.clone(),
+        version: req.overlay_version.clone(),
+        weight,
+        score_direction: direction,
     }))
 }
 
@@ -1876,7 +1906,7 @@ fn build_factor_signal_config(
             req.prediction_min_score,
         )?,
         event_gate: build_event_gate_config(req)?,
-        score_overlay: None,
+        score_overlay: build_score_overlay_config(req)?,
         portfolio_sleeve: None,
     })
 }
@@ -4224,6 +4254,10 @@ mod tests {
             portfolio_sharpe_reduce_full: Some(0.0),
             portfolio_sharpe_lookback_days: Some(120),
             portfolio_sharpe_min_exposure: Some(0.55),
+            overlay_combo_name: None,
+            overlay_version: "1.0.0".to_string(),
+            overlay_score_direction: None,
+            overlay_weight: None,
         }
     }
 }

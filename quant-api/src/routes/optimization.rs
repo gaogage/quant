@@ -16470,6 +16470,10 @@ fn build_factor_trial_request(
         persistence_mode: optional_string("persistence_mode")?
             .or_else(|| Some("summary_only".into())),
         return_risk_feature_cache_mode: optional_string("return_risk_feature_cache_mode")?,
+        overlay_combo_name: optional_string("overlay_combo_name")?,
+        overlay_version: string_value("overlay_version", Some("1.0.0"))?,
+        overlay_score_direction: optional_string("overlay_score_direction")?,
+        overlay_weight: optional_f64_value("overlay_weight")?,
     })
 }
 
