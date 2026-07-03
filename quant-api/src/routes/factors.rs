@@ -603,6 +603,14 @@ enum Phase7BackfillFactorKind {
         source_column: &'static str,
         mode: FinancialAnnualChangeMode,
     },
+    /// P4.2b 大盘动量反转交互特征:大盘股池内 reversal × momentum。
+    /// 补偿生产 combo ascending 在大盘段的失效(P4.1c 发现大盘 IC 为正)。
+    LargeCapMomentumReversal {
+        reversal_period: i32,
+        momentum_period: i32,
+        /// 大盘市值阈值(亿元),total_mv > 此值才入选
+        large_cap_threshold_yi: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -11322,6 +11330,15 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
             source_column,
             mode,
         } => phase7_financial_annual_persistence_backfill_sql(source_column, mode),
+        Phase7BackfillFactorKind::LargeCapMomentumReversal {
+            reversal_period,
+            momentum_period,
+            large_cap_threshold_yi,
+        } => phase7_large_cap_momentum_reversal_backfill_sql(
+            reversal_period,
+            momentum_period,
+            large_cap_threshold_yi,
+        ),
     }
 }
 
@@ -11362,6 +11379,88 @@ fn phase7_reversal_backfill_sql(period: i32) -> String {
             (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
         SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, trade_date
         FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
+}
+
+/// P4.2b 大盘动量反转交互特征 backfill SQL。
+/// 大盘股池(total_mv > 阈值,PIT)内,reversal × momentum 交互:
+/// raw_value = CUME_DIST(reversal) × CUME_DIST(momentum),捕获"既超跌又强势"的非线性协同。
+/// reversal = (prev_rev_close - close)/prev_rev_close(超跌为正),
+/// momentum = (close - prev_mom_close)/prev_mom_close(强势为正)。
+/// 两个 CUME_DIST ∈ [0,1],乘积 ∈ [0,1],高=同时超跌+强势。
+/// PIT:量价当日已知;市值取 trade_date<=当日 最近值;available_at = trade_date。
+fn phase7_large_cap_momentum_reversal_backfill_sql(
+    reversal_period: i32,
+    momentum_period: i32,
+    large_cap_threshold_yi: i32,
+) -> String {
+    // total_mv 单位为万元,阈值亿元 → 万元 = ×1e4
+    let threshold_wan: i64 = (large_cap_threshold_yi as i64) * 10_000;
+    format!(
+        "WITH priced AS (
+            SELECT
+                symbol,
+                trade_date,
+                close::double precision AS close,
+                LAG(close::double precision, {reversal_period}) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                ) AS prev_rev_close,
+                LAG(close::double precision, {momentum_period}) OVER (
+                    PARTITION BY symbol ORDER BY trade_date
+                ) AS prev_mom_close
+            FROM market_stock_daily_bar_adj
+            WHERE close IS NOT NULL AND trade_date <= $4
+        ),
+        large_cap AS (
+            SELECT DISTINCT ON (p.symbol) p.symbol, p.trade_date, p.close, p.prev_rev_close, p.prev_mom_close
+            FROM priced p
+            LEFT JOIN LATERAL (
+                SELECT total_mv FROM market_stock_daily_basic
+                WHERE symbol = p.symbol AND trade_date <= p.trade_date AND total_mv > 0
+                ORDER BY trade_date DESC LIMIT 1
+            ) b ON true
+            WHERE p.trade_date BETWEEN $3 AND $4
+              AND p.prev_rev_close IS NOT NULL AND p.prev_mom_close IS NOT NULL
+              AND p.prev_rev_close <> 0.0 AND p.prev_mom_close <> 0.0
+              AND COALESCE(b.total_mv, 0) > {threshold_wan}
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                (prev_rev_close - close) / NULLIF(prev_rev_close, 0.0) AS reversal,
+                (close - prev_mom_close) / NULLIF(prev_mom_close, 0.0) AS momentum
+            FROM large_cap
+            WHERE prev_rev_close <> 0.0 AND prev_mom_close <> 0.0
+        ),
+        interaction AS (
+            SELECT
+                symbol,
+                trade_date,
+                CUME_DIST() OVER (PARTITION BY trade_date ORDER BY reversal) AS rev_dist,
+                CUME_DIST() OVER (PARTITION BY trade_date ORDER BY momentum) AS mom_dist
+            FROM raw
+            WHERE reversal IS NOT NULL AND momentum IS NOT NULL
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                rev_dist * mom_dist AS raw_value,
+                percent_rank() OVER (PARTITION BY trade_date ORDER BY rev_dist * mom_dist) AS normalized_value
+            FROM interaction
+            WHERE rev_dist IS NOT NULL AND mom_dist IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, trade_date
+        FROM ranked
+        WHERE raw_value IS NOT NULL
         ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
             raw_value = EXCLUDED.raw_value,
             normalized_value = EXCLUDED.normalized_value,
