@@ -537,6 +537,10 @@ async fn main() {
             post(routes::factors::backfill_phase7_price_volume_background),
         )
         .route(
+            "/api/v1/quant/factors/p42b-large-cap-momentum-reversal-backfill/background",
+            post(routes::factors::backfill_p42b_large_cap_momentum_reversal_background),
+        )
+        .route(
             "/api/v1/quant/factors/materialize-pit-combo/background",
             post(routes::factors::materialize_pit_combo_background),
         )

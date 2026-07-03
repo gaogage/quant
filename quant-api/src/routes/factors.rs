@@ -2516,6 +2516,20 @@ fn phase7_price_volume_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
+fn p42b_large_cap_momentum_reversal_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![Phase7BackfillFactorSpec {
+        factor_code: "large_cap_mom_rev_daily_std",
+        name: "P4.2b large-cap momentum-reversal interaction rank",
+        period: 0,
+        kind: Phase7BackfillFactorKind::LargeCapMomentumReversal {
+            reversal_period: 5,
+            momentum_period: 60,
+            large_cap_threshold_yi: 500,
+        },
+        weight: 1.0,
+    }]
+}
+
 fn phase7_financial_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
@@ -5431,6 +5445,192 @@ pub async fn backfill_phase7_price_volume_background(
             "end_date": plan.end_date,
         }
     }))
+}
+
+/// POST /api/v1/quant/factors/p42b-large-cap-momentum-reversal-backfill/background
+///
+/// Set-based daily backfill for the P4.2b large-cap momentum-reversal
+/// interaction factor (`large_cap_mom_rev_daily_std`): within the large-cap
+/// pool (total_mv > threshold), CUME_DIST(reversal) x CUME_DIST(momentum)
+/// interaction, cross-sectional percent_rank normalization.
+pub async fn backfill_p42b_large_cap_momentum_reversal_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<P42bLargeCapMomentumReversalBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create p42b large-cap momentum-reversal backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_p42b_large_cap_momentum_reversal_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = report.total_rows();
+                let total_rows = usize_to_i32(total_rows);
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = p42b_large_cap_momentum_reversal_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist P4.2b large-cap momentum-reversal backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "P4.2b large-cap momentum-reversal backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "P4.2b large-cap momentum-reversal backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct P42bLargeCapMomentumReversalBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+impl P42bLargeCapMomentumReversalBackfillRequest {
+    fn into_plan(self) -> Result<SetBasedFactorBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name = trim_or_default(
+            self.combo_name,
+            "p42b_large_cap_mom_rev_daily_std",
+            "combo_name",
+        )?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(SetBasedFactorBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "p42b_large_cap_momentum_reversal_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "p42b_large_cap_mom_rev_daily_std",
+            category: "price_volume",
+            phase: "P4.2b",
+            dependencies: &["market_stock_daily_bar_adj", "market_stock_daily_basic"],
+            combo_method: "equal_weight",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
 }
 
 /// POST /api/v1/quant/factors/phase7-financial-quality-backfill/background
@@ -9242,6 +9442,16 @@ async fn run_phase7_price_volume_backfill(
     plan: &Phase7PriceVolumeBackfillPlan,
 ) -> Result<Phase7BackfillCompletion, String> {
     let specs = phase7_price_volume_backfill_specs();
+    let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
+    run_set_based_factor_backfill(db, task_id, job).await
+}
+
+async fn run_p42b_large_cap_momentum_reversal_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &SetBasedFactorBackfillPlan,
+) -> Result<SetBasedFactorBackfillCompletion, String> {
+    let specs = p42b_large_cap_momentum_reversal_specs();
     let job = SetBasedFactorBackfillJob::new(plan, &specs, phase7_factor_backfill_sql);
     run_set_based_factor_backfill(db, task_id, job).await
 }
