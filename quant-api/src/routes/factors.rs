@@ -16287,9 +16287,10 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
 
 /// P4.2b overlay combo 物化:等权平均两个交互特征(normalized_value)。
 /// combo = p42b_large_cap_alpha_overlay_v1,成分:large_cap_mom_rev_daily_std +
-/// defensive_lowvol_quality_daily_std。两因子均正向 IC(descending 有效),等权起点。
-/// 后续可升级为 ICIR 加权(需先 evaluate 两因子)。
-/// PIT:用 available_at <= trade_date 过滤;写入 multi_factor_value。
+/// defensive_lowvol_quality_daily_std。两因子均正向 IC(descending 有效)。
+/// **PIT ICIR 加权**:每个 trade_date,用 end_date <= trade_date 的历史窗口 mean_rank_ic
+/// 算累积 ICIR(均值/std),归一化为权重。窗口数 <3 时回退等权(早期冷启动)。
+/// PIT:ICIR 只用窗口结束日 <= trade_date 的数据,无未来信息;factor_value 用 available_at <= trade_date。
 pub async fn materialize_p42b_overlay_combo(
     db: &sqlx::PgPool,
     combo_name: &str,
@@ -16297,8 +16298,11 @@ pub async fn materialize_p42b_overlay_combo(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<u64, String> {
-    // 等权平均两因子的 normalized_value(均已是 0-1 截面 percent_rank,可直接平均)。
-    // 只保留两因子都有值的 (symbol, trade_date),避免单因子缺失致偏差。
+    // PIT ICIR 加权:每因子在 trade_date 的权重 = 累积 ICIR / (两因子累积 ICIR 之和)。
+    // 累积 ICIR = avg(mean_rank_ic over windows with end_date <= trade_date)
+    //             / nullif(stddev(mean_rank_ic over same), 0)
+    // 窗口数 <3 或 ICIR<=0 时回退等权(0.5/0.5),避免冷启动期不稳定权重。
+    // 因子 normalized_value 均为 0-1 截面 percent_rank,加权求和后仍为 0-1,可作 raw_score。
     let sql = r#"
 WITH pairs AS (
     SELECT a.symbol, a.trade_date,
@@ -16317,14 +16321,60 @@ WITH pairs AS (
       AND b.normalized_value IS NOT NULL
       AND a.available_at <= a.trade_date
       AND b.available_at <= b.trade_date
+),
+-- 每因子的 PIT 累积 ICIR(按 trade_date 滚动,只用 end_date <= trade_date 的窗口)
+pit_icir AS (
+    SELECT
+        p.trade_date,
+        -- large_cap 累积 ICIR
+        CASE WHEN COUNT(fe_a.mean_rank_ic) >= 3
+             THEN AVG(fe_a.mean_rank_ic) / NULLIF(STDDEV(fe_a.mean_rank_ic), 0)
+             ELSE NULL
+        END AS icir_a,
+        -- defensive 累积 ICIR
+        CASE WHEN COUNT(fe_b.mean_rank_ic) >= 3
+             THEN AVG(fe_b.mean_rank_ic) / NULLIF(STDDEV(fe_b.mean_rank_ic), 0)
+             ELSE NULL
+        END AS icir_b
+    FROM (SELECT DISTINCT trade_date FROM pairs) p
+    LEFT JOIN factor_evaluation fe_a
+      ON fe_a.factor_code = 'large_cap_mom_rev_daily_std'
+     AND fe_a.factor_version = $2
+     AND fe_a.end_date <= p.trade_date
+    LEFT JOIN factor_evaluation fe_b
+      ON fe_b.factor_code = 'defensive_lowvol_quality_daily_std'
+     AND fe_b.factor_version = $2
+     AND fe_b.end_date <= p.trade_date
+    GROUP BY p.trade_date
+),
+weighted AS (
+    SELECT
+        p.symbol,
+        p.trade_date,
+        p.available_at,
+        p.a_val,
+        p.b_val,
+        -- ICIR 归一化权重;任一 ICIR 为 NULL/<=0 或窗口不足 → 等权 0.5/0.5
+        CASE WHEN ic.icir_a IS NOT NULL AND ic.icir_b IS NOT NULL
+                  AND ic.icir_a > 0 AND ic.icir_b > 0
+             THEN ic.icir_a / (ic.icir_a + ic.icir_b)
+             ELSE 0.5
+        END AS w_a,
+        CASE WHEN ic.icir_a IS NOT NULL AND ic.icir_b IS NOT NULL
+                  AND ic.icir_a > 0 AND ic.icir_b > 0
+             THEN ic.icir_b / (ic.icir_a + ic.icir_b)
+             ELSE 0.5
+        END AS w_b
+    FROM pairs p
+    JOIN pit_icir ic ON ic.trade_date = p.trade_date
 )
 INSERT INTO multi_factor_value
     (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
 SELECT $1, $2, symbol, trade_date,
-    (a_val + b_val) / 2.0 AS raw_score,
-    (a_val + b_val) / 2.0 AS normalized_score,
+    w_a * a_val + w_b * b_val AS raw_score,
+    w_a * a_val + w_b * b_val AS normalized_score,
     available_at
-FROM pairs
+FROM weighted
 ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
     raw_score = EXCLUDED.raw_score,
     normalized_score = EXCLUDED.normalized_score,
@@ -16340,7 +16390,7 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
         .await
         .map_err(|e| format!("materialize_p42b_overlay_combo: {}", e))?;
     let total = res.rows_affected();
-    info!(combo = combo_name, rows = total, "P4.2b overlay combo 物化完成");
+    info!(combo = combo_name, rows = total, "P4.2b overlay combo 物化完成(PIT ICIR 加权)");
     Ok(total)
 }
 
@@ -16365,6 +16415,8 @@ pub struct EvaluateRollingPitRequest {
     pub horizon: i16,
     pub train_lookback_days: Option<i64>,
     pub max_windows: Option<usize>,
+    /// 可选:只评估指定因子列表(与 version 一同校验存在)。不传则评估 version 下所有未排除前缀的 active 技术因子。
+    pub factor_codes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -16375,6 +16427,7 @@ struct EvaluateRollingPitPlan {
     horizon: i16,
     train_lookback_days: i64,
     max_windows: Option<usize>,
+    factor_codes: Option<Vec<String>>,
 }
 
 impl EvaluateRollingPitRequest {
@@ -16404,6 +16457,7 @@ impl EvaluateRollingPitRequest {
             horizon: self.horizon,
             train_lookback_days,
             max_windows: self.max_windows,
+            factor_codes: self.factor_codes,
         })
     }
 }
@@ -16444,7 +16498,33 @@ async fn load_candidate_technical_factors(
     db: &sqlx::PgPool,
     version: &str,
     horizon: i16,
+    factor_codes: Option<&[String]>,
 ) -> Result<Vec<(String, String)>, String> {
+    // 指定 factor_codes 时:只取这些因子(校验 version 匹配),跳过全量扫描与前缀排除。
+    if let Some(codes) = factor_codes {
+        if !codes.is_empty() {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT DISTINCT factor_code, version AS factor_version
+                 FROM factor_definition
+                 WHERE version=$1
+                   AND status='active'
+                   AND factor_code = ANY($2)
+                 ORDER BY factor_code",
+            )
+            .bind(version)
+            .bind(codes)
+            .fetch_all(db)
+            .await
+            .map_err(|error| format!("load specified candidate factors: {}", error))?;
+            if rows.is_empty() {
+                return Err(format!(
+                    "no active factor_definition found for version {} with specified factor_codes",
+                    version
+                ));
+            }
+            return Ok(rows);
+        }
+    }
     sqlx::query_as::<_, (String, String)>(
         "WITH candidates AS (
            SELECT factor_code, factor_version
@@ -16651,7 +16731,13 @@ async fn run_rolling_pit_evaluation_backfill(
     if as_of_dates.is_empty() {
         return Err("no market quarters found for requested range".to_string());
     }
-    let factors = load_candidate_technical_factors(db, &plan.version, plan.horizon).await?;
+    let factors = load_candidate_technical_factors(
+        db,
+        &plan.version,
+        plan.horizon,
+        plan.factor_codes.as_deref(),
+    )
+    .await?;
     if factors.is_empty() {
         return Err(format!(
             "no technical factor_value found for version {}",
@@ -17986,6 +18072,7 @@ mod tests {
             horizon: 20,
             train_lookback_days: None,
             max_windows: None,
+            factor_codes: None,
         };
 
         let plan = req.into_plan().expect("valid rolling PIT plan");
@@ -18008,6 +18095,7 @@ mod tests {
             horizon: 20,
             train_lookback_days: Some(25),
             max_windows: None,
+            factor_codes: None,
         };
 
         let err = req.into_plan().unwrap_err();
