@@ -6586,8 +6586,27 @@ async fn generate_signals_with_cache_internal(
         score_cache.as_ref()
     };
 
-    let all_symbols: Vec<String> = scores_by_date
+    let score_source_configs = score_source_configs(config);
+    let base_source_key = FactorScoreSourceKey::from_config(config);
+    let mut score_sources: HashMap<FactorScoreSourceKey, FactorScoresByDate> = HashMap::new();
+    for source_config in score_source_configs {
+        let key = FactorScoreSourceKey::from_config(&source_config);
+        if score_sources.contains_key(&key) {
+            continue;
+        }
+        if key == base_source_key {
+            score_sources.insert(key, scores_by_date.clone());
+        } else {
+            let overlay_scores =
+                load_combo_scores_for_dates_cached(pool, cache, &source_config, &score_days)
+                    .await?;
+            score_sources.insert(key, Arc::as_ref(&overlay_scores).clone());
+        }
+    }
+
+    let all_symbols: Vec<String> = score_sources
         .values()
+        .flat_map(|scores_by_date| scores_by_date.values())
         .flat_map(|v| v.iter().map(|(s, _)| s.clone()))
         .collect::<HashSet<_>>()
         .into_iter()
@@ -6708,7 +6727,9 @@ async fn generate_signals_with_cache_internal(
         &return_risk_matrices,
         &return_risk_stats_matrices,
         prefer_return_risk_stats_matrices,
-        |score_day, _active_config| scores_by_date.get(&score_day).cloned(),
+        |score_day, active_config| {
+            score_rows_for_active_config(&score_sources, score_day, active_config)
+        },
         |_day, base| base.clone(),
     )
 }
@@ -6999,6 +7020,30 @@ fn regime_score_source_configs(
             if seen.insert(key) {
                 configs.push(sleeve_config);
             }
+        }
+    }
+    configs
+}
+
+fn score_source_configs(base_config: &SignalConfig) -> Vec<SignalConfig> {
+    let mut configs = Vec::new();
+    let mut seen = HashSet::new();
+    let key = FactorScoreSourceKey::from_config(base_config);
+    if seen.insert(key) {
+        configs.push(base_config.clone());
+    }
+    if let Some(overlay) = base_config.score_overlay.as_ref() {
+        let overlay_config = score_source_config_for_overlay(base_config, overlay);
+        let key = FactorScoreSourceKey::from_config(&overlay_config);
+        if seen.insert(key) {
+            configs.push(overlay_config);
+        }
+    }
+    if let Some(sleeve) = base_config.portfolio_sleeve.as_ref() {
+        let sleeve_config = score_source_config_for_portfolio_sleeve(base_config, sleeve);
+        let key = FactorScoreSourceKey::from_config(&sleeve_config);
+        if seen.insert(key) {
+            configs.push(sleeve_config);
         }
     }
     configs
