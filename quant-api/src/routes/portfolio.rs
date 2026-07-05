@@ -1654,6 +1654,9 @@ pub struct MvoSimulateRequest {
     pub leverage_multiplier: f64,
     /// 在线模拟绑定的 paper_account_id（必传，杠杆属性从该账号读）
     pub paper_account_id: String,
+    /// 策略 ID（可选）。缺省时读 paper_account.strategy_version_id，都无则报错。
+    /// 不再硬编码 fallback 到 v19（配置化原则）。
+    pub strategy_id: Option<String>,
 }
 
 fn mvo_sim_default_etfs() -> Vec<String> {
@@ -1700,7 +1703,7 @@ async fn run_mvo_simulate(
     task_id: &str,
     req: &MvoSimulateRequest,
 ) -> Result<Value, String> {
-    // 统一到共享 v19 核心：权重来自真 v19 GA（compute_mvo_weights_for_date），
+    // 统一到共享策略核心：权重来自策略 GA（compute_mvo_weights_for_date），
     // 经 run_daily_simulation 盯市复利，与回放/实盘同口径。
     let task_id = task_id.trim();
     let account_id = req.paper_account_id.trim();
@@ -1708,11 +1711,29 @@ async fn run_mvo_simulate(
         return Err("在线模拟必传 paper_account_id".into());
     }
 
-    // 以 v19 策略配置为基底，用传入的回测曲线作为 A 股权益源。
-    // ETF 阵容固定用 v19 的 7 资产（统一到真 v19，不受请求默认 4-ETF 影响）。
-    let mut rs = crate::routes::strategy::load_resolved_strategy(db, "v19")
+    // 策略 ID 解析：请求参数 > 账号 strategy_version_id > 报错（不 fallback 到具体策略）。
+    let strategy_id = match req.strategy_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sid) => sid.to_string(),
+        None => {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT strategy_version_id FROM paper_account WHERE paper_account_id = $1",
+            )
+            .bind(account_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| format!("query account strategy: {e}"))?
+            .flatten()
+            .ok_or_else(|| {
+                "策略 ID 未指定：请求未传 strategy_id 且账号 strategy_version_id 为空".to_string()
+            })?
+        }
+    };
+
+    // 以策略配置为基底，用传入的回测曲线作为 A 股权益源。
+    // ETF 阵容从策略配置 etf_symbols 读（不固定 v19 的 7 资产）。
+    let mut rs = crate::routes::strategy::load_resolved_strategy(db, &strategy_id)
         .await
-        .map_err(|e| format!("load strategy: {}", e))?;
+        .map_err(|e| format!("load strategy {}: {}", strategy_id, e))?;
     // 用传入 task_id 覆盖 a_share asset 的 equity_curve_task_id（在线模拟用请求的回测曲线）
     if let Some(a) = rs
         .assets
