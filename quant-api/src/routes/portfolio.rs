@@ -1753,7 +1753,11 @@ async fn run_mvo_simulate(
     .map_err(|e| format!("query account: {e}"))?
     .unwrap_or((false, 1.0, "fixed".into()));
 
-    // 共享逐日模拟（reset=false，EodClose）——在线模拟不清表
+    // 共享逐日模拟（reset=true，EodClose）。
+    // mvo_simulate 是回测性质（指定起止日期跑历史区间），必须从干净状态开始：
+    // 否则残留 current_nav/持仓会污染 base_scale（=残留nav×mvo_pct/sleeve_mv）放大建仓，
+    // 且 prev_nav(init_cap) 与残留 NAV 不匹配导致首日收益异常、nav_snapshot 跨 run 混淆。
+    // 实盘每日建仓走 scheduler 路径，不经此函数，reset 不影响实盘。
     let tushare = quant_data::tushare::client::TushareClient::from_env()
         .map_err(|e| format!("tushare: {}", e))?;
     let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -1768,7 +1772,7 @@ async fn run_mvo_simulate(
         crate::routes::rebalance::PriceSource::EodClose,
         &cache,
         &tushare,
-        false, // 在线模拟 reset=false
+        true, // 回测必须重置，避免残留污染
         lev_enabled,
         lev_mult,
         &lev_mode,
