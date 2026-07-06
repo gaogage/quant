@@ -1645,13 +1645,7 @@ pub struct MvoSimulateRequest {
     /// 调仓频率："quarterly"（默认）或 "monthly"
     #[serde(default = "mvo_sim_default_rebalance")]
     pub rebalance_freq: String,
-    // ── v15 增强参数 ──
-    /// 杠杆模式: "fixed"(默认), "vol_target"
-    #[serde(default = "mvo_sim_default_leverage_mode")]
-    pub leverage_mode: String,
-    /// 杠杆倍率 (fixed模式, 默认1.0)
-    #[serde(default = "mvo_sim_default_leverage_mult")]
-    pub leverage_multiplier: f64,
+    // 杠杆参数已移除：杠杆是账号级配置（paper_account.leverage_*），请求不传，单一数据源。
     /// 在线模拟绑定的 paper_account_id（必传，杠杆属性从该账号读）
     pub paper_account_id: String,
     /// 策略 ID（可选）。缺省时读 paper_account.strategy_version_id，都无则报错。
@@ -1675,12 +1669,6 @@ fn mvo_sim_default_min_stock() -> f64 {
 }
 fn mvo_sim_default_rebalance() -> String {
     "quarterly".into()
-}
-fn mvo_sim_default_leverage_mode() -> String {
-    "fixed".into()
-}
-fn mvo_sim_default_leverage_mult() -> f64 {
-    1.0
 }
 
 /// POST /api/v1/quant/backtests/{task_id}/mvo-simulate
@@ -1752,7 +1740,9 @@ async fn run_mvo_simulate(
     .await
     .map_err(|e| format!("加载权益曲线失败: {e}"))?;
 
-    // 杠杆属性从账号读（列名 leverage_*）
+    // 杠杆属性从账号读（列名 leverage_*）。
+    // 设计原则：杠杆是账号级配置（账号绑定策略，策略决定杠杆上限），请求不传杠杆参数。
+    // 单一数据源避免请求与账号配置冲突。
     let (lev_enabled, lev_mult, lev_mode): (bool, f64, String) = sqlx::query_as(
         "SELECT COALESCE(leverage_enabled,false), COALESCE(leverage_multiplier,1.0), COALESCE(leverage_mode,'fixed')
          FROM paper_account WHERE paper_account_id = $1",
