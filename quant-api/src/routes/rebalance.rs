@@ -322,8 +322,11 @@ pub async fn rebalance_account(
         if *alloc_pct <= 0.0 {
             continue;
         }
+        // ETF 目标市值也应用 leverage_mult(与 A 股段 scale 口径一致)。
+        // 杠杆是账号级配置,放大整个组合(A股+ETF),而非只放大 A 股 11%。
+        // 修复前:alloc_amount = current_nav × alloc_pct(不放大)→ 杠杆只对 A股生效,总 nav 几乎不变。
         let alloc_amount =
-            current_nav * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO);
+            current_nav * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO) * leverage_mult;
         if alloc_amount <= Decimal::ZERO {
             continue;
         }
