@@ -262,8 +262,15 @@ pub async fn rebalance_account(
         }
     }
 
-    // 7b. 清仓:当前持仓中不在 A 股目标集的 symbol(ETF 不在此清,ETF 段单独管理)
+    // 7b. 清仓:当前持仓中【不在 A 股目标集 且 属于 A 股】的 symbol。
+    // ETF 不在此清——ETF 减仓由 ETF 段增量调仓处理(delta=target_qty-cur_qty)。
+    // 若在此清 ETF,清仓段改 DB 但 current_positions 内存快照不更新,
+    // ETF 段会读到旧 cur_qty 导致 delta 反向(应 buy 却 sell),持仓 quantity 错乱、nav 跳变。
     for (sym, (qty, _)) in &current_positions {
+        // 仅清 A股:排除策略配置的 ETF 列表(ETF 由 ETF 段管理)
+        if sc.etf_symbols.iter().any(|e| e == sym) {
+            continue;
+        }
         if !target_symbols.contains(sym) && *qty > Decimal::ZERO {
             let price = fetch_eod_price(db, sym, date).await;
             if price <= 0.0 {
@@ -279,7 +286,7 @@ pub async fn rebalance_account(
                 price_lower_limit: None,
                 slippage_pct: slippage,
                 target_value: *qty * Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
-                reason: Some("清仓(不在目标集)".into()),
+                reason: Some("清仓(A股不在目标集)".into()),
                 strategy_version_id: Some(sc.strategy_id.clone()),
             };
             if execute_simulated_trade(db, &trade).await.is_ok() {

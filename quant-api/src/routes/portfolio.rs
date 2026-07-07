@@ -1651,6 +1651,11 @@ pub struct MvoSimulateRequest {
     /// 策略 ID（可选）。缺省时读 paper_account.strategy_version_id，都无则报错。
     /// 不再硬编码 fallback 到 v19（配置化原则）。
     pub strategy_id: Option<String>,
+    /// 起始日期 YYYYMMDD（可选）。缺省取 sleeve 权益曲线全区间起点。
+    /// 用于分段验证/调试（如只跑 2024-12-20~2025-01-10 定位调仓日异常）。
+    pub start_date: Option<String>,
+    /// 结束日期 YYYYMMDD（可选）。缺省取 sleeve 权益曲线全区间终点。
+    pub end_date: Option<String>,
 }
 
 fn mvo_sim_default_etfs() -> Vec<String> {
@@ -1732,13 +1737,26 @@ async fn run_mvo_simulate(
     }
 
     // 曲线日期范围（从 a_share asset 的 equity_curve_task_id 取）
-    let (first_d, last_d): (NaiveDate, NaiveDate) = sqlx::query_as(
+    let (mut first_d, mut last_d): (NaiveDate, NaiveDate) = sqlx::query_as(
         "SELECT MIN(trade_date), MAX(trade_date) FROM backtest_equity_curve WHERE task_id = $1",
     )
     .bind(task_id)
     .fetch_one(db)
     .await
     .map_err(|e| format!("加载权益曲线失败: {e}"))?;
+    // 可选日期覆盖（分段验证/调试）：请求传 start_date/end_date 则收窄区间。
+    if let Some(s) = req.start_date.as_deref().filter(|s| !s.is_empty()) {
+        let d = NaiveDate::parse_from_str(s, "%Y%m%d").map_err(|e| format!("start_date: {e}"))?;
+        if d > first_d {
+            first_d = d;
+        }
+    }
+    if let Some(e) = req.end_date.as_deref().filter(|s| !s.is_empty()) {
+        let d = NaiveDate::parse_from_str(e, "%Y%m%d").map_err(|e| format!("end_date: {e}"))?;
+        if d < last_d {
+            last_d = d;
+        }
+    }
 
     // 杠杆属性从账号读（列名 leverage_*）。
     // 设计原则：杠杆是账号级配置（账号绑定策略，策略决定杠杆上限），请求不传杠杆参数。
