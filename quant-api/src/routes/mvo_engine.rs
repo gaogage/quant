@@ -211,6 +211,10 @@ pub async fn run_daily_simulation(
         mark_to_market(db, account_id, d).await?;
         // 3c. NAV 重算
         update_current_nav(db, account_id).await?;
+        // 3c.1 每日维保检查(实盘口径):维保<平仓线触发强平,平仓后重算 NAV。
+        // 非调仓日也可能因价格下跌触发强平(券商每日盯市)。
+        let _ = crate::routes::rebalance::check_maintenance_after_mark(db, account_id, d, 0.002).await;
+        update_current_nav(db, account_id).await?;
         // 3d. 读真实盯市 NAV 算日收益
         let nav: f64 = sqlx::query_scalar(
             "SELECT COALESCE(current_nav, initial_capital)::double precision FROM paper_account WHERE paper_account_id = $1",

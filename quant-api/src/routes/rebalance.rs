@@ -135,7 +135,7 @@ pub async fn rebalance_account(
     };
 
     // 4. 杠杆(共享 compute_vol_target_leverage)
-    let mut leverage_mult = if leverage_enabled && regime > sc.leverage_regime_threshold && leverage_multiplier > 1.0 {
+    let leverage_mult = if leverage_enabled && regime > sc.leverage_regime_threshold && leverage_multiplier > 1.0 {
         if leverage_mode == "vol_target" {
             Decimal::from_f64_retain(compute_vol_target_leverage(db, account_id, &sc).await)
                 .unwrap_or(Decimal::ONE)
@@ -146,33 +146,29 @@ pub async fn rebalance_account(
         Decimal::ONE
     };
 
-    // 5. 维保门控:threshold NULL → 默认 1.3/1.5,不跳过(与实盘口径一致)
+    // 5. 维保门控(实盘口径):维保<警戒线禁买(跳过建仓段),平仓由每日盯市 check_maintenance_after_mark 处理。
+    // 建仓前的预防:若当前已警戒状态,本次 rebalance 不新买入(只允许调仓段卖出的减仓)。
+    let mut warn_no_buy = false;
     if leverage_enabled {
-        let (mv, cash_now, margin): (Decimal, Decimal, Decimal) = sqlx::query_as(
-            "SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1),
-                    COALESCE(cash,0), COALESCE(margin_amount,0)
-             FROM paper_account WHERE paper_account_id=$1",
-        )
-        .bind(account_id)
-        .fetch_one(db)
-        .await
-        .map_err(|e| format!("maint query: {}", e))?;
-        let margin_f = margin.to_string().parse::<f64>().unwrap_or(0.0);
-        if margin_f > 1e-6 {
-            let total_assets = (mv + cash_now).to_string().parse::<f64>().unwrap_or(0.0);
-            let maint = total_assets / margin_f;
-            let (liq_thr, warn_thr): (Option<f64>, Option<f64>) = sqlx::query_as(
-                "SELECT liquidation_threshold, warning_threshold FROM paper_account WHERE paper_account_id=$1",
+        let maint = maintenance_ratio(db, account_id).await;
+        if !maint.is_infinite() {
+            let (liq_thr, warn_thr): (f64, f64) = sqlx::query_as(
+                "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5)
+                 FROM paper_account WHERE paper_account_id = $1",
             )
             .bind(account_id)
-            .fetch_one(db)
+            .fetch_optional(db)
             .await
-            .map(|(l, w): (Option<f64>, Option<f64>)| (l.or(Some(1.3)), w.or(Some(1.5))))
-            .map_err(|e| format!("thr query: {}", e))?;
-            if liq_thr.is_some_and(|t| maint < t) {
-                leverage_mult = Decimal::ONE;
-            } else if warn_thr.is_some_and(|t| maint < t) {
-                leverage_mult = leverage_mult.min(Decimal::ONE);
+            .map_err(|e| format!("thr query: {}", e))?
+            .unwrap_or((1.3, 1.5));
+            if maint < liq_thr {
+                // 平仓线:强平(正常由每日检查处理,此处兜底)
+                let _ = force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(&sc)).await;
+                warn_no_buy = true;
+                warn!("[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买", date, account_id, maint, liq_thr);
+            } else if maint < warn_thr {
+                warn_no_buy = true;
+                warn!("[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买", date, account_id, maint, warn_thr);
             }
         }
     }
@@ -198,6 +194,11 @@ pub async fn rebalance_account(
     let mut n = 0usize;
     let mut target_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
     for p in &positions {
+        if warn_no_buy {
+            // 警戒禁买:不建仓,仅记录目标集(清仓段仍可减仓)
+            target_symbols.insert(p.symbol.clone());
+            continue;
+        }
         if p.quantity <= Decimal::ZERO || p.market_value <= Decimal::ZERO {
             continue;
         }
@@ -319,6 +320,9 @@ pub async fn rebalance_account(
         HashMap::new()
     };
     for (etf_symbol, alloc_pct) in &etf_allocations {
+        if warn_no_buy {
+            continue; // 警戒禁买:不建仓 ETF(减仓由增量 delta 自然处理)
+        }
         if *alloc_pct <= 0.0 {
             continue;
         }
@@ -388,6 +392,180 @@ pub async fn rebalance_account(
     update_current_nav(db, account_id).await?;
     try_auto_repay(db, account_id).await.ok();
     Ok(n)
+}
+
+/// 维保比例(维持担保比例) = (持仓市值 + cash) / margin。margin=0 返回 ∞(无融资不限制)。
+async fn maintenance_ratio(db: &PgPool, account_id: &str) -> f64 {
+    let row: Option<(rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal)> =
+        sqlx::query_as(
+            "SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1),
+                    COALESCE(cash,0), COALESCE(margin_amount,0)
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+    match row {
+        Some((mv, cash, margin)) => {
+            let margin_f = margin.to_string().parse::<f64>().unwrap_or(0.0);
+            if margin_f < 1e-6 {
+                return f64::INFINITY; // 无融资
+            }
+            let total = (mv + cash).to_string().parse::<f64>().unwrap_or(0.0);
+            total / margin_f
+        }
+        None => f64::INFINITY,
+    }
+}
+
+/// 强制平仓:维保 < 平仓线时,卖出持仓还款直至维保恢复到 target_maint。
+/// 平仓顺序:优先 ETF(流动性好),再 A股;每只按市值比例卖。返回平仓笔数 + 是否清空。
+async fn force_liquidation(
+    db: &PgPool,
+    account_id: &str,
+    date: NaiveDate,
+    target_maint: f64,
+    slippage: f64,
+) -> Result<usize, String> {
+    let mut n = 0usize;
+    loop {
+        let maint = maintenance_ratio(db, account_id).await;
+        if maint >= target_maint || maint.is_infinite() {
+            break; // 维保恢复或无融资
+        }
+        // 计算需还款额:使 maint = total_assets / (margin - repay) = target_maint
+        // repay = margin - total_assets / target_maint
+        let (mv, cash, margin): (rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal) =
+            sqlx::query_as(
+                "SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1),
+                        COALESCE(cash,0), COALESCE(margin_amount,0)
+                 FROM paper_account WHERE paper_account_id = $1",
+            )
+            .bind(account_id)
+            .fetch_one(db)
+            .await
+            .map_err(|e| format!("liq query: {}", e))?;
+        let margin_f = margin.to_string().parse::<f64>().unwrap_or(0.0);
+        let total_f = (mv + cash).to_string().parse::<f64>().unwrap_or(0.0);
+        let need_repay = margin_f - total_f / target_maint;
+        if need_repay <= 1.0 {
+            break;
+        }
+        // 取持仓中市值最大的一只卖出(足以还款的比例)
+        let pos: Option<(String, rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal)> =
+            sqlx::query_as(
+                "SELECT symbol, quantity, market_price, market_value
+                 FROM paper_position WHERE paper_account_id=$1 AND quantity>0
+                 ORDER BY market_value DESC LIMIT 1",
+            )
+            .bind(account_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| format!("liq pos: {}", e))?;
+        let (sym, qty, price, mv_sym) = match pos {
+            Some(p) => p,
+            None => break, // 无持仓可平
+        };
+        // 卖出数量 = need_repay / price(含滑点卖出价),不超过持仓
+        let slip_d = rust_decimal::Decimal::from_f64_retain(slippage).unwrap_or(rust_decimal::Decimal::ZERO);
+        let sell_price = price * (rust_decimal::Decimal::ONE - slip_d);
+        if sell_price <= rust_decimal::Decimal::ZERO {
+            break;
+        }
+        let need_repay_d = rust_decimal::Decimal::from_f64_retain(need_repay).unwrap_or(rust_decimal::Decimal::ZERO);
+        let mut sell_qty = need_repay_d / sell_price;
+        if sell_qty > qty {
+            sell_qty = qty; // 清空该只
+        }
+        if sell_qty <= rust_decimal::Decimal::new(1, 2) {
+            break; // 量太小,避免死循环
+        }
+        let trade = crate::routes::trading::PlannedTrade {
+            account_id: account_id.to_string(),
+            symbol: sym.clone(),
+            side: "sell".into(),
+            target_quantity: sell_qty,
+            target_price: price,
+            price_upper_limit: None,
+            price_lower_limit: None,
+            slippage_pct: slippage,
+            target_value: sell_qty * price,
+            reason: Some(format!("强平(维保{:.2}<平仓线)", maint)),
+            strategy_version_id: None,
+        };
+        if execute_simulated_trade(db, &trade).await.is_ok() {
+            apply_fill_to_position(db, account_id, &sym, "sell", sell_qty, sell_price).await;
+            // 卖出后 cash += sell_qty*sell_price,主动还款降低 margin
+            let repay_amount = sell_qty * sell_price;
+            let _ = sqlx::query(
+                "UPDATE paper_account SET cash = GREATEST(cash - $2, 0),
+                     margin_amount = GREATEST(margin_amount - $2, 0)
+                 WHERE paper_account_id = $1",
+            )
+            .bind(account_id)
+            .bind(repay_amount)
+            .execute(db)
+            .await;
+            update_current_nav(db, account_id).await?;
+            n += 1;
+            warn!(
+                "[FORCE_LIQ] date={} acct={} sym={} qty={} 维保{:.3}→平仓还款{:.0}",
+                date, account_id, sym, sell_qty, maint, repay_amount
+            );
+        } else {
+            break;
+        }
+        if n > 50 {
+            warn!("[FORCE_LIQ] date={} 平仓超50笔,中止防死循环", date);
+            break;
+        }
+    }
+    Ok(n)
+}
+
+/// 每日盯市后维保检查:维保<平仓线触发强平,维保<警戒线标记禁买。
+/// 返回 (强平笔数, 是否警戒禁买)。
+pub async fn check_maintenance_after_mark(
+    db: &PgPool,
+    account_id: &str,
+    date: NaiveDate,
+    slippage: f64,
+) -> Result<(usize, bool), String> {
+    // 读维保阈值(默认 1.3/1.5)
+    let (liq_thr, warn_thr): (f64, f64) = sqlx::query_as(
+        "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5)
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("thr: {}", e))?
+    .unwrap_or((1.3, 1.5));
+    let (leverage_enabled, _): (bool, Option<f64>) = sqlx::query_as(
+        "SELECT leverage_enabled, leverage_multiplier FROM paper_account WHERE paper_account_id=$1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("lev: {}", e))?
+    .unwrap_or((false, None));
+    if !leverage_enabled {
+        return Ok((0, false)); // 无杠杆不检查维保
+    }
+    let maint = maintenance_ratio(db, account_id).await;
+    if maint.is_infinite() {
+        return Ok((0, false));
+    }
+    // 平仓线:强平至维保恢复到 warn_thr + 缓冲(0.05)
+    let mut liq_n = 0;
+    if maint < liq_thr {
+        liq_n = force_liquidation(db, account_id, date, warn_thr + 0.05, slippage).await?;
+    }
+    let maint_after = maintenance_ratio(db, account_id).await;
+    let warn = !maint_after.is_infinite() && maint_after < warn_thr;
+    Ok((liq_n, warn))
 }
 
 /// 每日盯市:用当日收盘价重算持仓 market_price/market_value,使 update_current_nav 反映真实市值。
