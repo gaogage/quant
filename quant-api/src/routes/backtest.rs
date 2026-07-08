@@ -2298,6 +2298,9 @@ fn build_market_regime_policy(
         "quality_state_alpha_selector_v3" => {
             MarketRegimePolicy::quality_state_alpha_selector_v3(benchmark)
         }
+        "quality_state_alpha_h1h20_selector" => {
+            MarketRegimePolicy::quality_state_alpha_h1h20_selector(benchmark)
+        }
         "quality_state_alpha_overlay_selector_v1" => {
             MarketRegimePolicy::quality_state_alpha_overlay_selector_v1(benchmark)
         }

@@ -5349,6 +5349,47 @@ impl MarketRegimePolicy {
         )
     }
 
+    /// B1 horizon 自适应:Bull 用 h1 combo(full_pit_icir_37f,牛市强 Sharpe 1.2),
+    /// Bear/HighVol/Sideways/Mixed 用 h20 combo(full_pit_icir_37f_h20,震荡市强 MaxDD 19%)。
+    /// 基于 Task19 研究:horizon=1 在牛市 IC 强,horizon=20 在震荡市 IC 强。
+    /// 切换阈值由 quality_bear_window_guard_v2 基底的 regime 检测决定(trailing-12m),非全周期调参。
+    pub fn quality_state_alpha_h1h20_selector(benchmark: impl Into<String>) -> Self {
+        Self::quality_state_alpha_selector(
+            benchmark,
+            StateAlphaSelectorSpec {
+                bull_sleeve: (
+                    "full_pit_icir_37f",
+                    0.10,
+                    ScoreDirection::Descending,
+                ),
+                bear_sleeve: (
+                    "full_pit_icir_37f_h20",
+                    0.15,
+                    ScoreDirection::Ascending,
+                ),
+                high_volatility_sleeve: (
+                    "full_pit_icir_37f_h20",
+                    0.125,
+                    ScoreDirection::Ascending,
+                ),
+                sideways_sleeve: (
+                    "full_pit_icir_37f_h20",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                mixed_sleeve: (
+                    "full_pit_icir_37f_h20",
+                    0.10,
+                    ScoreDirection::Ascending,
+                ),
+                bear_exposure: 0.72,
+                high_volatility_exposure: 0.58,
+                bear_max_position_pct: Decimal::new(10, 2),
+                high_volatility_max_position_pct: Decimal::new(8, 2),
+            },
+        )
+    }
+
     pub fn quality_mixed_event_state_selector_v1(benchmark: impl Into<String>) -> Self {
         Self::quality_state_alpha_selector(
             benchmark,
