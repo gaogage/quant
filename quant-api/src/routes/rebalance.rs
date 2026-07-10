@@ -754,6 +754,8 @@ mod tests {
             vol_target: 0.0,
             leverage_cap: 0.0,
             default_weights: vec![],
+            regime_bull_min_stock: 0.0,
+            regime_bear_min_stock: 0.0,
             signal_source: String::new(),
             prediction_blend_weight: 0.0,
             combo_name: String::new(),

@@ -193,6 +193,12 @@ pub struct StrategyConfig {
     pub vol_target: f64,
     pub leverage_cap: f64,
     pub default_weights: Vec<f64>,
+    // regime 自适应 A 股最低占比(compute_lw_mvo_weights 牛市/熊市分支使用)。
+    // DB strategy_config 表有列,load_strategy_config 读出;resolved_to_legacy_sc 从 MvoParams 映射。
+    #[serde(default)]
+    pub regime_bull_min_stock: f64,
+    #[serde(default)]
+    pub regime_bear_min_stock: f64,
     // A股大类选股方式（下沉到策略，不再挂账号）
     #[serde(default = "default_signal_source")]
     pub signal_source: String,
@@ -405,6 +411,8 @@ mod tests {
             vol_target: 0.0,
             leverage_cap: 0.0,
             default_weights: vec![],
+            regime_bull_min_stock: 0.0,
+            regime_bear_min_stock: 0.0,
             signal_source: String::new(),
             prediction_blend_weight: 0.0,
             combo_name: String::new(),
@@ -829,6 +837,8 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         vol_target: mvo.vol_target,
         leverage_cap: mvo.leverage_cap,
         default_weights: mvo.default_weights.clone(),
+        regime_bull_min_stock: mvo.regime_bull_min_stock,
+        regime_bear_min_stock: mvo.regime_bear_min_stock,
         signal_source: a_share.security.signal_source.clone(),
         prediction_blend_weight: a_share.security.prediction_blend_weight,
         combo_name: a_share.security.combo_name.clone(),
@@ -872,6 +882,8 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'vol_target', vol_target,
             'leverage_cap', leverage_cap,
             'default_weights', default_weights,
+            'regime_bull_min_stock', regime_bull_min_stock,
+            'regime_bear_min_stock', regime_bear_min_stock,
             'signal_source', signal_source,
             'prediction_blend_weight', prediction_blend_weight,
             'combo_name', combo_name,
@@ -3190,15 +3202,33 @@ pub(crate) async fn compute_lw_mvo_weights(
             trail_3m * 2.0
         };
         if trail_3m < -0.03 {
-            info!("[MVO] Factor failure detected (3m={:.1}%), min_stock {} -> 0.00, switching to ETF defense", trail_3m * 100.0, min_stock);
-            0.00
-        } else if trail_6m > 0.15 {
+            // 熊市:优先用策略配置 regime_bear_min_stock(若>0),否则降仓到 0 转 ETF 防守
+            let bear_target = if sc.regime_bear_min_stock > 0.0 {
+                sc.regime_bear_min_stock
+            } else {
+                0.00
+            };
             info!(
-                "[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> 0.20",
-                trail_6m * 100.0,
-                min_stock
+                "[MVO] Factor failure detected (3m={:.1}%), min_stock {} -> {:.2}, switching to ETF defense",
+                trail_3m * 100.0,
+                min_stock,
+                bear_target
             );
-            0.20
+            bear_target
+        } else if trail_6m > 0.15 {
+            // 牛市:优先用策略配置 regime_bull_min_stock(若>0),否则用默认 0.20
+            let bull_target = if sc.regime_bull_min_stock > 0.0 {
+                sc.regime_bull_min_stock
+            } else {
+                0.20
+            };
+            info!(
+                "[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> {:.2}",
+                trail_6m * 100.0,
+                min_stock,
+                bull_target
+            );
+            bull_target
         } else {
             min_stock
         }
