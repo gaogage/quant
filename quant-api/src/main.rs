@@ -18,11 +18,17 @@ use uuid::Uuid;
 mod auth;
 mod phase7_alpha_admission;
 mod routes;
+mod sync_task_registry;
+
+use sync_task_registry::new_registry;
 
 pub struct AppState {
     pub start_time: chrono::DateTime<chrono::Utc>,
     pub db: sqlx::PgPool,
     pub tushare: quant_data::tushare::client::TushareClient,
+    /// 后台同步任务注册表:保存 tokio::spawn 的 AbortHandle,
+    /// 供 cancel_sync_task 主动 abort 僵尸 task(见 sync_task_registry 模块)。
+    pub sync_tasks: Arc<sync_task_registry::SyncTaskRegistry>,
 }
 
 #[tokio::main]
@@ -57,6 +63,7 @@ async fn main() {
         start_time: chrono::Utc::now(),
         db,
         tushare,
+        sync_tasks: new_registry(),
     });
 
     let trace_layer = TraceLayer::new_for_http()

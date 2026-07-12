@@ -1,11 +1,14 @@
 //! 数据同步服务 — Tushare → 标准化 → PostgreSQL
 
 use chrono::{Datelike, Duration, NaiveDate};
+use futures::stream::{self, StreamExt};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -3569,7 +3572,25 @@ pub async fn sync_trade_calendar_with_task(
 
 // ─── sync_adj_factor ─────────────────────────────────────────────
 
-/// 同步复权因子（逐只拉取）
+/// 检查 data_sync_task 是否被请求取消(status = 'cancel_requested')。
+///
+/// 用于 sync_adj_factor/sync_fund_adj 循环内安全停止:
+/// 用户调 cancel_sync_task 路由后 DB status 改为 cancel_requested,
+/// 循环每 N 只检查一次,若已取消则提前 return。
+///
+/// 复用 factors.rs:11468 factor_backfill_cancel_requested 的模式。
+async fn sync_task_cancelled(db: &PgPool, task_id: &str) -> bool {
+    sqlx::query_scalar("SELECT status FROM data_sync_task WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|s: String| s == "cancel_requested")
+        .unwrap_or(false)
+}
+
+/// 同步复权因子（逐只拉取,8 并发）
 pub async fn sync_adj_factor(
     pool: &PgPool,
     client: &TushareClient,
@@ -3605,52 +3626,117 @@ pub async fn sync_adj_factor(
     .await?;
 
     let total = symbols.len();
-    let mut ok = 0usize;
-    let mut fail = 0usize;
+    let ok = Arc::new(AtomicUsize::new(0));
+    let fail = Arc::new(AtomicUsize::new(0));
+    let cancelled = Arc::new(AtomicBool::new(false));
 
-    for sym in symbols {
-        match client.adj_factor(sym, Some(start), Some(end)).await {
-            Ok(resp) => {
-                if let Some(data) = resp.data {
-                    let maps = data.to_maps();
-                    let factors: Vec<MarketAdjustmentFactor> = maps
-                        .iter()
-                        .filter_map(|item| {
-                            Some(MarketAdjustmentFactor {
-                                symbol: sym.clone(),
-                                trade_date: to_date(&get_str(item, "trade_date"))?,
-                                adj_factor: to_decimal(get_f64(item, "adj_factor")),
-                            })
-                        })
-                        .collect();
+    // 8 并发拉取(Governor 200/分钟自动限流,不会超 Tushare 配额)。
+    // 取消用 AtomicBool(for_each_concurrent 无法直接 break,检测到后其他分支 return)。
+    // 心跳 + 取消检查每 50 只一次(避免每只都查 DB 增加延迟)。
+    let pool_c = pool.clone();
+    let client_c = client.clone();
+    let task_id_c = task_id.clone();
+    let start_c = start.to_string();
+    let end_c = end.to_string();
+    let dv_id_c = dv_id.to_string();
 
-                    if !factors.is_empty() {
-                        repository::upsert_adj_factors_batch(pool, &factors, dv_id, "tushare")
-                            .await?;
-                        ok += 1;
+    stream::iter(symbols.iter().enumerate())
+        .for_each_concurrent(8, |(i, sym)| {
+            let pool = pool_c.clone();
+            let client = client_c.clone();
+            let task_id = task_id_c.clone();
+            let start = start_c.clone();
+            let end = end_c.clone();
+            let dv_id = dv_id_c.clone();
+            let ok = ok.clone();
+            let fail = fail.clone();
+            let cancelled = cancelled.clone();
+            async move {
+                if cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                // 每 50 只检查取消 + 更新心跳
+                if i > 0 && i % 50 == 0 {
+                    if sync_task_cancelled(&pool, &task_id).await {
+                        cancelled.store(true, Ordering::Relaxed);
+                        info!("复权因子同步被取消: {}/{}", i, total);
+                        return;
+                    }
+                    let ok_n = ok.load(Ordering::Relaxed) as i32;
+                    let fail_n = fail.load(Ordering::Relaxed) as i32;
+                    let progress = (ok_n * 100 / total.max(1) as i32).min(99);
+                    let _ = repository::heartbeat_sync_task(
+                        &pool, &task_id, total as i32, ok_n, fail_n, progress,
+                    )
+                    .await;
+                    info!("复权因子进度: {}/{}", i, total);
+                }
+                match client.adj_factor(&sym, Some(&start), Some(&end)).await {
+                    Ok(resp) => {
+                        if let Some(data) = resp.data {
+                            let maps = data.to_maps();
+                            let factors: Vec<MarketAdjustmentFactor> = maps
+                                .iter()
+                                .filter_map(|item| {
+                                    Some(MarketAdjustmentFactor {
+                                        symbol: sym.clone(),
+                                        trade_date: to_date(&get_str(item, "trade_date"))?,
+                                        adj_factor: to_decimal(get_f64(item, "adj_factor")),
+                                    })
+                                })
+                                .collect();
+                            if !factors.is_empty() {
+                                match repository::upsert_adj_factors_batch(
+                                    &pool, &factors, &dv_id, "tushare",
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        ok.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(e) => {
+                                        warn!("{} 复权因子 upsert 失败: {}", sym, e);
+                                        fail.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("{} 复权因子失败: {}", sym, e);
+                        fail.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                if ok % 200 == 0 {
-                    info!("复权因子进度: {}/{}", ok, total);
-                }
             }
-            Err(e) => {
-                warn!("{} 复权因子失败: {}", sym, e);
-                fail += 1;
-            }
-        }
-    }
+        })
+        .await;
+
+    let ok = ok.load(Ordering::Relaxed);
+    let fail = fail.load(Ordering::Relaxed);
+    let was_cancelled = cancelled.load(Ordering::Relaxed);
 
     repository::update_sync_task(
         pool,
         &task_id,
-        if fail > 0 { "partial" } else { "completed" },
+        if was_cancelled {
+            "cancelled"
+        } else if fail > 0 {
+            "partial"
+        } else {
+            "completed"
+        },
         total as i32,
         ok as i32,
         fail as i32,
     )
     .await?;
-    info!("复权因子同步完成: ok={}/{}, fail={}", ok, total, fail);
+    info!(
+        "复权因子同步{}: ok={}/{}, fail={}",
+        if was_cancelled { "已取消" } else { "完成" },
+        ok,
+        total,
+        fail
+    );
     Ok(ok)
 }
 
@@ -3695,8 +3781,15 @@ pub async fn sync_fund_adj(
     let total = symbols.len();
     let mut ok = 0usize;
     let mut fail = 0usize;
+    let mut cancelled = false;
 
-    for sym in symbols {
+    for (i, sym) in symbols.iter().enumerate() {
+        // 每只检查取消(ETF 数少,不必节流)
+        if sync_task_cancelled(pool, &task_id).await {
+            info!("基金复权因子同步被取消: {}/{}", i, total);
+            cancelled = true;
+            break;
+        }
         match client.fund_adj(sym, Some(start), Some(end)).await {
             Ok(resp) => {
                 if let Some(data) = resp.data {
@@ -3723,18 +3816,41 @@ pub async fn sync_fund_adj(
                 fail += 1;
             }
         }
+        // 每只后更新心跳(ETF 数少,频率高无妨)
+        let progress = ((ok * 100) / total.max(1)).min(99) as i32;
+        let _ = repository::heartbeat_sync_task(
+            pool,
+            &task_id,
+            total as i32,
+            ok as i32,
+            fail as i32,
+            progress,
+        )
+        .await;
     }
 
     repository::update_sync_task(
         pool,
         &task_id,
-        if fail > 0 { "partial" } else { "completed" },
+        if cancelled {
+            "cancelled"
+        } else if fail > 0 {
+            "partial"
+        } else {
+            "completed"
+        },
         total as i32,
         ok as i32,
         fail as i32,
     )
     .await?;
-    info!("基金复权因子同步完成: ok={}/{}, fail={}", ok, total, fail);
+    info!(
+        "基金复权因子同步{}: ok={}/{}, fail={}",
+        if cancelled { "已取消" } else { "完成" },
+        ok,
+        total,
+        fail
+    );
     Ok(ok)
 }
 

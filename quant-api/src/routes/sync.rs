@@ -17029,23 +17029,28 @@ pub async fn create_sync_task(
         let state_for_task = state.clone();
         let task_id_for_task = task_id.clone();
         let req_for_task = req.clone();
-        tokio::spawn(async move {
-            if let Err(message) = execute_sync_task(
-                state_for_task.clone(),
-                task_id_for_task.clone(),
-                req_for_task,
-            )
-            .await
-            {
-                let _ = quant_data::repository::fail_sync_task(
-                    &state_for_task.db,
-                    &task_id_for_task,
-                    &message,
+        crate::sync_task_registry::spawn_sync_task(
+            state.sync_tasks.clone(),
+            task_id.clone(),
+            async move {
+                if let Err(message) = execute_sync_task(
+                    state_for_task.clone(),
+                    task_id_for_task.clone(),
+                    req_for_task,
                 )
-                .await;
-                tracing::error!(task_id = %task_id_for_task, error = %message, "统一同步任务失败");
-            }
-        });
+                .await
+                {
+                    let _ = quant_data::repository::fail_sync_task(
+                        &state_for_task.db,
+                        &task_id_for_task,
+                        &message,
+                    )
+                    .await;
+                    tracing::error!(task_id = %task_id_for_task, error = %message, "统一同步任务失败");
+                }
+            },
+        )
+        .await;
 
         return Json(json!({"code": 0, "data": {
             "task_id": task_id,
@@ -17225,23 +17230,28 @@ pub async fn sync_adj_factor_background(
     }
     info!(data_version_id = %dv_id, symbols = symbols.len(), "后台同步复权因子");
 
-    tokio::spawn(async move {
-        match quant_data::sync::sync_adj_factor(
-            &state.db,
-            &state.tushare,
-            &symbols,
-            &start,
-            &end,
-            &task_id,
-        )
-        .await
-        {
-            Ok(count) => info!(task_id = %task_id, count = count, "后台同步复权因子完成"),
-            Err(e) => {
-                tracing::error!(task_id = %task_id, error = %e.to_string(), "后台同步复权因子失败")
+    crate::sync_task_registry::spawn_sync_task(
+        state.sync_tasks.clone(),
+        task_id.clone(),
+        async move {
+            match quant_data::sync::sync_adj_factor(
+                &state.db,
+                &state.tushare,
+                &symbols,
+                &start,
+                &end,
+                &task_id,
+            )
+            .await
+            {
+                Ok(count) => info!(task_id = %task_id, count = count, "后台同步复权因子完成"),
+                Err(e) => {
+                    tracing::error!(task_id = %task_id, error = %e.to_string(), "后台同步复权因子失败")
+                }
             }
-        }
-    });
+        },
+    )
+    .await;
 
     Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "running"}}))
 }
@@ -17766,22 +17776,27 @@ pub async fn futures_price_chain_sync(
         let state_for_task = state.clone();
         let task_id_for_task = task_id.clone();
         let req_for_task = sync_req.clone();
-        tokio::spawn(async move {
-            if let Err(message) = execute_sync_task(
-                state_for_task.clone(),
-                task_id_for_task.clone(),
-                req_for_task,
-            )
-            .await
-            {
-                let _ = quant_data::repository::fail_sync_task(
-                    &state_for_task.db,
-                    &task_id_for_task,
-                    &message,
+        crate::sync_task_registry::spawn_sync_task(
+            state.sync_tasks.clone(),
+            task_id.clone(),
+            async move {
+                if let Err(message) = execute_sync_task(
+                    state_for_task.clone(),
+                    task_id_for_task.clone(),
+                    req_for_task,
                 )
-                .await;
-            }
-        });
+                .await
+                {
+                    let _ = quant_data::repository::fail_sync_task(
+                        &state_for_task.db,
+                        &task_id_for_task,
+                        &message,
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
         return Json(json!({
             "code": 0,
             "data": {
@@ -17862,22 +17877,27 @@ pub async fn margin_detail_sync(
         let state_for_task = state.clone();
         let task_id_for_task = task_id.clone();
         let req_for_task = sync_req.clone();
-        tokio::spawn(async move {
-            if let Err(message) = execute_sync_task(
-                state_for_task.clone(),
-                task_id_for_task.clone(),
-                req_for_task,
-            )
-            .await
-            {
-                let _ = quant_data::repository::fail_sync_task(
-                    &state_for_task.db,
-                    &task_id_for_task,
-                    &message,
+        crate::sync_task_registry::spawn_sync_task(
+            state.sync_tasks.clone(),
+            task_id.clone(),
+            async move {
+                if let Err(message) = execute_sync_task(
+                    state_for_task.clone(),
+                    task_id_for_task.clone(),
+                    req_for_task,
                 )
-                .await;
-            }
-        });
+                .await
+                {
+                    let _ = quant_data::repository::fail_sync_task(
+                        &state_for_task.db,
+                        &task_id_for_task,
+                        &message,
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
         return Json(json!({
             "code": 0,
             "data": {
@@ -17938,22 +17958,27 @@ pub async fn shareholder_structure_sync(
         let state_for_task = state.clone();
         let task_id_for_task = task_id.clone();
         let req_for_task = sync_req.clone();
-        tokio::spawn(async move {
-            if let Err(message) = execute_sync_task(
-                state_for_task.clone(),
-                task_id_for_task.clone(),
-                req_for_task,
-            )
-            .await
-            {
-                let _ = quant_data::repository::fail_sync_task(
-                    &state_for_task.db,
-                    &task_id_for_task,
-                    &message,
+        crate::sync_task_registry::spawn_sync_task(
+            state.sync_tasks.clone(),
+            task_id.clone(),
+            async move {
+                if let Err(message) = execute_sync_task(
+                    state_for_task.clone(),
+                    task_id_for_task.clone(),
+                    req_for_task,
                 )
-                .await;
-            }
-        });
+                .await
+                {
+                    let _ = quant_data::repository::fail_sync_task(
+                        &state_for_task.db,
+                        &task_id_for_task,
+                        &message,
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
         return Json(json!({
             "code": 0,
             "data": {
@@ -18013,22 +18038,27 @@ pub async fn equity_pledge_pressure_sync(
         let state_for_task = state.clone();
         let task_id_for_task = task_id.clone();
         let req_for_task = sync_req.clone();
-        tokio::spawn(async move {
-            if let Err(message) = execute_sync_task(
-                state_for_task.clone(),
-                task_id_for_task.clone(),
-                req_for_task,
-            )
-            .await
-            {
-                let _ = quant_data::repository::fail_sync_task(
-                    &state_for_task.db,
-                    &task_id_for_task,
-                    &message,
+        crate::sync_task_registry::spawn_sync_task(
+            state.sync_tasks.clone(),
+            task_id.clone(),
+            async move {
+                if let Err(message) = execute_sync_task(
+                    state_for_task.clone(),
+                    task_id_for_task.clone(),
+                    req_for_task,
                 )
-                .await;
-            }
-        });
+                .await
+                {
+                    let _ = quant_data::repository::fail_sync_task(
+                        &state_for_task.db,
+                        &task_id_for_task,
+                        &message,
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
         return Json(json!({
             "code": 0,
             "data": {
@@ -21371,23 +21401,28 @@ async fn build_phase7_optional_source_coverage_sync(
             let state_for_task = state.clone();
             let task_id_for_task = task_id.clone();
             let req_for_task = sync_req.clone();
-            tokio::spawn(async move {
-                if let Err(message) = execute_sync_task(
-                    state_for_task.clone(),
-                    task_id_for_task.clone(),
-                    req_for_task,
-                )
-                .await
-                {
-                    let _ = quant_data::repository::fail_sync_task(
-                        &state_for_task.db,
-                        &task_id_for_task,
-                        &message,
+            crate::sync_task_registry::spawn_sync_task(
+                state.sync_tasks.clone(),
+                task_id.clone(),
+                async move {
+                    if let Err(message) = execute_sync_task(
+                        state_for_task.clone(),
+                        task_id_for_task.clone(),
+                        req_for_task,
                     )
-                    .await;
-                    tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 可选源 bounded 补数失败");
-                }
-            });
+                    .await
+                    {
+                        let _ = quant_data::repository::fail_sync_task(
+                            &state_for_task.db,
+                            &task_id_for_task,
+                            &message,
+                        )
+                        .await;
+                        tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 可选源 bounded 补数失败");
+                    }
+                },
+            )
+            .await;
             source_results.push(json!({
                 "source": source,
                 "table": table,
@@ -21604,23 +21639,28 @@ async fn build_phase7_share_float_coverage_batches(
             let state_for_task = state.clone();
             let task_id_for_task = task_id.clone();
             let req_for_task = sync_req.clone();
-            tokio::spawn(async move {
-                if let Err(message) = execute_sync_task(
-                    state_for_task.clone(),
-                    task_id_for_task.clone(),
-                    req_for_task,
-                )
-                .await
-                {
-                    let _ = quant_data::repository::fail_sync_task(
-                        &state_for_task.db,
-                        &task_id_for_task,
-                        &message,
+            crate::sync_task_registry::spawn_sync_task(
+                state.sync_tasks.clone(),
+                task_id.clone(),
+                async move {
+                    if let Err(message) = execute_sync_task(
+                        state_for_task.clone(),
+                        task_id_for_task.clone(),
+                        req_for_task,
                     )
-                    .await;
-                    tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 share_float float_date补数失败");
-                }
-            });
+                    .await
+                    {
+                        let _ = quant_data::repository::fail_sync_task(
+                            &state_for_task.db,
+                            &task_id_for_task,
+                            &message,
+                        )
+                        .await;
+                        tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 share_float float_date补数失败");
+                    }
+                },
+            )
+            .await;
             batch_results.push(json!({
                 "batch_index": index + 1,
                 "task_id": task_id,
@@ -22405,23 +22445,28 @@ async fn build_phase7_financial_coverage_batches(
             let state_for_task = state.clone();
             let task_id_for_task = task_id.clone();
             let req_for_task = sync_req.clone();
-            tokio::spawn(async move {
-                if let Err(message) = execute_sync_task(
-                    state_for_task.clone(),
-                    task_id_for_task.clone(),
-                    req_for_task,
-                )
-                .await
-                {
-                    let _ = quant_data::repository::fail_sync_task(
-                        &state_for_task.db,
-                        &task_id_for_task,
-                        &message,
+            crate::sync_task_registry::spawn_sync_task(
+                state.sync_tasks.clone(),
+                task_id.clone(),
+                async move {
+                    if let Err(message) = execute_sync_task(
+                        state_for_task.clone(),
+                        task_id_for_task.clone(),
+                        req_for_task,
                     )
-                    .await;
-                    tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 financial bounded 补数失败");
-                }
-            });
+                    .await
+                    {
+                        let _ = quant_data::repository::fail_sync_task(
+                            &state_for_task.db,
+                            &task_id_for_task,
+                            &message,
+                        )
+                        .await;
+                        tracing::error!(task_id = %task_id_for_task, error = %message, "Phase 7 financial bounded 补数失败");
+                    }
+                },
+            )
+            .await;
             status = "running";
         } else {
             execution = Some(execute_sync_task(state.clone(), task_id.clone(), sync_req).await?);
@@ -22869,20 +22914,28 @@ async fn build_phase7_coverage_expansion_runner(
         let end_date_for_task = end_date.clone();
         let requested_sources_for_task = requested_sources.clone();
         let data_version_prefix_for_task = data_version_prefix.clone();
-        tokio::spawn(async move {
-            run_phase7_coverage_autopilot_background(
-                state_for_task,
-                start_date_for_task,
-                end_date_for_task,
-                requested_sources_for_task,
-                batch_size,
-                batch_count,
-                max_rounds,
-                target_ratio,
-                data_version_prefix_for_task,
-            )
-            .await;
-        });
+        // 合成 task_id 用于 registry 取消(phase7 autopilot 不注册 data_sync_task)
+        let autopilot_task_id =
+            format!("phase7-autopilot-{}", data_version_prefix);
+        crate::sync_task_registry::spawn_sync_task(
+            state.sync_tasks.clone(),
+            autopilot_task_id.clone(),
+            async move {
+                run_phase7_coverage_autopilot_background(
+                    state_for_task,
+                    start_date_for_task,
+                    end_date_for_task,
+                    requested_sources_for_task,
+                    batch_size,
+                    batch_count,
+                    max_rounds,
+                    target_ratio,
+                    data_version_prefix_for_task,
+                )
+                .await;
+            },
+        )
+        .await;
     }
 
     Ok(json!({
@@ -24339,25 +24392,30 @@ pub async fn sync_daily_background(
     }
     info!(data_version_id = %dv_id, symbols = symbols.len(), "后台同步日线");
 
-    tokio::spawn(async move {
-        match quant_data::sync::sync_daily_bars(
-            &state.db,
-            &state.tushare,
-            &symbols,
-            &start,
-            &end,
-            &task_id,
-        )
-        .await
-        {
-            Ok(count) => {
-                info!(task_id = %task_id, count = count, "后台同步日线完成");
+    crate::sync_task_registry::spawn_sync_task(
+        state.sync_tasks.clone(),
+        task_id.clone(),
+        async move {
+            match quant_data::sync::sync_daily_bars(
+                &state.db,
+                &state.tushare,
+                &symbols,
+                &start,
+                &end,
+                &task_id,
+            )
+            .await
+            {
+                Ok(count) => {
+                    info!(task_id = %task_id, count = count, "后台同步日线完成");
+                }
+                Err(e) => {
+                    tracing::error!(task_id = %task_id, error = %e.to_string(), "后台同步日线失败");
+                }
             }
-            Err(e) => {
-                tracing::error!(task_id = %task_id, error = %e.to_string(), "后台同步日线失败");
-            }
-        }
-    });
+        },
+    )
+    .await;
 
     Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "running"}}))
 }
@@ -24623,14 +24681,22 @@ pub async fn cancel_sync_task(
     .await;
 
     match result {
-        Ok(result) if result.rows_affected() == 1 => Json(json!({
-            "code": 0,
-            "data": {
-                "task_id": task_id,
-                "previous_status": status,
-                "status": next_status,
-            }
-        })),
+        Ok(result) if result.rows_affected() == 1 => {
+            // DB status 已改为 cancel_requested/cancelled,
+            // 再主动 abort tokio task(双保险:循环内 cancel 检查 + tokio abort)。
+            // running → cancel_requested 时 task 仍在跑,abort 立即终止;
+            // pending → cancelled 时 task 可能未启动,abort 无副作用。
+            let aborted = state.sync_tasks.abort(&task_id).await;
+            Json(json!({
+                "code": 0,
+                "data": {
+                    "task_id": task_id,
+                    "previous_status": status,
+                    "status": next_status,
+                    "tokio_aborted": aborted,
+                }
+            }))
+        }
         Ok(_) => Json(json!({
             "code": 1,
             "message": "task status changed before cancel request was applied",

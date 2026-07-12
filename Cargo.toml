@@ -18,6 +18,9 @@ authors = ["Quant Team"]
 # Async runtime
 tokio = { version = "1.49", features = ["full"] }
 
+# Async utilities (stream combinators for concurrent sync)
+futures = "0.3"
+
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "bigdecimal", "rust_decimal"] }
 
