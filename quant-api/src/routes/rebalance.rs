@@ -101,26 +101,40 @@ pub async fn rebalance_account(
     leverage_enabled: bool,
     leverage_multiplier: f64,
     leverage_mode: &str,
+    // P2-B:上层已算的值传入,避免重复查 DB(回放 mvo_engine 传 Some,实盘传 None 自查)
+    preloaded_nav: Option<f64>,
+    preloaded_regime: Option<f64>,
 ) -> Result<usize, String> {
     // 桥接:ResolvedStrategy → 平铺 StrategyConfig(MVO 函数/sc_slippage_pct 仍接 &StrategyConfig)。
     // task_id 保留参数:实盘由调用方传 run-factor 当日 task;回放传 rs 的 a_share equity_curve_task_id。
     let sc = resolved_to_legacy_sc(rs)?;
     // 1. 资金基准:统一用 current_nav(非 initial_capital);NULL 则降级 initial_capital
-    let current_nav: Decimal = sqlx::query_scalar(
-        "SELECT COALESCE(current_nav, initial_capital) FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(account_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("nav query: {}", e))?;
-    let capital_f = current_nav.to_string().parse::<f64>().unwrap_or(0.0);
+    // P2-B:上层 mvo_engine 已算过 NAV 时直接用,省 1 次 DB
+    let capital_f = if let Some(nav) = preloaded_nav {
+        nav
+    } else {
+        let current_nav: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(current_nav, initial_capital) FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(db)
+        .await
+        .map_err(|e| format!("nav query: {}", e))?;
+        current_nav.to_string().parse::<f64>().unwrap_or(0.0)
+    };
     if capital_f <= 0.0 {
         return Err(format!("账号 {} current_nav<=0,拒绝建仓", account_id));
     }
+    let current_nav = Decimal::from_f64_retain(capital_f).unwrap_or(Decimal::ZERO);
 
     // 2. MVO 权重 + 体制(共享)
     let mvo_weights = compute_lw_mvo_weights(db, date, mvo_cache, &sc).await;
-    let regime = detect_regime_exposure(db, date).await;
+    // P2-B:上层 mvo_engine 已用 csi300_map 算过 regime 时直接用,省 1 次 DB
+    let regime = if let Some(r) = preloaded_regime {
+        r
+    } else {
+        detect_regime_exposure(db, date).await
+    };
     let mvo_a_pct = mvo_weights.get(0).copied().unwrap_or(0.0) * regime;
 
     // 3. 选股(读 task_id 的 backtest_position 当日截面)
@@ -148,27 +162,34 @@ pub async fn rebalance_account(
 
     // 5. 维保门控(实盘口径):维保<警戒线禁买(跳过建仓段),平仓由每日盯市 check_maintenance_after_mark 处理。
     // 建仓前的预防:若当前已警戒状态,本次 rebalance 不新买入(只允许调仓段卖出的减仓)。
+    // P2-D:维保 ratio + 阈值合并为 1 条 SQL(原 maintenance_ratio + SELECT thr 两次 DB)
     let mut warn_no_buy = false;
     if leverage_enabled {
-        let maint = maintenance_ratio(db, account_id).await;
-        if !maint.is_infinite() {
-            let (liq_thr, warn_thr): (f64, f64) = sqlx::query_as(
-                "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5)
-                 FROM paper_account WHERE paper_account_id = $1",
-            )
-            .bind(account_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| format!("thr query: {}", e))?
-            .unwrap_or((1.3, 1.5));
-            if maint < liq_thr {
-                // 平仓线:强平(正常由每日检查处理,此处兜底)
-                let _ = force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(&sc)).await;
-                warn_no_buy = true;
-                warn!("[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买", date, account_id, maint, liq_thr);
-            } else if maint < warn_thr {
-                warn_no_buy = true;
-                warn!("[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买", date, account_id, maint, warn_thr);
+        let maint_info: Option<(f64, f64, f64)> = sqlx::query_as(
+            "SELECT
+                CASE WHEN COALESCE(margin_amount,0) < 0.000001 THEN 'Infinity'::float
+                     ELSE (COALESCE((SELECT SUM(market_value) FROM paper_position WHERE paper_account_id=$1),0)
+                           + COALESCE(cash,0)) / COALESCE(margin_amount,1)::float END,
+                COALESCE(liquidation_threshold, 1.3),
+                COALESCE(warning_threshold, 1.5)
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        if let Some((maint, liq_thr, warn_thr)) = maint_info {
+            if !maint.is_infinite() {
+                if maint < liq_thr {
+                    // 平仓线:强平(正常由每日检查处理,此处兜底)
+                    let _ = force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(&sc)).await;
+                    warn_no_buy = true;
+                    warn!("[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买", date, account_id, maint, liq_thr);
+                } else if maint < warn_thr {
+                    warn_no_buy = true;
+                    warn!("[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买", date, account_id, maint, warn_thr);
+                }
             }
         }
     }
@@ -193,6 +214,10 @@ pub async fn rebalance_account(
     let slippage = sc_slippage_pct(&sc);
     let mut n = 0usize;
     let mut target_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // P2-A:批量预加载当日 A 股停牌/涨跌停状态(替代循环内逐股查 2 次 DB)
+    let block_symbols: Vec<String> = positions.iter().map(|p| p.symbol.clone()).collect();
+    let trade_block_map =
+        crate::routes::scheduler::preload_trade_block_map(db, date, &block_symbols).await;
     for p in &positions {
         if warn_no_buy {
             // 警戒禁买:不建仓,仅记录目标集(清仓段仍可减仓)
@@ -207,15 +232,11 @@ pub async fn rebalance_account(
             continue;
         }
         target_symbols.insert(p.symbol.clone());
-        // A 股交易阻断(停牌/涨跌停)——回放实盘统一风控
-        match a_share_trade_block_reason(db, &p.symbol, date).await {
-            Ok(Some(reason)) => {
-                warn!("[rebalance] 跳过 A股交易: {}", reason);
-                send_quality_alert(db, &[format!("{}: {}", account_id, reason)]).await;
-                continue;
-            }
-            Ok(None) => {}
-            Err(e) => return Err(e),
+        // A 股交易阻断(停牌/涨跌停)——回放用批量预加载的 trade_block_map 内存查(P2-A)
+        if let Some(reason) = trade_block_map.get(&p.symbol) {
+            warn!("[rebalance] 跳过 A股交易: {} {}", p.symbol, reason);
+            send_quality_alert(db, &[format!("{}: {}", account_id, reason)]).await;
+            continue;
         }
         let target_qty = p.quantity * scale;
         let cur_qty = current_positions
@@ -303,13 +324,21 @@ pub async fn rebalance_account(
     // 8. ETF 建仓(按 price_source 取价:EodClose 从 DB / Intraday 从 tushare HashMap)
     // etf_symbols 必须与 mvo_weights 同源:只含当日已发行 ETF(compute_lw_mvo_weights 已过滤),
     // 否则 mvo_weights.get(i+1) 索引会与全量 sc.etf_symbols 错位。
+    // P2-C:批量预加载 ETF 上市状态 + 当日收盘价(替代循环内逐个查 DB)
+    let etf_listed_map = preload_etf_listed_map(db, &sc.etf_symbols, date).await;
     let mut listed_etf_symbols: Vec<String> = Vec::new();
     for s in &sc.etf_symbols {
-        if crate::routes::equity_curve_sync::is_etf_listed_on(db, s, date).await {
+        if etf_listed_map.get(s).copied().unwrap_or(false) {
             listed_etf_symbols.push(s.clone());
         }
     }
     let etf_allocations = build_etf_allocations(&mvo_weights, regime, &listed_etf_symbols);
+    // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
+    let etf_eod_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::EodClose) {
+        preload_etf_eod_prices(db, &listed_etf_symbols, date).await
+    } else {
+        HashMap::new()
+    };
     let intraday_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::Intraday) {
         let syms: Vec<String> = etf_allocations
             .iter()
@@ -334,7 +363,12 @@ pub async fn rebalance_account(
         if alloc_amount <= Decimal::ZERO {
             continue;
         }
-        let price_val = fetch_etf_price(db, etf_symbol.as_str(), date, price_source, &intraday_prices).await;
+        // P2-C:EodClose 模式优先用预加载的 etf_eod_prices,Intraday 模式用 intraday_prices
+        let price_val = if matches!(price_source, PriceSource::EodClose) {
+            etf_eod_prices.get(etf_symbol.as_str()).copied().unwrap_or(0.0)
+        } else {
+            fetch_etf_price(db, etf_symbol.as_str(), date, price_source, &intraday_prices).await
+        };
         let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ONE);
         if price <= Decimal::ZERO {
             continue;
@@ -714,6 +748,68 @@ async fn fetch_eod_price(db: &PgPool, symbol: &str, date: NaiveDate) -> f64 {
     .ok()
     .flatten()
     .unwrap_or(1.0)
+}
+
+/// P2-C:批量预加载 ETF 当日收盘价(EodClose 口径)。
+///
+/// 替代循环内逐个 fetch_eod_price(每个 ETF 1 次 DB)。用 DISTINCT ON 取每个 symbol
+/// 不晚于 date 的最近收盘价,一次查全部。
+async fn preload_etf_eod_prices(
+    db: &PgPool,
+    symbols: &[String],
+    date: NaiveDate,
+) -> HashMap<String, f64> {
+    if symbols.is_empty() {
+        return HashMap::new();
+    }
+    let rows: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT DISTINCT ON (symbol) symbol, close::double precision
+         FROM market_stock_daily_bar_adj
+         WHERE symbol = ANY($1) AND trade_date <= $2 AND close > 0
+         ORDER BY symbol, trade_date DESC",
+    )
+    .bind(symbols)
+    .bind(date)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    rows.into_iter().collect()
+}
+
+/// P2-C:批量预加载 ETF 上市状态(是否在 date 当日已发行)。
+///
+/// 替代循环内逐个 is_etf_listed_on(每个 ETF 1-2 次 DB)。
+/// 对齐 equity_curve_sync.rs:24 is_etf_listed_on 逻辑:优先 list_date,fallback MIN(trade_date)。
+/// 一次查所有 ETF 的 list_date + 首发行情日,返回 HashMap<symbol, is_listed>。
+async fn preload_etf_listed_map(
+    db: &PgPool,
+    symbols: &[String],
+    date: NaiveDate,
+) -> HashMap<String, bool> {
+    if symbols.is_empty() {
+        return HashMap::new();
+    }
+    // 一次查 list_date + 首发行情日(MIN(trade_date) fallback)
+    let rows: Vec<(String, Option<NaiveDate>, Option<NaiveDate>)> = sqlx::query_as(
+        "SELECT m.symbol, m.list_date,
+                (SELECT MIN(trade_date) FROM market_stock_daily_bar_adj b WHERE b.symbol = m.symbol) AS first_bar
+         FROM market_stock m
+         WHERE m.symbol = ANY($1)",
+    )
+    .bind(symbols)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let mut map: HashMap<String, bool> = HashMap::new();
+    for (sym, list_date, first_bar) in rows {
+        let listed = if let Some(ld) = list_date {
+            ld <= date
+        } else {
+            first_bar.map(|f| f <= date).unwrap_or(false)
+        };
+        map.insert(sym, listed);
+    }
+    map
 }
 
 #[cfg(test)]

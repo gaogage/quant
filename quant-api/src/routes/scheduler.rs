@@ -1887,6 +1887,50 @@ pub(crate) async fn a_share_trade_block_reason(
     Ok(None)
 }
 
+/// 批量预加载当日所有 A 股的停牌/涨跌停阻断状态(mvo_simulate P2-A 性能优化)。
+///
+/// 替代逐股调 a_share_trade_block_reason(每股 2 次 DB)。一次性 UNION ALL 查停牌 + 涨跌停,
+/// 返回 `HashMap<symbol, reason>`(只含被阻断的 symbol)。未在 map 中的 symbol 视为可交易。
+///
+/// 停牌优先于涨跌停(UNION ALL 顺序 + entry().or_insert_with 保证停牌先入,涨跌停不覆盖)。
+pub async fn preload_trade_block_map(
+    db: &PgPool,
+    trade_date: NaiveDate,
+    symbols: &[String],
+) -> std::collections::HashMap<String, String> {
+    if symbols.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    // 只查 A 股(非 A 股 symbol 如 ETF 不在此表,直接跳过)
+    let a_shares: Vec<&str> = symbols
+        .iter()
+        .filter(|s| is_a_share_symbol(s))
+        .map(|s| s.as_str())
+        .collect();
+    if a_shares.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT s.symbol, '停牌' AS reason FROM market_stock_suspension s
+          WHERE s.trade_date = $1 AND s.symbol = ANY($2) AND COALESCE(s.suspend_type, 'S') = 'S'
+         UNION ALL
+         SELECT l.symbol, '涨跌停' FROM market_stock_limit l
+          WHERE l.trade_date = $1 AND l.symbol = ANY($2)",
+    )
+    .bind(trade_date)
+    .bind(&a_shares)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let mut map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (sym, reason) in rows {
+        // 停牌在 UNION ALL 前置,先 insert;涨跌停后置,用 or_insert 不覆盖(停牌优先)
+        map.entry(sym).or_insert(reason);
+    }
+    map
+}
+
 /// 14:45 调仓前获取当日行情 + 停牌/涨跌停数据
 async fn sync_daily_data_for_today(
     db: &PgPool,
@@ -2996,6 +3040,9 @@ async fn sync_positions_from_backtest(
         leverage_enabled,
         leverage_multiplier,
         leverage_mode,
+        // P2-B:实盘无上层预算,传 None 让 rebalance_account 内部自查(保持旧行为)
+        None,
+        None,
     )
     .await
 }

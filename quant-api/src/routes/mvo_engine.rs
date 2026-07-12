@@ -208,6 +208,9 @@ pub async fn run_daily_simulation(
 
     for d in &dates {
         let d = *d;
+        // P2-B:regime 提前算(只依赖 date + csi300_map),供 rebalance_account 复用,省调仓日内 1 次 DB
+        let regime =
+            crate::routes::scheduler::detect_regime_exposure_cached(&csi300_map, d);
         // 3a. 调仓日控制（读 rebalance_freq）
         if is_rebalance_day(d, &rs.rebalance_freq, &mut last_marker) {
             rebalance_account(
@@ -222,6 +225,9 @@ pub async fn run_daily_simulation(
                 leverage_enabled,
                 leverage_multiplier,
                 leverage_mode,
+                // P2-B:传上层已算的 prev_nav(调仓前 NAV)和 regime,省调仓日内 2 次 DB
+                Some(prev_nav),
+                Some(regime),
             )
             .await?;
         }
@@ -246,8 +252,6 @@ pub async fn run_daily_simulation(
         } else {
             0.0
         };
-        let regime =
-            crate::routes::scheduler::detect_regime_exposure_cached(&csi300_map, d);
         // 3e. 写 paper_nav_snapshot
         let sid = format!("ns-{}", uuid::Uuid::new_v4());
         let cum = if init_cap_f > 0.0 {
