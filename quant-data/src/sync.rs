@@ -803,7 +803,11 @@ pub async fn sync_daily_basic(
         )
         .await?;
     } else {
-        for symbol in symbols {
+        let total = symbols.len();
+        for (i, symbol) in symbols.iter().enumerate() {
+            if sync_checkpoint(pool, &task_id, total, ok, failed, i, 50).await {
+                break;
+            }
             let mut offset = 0usize;
             let mut symbol_failed = false;
             loop {
@@ -1098,7 +1102,11 @@ pub async fn sync_fund_daily(
         let sd = y_start.format("%Y%m%d").to_string();
         let ed = y_end.format("%Y%m%d").to_string();
 
-        for symbol in symbols {
+        let total = symbols.len();
+        for (i, symbol) in symbols.iter().enumerate() {
+            if sync_checkpoint(pool, &task_id, total, i, 0, i, 50).await {
+                break;
+            }
             // Rate-limit: pause 1.5s if we've made too many calls this minute
             if calls_this_minute >= max_calls_per_minute {
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -1366,7 +1374,11 @@ pub async fn sync_moneyflow(
         )
         .await?;
     } else {
-        for symbol in symbols {
+        let total = symbols.len();
+        for (i, symbol) in symbols.iter().enumerate() {
+            if sync_checkpoint(pool, &task_id, total, ok, failed, i, 50).await {
+                break;
+            }
             let mut offset = 0usize;
             let mut symbol_failed = false;
             loop {
@@ -1628,7 +1640,11 @@ pub async fn sync_margin_detail(
         .await?;
     } else {
         repository::heartbeat_sync_task(pool, &task_id, symbols.len() as i32, 0, 0, 0).await?;
-        for symbol in symbols {
+        let total = symbols.len();
+        for (i, symbol) in symbols.iter().enumerate() {
+            if sync_checkpoint(pool, &task_id, total, ok, failed, i, 50).await {
+                break;
+            }
             let mut offset = 0usize;
             let mut symbol_failed = false;
             loop {
@@ -2399,7 +2415,11 @@ pub async fn sync_equity_pledge_pressure(
             }
         }
     } else {
-        for symbol in symbols {
+        let total = symbols.len();
+        for (i, symbol) in symbols.iter().enumerate() {
+            if sync_checkpoint(pool, task_id, total, i, 0, i, 50).await {
+                break;
+            }
             let mut offset = 0usize;
             let mut rows = Vec::new();
             loop {
@@ -3590,6 +3610,51 @@ async fn sync_task_cancelled(db: &PgPool, task_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 循环边界检查点:检查取消 + 更新心跳。
+///
+/// 通用辅助,供 sync_daily_basic/sync_moneyflow/sync_fund_daily 等分页 loop 函数复用。
+/// 在 `for symbol in symbols` 循环体开头调用,返回 true 表示已取消应 break。
+///
+/// 每 N 只检查一次取消(避免每只查 DB),并更新心跳(progress/last_heartbeat_at)。
+///
+/// # 参数
+/// - `db`:数据库连接池
+/// - `task_id`:同步任务 ID(data_sync_task.task_id)
+/// - `total/success/failed`:进度统计
+/// - `index`:当前迭代下标(0-based)
+/// - `check_every`:检查频率(如 50,则每 50 只检查一次)
+///
+/// # 返回
+/// true = 已被取消,调用方应 break 循环;false = 继续。
+async fn sync_checkpoint(
+    db: &PgPool,
+    task_id: &str,
+    total: usize,
+    success: usize,
+    failed: usize,
+    index: usize,
+    check_every: usize,
+) -> bool {
+    if index == 0 || index % check_every != 0 {
+        return false;
+    }
+    if sync_task_cancelled(db, task_id).await {
+        info!("同步任务 {} 被取消: {}/{}", task_id, index, total);
+        return true;
+    }
+    let progress = ((success * 100) / total.max(1)).min(99) as i32;
+    let _ = repository::heartbeat_sync_task(
+        db,
+        task_id,
+        total as i32,
+        success as i32,
+        failed as i32,
+        progress,
+    )
+    .await;
+    false
+}
+
 /// 同步复权因子（逐只拉取,8 并发）
 pub async fn sync_adj_factor(
     pool: &PgPool,
@@ -4442,7 +4507,10 @@ pub async fn sync_forecast(
     let page_limit = 2000usize;
     repository::update_sync_task(pool, &task_id, "running", total as i32, 0, 0).await?;
 
-    for symbol in symbols {
+    for (i, symbol) in symbols.iter().enumerate() {
+        if sync_checkpoint(pool, &task_id, total, ok, failed, i, 50).await {
+            break;
+        }
         let mut offset = 0usize;
         let mut symbol_failed = false;
         let mut symbol_rows = 0usize;
@@ -4605,7 +4673,10 @@ pub async fn sync_express(
     let page_limit = 2000usize;
     repository::update_sync_task(pool, &task_id, "running", total as i32, 0, 0).await?;
 
-    for symbol in symbols {
+    for (i, symbol) in symbols.iter().enumerate() {
+        if sync_checkpoint(pool, &task_id, total, ok, failed, i, 50).await {
+            break;
+        }
         let mut offset = 0usize;
         let mut symbol_failed = false;
         let mut symbol_rows = 0usize;
@@ -4949,7 +5020,10 @@ pub async fn sync_cashflow(
     let page_limit = 2000usize;
     let call_timeout = tushare_symbol_call_timeout();
 
-    for symbol in symbols {
+    for (i, symbol) in symbols.iter().enumerate() {
+        if sync_checkpoint(pool, &task_id, total, ok, failed, i, 50).await {
+            break;
+        }
         let mut offset = 0usize;
         let mut symbol_failed = false;
         let mut symbol_rows = 0usize;
@@ -5109,7 +5183,10 @@ pub async fn sync_dividend(
     let page_limit = 2000usize;
     let call_timeout = tushare_symbol_call_timeout();
 
-    for symbol in symbols {
+    for (i, symbol) in symbols.iter().enumerate() {
+        if sync_checkpoint(pool, &task_id, total, ok, failed, i, 50).await {
+            break;
+        }
         let mut offset = 0usize;
         let mut symbol_failed = false;
         let mut symbol_rows = 0usize;
