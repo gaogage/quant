@@ -3033,6 +3033,48 @@ pub async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
     }
 }
 
+/// detect_regime_exposure 的内存缓存版本(mvo_simulate 性能优化)。
+///
+/// 从预加载的 csi300_map(000300.SH 日线 HashMap<NaiveDate, f64>)取最近 252 个交易日
+/// 算 trailing 12m return,逻辑同 detect_regime_exposure 但不查 DB。
+///
+/// mvo_simulate 循环前一次性预加载整个区间,循环内每天调此函数 O(1) 查内存,
+/// 省 ~N 次 DB 往返(N = 模拟天数)。
+pub fn detect_regime_exposure_cached(
+    csi300_map: &std::collections::HashMap<NaiveDate, f64>,
+    date: NaiveDate,
+) -> f64 {
+    // 取不晚于 date 的最近 252 个交易日收盘价(对齐 SQL 的 trade_date <= $1 ORDER BY DESC LIMIT 252)
+    let mut recent: Vec<(NaiveDate, f64)> = csi300_map
+        .iter()
+        .filter(|(d, _)| **d <= date)
+        .map(|(d, c)| (*d, *c))
+        .collect();
+    if recent.len() < 2 {
+        return 1.00; // 数据不足,默认满仓(对齐 SQL 不足时返回 1.00)
+    }
+    recent.sort_by(|a, b| b.0.cmp(&a.0)); // trade_date DESC
+    recent.truncate(252);
+    // 最新收盘 / 252日前收盘 - 1(对齐 SQL:DESC LIMIT 1 是最新,ASC LIMIT 1 是最早)
+    let latest = recent.first().map(|(_, c)| *c).unwrap_or(0.0);
+    let earliest = recent.last().map(|(_, c)| *c).unwrap_or(0.0);
+    let trail = if earliest > 0.0 {
+        Some(latest / earliest - 1.0)
+    } else {
+        None
+    };
+    match trail {
+        Some(t) if t < -0.10 => {
+            debug!(
+                "[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%",
+                t * 100.0
+            );
+            0.60
+        }
+        _ => 1.00, // 满仓
+    }
+}
+
 /// v17: CSI300体制检测，返回动态min_stock
 /// bull(MA60>MA250, trailing12m>10%): 35% | neutral: 25% | bear(trailing12m<-15%): 0%
 async fn get_regime_min_stock(db: &PgPool, date: NaiveDate) -> f64 {

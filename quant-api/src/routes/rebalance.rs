@@ -533,24 +533,18 @@ pub async fn check_maintenance_after_mark(
     date: NaiveDate,
     slippage: f64,
 ) -> Result<(usize, bool), String> {
-    // 读维保阈值(默认 1.3/1.5)
-    let (liq_thr, warn_thr): (f64, f64) = sqlx::query_as(
-        "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5)
-         FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(account_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("thr: {}", e))?
-    .unwrap_or((1.3, 1.5));
-    let (leverage_enabled, _): (bool, Option<f64>) = sqlx::query_as(
-        "SELECT leverage_enabled, leverage_multiplier FROM paper_account WHERE paper_account_id=$1",
-    )
-    .bind(account_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("lev: {}", e))?
-    .unwrap_or((false, None));
+    // 读维保阈值 + 杠杆配置(合并为 1 条 SELECT,原 2 条查同一行 paper_account)
+    let (liq_thr, warn_thr, leverage_enabled, _): (f64, f64, bool, Option<f64>) =
+        sqlx::query_as(
+            "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5),
+                    leverage_enabled, leverage_multiplier
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("thr/lev: {}", e))?
+        .unwrap_or((1.3, 1.5, false, None));
     if !leverage_enabled {
         return Ok((0, false)); // 无杠杆不检查维保
     }

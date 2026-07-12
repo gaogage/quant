@@ -277,18 +277,22 @@ pub async fn try_auto_repay(db: &PgPool, account_id: &str) -> Result<Option<Stri
 
 // ── 更新净资产 ────────────────────────────────────────
 
-pub async fn update_current_nav(db: &PgPool, account_id: &str) -> Result<(), String> {
-    sqlx::query(
+/// 更新 paper_account.current_nav = 持仓市值合计 + cash - margin,返回算出的 NAV。
+///
+/// 改返回 `Result<f64>`(P1-B 性能优化):mvo_simulate 循环内可直接拿 NAV,
+/// 省去紧随其后的 `SELECT current_nav` 一次 DB 往返(~N 次,N=模拟天数)。
+pub async fn update_current_nav(db: &PgPool, account_id: &str) -> Result<f64, String> {
+    let nav: f64 = sqlx::query_scalar(
         "UPDATE paper_account SET
          current_nav = (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id = $1)
                      + COALESCE(cash,0) - COALESCE(margin_amount,0)
-         WHERE paper_account_id = $1"
+         WHERE paper_account_id = $1 RETURNING current_nav::double precision",
     )
     .bind(account_id)
-    .execute(db)
+    .fetch_one(db)
     .await
     .map_err(|e| format!("update_nav: {}", e))?;
-    Ok(())
+    Ok(nav)
 }
 
 #[cfg(test)]

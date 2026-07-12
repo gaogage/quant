@@ -183,6 +183,24 @@ pub async fn run_daily_simulation(
         return Err(format!("交易日序列为空（task={}, {}~{}）", a_task_id, start, end));
     }
 
+    // 2.1 预加载 CSI300 日线到内存(detect_regime_exposure 每天查 252 天,改内存读省 ~N 次 DB)
+    // 复用 paper.rs:721 bench_map 模式。first_d 往前推 400 天确保 trailing 252 天有边界数据。
+    let csi300_first = *dates.first().unwrap() - chrono::Duration::days(400);
+    let csi300_last = *dates.last().unwrap();
+    let csi300_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
+        "SELECT trade_date, close::double precision FROM market_index_daily_bar
+         WHERE symbol = '000300.SH' AND trade_date >= $1 AND trade_date <= $2 AND close > 0
+         ORDER BY trade_date",
+    )
+    .bind(csi300_first)
+    .bind(csi300_last)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("load csi300: {}", e))?;
+    let csi300_map: std::collections::HashMap<NaiveDate, f64> =
+        csi300_rows.into_iter().collect();
+    tracing::info!(days = csi300_map.len(), "CSI300 预加载完成(detect_regime 缓存)");
+
     // 3. 逐日
     let mut prev_nav = init_cap_f;
     let mut out: Vec<DailyNav> = Vec::with_capacity(dates.len());
@@ -209,26 +227,27 @@ pub async fn run_daily_simulation(
         }
         // 3b. 每日盯市
         mark_to_market(db, account_id, d).await?;
-        // 3c. NAV 重算
-        update_current_nav(db, account_id).await?;
+        // 3c. NAV 重算(P1-B:update_current_nav 返回 NAV,省下面的 SELECT current_nav)
+        let nav_first = update_current_nav(db, account_id).await?;
         // 3c.1 每日维保检查(实盘口径):维保<平仓线触发强平,平仓后重算 NAV。
         // 非调仓日也可能因价格下跌触发强平(券商每日盯市)。
-        let _ = crate::routes::rebalance::check_maintenance_after_mark(db, account_id, d, 0.002).await;
-        update_current_nav(db, account_id).await?;
-        // 3d. 读真实盯市 NAV 算日收益
-        let nav: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(current_nav, initial_capital)::double precision FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_one(db)
-        .await
-        .map_err(|e| format!("read nav: {}", e))?;
+        let (liq_n, _warn_block) =
+            crate::routes::rebalance::check_maintenance_after_mark(db, account_id, d, 0.002)
+                .await
+                .unwrap_or((0, false));
+        // P1-A:仅强平日(liq_n>0)才重算 NAV,未强平用第1次值(省 ~N 次 DB)
+        let nav = if liq_n > 0 {
+            update_current_nav(db, account_id).await?
+        } else {
+            nav_first
+        };
         let net = if prev_nav > 0.0 {
             nav / prev_nav - 1.0
         } else {
             0.0
         };
-        let regime = crate::routes::scheduler::detect_regime_exposure(db, d).await;
+        let regime =
+            crate::routes::scheduler::detect_regime_exposure_cached(&csi300_map, d);
         // 3e. 写 paper_nav_snapshot
         let sid = format!("ns-{}", uuid::Uuid::new_v4());
         let cum = if init_cap_f > 0.0 {
