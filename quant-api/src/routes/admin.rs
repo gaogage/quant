@@ -276,8 +276,8 @@ pub async fn sync_status(
     }
 
     // T+1 数据在次日 9:00 自动同步（含周末），正常 gap ≤1 天。
-    // 页面以正式 canonical=v19 full PIT 配置为准，不再用旧 phase7 单独口径。
-    let cfg = load_admin_strategy_config(&state.db, "v19").await;
+    // 看板取第一个 active 复合策略为代表检查数据新鲜度（不再硬编码 v19）。
+    let cfg = load_first_active_admin_strategy_config(&state.db).await;
     let today = admin_latest_market_date(&state.db).await;
 
     let mut results = Vec::new();
@@ -729,9 +729,44 @@ async fn load_admin_strategy_config(
         }
         None => AdminSyncStrategyConfig {
             strategy_id: strategy_id.to_string(),
-            combo_name: "full_pit_icir_37f".to_string(),
-            equity_curve_task_id: "fbt-8dbae9c9-7081-4e3e-9da8-c19d6a76e77e".to_string(),
-            prediction_set_id: Some("pred-fullperiod-nlqr-20140101-20260630".to_string()),
+            combo_name: String::new(),
+            equity_curve_task_id: String::new(),
+            prediction_set_id: None,
+            etf_symbols: admin_default_mvo_etfs(),
+        },
+    }
+}
+
+/// 加载第一个 active 复合策略(sync_status 看板用,不再硬编码 v19)。
+/// 看板本质是抽样检查数据新鲜度,取任一 active 复合策略代表即可。
+/// 若无 active 策略,返回带默认 ETF 的空配置(后续检查会因 combo/curve 为空而提示未就绪)。
+async fn load_first_active_admin_strategy_config(db: &sqlx::PgPool) -> AdminSyncStrategyConfig {
+    let row: Option<(String, String, String, Option<String>, Option<serde_json::Value>)> =
+        sqlx::query_as(
+            "SELECT strategy_id, combo_name, equity_curve_task_id, prediction_set_id, etf_symbols
+             FROM strategy_config
+             WHERE status='active' AND strategy_type='composite'
+             ORDER BY strategy_id LIMIT 1",
+        )
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+    match row {
+        Some((strategy_id, combo_name, equity_curve_task_id, prediction_set_id, etf_symbols)) => {
+            AdminSyncStrategyConfig {
+                strategy_id,
+                combo_name,
+                equity_curve_task_id,
+                prediction_set_id,
+                etf_symbols: admin_parse_etf_symbols(etf_symbols),
+            }
+        }
+        None => AdminSyncStrategyConfig {
+            strategy_id: String::new(),
+            combo_name: String::new(),
+            equity_curve_task_id: String::new(),
+            prediction_set_id: None,
             etf_symbols: admin_default_mvo_etfs(),
         },
     }
@@ -770,7 +805,17 @@ pub async fn repair_sync(
     }
 
     let dv_id = uuid::Uuid::new_v4().simple().to_string();
-    let strategy_id = req.strategy_id.as_deref().unwrap_or("v19");
+    // 策略 ID 必传(不再 fallback 到 "v19",配置化原则)。
+    // 与 portfolio.rs run_mvo_simulate 链路一致:请求未传则报错。
+    let strategy_id = match req.strategy_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sid) => sid,
+        None => {
+            return Json(serde_json::json!({
+                "code": 1,
+                "message": "repair 必传 strategy_id(不再默认 v19)"
+            })).into_response();
+        }
+    };
     let cfg = load_admin_strategy_config(&state.db, strategy_id).await;
     let has_explicit_start_date = req.start_date.is_some();
     let target_date = match req.end_date.as_deref() {

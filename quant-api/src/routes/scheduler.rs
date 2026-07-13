@@ -865,6 +865,31 @@ pub(crate) fn rs_to_legacy_etf_symbols(rs: &ResolvedStrategy) -> Vec<String> {
     rs.etf_symbols.clone()
 }
 
+/// 取所有 active 复合策略的 etf_symbols 并集（EOD 同步用，覆盖所有激活策略的 ETF）。
+/// 不再依赖单一策略（v19）的 etf_symbols，确保多策略并行时所有策略 ETF 都被同步。
+pub async fn load_active_etf_symbols_union(db: &PgPool) -> Vec<String> {
+    let rows: Vec<(Option<serde_json::Value>,)> = sqlx::query_as(
+        "SELECT etf_symbols
+         FROM strategy_config
+         WHERE status='active' AND strategy_type='composite' AND etf_symbols IS NOT NULL
+         ORDER BY strategy_id",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (etf_json,) in rows {
+        if let Some(arr) = etf_json.as_ref().and_then(|v| v.as_array()) {
+            for sym in arr {
+                if let Some(s) = sym.as_str() {
+                    set.insert(s.to_string());
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
 /// 从数据库加载活跃策略配置，失败时 panic（策略配置必须从 DB 加载，不允许硬编码 fallback）
 pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig {
     let row: Option<(serde_json::Value,)> = sqlx::query_as::<_, (serde_json::Value,)>(
@@ -915,6 +940,28 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             "[scheduler] 策略配置加载失败 strategy_id={},strategy_config 表无此 active 记录",
             strategy_id
         ),
+    }
+}
+
+/// 加载第一个 active 复合策略配置（不再硬编码 v19）。
+/// 用于 EOD 同步的 ML 预测覆盖检查（ensure_prediction_coverage 仍需单策略 sc）。
+/// 无 active 复合策略时返回 None（调用方跳过 ML 检查，不 panic）。
+pub async fn load_first_active_strategy_config(db: &PgPool) -> Option<StrategyConfig> {
+    let sid: Option<String> = sqlx::query_scalar(
+        "SELECT strategy_id FROM strategy_config
+         WHERE status='active' AND strategy_type='composite'
+         ORDER BY strategy_id LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    match sid {
+        Some(sid) => Some(load_strategy_config(db, &sid).await),
+        None => {
+            warn!("[scheduler] 无 active 复合策略，跳过 ML 预测覆盖检查");
+            None
+        }
     }
 }
 
@@ -1070,14 +1117,21 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
 
-        // 从数据库加载策略配置
-        let strategy_config = Arc::new(load_strategy_config(&db, "v19").await);
+        // 从数据库加载策略配置（取第一个 active 复合策略，不再硬编码 v19）。
+        // 无 active 策略时为 None，run_tick/validate_pre_trade_data 据此跳过策略相关校验。
+        let strategy_config: Arc<Option<StrategyConfig>> =
+            Arc::new(load_first_active_strategy_config(&db).await);
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!(
-            "[scheduler] {} 已启动 ({}): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步",
-            strategy_config.strategy_id, strategy_config.name
-        );
+        match strategy_config.as_ref() {
+            Some(sc) => info!(
+                "[scheduler] {} 已启动 ({}): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步",
+                sc.strategy_id, sc.name
+            ),
+            None => info!(
+                "[scheduler] 已启动 (无 active 复合策略): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步"
+            ),
+        }
 
         // 首次运行时检查定时任务
         run_scheduled_tasks(&db).await;
@@ -1085,7 +1139,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         loop {
             interval.tick().await;
             if let Err(e) =
-                run_tick(&db, &tushare, &state, &mvo_cache, port, &strategy_config).await
+                run_tick(&db, &tushare, &state, &mvo_cache, port, strategy_config.as_ref().as_ref()).await
             {
                 error!("[scheduler] 任务失败: {}", e);
             }
@@ -1119,7 +1173,7 @@ async fn run_tick(
     state: &Arc<Mutex<DailyState>>,
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
     port: u16,
-    sc: &StrategyConfig,
+    sc_opt: Option<&StrategyConfig>,
 ) -> Result<(), String> {
     let now = Local::now();
     let today = now.date_naive();
@@ -1152,6 +1206,14 @@ async fn run_tick(
                 let mut st = state.lock().await;
                 st.traded_today = true;
             }
+            // 无 active 策略则跳过调仓（无调仓目标），不阻塞后续 EOD/T+1 同步。
+            let sc = match sc_opt {
+                Some(s) => s,
+                None => {
+                    warn!("[scheduler] 14:45 调仓跳过（无 active 复合策略）");
+                    return Ok(());
+                }
+            };
             info!("[scheduler] 14:45 日频调仓 (v16 LW-MVO 7-asset)...");
 
             // ── 前置数据校验+自动修复 ──
@@ -1258,11 +1320,11 @@ async fn run_tick(
                 Ok(n) => info!("[scheduler] T+1 A股日线同步: {} 条", n),
                 Err(e) => warn!("[scheduler] T+1 A股日线同步失败: {}", e),
             }
-            let etf_symbols = &sc.etf_symbols;
+            let etf_symbols = load_active_etf_symbols_union(db).await;
             let _ = quant_data::sync::sync_fund_daily(
                 db,
                 tushare,
-                etf_symbols,
+                &etf_symbols,
                 &sync_date_str,
                 &sync_date_str,
                 &format!("etf-t1-{}", sync_date_str),
@@ -1322,10 +1384,21 @@ async fn run_tick(
                     .json(&serde_json::json!({"start_date": backfill_start, "end_date": sync_date_str}))
                     .timeout(std::time::Duration::from_secs(10))
                     .send().await;
-                if sc.combo_name != "phase7_price_volume_expanded_v1" {
+                // 遍历所有 active 复合策略的 combo 做增量物化（不再依赖单一 v19 的 sc）。
+                let active_combos: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT strategy_id, combo_name FROM strategy_config
+                     WHERE status='active' AND strategy_type='composite'
+                       AND combo_name IS NOT NULL AND combo_name <> ''
+                       AND combo_name <> 'phase7_price_volume_expanded_v1'
+                     ORDER BY strategy_id",
+                )
+                .fetch_all(db)
+                .await
+                .unwrap_or_default();
+                for (sid, combo) in active_combos {
                     match crate::routes::factors::materialize_pit_combo(
                         db,
-                        pre_trade_factor_combo(sc),
+                        &combo,
                         "1.0.0",
                         20,
                         sync_date - chrono::Duration::days(7),
@@ -1333,8 +1406,14 @@ async fn run_tick(
                     )
                     .await
                     {
-                        Ok(rows) => info!("[scheduler] T+1 PIT combo 增量物化完成: {} 行", rows),
-                        Err(e) => warn!("[scheduler] T+1 PIT combo 增量物化失败: {}", e),
+                        Ok(rows) => info!(
+                            "[scheduler] T+1 PIT combo 增量物化完成 ({}={}): {} 行",
+                            sid, combo, rows
+                        ),
+                        Err(e) => warn!(
+                            "[scheduler] T+1 PIT combo 增量物化失败 ({}={}): {}",
+                            sid, combo, e
+                        ),
                     }
                 }
             }
@@ -1984,7 +2063,10 @@ async fn sync_eod_data(
     date: NaiveDate,
 ) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
-    let sc = load_strategy_config(db, "v19").await;
+    // etf_symbols 取所有 active 复合策略的并集（不再硬编码 v19，覆盖多策略 ETF）。
+    let etf_symbols = load_active_etf_symbols_union(db).await;
+    // ensure_prediction_coverage 的 ML 训练逻辑仍需单策略 sc（取第一个 active 复合策略为代表）。
+    let sc = load_first_active_strategy_config(db).await;
     let all_stocks: Vec<String> = sqlx::query_scalar(
         "SELECT symbol FROM market_stock WHERE list_status = 'L' ORDER BY symbol",
     )
@@ -2014,7 +2096,7 @@ async fn sync_eod_data(
     let _ = quant_data::sync::sync_fund_daily(
         db,
         tushare,
-        &sc.etf_symbols,
+        &etf_symbols,
         &date_str,
         &date_str,
         &format!("etf-eod-{}", date_str),
@@ -2060,8 +2142,14 @@ async fn sync_eod_data(
 
     // ── ML预测数据检查+补齐 ──
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    let pred_ok = ensure_prediction_coverage(db, tushare, date, &sc).await;
-    if !pred_ok {
+    let pred_ok = match sc.as_ref() {
+        Some(sc) => ensure_prediction_coverage(db, tushare, date, sc).await,
+        None => {
+            warn!("[scheduler] ⚠ 无 active 策略，跳过 ML 预测覆盖检查");
+            false
+        }
+    };
+    if !pred_ok && sc.is_some() {
         warn!("[scheduler] ⚠ ML预测数据补齐失败, v16将降级为纯因子选股");
     }
 
@@ -2630,12 +2718,12 @@ async fn generate_paper_signals_for_all(
         let leverage_enabled = *leverage_enabled;
         let leverage_multiplier = *leverage_multiplier;
         let leverage_mode = leverage_mode.as_str();
-        // 账号挂策略(strategy_version_id) → 加载该策略配置;无配置则跳过
+        // 账号挂策略(strategy_version_id) → 加载该策略配置;无配置则报错并跳过(不阻塞其他账号)
         let strategy_version_id = match strategy_version_id.as_deref() {
-            Some(s) => s,
-            None => {
-                warn!(
-                    "[paper] 账号 {} 未配置 strategy_version_id,跳过",
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                error!(
+                    "[paper] 账号 {} 未配置 strategy_version_id,跳过(配置错误,不阻塞其他账号)",
                     account_id
                 );
                 continue;

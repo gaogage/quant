@@ -52,9 +52,7 @@ pub async fn list_strategies(
                 prediction_set_id, dynamic_target_cap, score_direction, candidate_tier
          FROM strategy_config
          WHERE status = 'active'
-         ORDER BY
-             CASE WHEN strategy_id = 'v19' THEN 0 ELSE 1 END,
-             strategy_id",
+         ORDER BY strategy_id",
     )
     .fetch_all(&state.db)
     .await

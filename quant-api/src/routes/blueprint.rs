@@ -36,8 +36,8 @@ pub async fn blueprint_progress(
 }
 
 async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
-    let strategy = load_active_v19_strategy(db).await?;
-    let accounts = load_active_v19_accounts(db).await?;
+    let strategies = load_active_strategies(db).await?;
+    let accounts = load_active_simulated_accounts(db).await?;
     let selected = accounts
         .iter()
         .filter(|account| account["annual_return_pct"].is_number())
@@ -82,8 +82,8 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
     Ok(json!({
         "as_of": chrono::Utc::now().to_rfc3339(),
         "canonical": {
-            "strategy": strategy,
-            "scope": "active v19 simulated accounts and full PIT canonical lineage",
+            "strategies": strategies,
+            "scope": "active simulated accounts and full PIT canonical lineage",
             "promotion_status": "defensive_candidate"
         },
         "selected_account": selected,
@@ -131,36 +131,38 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
     }))
 }
 
-async fn load_active_v19_strategy(db: &sqlx::PgPool) -> Result<Value, String> {
-    let row = sqlx::query(
+async fn load_active_strategies(db: &sqlx::PgPool) -> Result<Vec<Value>, String> {
+    let rows = sqlx::query(
         r#"
         SELECT strategy_id, combo_name, prediction_set_id, equity_curve_task_id,
                signal_source, score_direction, candidate_tier, status
         FROM strategy_config
-        WHERE strategy_id = 'v19' AND status = 'active'
-        LIMIT 1
+        WHERE status = 'active' AND strategy_type = 'composite'
+        ORDER BY strategy_id
         "#,
     )
-    .fetch_optional(db)
+    .fetch_all(db)
     .await
-    .map_err(|error| format!("load active v19 strategy failed: {error}"))?;
+    .map_err(|error| format!("load active strategies failed: {error}"))?;
 
-    Ok(match row {
-        Some(row) => json!({
-            "strategy_id": row.get::<String, _>("strategy_id"),
-            "combo_name": row.get::<String, _>("combo_name"),
-            "prediction_set_id": row.get::<String, _>("prediction_set_id"),
-            "equity_curve_task_id": row.get::<String, _>("equity_curve_task_id"),
-            "signal_source": row.get::<String, _>("signal_source"),
-            "score_direction": row.get::<String, _>("score_direction"),
-            "candidate_tier": row.try_get::<String, _>("candidate_tier").unwrap_or_else(|_| "research_baseline".into()),
-            "status": row.get::<String, _>("status"),
-        }),
-        None => json!({"strategy_id": "v19", "status": "missing"}),
-    })
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "strategy_id": row.get::<String, _>("strategy_id"),
+                "combo_name": row.try_get::<String, _>("combo_name").unwrap_or_default(),
+                "prediction_set_id": row.try_get::<Option<String>, _>("prediction_set_id").ok().flatten(),
+                "equity_curve_task_id": row.try_get::<Option<String>, _>("equity_curve_task_id").ok().flatten(),
+                "signal_source": row.try_get::<String, _>("signal_source").unwrap_or_default(),
+                "score_direction": row.try_get::<String, _>("score_direction").unwrap_or_default(),
+                "candidate_tier": row.try_get::<String, _>("candidate_tier").unwrap_or_else(|_| "research_baseline".into()),
+                "status": row.get::<String, _>("status"),
+            })
+        })
+        .collect())
 }
 
-async fn load_active_v19_accounts(db: &sqlx::PgPool) -> Result<Vec<Value>, String> {
+async fn load_active_simulated_accounts(db: &sqlx::PgPool) -> Result<Vec<Value>, String> {
     let rows = sqlx::query(
         r#"
         SELECT pa.paper_account_id, pa.name, pa.status, pa.account_type, pa.strategy_version_id,
@@ -180,13 +182,14 @@ async fn load_active_v19_accounts(db: &sqlx::PgPool) -> Result<Vec<Value>, Strin
             LIMIT 1
         ) pr ON TRUE
         WHERE pa.status = 'active'
-          AND pa.strategy_version_id = 'v19'
+          AND pa.account_type = 'simulated'
+          AND pa.strategy_version_id IS NOT NULL
         ORDER BY pa.paper_account_id
         "#,
     )
     .fetch_all(db)
     .await
-    .map_err(|error| format!("load active v19 accounts failed: {error}"))?;
+    .map_err(|error| format!("load active simulated accounts failed: {error}"))?;
 
     Ok(rows
         .into_iter()

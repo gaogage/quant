@@ -30752,7 +30752,11 @@ pub async fn check_paper_account_data_readiness(
     .map_err(|e| format!("查询账号数据门禁: {}", e))?;
     let (account_id, account_name, strategy_id) =
         account.ok_or_else(|| format!("账号不存在或未激活: {}", account_id))?;
-    let sid = strategy_id.unwrap_or_else(|| "v19".to_string());
+    // 账号未挂策略 → 数据未就绪(不再 fallback "v19",配置化原则)。
+    // 该账号在批量门禁中被跳过,不阻塞其他账号。
+    let sid = strategy_id.ok_or_else(|| {
+        format!("账号 {}({}) 未配置 strategy_version_id,数据未就绪", account_id, account_name)
+    })?;
 
     let cfg: Option<(String, String, Option<String>, Option<Value>, String, f64)> = sqlx::query_as(
         "SELECT combo_name, equity_curve_task_id, prediction_set_id, etf_symbols,
@@ -30889,7 +30893,18 @@ pub async fn account_data_health(
     let mut common_deps_cache: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
     for (_acct_id, acct_name, strat_id, _lev) in &accounts {
-        let sid = strat_id.as_deref().unwrap_or("v19");
+        // 账号未挂策略 → 跳过(不再 fallback "v19",配置化原则)。
+        // 健康检查不因单个无策略账号终止。
+        let sid = match strat_id.as_deref() {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                tracing::error!(
+                    "[health] 账号 {} 未配置 strategy_version_id,跳过健康检查",
+                    acct_name
+                );
+                continue;
+            }
+        };
         if !cfg_cache.contains_key(sid) {
             let cfg: Option<(String, String, Option<String>, Option<Value>, String, f64)> =
                 sqlx::query_as(
