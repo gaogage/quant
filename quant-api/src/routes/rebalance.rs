@@ -133,7 +133,7 @@ pub async fn rebalance_account(
     let regime = if let Some(r) = preloaded_regime {
         r
     } else {
-        detect_regime_exposure(db, date).await
+        detect_regime_exposure(db, date, sc.deep_bear_threshold, sc.deep_bear_exposure).await
     };
     let mvo_a_pct = mvo_weights.get(0).copied().unwrap_or(0.0) * regime;
 
@@ -846,6 +846,8 @@ mod tests {
             default_weights: vec![],
             regime_bull_min_stock: 0.0,
             regime_bear_min_stock: 0.0,
+            deep_bear_threshold: -0.10,
+            deep_bear_exposure: 0.60,
             signal_source: String::new(),
             prediction_blend_weight: 0.0,
             combo_name: String::new(),

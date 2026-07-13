@@ -203,14 +203,25 @@ pub async fn run_daily_simulation(
 
     // 3. 逐日
     let mut prev_nav = init_cap_f;
+    // P1-2: regime 阈值从策略配置读(原硬编码 -0.10/0.60)。
+    let (deep_bear_threshold, deep_bear_exposure) = rs
+        .mvo
+        .as_ref()
+        .map(|m| (m.deep_bear_threshold, m.deep_bear_exposure))
+        .unwrap_or((-0.10, 0.60));
+
     let mut out: Vec<DailyNav> = Vec::with_capacity(dates.len());
     let mut last_marker: Option<(i32, u32)> = None; // 调仓频率 marker（年/季/月）
 
     for d in &dates {
         let d = *d;
         // P2-B:regime 提前算(只依赖 date + csi300_map),供 rebalance_account 复用,省调仓日内 1 次 DB
-        let regime =
-            crate::routes::scheduler::detect_regime_exposure_cached(&csi300_map, d);
+        let regime = crate::routes::scheduler::detect_regime_exposure_cached(
+            &csi300_map,
+            d,
+            deep_bear_threshold,
+            deep_bear_exposure,
+        );
         // 3a. 调仓日控制（读 rebalance_freq）
         if is_rebalance_day(d, &rs.rebalance_freq, &mut last_marker) {
             rebalance_account(

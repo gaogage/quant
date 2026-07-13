@@ -199,6 +199,12 @@ pub struct StrategyConfig {
     pub regime_bull_min_stock: f64,
     #[serde(default)]
     pub regime_bear_min_stock: f64,
+    // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化,原硬编码 -0.10/0.60)。
+    // trailing-12m 收益 < deep_bear_threshold → 仓位降为 deep_bear_exposure。
+    #[serde(default = "default_deep_bear_threshold")]
+    pub deep_bear_threshold: f64,
+    #[serde(default = "default_deep_bear_exposure")]
+    pub deep_bear_exposure: f64,
     // A股大类选股方式（下沉到策略，不再挂账号）
     #[serde(default = "default_signal_source")]
     pub signal_source: String,
@@ -237,6 +243,12 @@ fn default_combo_name() -> String {
 }
 fn default_top_n() -> i64 {
     30
+}
+fn default_deep_bear_threshold() -> f64 {
+    -0.10
+}
+fn default_deep_bear_exposure() -> f64 {
+    0.60
 }
 fn default_dynamic_target_cap() -> f64 {
     0.30
@@ -413,6 +425,8 @@ mod tests {
             default_weights: vec![],
             regime_bull_min_stock: 0.0,
             regime_bear_min_stock: 0.0,
+            deep_bear_threshold: -0.10,
+            deep_bear_exposure: 0.60,
             signal_source: String::new(),
             prediction_blend_weight: 0.0,
             combo_name: String::new(),
@@ -539,6 +553,8 @@ mod tests {
                 regime_bear_threshold: 0.0,
                 regime_bull_min_stock: 0.0,
                 regime_bear_min_stock: 0.0,
+                deep_bear_threshold: -0.10,
+                deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
                 dynamic_target_floor: 0.12,
                 risk_free_rate: 0.03,
@@ -752,6 +768,8 @@ mod tests {
                 regime_bear_threshold: 0.0,
                 regime_bull_min_stock: 0.0,
                 regime_bear_min_stock: 0.0,
+                deep_bear_threshold: -0.10,
+                deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
                 dynamic_target_floor: 0.12,
                 risk_free_rate: 0.03,
@@ -839,6 +857,8 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         default_weights: mvo.default_weights.clone(),
         regime_bull_min_stock: mvo.regime_bull_min_stock,
         regime_bear_min_stock: mvo.regime_bear_min_stock,
+        deep_bear_threshold: mvo.deep_bear_threshold,
+        deep_bear_exposure: mvo.deep_bear_exposure,
         signal_source: a_share.security.signal_source.clone(),
         prediction_blend_weight: a_share.security.prediction_blend_weight,
         combo_name: a_share.security.combo_name.clone(),
@@ -909,6 +929,8 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'default_weights', default_weights,
             'regime_bull_min_stock', regime_bull_min_stock,
             'regime_bear_min_stock', regime_bear_min_stock,
+            'deep_bear_threshold', deep_bear_threshold,
+            'deep_bear_exposure', deep_bear_exposure,
             'signal_source', signal_source,
             'prediction_blend_weight', prediction_blend_weight,
             'combo_name', combo_name,
@@ -3138,7 +3160,12 @@ async fn sync_positions_from_backtest(
 /// 体制检测：Trailing 12-month CSI300 return。
 /// 深熊（12月跌 >10%）：仓位降至 60%，规避系统性风险。
 /// 其余时间：满仓，让 LW-MVO 自主调配。
-pub async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
+pub async fn detect_regime_exposure(
+    db: &PgPool,
+    date: NaiveDate,
+    deep_bear_threshold: f64,
+    deep_bear_exposure: f64,
+) -> f64 {
     // 真正的 trailing-12m 回报 = 最新收盘 / 252日前收盘 - 1。
     // （旧实现用 MAX/MIN-1，永远为正 → 降仓从不触发，2015股灾/2018熊市全程满仓）
     let trail: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
@@ -3157,12 +3184,12 @@ pub async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
     .and_then(|(v,)| v);
 
     match trail {
-        Some(t) if t < -0.10 => {
+        Some(t) if t < deep_bear_threshold => {
             debug!(
-                "[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%",
-                t * 100.0
+                "[Regime] DEEP BEAR: 12m return={:.1}%, exposure={:.0}%",
+                t * 100.0, deep_bear_exposure * 100.0
             );
-            0.60
+            deep_bear_exposure
         }
         _ => 1.00, // 满仓
     }
@@ -3178,6 +3205,8 @@ pub async fn detect_regime_exposure(db: &PgPool, date: NaiveDate) -> f64 {
 pub fn detect_regime_exposure_cached(
     csi300_map: &std::collections::HashMap<NaiveDate, f64>,
     date: NaiveDate,
+    deep_bear_threshold: f64,
+    deep_bear_exposure: f64,
 ) -> f64 {
     // 取不晚于 date 的最近 252 个交易日收盘价(对齐 SQL 的 trade_date <= $1 ORDER BY DESC LIMIT 252)
     let mut recent: Vec<(NaiveDate, f64)> = csi300_map
@@ -3199,12 +3228,12 @@ pub fn detect_regime_exposure_cached(
         None
     };
     match trail {
-        Some(t) if t < -0.10 => {
+        Some(t) if t < deep_bear_threshold => {
             debug!(
-                "[Regime] DEEP BEAR: 12m return={:.1}%, exposure=60%",
-                t * 100.0
+                "[Regime] DEEP BEAR: 12m return={:.1}%, exposure={:.0}%",
+                t * 100.0, deep_bear_exposure * 100.0
             );
-            0.60
+            deep_bear_exposure
         }
         _ => 1.00, // 满仓
     }
