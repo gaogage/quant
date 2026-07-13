@@ -205,6 +205,11 @@ pub struct StrategyConfig {
     pub deep_bear_threshold: f64,
     #[serde(default = "default_deep_bear_exposure")]
     pub deep_bear_exposure: f64,
+    // v16 ML blend 策略参数(P1-4 配置化,原硬编码 0.25/200)。
+    #[serde(default = "default_kelly_fraction")]
+    pub kelly_fraction: f64,
+    #[serde(default = "default_score_candidate_pool_size")]
+    pub score_candidate_pool_size: i64,
     // A股大类选股方式（下沉到策略，不再挂账号）
     #[serde(default = "default_signal_source")]
     pub signal_source: String,
@@ -249,6 +254,12 @@ fn default_deep_bear_threshold() -> f64 {
 }
 fn default_deep_bear_exposure() -> f64 {
     0.60
+}
+fn default_kelly_fraction() -> f64 {
+    0.25
+}
+fn default_score_candidate_pool_size() -> i64 {
+    200
 }
 fn default_dynamic_target_cap() -> f64 {
     0.30
@@ -439,6 +450,8 @@ mod tests {
             leverage_regime_threshold: 0.9,
             slippage_pct: 0.002,
             mvo_objective: "minvariance".into(),
+            kelly_fraction: 0.25,
+            score_candidate_pool_size: 200,
         }
     }
 
@@ -559,6 +572,11 @@ mod tests {
                 dynamic_target_floor: 0.12,
                 risk_free_rate: 0.03,
                 grid_step: 0.0,
+                leverage_regime_threshold: 0.9,
+                slippage_pct: 0.002,
+                mvo_objective: "minvariance".into(),
+                kelly_fraction: 0.25,
+                score_candidate_pool_size: 200,
             }),
             assets: vec![
                 AssetStrategy {
@@ -774,6 +792,11 @@ mod tests {
                 dynamic_target_floor: 0.12,
                 risk_free_rate: 0.03,
                 grid_step: 0.0,
+                leverage_regime_threshold: 0.9,
+                slippage_pct: 0.002,
+                mvo_objective: "minvariance".into(),
+                kelly_fraction: 0.25,
+                score_candidate_pool_size: 200,
             }),
             assets: vec![
                 AssetStrategy {
@@ -859,6 +882,8 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         regime_bear_min_stock: mvo.regime_bear_min_stock,
         deep_bear_threshold: mvo.deep_bear_threshold,
         deep_bear_exposure: mvo.deep_bear_exposure,
+        kelly_fraction: mvo.kelly_fraction,
+        score_candidate_pool_size: mvo.score_candidate_pool_size,
         signal_source: a_share.security.signal_source.clone(),
         prediction_blend_weight: a_share.security.prediction_blend_weight,
         combo_name: a_share.security.combo_name.clone(),
@@ -868,13 +893,11 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         dynamic_target_floor: mvo.dynamic_target_floor,
         score_direction: a_share.security.score_direction.clone(),
         candidate_tier: a_share.security.candidate_tier.clone(),
-        // rebalance 级参数:ResolvedStrategy 无来源(MvoParams/SecurityConfig 均无),暂用默认值。
-        // load_strategy_config 从 DB 读真实值;此路径(回放/实盘用 ResolvedStrategy)用默认。
-        leverage_regime_threshold: 0.9,
-        slippage_pct: 0.002,
-        // mvo_objective:ResolvedStrategy/MvoParams 无此字段,用默认 minvariance。
-        // load_strategy_config 从 DB strategy_config.mvo_objective 读真实值。
-        mvo_objective: default_mvo_objective(),
+        // rebalance 级参数:从 MvoParams 读(P1-3 统一加载机制,消除硬编码默认)。
+        // load_resolved_strategy 已从 DB strategy_config 读 leverage_regime_threshold/slippage_pct/mvo_objective。
+        leverage_regime_threshold: mvo.leverage_regime_threshold,
+        slippage_pct: mvo.slippage_pct,
+        mvo_objective: mvo.mvo_objective.clone(),
     })
 }
 
@@ -931,6 +954,8 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'regime_bear_min_stock', regime_bear_min_stock,
             'deep_bear_threshold', deep_bear_threshold,
             'deep_bear_exposure', deep_bear_exposure,
+            'kelly_fraction', kelly_fraction,
+            'score_candidate_pool_size', score_candidate_pool_size,
             'signal_source', signal_source,
             'prediction_blend_weight', prediction_blend_weight,
             'combo_name', combo_name,
@@ -3000,12 +3025,13 @@ async fn generate_paper_signals_for_all(
                 blend_body["prediction_blend_weight"] =
                     serde_json::json!(sc.prediction_blend_weight);
             }
-            // v16 专用参数
+            // v16 专用参数(P1-4 配置化:从 sc 读,原硬编码 0.25/200)
             if !wfa_used {
                 blend_body["top_n"] = serde_json::json!(sc.top_n);
                 blend_body["rebalance"] = serde_json::json!("biweekly");
-                blend_body["kelly_fraction"] = serde_json::json!(0.25);
-                blend_body["score_candidate_pool_size"] = serde_json::json!(200);
+                blend_body["kelly_fraction"] = serde_json::json!(sc.kelly_fraction);
+                blend_body["score_candidate_pool_size"] =
+                    serde_json::json!(sc.score_candidate_pool_size);
             }
             info!("[paper] v16 prediction_blend: set={:?}", prediction_set_id);
             client

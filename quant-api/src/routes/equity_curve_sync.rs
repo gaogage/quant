@@ -165,8 +165,10 @@ pub async fn sync_strategy_equity_curve(
         if let Some(pid) = pid {
             payload["prediction_set_id"] = serde_json::json!(pid);
             payload["prediction_blend_weight"] = serde_json::json!(sc.prediction_blend_weight);
-            payload["kelly_fraction"] = serde_json::json!(0.25);
-            payload["score_candidate_pool_size"] = serde_json::json!(200);
+            // P1-4 配置化:从 sc 读,原硬编码 0.25/200
+            payload["kelly_fraction"] = serde_json::json!(sc.kelly_fraction);
+            payload["score_candidate_pool_size"] =
+                serde_json::json!(sc.score_candidate_pool_size);
             info!(
                 "[equity-sync] {} prediction_blend: set={} w={}",
                 strategy_id, pid, sc.prediction_blend_weight

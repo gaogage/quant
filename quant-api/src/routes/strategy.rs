@@ -47,6 +47,13 @@ pub struct MvoParams {
     pub dynamic_target_floor: f64,
     pub risk_free_rate: f64,
     pub grid_step: f64,
+    // rebalance 级参数(P1-3 统一加载机制:从 DB 读,消除 resolved_to_legacy_sc 硬编码默认)。
+    pub leverage_regime_threshold: f64,
+    pub slippage_pct: f64,
+    pub mvo_objective: String,
+    // v16 ML blend 策略参数(P1-4 配置化,原硬编码 0.25/200)。
+    pub kelly_fraction: f64,
+    pub score_candidate_pool_size: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +129,11 @@ struct CompositeRow {
     dynamic_target_floor: Option<f64>,
     risk_free_rate: Option<f64>,
     grid_step: Option<f64>,
+    leverage_regime_threshold: Option<f64>,
+    slippage_pct: Option<f64>,
+    mvo_objective: Option<String>,
+    kelly_fraction: Option<f64>,
+    score_candidate_pool_size: Option<i32>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -174,7 +186,9 @@ pub async fn load_resolved_strategy(
                 regime_bull_threshold, regime_bear_threshold,
                 regime_bull_min_stock, regime_bear_min_stock,
                 deep_bear_threshold, deep_bear_exposure,
-                dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step
+                dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step,
+                leverage_regime_threshold, slippage_pct, mvo_objective,
+                kelly_fraction, score_candidate_pool_size
          FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)
@@ -230,6 +244,11 @@ pub async fn load_resolved_strategy(
                 dynamic_target_floor: main.dynamic_target_floor.unwrap_or(0.12),
                 risk_free_rate: main.risk_free_rate.unwrap_or(0.03),
                 grid_step: main.grid_step.unwrap_or(0.0),
+                leverage_regime_threshold: main.leverage_regime_threshold.unwrap_or(0.9),
+                slippage_pct: main.slippage_pct.unwrap_or(0.002),
+                mvo_objective: main.mvo_objective.unwrap_or_else(|| "minvariance".into()),
+                kelly_fraction: main.kelly_fraction.unwrap_or(0.25),
+                score_candidate_pool_size: main.score_candidate_pool_size.unwrap_or(200) as i64,
             };
             Ok(ResolvedStrategy {
                 strategy_id: main.strategy_id,
@@ -347,6 +366,11 @@ mod tests {
                 dynamic_target_floor: 0.12,
                 risk_free_rate: 0.03,
                 grid_step: 0.0,
+                leverage_regime_threshold: 0.9,
+                slippage_pct: 0.002,
+                mvo_objective: "minvariance".into(),
+                kelly_fraction: 0.25,
+                score_candidate_pool_size: 200,
             }),
             assets: vec![],
             etf_symbols: vec![
