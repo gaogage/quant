@@ -933,7 +933,45 @@ pub async fn load_active_etf_symbols_union(db: &PgPool) -> Vec<String> {
     set.into_iter().collect()
 }
 
-/// 从数据库加载活跃策略配置，失败时 panic（策略配置必须从 DB 加载，不允许硬编码 fallback）
+/// 从 combo_name 推断 PIT horizon：`full_pit_icir_37f_h20` → 20，无 `_hN` 后缀 → 1。
+/// 用于 pit_combo_refresh 遍历所有 active combo 时为每个 combo 取正确 horizon。
+fn combo_horizon_from_name(combo: &str) -> i16 {
+    if let Some(idx) = combo.rfind("_h") {
+        if let Ok(h) = combo[idx + 2..].parse::<i16>() {
+            if h > 0 {
+                return h;
+            }
+        }
+    }
+    1
+}
+
+/// 收集所有 active 策略（composite + asset 子策略）声明的 factor combo_name 去重列表。
+/// 用于调仓前对所有活跃账号用到的因子物化做新鲜度校验+自动补全。
+/// 模拟实盘盘中调仓依赖：每个激活账号的激活策略用到的 combo 都必须有当日因子数据。
+pub async fn load_active_factor_combos(db: &PgPool) -> Vec<String> {
+    let rows: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT combo_name
+         FROM strategy_config
+         WHERE status='active' AND combo_name IS NOT NULL AND btrim(combo_name) <> ''
+         ORDER BY strategy_id",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (combo,) in rows {
+        if let Some(c) = combo {
+            let c = c.trim().to_string();
+            if !c.is_empty() {
+                set.insert(c);
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+
 pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig {
     let row: Option<(serde_json::Value,)> = sqlx::query_as::<_, (serde_json::Value,)>(
         "SELECT jsonb_build_object(
@@ -1052,34 +1090,43 @@ async fn run_scheduled_tasks(db: &PgPool) {
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
                 // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。
-                let combo = params
-                    .get("combo_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("full_pit_icir_37f");
+                // 遍历所有 active 策略声明的 PIT combo（含 h1/h20），每个用 combo_name 推断的 horizon。
+                // 模拟实盘盘中调仓依赖：所有激活账号策略用到的 combo 都需每日刷新到最新交易日。
+                // phase7_price_volume_expanded_v1 等 non-ICIR combo 不走此路径（由 phase7 backfill 路由处理）。
                 let ver = params
                     .get("version")
                     .and_then(|v| v.as_str())
                     .unwrap_or("1.0.0");
-                let horizon = params.get("horizon").and_then(|v| v.as_i64()).unwrap_or(20) as i16;
                 // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
                 let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
                 let refresh_end = chrono::Utc::now().date_naive();
-                info!(
-                    "[scheduler] PIT combo 保鲜: combo={} 区间 {}~{}",
-                    combo, refresh_start, refresh_end
-                );
-                match crate::routes::factors::materialize_pit_combo(
-                    db,
-                    combo,
-                    ver,
-                    horizon,
-                    refresh_start,
-                    refresh_end,
-                )
-                .await
-                {
-                    Ok(rows) => info!("[scheduler] PIT combo 保鲜完成: {} 行", rows),
-                    Err(e) => warn!("[scheduler] PIT combo 保鲜失败: {}", e),
+                let combos = load_active_factor_combos(db).await;
+                let pit_combos: Vec<String> = combos
+                    .into_iter()
+                    .filter(|c| c.starts_with("full_pit_icir"))
+                    .collect();
+                if pit_combos.is_empty() {
+                    warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
+                }
+                for combo in &pit_combos {
+                    let horizon = combo_horizon_from_name(combo);
+                    info!(
+                        "[scheduler] PIT combo 保鲜: combo={} horizon={} 区间 {}~{}",
+                        combo, horizon, refresh_start, refresh_end
+                    );
+                    match crate::routes::factors::materialize_pit_combo(
+                        db,
+                        combo,
+                        ver,
+                        horizon,
+                        refresh_start,
+                        refresh_end,
+                    )
+                    .await
+                    {
+                        Ok(rows) => info!("[scheduler] PIT combo {} 保鲜完成: {} 行", combo, rows),
+                        Err(e) => warn!("[scheduler] PIT combo {} 保鲜失败: {}", combo, e),
+                    }
                 }
             }
             "market_level_source_freshness" => {
@@ -1822,79 +1869,88 @@ async fn validate_pre_trade_data(
     }
 
     // 3. 策略声明的 PIT combo — 缺了自动触发对应物化，不能用旧 PV combo 代替 full PIT。
-    let factor_combo = pre_trade_factor_combo(sc);
-    if let Some(gap_td) = check_factor_freshness(db, factor_combo, today, 2).await {
-        info!(
-            "[pre-trade] 因子({})落后{}交易日, 自动触发回填...",
-            factor_combo, gap_td
-        );
-        let materialize_start = today - chrono::Duration::days(30);
-        let trigger_ok = if factor_combo == "phase7_price_volume_expanded_v1" {
-            let client = reqwest::Client::new();
-            let backfill_start = materialize_start.format("%Y%m%d").to_string();
-            let today_str_clone = today_str.clone();
-            let api_base = format!(
-                "http://localhost:{}",
-                std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+    //    遍历所有 active 策略用到的 combo（含 composite + asset 子策略），逐个校验新鲜度+物化。
+    //    模拟实盘盘中调仓依赖：每个激活账号的激活策略用到的 combo 都必须有当日因子数据。
+    let mut active_combos = load_active_factor_combos(db).await;
+    if active_combos.is_empty() {
+        // 无 active 复合策略时兜底用传入 sc 的 combo（保持原行为，不应命中——start_scheduler 已跳过无策略）。
+        let fallback = pre_trade_factor_combo(sc).to_string();
+        active_combos.push(fallback);
+    }
+    for factor_combo in active_combos {
+        if let Some(gap_td) = check_factor_freshness(db, &factor_combo, today, 2).await {
+            info!(
+                "[pre-trade] 因子({})落后{}交易日, 自动触发回填...",
+                factor_combo, gap_td
             );
-            client
-                .post(format!(
-                    "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
-                    api_base
-                ))
-                .json(
-                    &serde_json::json!({"start_date": backfill_start, "end_date": today_str_clone}),
-                )
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false)
-        } else {
-            match crate::routes::factors::materialize_pit_combo(
-                db,
-                factor_combo,
-                "1.0.0",
-                20,
-                materialize_start,
-                today,
-            )
-            .await
-            {
-                Ok(rows) => {
-                    info!(
-                        "[pre-trade] PIT combo {} 物化完成: {} 行",
-                        factor_combo, rows
-                    );
-                    true
-                }
-                Err(e) => {
-                    warn!("[pre-trade] PIT combo {} 物化失败: {}", factor_combo, e);
-                    false
-                }
-            }
-        };
-        if trigger_ok {
-            // 轮询等待因子计算完成
-            for retry in 0..20 {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if check_factor_freshness(db, factor_combo, today, 2)
+            let materialize_start = today - chrono::Duration::days(30);
+            let trigger_ok = if factor_combo == "phase7_price_volume_expanded_v1" {
+                let client = reqwest::Client::new();
+                let backfill_start = materialize_start.format("%Y%m%d").to_string();
+                let today_str_clone = today_str.clone();
+                let api_base = format!(
+                    "http://localhost:{}",
+                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+                );
+                client
+                    .post(format!(
+                        "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
+                        api_base
+                    ))
+                    .json(
+                        &serde_json::json!({"start_date": backfill_start, "end_date": today_str_clone}),
+                    )
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
                     .await
-                    .is_none()
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false)
+            } else {
+                match crate::routes::factors::materialize_pit_combo(
+                    db,
+                    &factor_combo,
+                    "1.0.0",
+                    20,
+                    materialize_start,
+                    today,
+                )
+                .await
                 {
-                    info!("[pre-trade] 因子回填完成 (等待{}s)", (retry + 1) * 3);
-                    break;
+                    Ok(rows) => {
+                        info!(
+                            "[pre-trade] PIT combo {} 物化完成: {} 行",
+                            factor_combo, rows
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        warn!("[pre-trade] PIT combo {} 物化失败: {}", factor_combo, e);
+                        false
+                    }
                 }
+            };
+            if trigger_ok {
+                // 轮询等待因子计算完成
+                for retry in 0..20 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    if check_factor_freshness(db, &factor_combo, today, 2)
+                        .await
+                        .is_none()
+                    {
+                        info!("[pre-trade] 因子({})回填完成 (等待{}s)", factor_combo, (retry + 1) * 3);
+                        break;
+                    }
+                }
+                // 再次检查
+                if let Some(g) = check_factor_freshness(db, &factor_combo, today, 2).await {
+                    errors.push(format!(
+                        "因子({}): 自动回填后仍落后{}交易日, 请检查底层数据",
+                        factor_combo, g
+                    ));
+                }
+            } else {
+                errors.push(format!("因子({}): 自动回填触发失败", factor_combo));
             }
-            // 再次检查
-            if let Some(g) = check_factor_freshness(db, factor_combo, today, 2).await {
-                errors.push(format!(
-                    "因子({}): 自动回填后仍落后{}交易日, 请检查底层数据",
-                    factor_combo, g
-                ));
-            }
-        } else {
-            errors.push(format!("因子({}): 自动回填触发失败", factor_combo));
         }
     }
 
@@ -1916,8 +1972,10 @@ async fn check_data_freshness(
             .ok()
             .flatten();
     if let Some((max_dt,)) = max_row {
+        // market_trade_calendar 存在重复行（历史同步多来源导致），用 DISTINCT trade_date 去重，
+        // 否则 gap 虚高（每行重复 N 倍）误判数据落后。
         let gap: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+            "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
         ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((999,));
         if gap.0 > max_gap {
             Some(gap.0)
@@ -1947,8 +2005,9 @@ async fn check_factor_freshness(
     .ok()
     .flatten();
     if let Some((max_dt,)) = max_row {
+        // market_trade_calendar 存在重复行，用 DISTINCT trade_date 去重，否则 gap 虚高误判因子落后。
         let gap: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+            "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
         ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((999,));
         if gap.0 > max_gap {
             Some(gap.0)
