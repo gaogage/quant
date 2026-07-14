@@ -599,18 +599,20 @@ pub async fn check_maintenance_after_mark(
 /// 每日盯市:用当日收盘价重算持仓 market_price/market_value,使 update_current_nav 反映真实市值。
 /// 回放逐日复利的必要步骤(否则 NAV 停在建仓日不动)。
 pub async fn mark_to_market(db: &PgPool, account_id: &str, date: NaiveDate) -> Result<(), String> {
-    // DISTINCT ON 取每个 symbol 不晚于 date 的最近收盘价(当日缺失时降级最近可用)
+    // LATERAL 子查询:每个持仓 symbol 单独取最新复权价(走 symbol,trade_date 索引),
+    // 避免 DISTINCT ON 全表扫描视图(market_stock_daily_bar_adj JOIN adj_factor 1400万行)。
+    // 原 DISTINCT ON 写法单次 ~1.6s,1578 天累计 ~42 分钟(mvo_simulate 卡顿根因)。
     sqlx::query(
         "UPDATE paper_position pp SET
              market_price = sub.close, market_value = pp.quantity * sub.close
-         FROM (
-             SELECT DISTINCT ON (symbol) symbol, close::numeric AS close
+         FROM paper_position p2
+         LEFT JOIN LATERAL (
+             SELECT close::numeric AS close
              FROM market_stock_daily_bar_adj
-             WHERE trade_date <= $1
-               AND symbol IN (SELECT symbol FROM paper_position WHERE paper_account_id = $2)
-             ORDER BY symbol, trade_date DESC
-         ) sub
-         WHERE pp.symbol = sub.symbol AND pp.paper_account_id = $2",
+             WHERE symbol = p2.symbol AND trade_date <= $1
+             ORDER BY trade_date DESC LIMIT 1
+         ) sub ON true
+         WHERE pp.paper_account_id = $2 AND p2.paper_account_id = $2 AND pp.symbol = p2.symbol",
     )
     .bind(date)
     .bind(account_id)
