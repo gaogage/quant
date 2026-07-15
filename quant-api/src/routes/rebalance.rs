@@ -295,7 +295,7 @@ pub async fn rebalance_account(
                 Decimal::ONE + slip_d
             };
             let fill_price = price * mult;
-            apply_fill_to_position(db, account_id, &p.symbol, side, qty, fill_price, leverage_enabled).await;
+            apply_fill_to_position(db, account_id, &p.symbol, side, qty, fill_price, leverage_enabled, date).await;
             n += 1;
         }
     }
@@ -342,7 +342,7 @@ pub async fn rebalance_account(
                 let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
                 let fill_price = Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO)
                     * (Decimal::ONE - slip_d);
-                apply_fill_to_position(db, account_id, sym, "sell", *qty, fill_price, leverage_enabled).await;
+                apply_fill_to_position(db, account_id, sym, "sell", *qty, fill_price, leverage_enabled, date).await;
                 n += 1;
             }
         }
@@ -441,7 +441,7 @@ pub async fn rebalance_account(
                 Decimal::ONE + slip_d
             };
             let fill_price = price * mult;
-            apply_fill_to_position(db, account_id, etf_symbol.as_str(), side, qty, fill_price, leverage_enabled).await;
+            apply_fill_to_position(db, account_id, etf_symbol.as_str(), side, qty, fill_price, leverage_enabled, date).await;
             n += 1;
         }
     }
@@ -569,7 +569,7 @@ async fn force_liquidation(
             strategy_version_id: None,
         };
         if execute_simulated_trade(db, &trade).await.is_ok() {
-            apply_fill_to_position(db, account_id, &sym, "sell", sell_qty, sell_price, true).await;
+            apply_fill_to_position(db, account_id, &sym, "sell", sell_qty, sell_price, true, date).await;
             // 卖出后 cash += sell_qty*sell_price,主动还款降低 margin
             let repay_amount = sell_qty * sell_price;
             let _ = sqlx::query(
@@ -677,6 +677,7 @@ async fn apply_fill_to_position(
     qty: Decimal,
     fill_price: Decimal,
     leverage_enabled: bool,
+    date: NaiveDate,
 ) {
     let fill_amount = qty * fill_price;
     if side == "buy" {
@@ -719,22 +720,24 @@ async fn apply_fill_to_position(
         } else {
             (qty, fill_amount)
         };
-        // 持仓:移动加权 avg_cost
+        // 持仓:移动加权 avg_cost + 标记 last_trade_date(T+1:当日买入次日才能卖)
         let _ = sqlx::query(
-            "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value)
-             VALUES ($1, $2, $3, $4, $5, $5, $4*$5)
+            "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value, last_trade_date)
+             VALUES ($1, $2, $3, $4, $5, $5, $4*$5, $6)
              ON CONFLICT (paper_account_id, symbol) DO UPDATE SET
                  avg_cost = (paper_position.avg_cost * paper_position.quantity + EXCLUDED.avg_cost * EXCLUDED.quantity)
                             / (paper_position.quantity + EXCLUDED.quantity),
                  quantity = paper_position.quantity + EXCLUDED.quantity,
                  market_price = EXCLUDED.market_price,
-                 market_value = (paper_position.quantity + EXCLUDED.quantity) * EXCLUDED.market_price",
+                 market_value = (paper_position.quantity + EXCLUDED.quantity) * EXCLUDED.market_price,
+                 last_trade_date = $6",
         )
         .bind(format!("pp-{}", short_id()))
         .bind(account_id)
         .bind(sym)
         .bind(qty)
         .bind(fill_price)
+        .bind(date)
         .execute(db)
         .await;
         // 资金:扣 cash,不足自动融资(margin += 缺口)。单 SQL 保证原子。
@@ -751,14 +754,36 @@ async fn apply_fill_to_position(
         .await;
     } else {
         // sell
+        // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
+        // last_trade_date IS NULL(历史数据未标记)兜底允许卖出,避免误拦正常持仓。
+        let t1_blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM paper_position
+              WHERE paper_account_id=$1 AND symbol=$2 AND quantity>0
+                AND last_trade_date IS NOT NULL AND last_trade_date = $3)",
+        )
+        .bind(account_id)
+        .bind(sym)
+        .bind(date)
+        .fetch_one(db)
+        .await
+        .unwrap_or(false);
+        if t1_blocked {
+            warn!(
+                "[rebalance] T+1 跳过卖出: {} {} 当日买入(last_trade_date={})不可卖",
+                account_id, sym, date
+            );
+            return;
+        }
         let _ = sqlx::query(
             "UPDATE paper_position SET quantity = quantity - $3,
-                 market_value = (quantity - $3) * market_price
+                 market_value = (quantity - $3) * market_price,
+                 last_trade_date = $4
              WHERE paper_account_id = $1 AND symbol = $2 AND quantity >= $3",
         )
         .bind(account_id)
         .bind(sym)
         .bind(qty)
+        .bind(date)
         .execute(db)
         .await;
         // qty 归零的行删除(保持持仓表干净)
