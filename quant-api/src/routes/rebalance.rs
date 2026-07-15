@@ -279,7 +279,7 @@ pub async fn rebalance_account(
                 Decimal::ONE + slip_d
             };
             let fill_price = price * mult;
-            apply_fill_to_position(db, account_id, &p.symbol, side, qty, fill_price).await;
+            apply_fill_to_position(db, account_id, &p.symbol, side, qty, fill_price, leverage_enabled).await;
             n += 1;
         }
     }
@@ -315,7 +315,7 @@ pub async fn rebalance_account(
                 let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
                 let fill_price = Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO)
                     * (Decimal::ONE - slip_d);
-                apply_fill_to_position(db, account_id, sym, "sell", *qty, fill_price).await;
+                apply_fill_to_position(db, account_id, sym, "sell", *qty, fill_price, leverage_enabled).await;
                 n += 1;
             }
         }
@@ -409,7 +409,7 @@ pub async fn rebalance_account(
                 Decimal::ONE + slip_d
             };
             let fill_price = price * mult;
-            apply_fill_to_position(db, account_id, etf_symbol.as_str(), side, qty, fill_price).await;
+            apply_fill_to_position(db, account_id, etf_symbol.as_str(), side, qty, fill_price, leverage_enabled).await;
             n += 1;
         }
     }
@@ -530,7 +530,7 @@ async fn force_liquidation(
             strategy_version_id: None,
         };
         if execute_simulated_trade(db, &trade).await.is_ok() {
-            apply_fill_to_position(db, account_id, &sym, "sell", sell_qty, sell_price).await;
+            apply_fill_to_position(db, account_id, &sym, "sell", sell_qty, sell_price, true).await;
             // 卖出后 cash += sell_qty*sell_price,主动还款降低 margin
             let repay_amount = sell_qty * sell_price;
             let _ = sqlx::query(
@@ -625,6 +625,11 @@ pub async fn mark_to_market(db: &PgPool, account_id: &str, date: NaiveDate) -> R
 /// 成交后更新持仓:买(qty+=,avg_cost 移动加权);卖(qty-=,qty→0 删行)。
 /// 同步流转 cash/margin:买扣 cash(不足自动融资 margin+=缺口);卖 cash+=fill_amount(末尾 try_auto_repay 归还多余融资)。
 /// 这是 NAV 复利成立的前提——否则 current_nav = 持仓市值+cash-margin 会因 cash 不动而虚高。
+///
+/// leverage_enabled=false(无杠杆账户):买入金额严格不超过可用 cash。
+/// 满仓(MVO 权重 sum=1.0)+ 滑点会让实际买入微超 cash,无杠杆账户不应融资,
+/// 故 cash 不足时按剩余 cash 缩减买入量(min(目标qty, 剩余cash/fill_price)),不产生 margin。
+/// 杠杆账户保持原逻辑(cash 不足自动融资)。
 async fn apply_fill_to_position(
     db: &PgPool,
     account_id: &str,
@@ -632,9 +637,47 @@ async fn apply_fill_to_position(
     side: &str,
     qty: Decimal,
     fill_price: Decimal,
+    leverage_enabled: bool,
 ) {
     let fill_amount = qty * fill_price;
     if side == "buy" {
+        // 无杠杆账户:cash 不足时缩减买入量,严格不融资
+        let (qty, fill_amount) = if !leverage_enabled {
+            let cash: f64 = sqlx::query_scalar(
+                "SELECT COALESCE(cash,0)::double precision FROM paper_account WHERE paper_account_id=$1",
+            )
+            .bind(account_id)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0.0);
+            if cash <= 0.0 {
+                warn!("[rebalance] {} 无杠杆账户 cash=0,跳过买入 {}", account_id, sym);
+                return;
+            }
+            let max_qty_by_cash = Decimal::from_f64_retain(cash)
+                .map(|c| c / fill_price)
+                .unwrap_or(Decimal::ZERO);
+            if max_qty_by_cash <= Decimal::ZERO {
+                return;
+            }
+            if qty <= max_qty_by_cash {
+                (qty, fill_amount)
+            } else {
+                // 缩减到 cash 可承担量(保留 4 位小数,避免粉尘)
+                let scaled = (max_qty_by_cash * Decimal::from(10000)).floor()
+                    / Decimal::from(10000);
+                if scaled <= Decimal::ZERO {
+                    return;
+                }
+                warn!(
+                    "[rebalance] {} 无杠杆账户 {} 买入缩减: 目标{} → {}(cash={:.2} 不足满仓+滑点)",
+                    account_id, sym, qty, scaled, cash
+                );
+                (scaled, scaled * fill_price)
+            }
+        } else {
+            (qty, fill_amount)
+        };
         // 持仓:移动加权 avg_cost
         let _ = sqlx::query(
             "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value)
@@ -654,6 +697,7 @@ async fn apply_fill_to_position(
         .execute(db)
         .await;
         // 资金:扣 cash,不足自动融资(margin += 缺口)。单 SQL 保证原子。
+        // 无杠杆账户已在上方缩减 qty,fill_amount ≤ cash,不会产生 margin。
         let _ = sqlx::query(
             "UPDATE paper_account SET
                  cash = CASE WHEN COALESCE(cash,0) >= $2 THEN cash - $2 ELSE 0 END,
