@@ -4045,7 +4045,8 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
                 } else {
                     0.0
                 };
-                json!({"class": cls, "market_value": val, "weight_pct": (pct*100.0).round()/100.0})
+                // 字段名对齐 dingtalk::build_position_summary_notification 渲染方(name/pct)
+                json!({"name": cls, "pct": (pct*100.0).round()/100.0})
             })
             .collect();
         // 现金单独列出
@@ -4055,7 +4056,7 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
             } else {
                 0.0
             };
-            class_breakdown.push(json!({"class": "现金", "market_value": cash_val, "weight_pct": (cash_pct*100.0).round()/100.0}));
+            class_breakdown.push(json!({"name": "现金", "pct": (cash_pct*100.0).round()/100.0}));
         }
         let init_row = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
             "SELECT initial_capital::double precision, max_drawdown_pct::double precision FROM paper_account WHERE paper_account_id=$1"
