@@ -86,6 +86,7 @@ pub fn AccountsContent() -> Element {
     let mut loading = use_signal(|| true);
     let mut error = use_signal(String::new);
     let mut message = use_signal(String::new);
+    let mut rebalancing = use_signal(|| false);
     let mut expanded = use_signal(String::new);
     let mut detail = use_signal(|| Option::<Value>::None);
     let mut detail_loading = use_signal(|| false);
@@ -494,6 +495,30 @@ pub fn AccountsContent() -> Element {
         div { class: "p-6 max-w-7xl mx-auto",
             div { class: "flex items-center justify-between mb-4",
                 h1 { class: "text-2xl font-bold text-gray-900 dark:text-white", "投资账号" }
+                button { class: "px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-300 dark:disabled:bg-gray-700 rounded-lg text-sm text-white transition",
+                    disabled: *rebalancing.read(),
+                    onclick: move |_| {
+                        rebalancing.set(true);
+                        error.set(String::new());
+                        message.set(String::new());
+                        spawn(async move {
+                            match api::admin_manual_rebalance(None).await {
+                                Ok(v) => {
+                                    let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("调仓完成").to_string();
+                                    let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+                                    if code == 0 {
+                                        message.set(format!("{} (刷新页面查看最新持仓)", msg));
+                                    } else {
+                                        error.set(msg);
+                                    }
+                                }
+                                Err(e) => error.set(e),
+                            }
+                            rebalancing.set(false);
+                        });
+                    },
+                    if *rebalancing.read() { "调仓中…" } else { "手动调仓" }
+                }
             }
             if !message.read().is_empty() { div { class: "mb-4 p-3 bg-green-50 dark:bg-green-900/50 border border-green-300 dark:border-green-700 rounded-lg text-green-700 dark:text-green-300 text-sm flex justify-between", span { "{message}" } button { class: "text-green-600 dark:text-green-400", onclick: move |_| message.set(String::new()), "✕" } } }
             if !error.read().is_empty() { div { class: "mb-4 p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm flex justify-between", span { "{error}" } button { class: "text-red-600 dark:text-red-400", onclick: move |_| error.set(String::new()), "✕" } } }

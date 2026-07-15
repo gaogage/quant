@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use crate::auth::middleware::{require_admin, UserContext};
 use crate::AppState;
-
 // ── User Management ─────────────────────────────────────────
 
 /// GET /api/v1/admin/users — list all users
@@ -1217,5 +1216,124 @@ pub async fn rebuild_full_universe(
         }
         Err(e) => Json(serde_json::json!({"code": 1, "message": format!("重建失败: {}", e)}))
             .into_response(),
+    }
+}
+
+// ── Manual Rebalance ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ManualRebalanceRequest {
+    /// 调仓日期(YYYYMMDD),不传则用今日
+    pub date: Option<String>,
+}
+
+/// POST /api/v1/admin/rebalance — 手动触发调仓(遍历所有 active 模拟盘)
+///
+/// 复用 14:40 调仓链路:validate_pre_trade_data 前置校验 + generate_paper_signals_for_all。
+/// 内部 per-account 今日已交易检查保证幂等(今日已调仓账号跳过,不会重复下单)。
+/// 调仓成功后推送持仓摘要钉钉通知。
+pub async fn manual_rebalance(
+    State(state): State<Arc<AppState>>,
+    admin: UserContext,
+    Json(req): Json<ManualRebalanceRequest>,
+) -> axum::response::Response {
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
+
+    let today = req
+        .date
+        .as_deref()
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok())
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".into())
+        .parse()
+        .unwrap_or(8080);
+
+    // 取第一个 active 复合策略为代表(_sc 参数未用,每账号用自己的 strategy_version_id)
+    let sc = match crate::routes::scheduler::load_first_active_strategy_config(&state.db).await {
+        Some(s) => s,
+        None => {
+            return Json(serde_json::json!({
+                "code": 1,
+                "message": "无 active 复合策略,无法调仓"
+            }))
+            .into_response();
+        }
+    };
+
+    // 前置数据校验+自动修复(复用 14:40 链路),数据未就绪则拒绝调仓
+    let errors =
+        crate::routes::scheduler::validate_pre_trade_data(&state.db, &state.tushare, today, &sc)
+            .await;
+    if !errors.is_empty() {
+        return Json(serde_json::json!({
+            "code": 1,
+            "message": format!("数据未就绪,调仓拒绝:\n{}", errors.join("\n"))
+        }))
+        .into_response();
+    }
+
+    // 构造空 mvo_cache(首次计算时填充,先例 compute_mvo_weights_for_date)
+    let mvo_cache = Arc::new(tokio::sync::Mutex::new(
+        None::<crate::routes::scheduler::MvoWeightCache>,
+    ));
+
+    // 记录调仓前订单数(用于检测账号是否被数据门禁跳过)
+    let orders_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1",
+    )
+    .bind(today)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    match crate::routes::scheduler::generate_paper_signals_for_all(
+        &state.db,
+        &mvo_cache,
+        port,
+        today,
+        &sc,
+        &state.tushare,
+    )
+    .await
+    {
+        Ok(_) => {
+            // 检测是否有新订单(账号可能因数据门禁被跳过,此时无新订单)
+            let orders_after: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1",
+            )
+            .bind(today)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+            let new_orders = orders_after - orders_before;
+
+            // 调仓成功后推送持仓摘要钉钉通知(复用公开版本)
+            let _ =
+                crate::routes::scheduler::push_dingtalk_for_all_accounts_public(&state.db, today)
+                    .await;
+
+            if new_orders > 0 {
+                Json(serde_json::json!({
+                    "code": 0,
+                    "message": format!("调仓完成 {} (新增 {} 笔订单)", today.format("%Y-%m-%d"), new_orders)
+                }))
+                .into_response()
+            } else {
+                // 无新订单:账号被数据门禁跳过(权益曲线/因子等滞后),钉钉已发跳过原因
+                Json(serde_json::json!({
+                    "code": 0,
+                    "message": format!("调仓链路已执行 {} 但无账号下单(数据门禁跳过,查钉钉/日志)", today.format("%Y-%m-%d"))
+                }))
+                .into_response()
+            }
+        }
+        Err(e) => Json(serde_json::json!({
+            "code": 1,
+            "message": format!("调仓失败: {}", e)
+        }))
+        .into_response(),
     }
 }

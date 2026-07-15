@@ -1073,19 +1073,76 @@ async fn run_scheduled_tasks(db: &PgPool) {
             }
             "equity_curve_update" => {
                 // 自动同步所有活跃账号关联策略的权益曲线(combo 去重)。
-                // 消除硬编码 v19:v21/v21_lev 等策略也会被同步。
-                let results = crate::routes::equity_curve_sync::sync_active_strategies_equity_curves(db).await;
-                for r in &results {
-                    if r.status == "success" {
-                        info!("[scheduler] 权益曲线同步成功: {} task_id={:?} 更新策略 {:?}",
-                              r.strategy_id, r.task_id, r.updated_strategy_ids);
-                    } else {
-                        warn!("[scheduler] 权益曲线同步失败: {} err={:?}", r.strategy_id, r.error);
+                // 消除硬编码 v19:v21/v21_lev/v23 等策略都会被同步。
+                // 异步 spawn 不阻塞 scheduler tick(sleeve 回测全量重跑 ~75s/个,串行会卡 run_tick)。
+                // 每日工作日 17:00 触发(原月度,v23 月中创建后 sleeve 滞后到下月才同步→门禁拦截)。
+                let db_clone = db.clone();
+                tokio::spawn(async move {
+                    let results =
+                        crate::routes::equity_curve_sync::sync_active_strategies_equity_curves(
+                            &db_clone,
+                        )
+                        .await;
+                    for r in &results {
+                        if r.status == "success" {
+                            info!(
+                                "[scheduler] 权益曲线同步成功: {} task_id={:?} 更新策略 {:?}",
+                                r.strategy_id, r.task_id, r.updated_strategy_ids
+                            );
+                        } else {
+                            warn!(
+                                "[scheduler] 权益曲线同步失败: {} err={:?}",
+                                r.strategy_id, r.error
+                            );
+                        }
                     }
-                }
+                });
             }
             "factor_backfill" => {
-                // 因子回填已在 T+1 补同步中处理
+                // 因子回填:T+1 9:00 run_tick 内联已处理 bar 同步+等待+backfill(主路径)。
+                // 此任务作为"补保险"在 T+1 之后跑,幂等刷新 phase7 量价因子(5 因子),
+                // 保证盘中调仓依赖的 factor_value/multi_factor_value 新鲜。
+                // 可被 check_task_dependency_order 检查、可手动触发、可配 CRON。
+                let today = chrono::Local::now().date_naive();
+                let last_trade_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+                    "SELECT trade_date FROM market_trade_calendar
+                     WHERE is_open = true AND trade_date <= $1
+                     ORDER BY trade_date DESC LIMIT 1",
+                )
+                .bind(today)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+                let Some((sync_date,)) = last_trade_date else {
+                    warn!("[scheduler] factor_backfill: 无交易日历数据,跳过");
+                    continue;
+                };
+                let sync_date_str = sync_date.format("%Y%m%d").to_string();
+                let backfill_start = (sync_date - chrono::Duration::days(7))
+                    .format("%Y%m%d")
+                    .to_string();
+                let api_base = format!(
+                    "http://localhost:{}",
+                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+                );
+                info!(
+                    "[scheduler] factor_backfill: 触发 phase7 量价因子回填 {}~{}",
+                    backfill_start, sync_date_str
+                );
+                let client = reqwest::Client::new();
+                let _ = client
+                    .post(format!(
+                        "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
+                        api_base
+                    ))
+                    .json(&serde_json::json!({
+                        "start_date": backfill_start,
+                        "end_date": sync_date_str
+                    }))
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await;
             }
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
@@ -1494,7 +1551,7 @@ async fn run_tick(
                         db,
                         &combo,
                         "1.0.0",
-                        20,
+                        combo_horizon_from_name(&combo),
                         sync_date - chrono::Duration::days(7),
                         sync_date,
                     )
@@ -1780,7 +1837,9 @@ async fn try_extract_wfa_params(db: &PgPool) -> Result<(), String> {
 }
 
 /// 调仓前数据校验+自动修复。返回非空列表 = 校验/修复失败，拒绝调仓。
-async fn validate_pre_trade_data(
+/// 调仓前数据校验+自动修复。返回非空列表 = 校验/修复失败，拒绝调仓。
+/// pub: 手动触发调仓(admin::manual_rebalance)复用此前置校验。
+pub async fn validate_pre_trade_data(
     db: &PgPool,
     tushare: &TushareClient,
     today: NaiveDate,
@@ -1910,7 +1969,7 @@ async fn validate_pre_trade_data(
                     db,
                     &factor_combo,
                     "1.0.0",
-                    20,
+                    combo_horizon_from_name(&factor_combo),
                     materialize_start,
                     today,
                 )
@@ -2367,7 +2426,18 @@ async fn run_data_quality_check(db: &PgPool) {
                     "A股日线" | "ETF日线" | "CSI300" | "停牌" | "涨跌停" | "复权因子" => {
                         true
                     } // scheduler 9:00/16:00 内置
-                    "因子(pv)" => true, // factor_backfill_daily 任务 + T+1
+                    "因子(pv)" => {
+                        // 查 scheduled_task_config 确认 factor_backfill_daily 已配置且启用
+                        // (T+1 9:00 run_tick 内联也会回填,但需有可查/可触发的任务保障)
+                        let n: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM scheduled_task_config
+                             WHERE task_name='factor_backfill_daily' AND enabled=true",
+                        )
+                        .fetch_one(db)
+                        .await
+                        .unwrap_or(0);
+                        n > 0
+                    }
                     "ML预测" => true,   // scheduler 16:00 EOD (60天检查)
                     "权益曲线" => true, // equity_curve_monthly 任务
                     _ => false,
@@ -2425,6 +2495,24 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
     .fetch_all(db)
     .await
     .unwrap_or_default();
+
+    // ── 调仓依赖的必要任务存在性检查 ──
+    // 缺失/禁用则盘中调仓数据无保障,需提示用户配置(钉钉 + 前端 /tasks 页面双路展示)。
+    let required_tasks: [(&str, &str); 3] = [
+        ("factor_backfill_daily", "因子回填 phase7 量价因子"),
+        ("pit_combo_refresh_daily", "PIT combo 保鲜(因子组合物化)"),
+        ("data_quality_daily", "数据质量检查"),
+    ];
+    let configured: std::collections::HashSet<&str> =
+        tasks.iter().map(|(n, _)| n.as_str()).collect();
+    for (name, desc) in &required_tasks {
+        if !configured.contains(name) {
+            issues.push(format!(
+                "缺少必要定时任务: {} ({}) — 盘中调仓数据可能无保障, 请在 /tasks 页面配置",
+                name, desc
+            ));
+        }
+    }
 
     // 简单解析 CRON 的时和分字段，兼容 DB 里常见的 5 字段 cron 与 cron crate 需要的 6 字段 cron。
     let mut task_times: Vec<(String, u32, u32)> = Vec::new(); // (name, hour, minute)
@@ -2793,7 +2881,9 @@ pub(crate) async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
 }
 
 /// 为所有活跃模拟账号生成交易信号（使用 LW-MVO 自动发现权重）。
-async fn generate_paper_signals_for_all(
+/// pub: 手动触发调仓(admin::manual_rebalance)复用,不依赖 scheduler DailyState。
+/// 内部 per-account 今日已交易检查保证幂等(今日已调仓账号跳过)。
+pub async fn generate_paper_signals_for_all(
     db: &PgPool,
     mvo_cache: &Arc<Mutex<Option<MvoWeightCache>>>,
     port: u16,

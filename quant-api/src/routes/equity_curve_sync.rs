@@ -61,11 +61,13 @@ pub async fn collect_active_strategies(db: &PgPool) -> Vec<String> {
 }
 
 /// 查与 strategy_id 共用同 combo 的 active 策略列表(含自身)。
-/// 共用键:a_share 子行的 equity_curve_task_id 指向同一 task(即同 combo 产出)。
+/// 共用键:a_share 子行的 combo_name(同 combo 的 sleeve 才共享权益曲线)。
+/// 注意:不能用 equity_curve_task_id 判断共享 — 那是结果而非本质,
+/// 若策略创建时复制了别人的 task_id,会误把不同 combo(h1/h20)判为同组,污染彼此的 sleeve。
 pub async fn detect_combo_sharing(db: &PgPool, strategy_id: &str) -> Vec<String> {
-    // 取该策略 a_share 子行的 equity_curve_task_id
-    let task_id: Option<String> = sqlx::query_scalar(
-        "SELECT equity_curve_task_id FROM strategy_config \
+    // 取该策略 a_share 子行的 combo_name
+    let combo: Option<String> = sqlx::query_scalar(
+        "SELECT combo_name FROM strategy_config \
          WHERE parent_strategy_id = $1 AND asset_class = 'a_share' AND status = 'active' \
          LIMIT 1",
     )
@@ -74,15 +76,15 @@ pub async fn detect_combo_sharing(db: &PgPool, strategy_id: &str) -> Vec<String>
     .await
     .ok()
     .flatten();
-    let Some(tid) = task_id else {
+    let Some(combo) = combo else {
         return vec![strategy_id.to_string()];
     };
-    // 查所有 a_share 子行指向同一 task 的 composite 策略
+    // 查所有 a_share 子行用同一 combo 的 composite 策略
     let sharing: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT parent_strategy_id FROM strategy_config \
-         WHERE asset_class = 'a_share' AND status = 'active' AND equity_curve_task_id = $1",
+         WHERE asset_class = 'a_share' AND status = 'active' AND combo_name = $1",
     )
-    .bind(&tid)
+    .bind(&combo)
     .fetch_all(db)
     .await
     .unwrap_or_default();

@@ -935,6 +935,10 @@ async fn main() {
             "/api/v1/admin/ml/rebuild-full-universe",
             post(routes::admin::rebuild_full_universe),
         )
+        .route(
+            "/api/v1/admin/rebalance",
+            post(routes::admin::manual_rebalance),
+        )
         .route("/api/v1/admin/sync/status", get(routes::admin::sync_status))
         .route(
             "/api/v1/admin/sync/repair",

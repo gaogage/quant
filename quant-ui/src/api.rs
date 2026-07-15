@@ -348,6 +348,16 @@ pub async fn trigger_dingtalk_notify() -> Result<Value, String> {
     post("/api/v1/quant/paper/notify", &serde_json::json!({})).await
 }
 
+/// 手动触发调仓(遍历所有 active 模拟盘,复用 14:40 调仓链路)
+/// date: None=今日, Some("YYYYMMDD")=指定日期
+pub async fn admin_manual_rebalance(date: Option<&str>) -> Result<Value, String> {
+    let payload = match date {
+        Some(d) => serde_json::json!({ "date": d }),
+        None => serde_json::json!({}),
+    };
+    post("/api/v1/admin/rebalance", &payload).await
+}
+
 /// 历史模拟回放 — 清空旧数据后重新回放，一个账号仅保留最新结果
 pub async fn run_historical_replay(
     paper_account_id: &str,
