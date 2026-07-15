@@ -2290,7 +2290,7 @@ async fn sync_eod_data(
     .await;
 
     // 复权因子
-    let _ = quant_data::sync::sync_adj_factor(
+    let adj_n = quant_data::sync::sync_adj_factor(
         db,
         tushare,
         &all_stocks,
@@ -2298,7 +2298,23 @@ async fn sync_eod_data(
         &date_str,
         &format!("dv-adj-eod-{}", date_str),
     )
-    .await;
+    .await
+    .unwrap_or(0);
+    if adj_n > 0 {
+        info!("[scheduler] EOD 复权因子同步: {} 条", adj_n);
+    }
+
+    // 复权因子完整性兜底:adj_factor 表是「每日全量快照」设计(正常≈bar行数,实测5192≈5190)。
+    // 但 sync_adj_factor 按 symbol 逐只拉 Tushare(8并发,5201只),限流 200/分钟下部分超时会致
+    // 当日只成功一部分(如 7/10 仅 1196/5189)。视图 market_stock_daily_bar_adj 用 LEFT JOIN +
+    // COALESCE(adj_factor,1.0),缺失股票复权价退化为 raw 价,与前后日断层(10倍级),回测当日
+    // 收益率/涨跌停全错乱。故 EOD 必须校验覆盖率并自动补全,而非仅告警。
+    //
+    // 补全原理:非除权日 adj_factor 恒等于前一交易日值(复权因子仅在除权除息日跳变)。
+    // 对当日有 bar 但缺 adj_factor 的股票,用最近前一交易日的 adj_factor 前向填充 INSERT。
+    // 这是数学正确的兜底——除权日当日 Tushare 必返回新值(不会缺),缺失的必是非除权日。
+    let dv_adj_id = format!("dv-adj-eod-{}", date_str);
+    backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
     info!(
         "[scheduler] 16:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权) ({})",
@@ -2852,6 +2868,98 @@ async fn send_dingtalk_alert(db: &PgPool, msg: &str) {
         }
     }
 }
+/// 复权因子当日完整性兜底:校验覆盖率→前向填充补全→再校验告警。
+///
+/// adj_factor 表是「每日全量快照」(正常行数≈当日 bar 行数)。sync_adj_factor 按 symbol 逐只
+/// 拉 Tushare,部分超时会致当日只成功一部分。视图 COALESCE(adj_factor,1.0) 让缺失股票复权价
+/// 退化为 raw 价,与前后日断层,回测当日收益率/涨跌停错乱。
+///
+/// 补全:对当日有 bar 但缺 adj_factor 的股票,取该 symbol 最近前一交易日的 adj_factor INSERT。
+/// 数学正确——非除权日复权因子恒等于前值,缺失的必是非除权日(除权日 Tushare 必返回新值)。
+///
+/// 阈值:覆盖率<90%(adj_cnt < bar_cnt*0.9)才触发补全+告警,避免无谓写入。
+pub(crate) async fn backfill_adj_factor_for_date(db: &PgPool, date: NaiveDate, dv_id: &str) {
+    let date_str = date.format("%Y-%m-%d").to_string();
+    let bar_cnt: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT symbol) FROM market_stock_daily_bar WHERE trade_date = $1",
+    )
+    .bind(date)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+    let adj_cnt: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT symbol) FROM market_adjustment_factor WHERE trade_date = $1",
+    )
+    .bind(date)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+
+    if bar_cnt == 0 {
+        // 当日无 bar(非交易日或日线未同步),跳过
+        return;
+    }
+
+    // 覆盖率<90%:有缺失,前向填充补全
+    if adj_cnt * 10 < bar_cnt * 9 {
+        // 用 LATERAL 取每只缺失股票最近前一交易日的 adj_factor,批量 INSERT
+        let filled = sqlx::query(
+            "INSERT INTO market_adjustment_factor (symbol, trade_date, adj_factor, source, data_version_id, created_at) \
+             SELECT b.symbol, $1::date, prev.adj_factor, 'forward_fill', $2, NOW() \
+             FROM (SELECT DISTINCT symbol FROM market_stock_daily_bar WHERE trade_date = $1) b \
+             LEFT JOIN LATERAL ( \
+                 SELECT a.adj_factor FROM market_adjustment_factor a \
+                 WHERE a.symbol = b.symbol AND a.trade_date < $1 \
+                 ORDER BY a.trade_date DESC LIMIT 1 \
+             ) prev ON true \
+             WHERE prev.adj_factor IS NOT NULL \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM market_adjustment_factor x \
+                   WHERE x.symbol = b.symbol AND x.trade_date = $1 \
+               ) \
+             ON CONFLICT (symbol, trade_date) DO NOTHING",
+        )
+        .bind(date)
+        .bind(dv_id)
+        .execute(db)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+
+        let adj_cnt_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT symbol) FROM market_adjustment_factor WHERE trade_date = $1",
+        )
+        .bind(date)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+        let pct = if bar_cnt > 0 { adj_cnt_after * 100 / bar_cnt } else { 100 };
+        if filled > 0 {
+            info!(
+                "[scheduler] 复权因子前向填充: {} 补 {} 只 (adj {}→{} 覆盖率 {}%)",
+                date_str, filled, adj_cnt, adj_cnt_after, pct
+            );
+        }
+        // 补全后仍不足 90%:告警(可能前一交易日也大面积缺失,需人工查)
+        if adj_cnt_after * 10 < bar_cnt * 9 {
+            let msg = format!(
+                "复权因子缺失: {} 当日 bar {} 只,前向填充后 adj_factor {} 只(覆盖率 {}%),复权价可能仍退化,请人工核查",
+                date_str, bar_cnt, adj_cnt_after, pct
+            );
+            warn!("[scheduler] {}", msg);
+            send_quality_alert(db, &[msg]).await;
+        }
+    } else {
+        info!(
+            "[scheduler] 复权因子校验通过: {} bar={} adj_factor={} (覆盖率 {}%)",
+            date_str,
+            bar_cnt,
+            adj_cnt,
+            if bar_cnt > 0 { adj_cnt * 100 / bar_cnt } else { 100 }
+        );
+    }
+}
+
 pub(crate) async fn send_quality_alert(db: &PgPool, gaps: &[String]) {
     let accounts = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT name, dingtalk_webhook_url FROM paper_account WHERE status='active' AND dingtalk_webhook_url IS NOT NULL"
