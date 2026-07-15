@@ -7279,6 +7279,8 @@ pub async fn sync_limit_list(
         .await
         .map_err(|e| format!("清除: {}", e))?;
 
+    // Tushare limit_list_d 只返回涨停/跌停股的 symbol,不含 limit_type 方向字段。
+    // 先写入 symbol(标记当日有涨跌停),limit_type 由下方 derive 补全方向。
     for item in &maps {
         let ts_code = item["ts_code"].as_str().unwrap_or("");
         if ts_code.is_empty() {
@@ -7292,7 +7294,18 @@ pub async fn sync_limit_list(
         total += 1;
     }
 
-    info!(total, date = trade_date, "涨跌停数据同步完成");
+    info!(total, date = trade_date, "涨跌停数据同步完成(limit_type 待 derive)");
+
+    // 补全 limit_type 方向(U涨停/D跌停):用当日 close vs pre_close×limit_rate 推导。
+    // Tushare limit_list_d 不返回方向,derive_limit_list_from_daily_bars 用日线 close vs pre_close
+    // 判断 U/D 并 UPSERT(ON CONFLICT DO UPDATE SET limit_type)。
+    // derive 用 [start,end] 范围,这里单日 [trade_date, trade_date]。
+    // derive 用 close≥pre_close×(1+rate) 判 U(触及涨停价即标,含触及未封板,回测保守禁买更安全)。
+    match derive_limit_list_from_daily_bars(pool, trade_date, trade_date).await {
+        Ok(n) => info!(derived = n, date = trade_date, "涨跌停 limit_type 方向补全完成"),
+        Err(e) => warn!(date = trade_date, err = %e, "derive limit_type 失败(已写入 symbol,limit_type 仍 NULL)"),
+    }
+
     record_event_sync_completion(pool, "limit_daily", "tushare:limit_list_d", d, total).await?;
     Ok(total)
 }

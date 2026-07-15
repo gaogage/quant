@@ -67,7 +67,7 @@ pub async fn select_positions(
 // rebalance_account 与 mark_to_market 由 Task 5 在此追加
 
 use crate::routes::scheduler::{
-    a_share_trade_block_reason, compute_lw_mvo_weights, compute_vol_target_leverage,
+    compute_lw_mvo_weights, compute_vol_target_leverage,
     detect_regime_exposure, fetch_intraday_etf_prices, resolved_to_legacy_sc,
     send_quality_alert, MvoWeightCache, StrategyConfig,
 };
@@ -232,12 +232,6 @@ pub async fn rebalance_account(
             continue;
         }
         target_symbols.insert(p.symbol.clone());
-        // A 股交易阻断(停牌/涨跌停)——回放用批量预加载的 trade_block_map 内存查(P2-A)
-        if let Some(reason) = trade_block_map.get(&p.symbol) {
-            warn!("[rebalance] 跳过 A股交易: {} {}", p.symbol, reason);
-            send_quality_alert(db, &[format!("{}: {}", account_id, reason)]).await;
-            continue;
-        }
         let target_qty = p.quantity * scale;
         let cur_qty = current_positions
             .get(&p.symbol)
@@ -258,6 +252,23 @@ pub async fn rebalance_account(
             // 卖出:允许零头清仓(不足100股部分一次性清),不取整。
             ("sell", -delta)
         };
+        // A 股交易阻断(停牌/涨跌停)——按 side 区分(P2-A 批量预加载):
+        // 涨停('U')禁买可卖、跌停('D')禁卖可买、停牌买卖都禁。方向未知(NULL)保守都禁。
+        if let Some(block) = trade_block_map.get(&p.symbol) {
+            if block.blocks_side(side) {
+                let dir = block.limit_type.map(|c| c.to_string()).unwrap_or_default();
+                warn!(
+                    "[rebalance] 跳过 A股{}: {} {}({})",
+                    side, p.symbol, block.reason, if dir.is_empty() { "方向未知" } else { dir.as_str() }
+                );
+                send_quality_alert(db, &[format!(
+                    "{}: {} {} {}{}",
+                    account_id, p.symbol, side, block.reason,
+                    if dir.is_empty() { String::new() } else { format!("({})", dir) }
+                )]).await;
+                continue;
+            }
+        }
         let target_value = qty * price;
         if side == "buy" && target_value < Decimal::ONE {
             continue;
@@ -299,6 +310,17 @@ pub async fn rebalance_account(
             continue;
         }
         if !target_symbols.contains(sym) && *qty > Decimal::ZERO {
+            // 清仓是卖出:跌停('D')禁卖,跳过该股(留待次日或涨跌停解除再清)。
+            if let Some(block) = trade_block_map.get(sym) {
+                if block.blocks_side("sell") {
+                    let dir = block.limit_type.map(|c| c.to_string()).unwrap_or_default();
+                    warn!(
+                        "[rebalance] 清仓跳过 A股sell: {} {}({})",
+                        sym, block.reason, if dir.is_empty() { "方向未知" } else { dir.as_str() }
+                    );
+                    continue;
+                }
+            }
             let price = fetch_eod_price(db, sym, date).await;
             if price <= 0.0 {
                 continue;
@@ -497,18 +519,25 @@ async fn force_liquidation(
         if need_repay <= 1.0 {
             break;
         }
-        // 取持仓中市值最大的一只卖出(足以还款的比例)
+        // 取持仓中市值最大的一只卖出(足以还款的比例)。
+        // 排除当日跌停股('D'禁卖,卖出无对手盘)—跌停卖不出,选下一只可卖的非跌停股。
         let pos: Option<(String, rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal)> =
             sqlx::query_as(
-                "SELECT symbol, quantity, market_price, market_value
-                 FROM paper_position WHERE paper_account_id=$1 AND quantity>0
-                 ORDER BY market_value DESC LIMIT 1",
+                "SELECT p.symbol, p.quantity, p.market_price, p.market_value
+                 FROM paper_position p
+                 WHERE p.paper_account_id=$1 AND p.quantity>0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM market_stock_limit l
+                     WHERE l.symbol = p.symbol AND l.trade_date = $2 AND l.limit_type = 'D'
+                   )
+                 ORDER BY p.market_value DESC LIMIT 1",
             )
             .bind(account_id)
+            .bind(date)
             .fetch_optional(db)
             .await
             .map_err(|e| format!("liq pos: {}", e))?;
-        let (sym, qty, price, mv_sym) = match pos {
+        let (sym, qty, price, _mv_sym) = match pos {
             Some(p) => p,
             None => break, // 无持仓可平
         };
