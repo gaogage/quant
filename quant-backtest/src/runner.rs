@@ -50,6 +50,9 @@ struct TradingProfile {
     exchange: Option<String>,
     market: Option<String>,
     is_st: bool,
+    /// 品种类型(market_stock.instrument_type):'etf'/'stock'/None(未回填)。
+    /// 用于 ETF 涨跌幅规则(跨境 QDII ±20%、货基无限制)与股票区分。
+    instrument_type: Option<String>,
 }
 
 type DailyBarsByDate = HashMap<NaiveDate, HashMap<String, (Decimal, Decimal, Decimal, Decimal)>>;
@@ -534,7 +537,7 @@ impl BacktestDataCache {
     fn insert_trading_profiles(
         &mut self,
         requested_symbols: &[String],
-        rows: Vec<(String, Option<String>, Option<String>, Option<bool>)>,
+        rows: Vec<(String, Option<String>, Option<String>, Option<bool>, Option<String>)>,
     ) -> HashMap<String, TradingProfile> {
         let requested_symbols = normalized_symbol_key(requested_symbols);
         let mut by_symbol: HashMap<String, Option<TradingProfile>> = requested_symbols
@@ -542,13 +545,14 @@ impl BacktestDataCache {
             .map(|symbol| (symbol.clone(), None))
             .collect();
 
-        for (symbol, exchange, market, is_st) in rows {
+        for (symbol, exchange, market, is_st, instrument_type) in rows {
             by_symbol.insert(
                 symbol,
                 Some(TradingProfile {
                     exchange,
                     market,
                     is_st: is_st.unwrap_or(false),
+                    instrument_type,
                 }),
             );
         }
@@ -998,8 +1002,8 @@ impl BacktestRunner {
         &self,
         symbols: &[String],
     ) -> Result<HashMap<String, TradingProfile>, sqlx::Error> {
-        let rows: Vec<(String, Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
-            "SELECT symbol, exchange, market, is_st FROM market_stock WHERE symbol = ANY($1)",
+        let rows: Vec<(String, Option<String>, Option<String>, Option<bool>, Option<String>)> = sqlx::query_as(
+            "SELECT symbol, exchange, market, is_st, instrument_type FROM market_stock WHERE symbol = ANY($1)",
         )
         .bind(symbols)
         .fetch_all(&self.pool)
@@ -1007,13 +1011,14 @@ impl BacktestRunner {
 
         Ok(rows
             .into_iter()
-            .map(|(symbol, exchange, market, is_st)| {
+            .map(|(symbol, exchange, market, is_st, instrument_type)| {
                 (
                     symbol,
                     TradingProfile {
                         exchange,
                         market,
                         is_st: is_st.unwrap_or(false),
+                        instrument_type,
                     },
                 )
             })
@@ -1030,8 +1035,8 @@ impl BacktestRunner {
             return Ok(result);
         }
 
-        let rows: Vec<(String, Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
-            "SELECT symbol, exchange, market, is_st FROM market_stock WHERE symbol = ANY($1)",
+        let rows: Vec<(String, Option<String>, Option<String>, Option<bool>, Option<String>)> = sqlx::query_as(
+            "SELECT symbol, exchange, market, is_st, instrument_type FROM market_stock WHERE symbol = ANY($1)",
         )
         .bind(&missing_symbols)
         .fetch_all(&self.pool)
@@ -1104,6 +1109,23 @@ impl BacktestRunner {
     fn limit_rate_for(symbol: &str, profile: Option<&TradingProfile>) -> Decimal {
         if profile.is_some_and(|p| p.is_st) {
             return Decimal::new(5, 2);
+        }
+
+        // ETF 涨跌幅:优先用 instrument_type 字段(权威),回退 symbol 代码段。
+        // 跨境 QDII(513xxx 沪/159xxx 深部分)±20%,货币基金(511880/511990)无限制,
+        // 其余 ETF ±10%。简化:QDII 513xxx →20%,货基 511880/511990 →不限(用1.0),
+        // 其他 ETF →10%。
+        let is_etf = profile.is_some_and(|p| p.instrument_type.as_deref() == Some("etf"))
+            || quant_common::trading_rules::is_etf_symbol(symbol);
+        if is_etf {
+            let code = symbol.split('.').next().unwrap_or("");
+            if code.starts_with("513") {
+                return Decimal::new(20, 2); // 跨境 QDII ±20%
+            }
+            if code == "511880" || code == "511990" {
+                return Decimal::ONE; // 货币基金无涨跌幅限制
+            }
+            return Decimal::new(10, 2); // 普通 ETF ±10%
         }
 
         let market = profile
@@ -1427,16 +1449,19 @@ mod tests {
             exchange: Some("SSE".into()),
             market: Some("主板".into()),
             is_st: true,
+            instrument_type: Some("stock".into()),
         };
         let growth = TradingProfile {
             exchange: Some("SZSE".into()),
             market: Some("创业板".into()),
             is_st: false,
+            instrument_type: Some("stock".into()),
         };
         let main = TradingProfile {
             exchange: Some("SSE".into()),
             market: Some("主板".into()),
             is_st: false,
+            instrument_type: Some("stock".into()),
         };
 
         assert_eq!(

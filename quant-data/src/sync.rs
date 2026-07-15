@@ -901,7 +901,7 @@ pub async fn sync_daily_basic(
 /// 同步基金/ETF 基本信息到 market_stock 表。
 /// 从 Tushare fund_basic 接口拉取名称、类型、管理人。
 pub async fn sync_fund_basic(pool: &PgPool, client: &TushareClient) -> Result<usize, String> {
-    // E: 交易所 ETF, L: LOF
+    // E: 交易所 ETF, L: LOF。client.fund_basic 已请求 fund_basic 全 24 字段。
     let markets = ["E", "L"];
     let mut total = 0usize;
 
@@ -913,16 +913,16 @@ pub async fn sync_fund_basic(pool: &PgPool, client: &TushareClient) -> Result<us
 
         let maps = resp.data.map(|d| d.to_maps()).unwrap_or_default();
         for item in &maps {
-            let ts_code = item["ts_code"].as_str().unwrap_or("");
-            let name = item["name"].as_str().unwrap_or(ts_code);
-            let fund_type = item["fund_type"].as_str().unwrap_or("");
-            let status = item["status"].as_str().unwrap_or("");
+            let ts_code = get_str(item, "ts_code");
+            let name = get_str(item, "name");
+            let fund_type = get_str(item, "fund_type");
+            let status = get_str(item, "status");
 
             if ts_code.is_empty() || status == "D" {
                 continue;
             } // skip delisted
 
-            // exchange 按 ts_code 后缀判定(SH→SSE, SZ→SZSE),修正原硬编码 SSE
+            // exchange 按 ts_code 后缀判定(SH→SSE, SZ→SZSE)
             let exchange = if ts_code.ends_with(".SH") {
                 "SSE"
             } else if ts_code.ends_with(".SZ") {
@@ -930,31 +930,115 @@ pub async fn sync_fund_basic(pool: &PgPool, client: &TushareClient) -> Result<us
             } else {
                 "SSE"
             };
-            // list_date/delist_date:tushare 返回 "YYYYMMDD" 字符串,转 NaiveDate;空串→NULL
-            let list_date = item["list_date"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
-            let delist_date = item["delist_date"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y%m%d").ok());
+            // 各类日期:YYYYMMDD 字符串 → NaiveDate;空串→None
+            let parse_opt_date = |key: &str| -> Option<NaiveDate> {
+                get_opt_str(item, key)
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| NaiveDate::parse_from_str(&s, "%Y%m%d").ok())
+            };
+            let list_date = parse_opt_date("list_date");
+            let delist_date = parse_opt_date("delist_date");
+            let found_date = parse_opt_date("found_date");
+            let due_date = parse_opt_date("due_date");
+            let issue_date = parse_opt_date("issue_date");
+            let purc_startdate = parse_opt_date("purc_startdate");
+            let redm_startdate = parse_opt_date("redm_startdate");
 
+            // 数值字段:issue_amount/m_fee/c_fee/duration_year/p_value/min_amount
+            let issue_amount = to_opt_decimal(get_f64(item, "issue_amount"));
+            let m_fee = to_opt_decimal(get_f64(item, "m_fee"));
+            let c_fee = to_opt_decimal(get_f64(item, "c_fee"));
+            let duration_year = to_opt_decimal(get_f64(item, "duration_year"));
+            let p_value = to_opt_decimal(get_f64(item, "p_value"));
+            let min_amount = to_opt_decimal(get_f64(item, "min_amount"));
+
+            // 1. market_stock:基础信息 + instrument_type='etf' + market(供回测/实盘快速区分)
+            //    name 保留纯简称(不再拼 fund_type,fund_type 已存 market_fund 独立字段)
             sqlx::query(
-                "INSERT INTO market_stock (symbol, name, exchange, list_status, is_st, list_date, delist_date)
-                 VALUES ($1, $2, $3, 'L', false, $4, $5)
+                "INSERT INTO market_stock (symbol, name, exchange, market, list_status, is_st, instrument_type, list_date, delist_date)
+                 VALUES ($1, $2, $3, $4, 'L', false, 'etf', $5, $6)
                  ON CONFLICT (symbol) DO UPDATE SET name = EXCLUDED.name, exchange = EXCLUDED.exchange,
+                   market = COALESCE(EXCLUDED.market, market_stock.market),
+                   instrument_type = 'etf',
                    list_date = COALESCE(EXCLUDED.list_date, market_stock.list_date),
                    delist_date = COALESCE(EXCLUDED.delist_date, market_stock.delist_date)",
             )
-            .bind(ts_code)
-            .bind(format!("{} ({})", name, fund_type))
+            .bind(&ts_code)
+            .bind(&name)
             .bind(exchange)
+            .bind(*market)
             .bind(list_date)
             .bind(delist_date)
             .execute(pool)
             .await
-            .map_err(|e| format!("insert failed: {}", e))?;
+            .map_err(|e| format!("market_stock insert failed: {}", e))?;
+
+            // 2. market_fund:基金专有完整信息(24 字段全量 UPSERT)
+            sqlx::query(
+                "INSERT INTO market_fund (
+                    symbol, name, management, custodian, fund_type, found_date, due_date,
+                    list_date, issue_date, delist_date, issue_amount, m_fee, c_fee,
+                    duration_year, p_value, min_amount, exp_return, benchmark, status,
+                    invest_type, type, trustee, purc_startdate, redm_startdate, market
+                 ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+                 )
+                 ON CONFLICT (symbol) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    management = EXCLUDED.management,
+                    custodian = EXCLUDED.custodian,
+                    fund_type = EXCLUDED.fund_type,
+                    found_date = EXCLUDED.found_date,
+                    due_date = EXCLUDED.due_date,
+                    list_date = EXCLUDED.list_date,
+                    issue_date = EXCLUDED.issue_date,
+                    delist_date = EXCLUDED.delist_date,
+                    issue_amount = EXCLUDED.issue_amount,
+                    m_fee = EXCLUDED.m_fee,
+                    c_fee = EXCLUDED.c_fee,
+                    duration_year = EXCLUDED.duration_year,
+                    p_value = EXCLUDED.p_value,
+                    min_amount = EXCLUDED.min_amount,
+                    exp_return = EXCLUDED.exp_return,
+                    benchmark = EXCLUDED.benchmark,
+                    status = EXCLUDED.status,
+                    invest_type = EXCLUDED.invest_type,
+                    type = EXCLUDED.type,
+                    trustee = EXCLUDED.trustee,
+                    purc_startdate = EXCLUDED.purc_startdate,
+                    redm_startdate = EXCLUDED.redm_startdate,
+                    market = EXCLUDED.market,
+                    updated_at = NOW()",
+            )
+            .bind(&ts_code)
+            .bind(&name)
+            .bind(get_opt_str(item, "management"))
+            .bind(get_opt_str(item, "custodian"))
+            .bind(&fund_type)
+            .bind(found_date)
+            .bind(due_date)
+            .bind(list_date)
+            .bind(issue_date)
+            .bind(delist_date)
+            .bind(issue_amount)
+            .bind(m_fee)
+            .bind(c_fee)
+            .bind(duration_year)
+            .bind(p_value)
+            .bind(min_amount)
+            .bind(get_opt_str(item, "exp_return"))
+            .bind(get_opt_str(item, "benchmark"))
+            .bind(&status)
+            .bind(get_opt_str(item, "invest_type"))
+            .bind(get_opt_str(item, "type"))
+            .bind(get_opt_str(item, "trustee"))
+            .bind(purc_startdate)
+            .bind(redm_startdate)
+            .bind(get_opt_str(item, "market"))
+            .execute(pool)
+            .await
+            .map_err(|e| format!("market_fund insert failed: {}", e))?;
+
             total += 1;
         }
     }
