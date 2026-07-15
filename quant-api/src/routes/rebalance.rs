@@ -249,8 +249,13 @@ pub async fn rebalance_account(
             continue;
         }
         let (side, qty) = if delta > Decimal::ZERO {
-            ("buy", delta)
+            // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
+            ("buy", quant_common::trading_rules::round_down_to_lot(
+                delta,
+                quant_common::trading_rules::LOT_SIZE,
+            ))
         } else {
+            // 卖出:允许零头清仓(不足100股部分一次性清),不取整。
             ("sell", -delta)
         };
         let target_value = qty * price;
@@ -383,8 +388,13 @@ pub async fn rebalance_account(
             continue;
         }
         let (side, qty) = if delta > Decimal::ZERO {
-            ("buy", delta)
+            // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
+            ("buy", quant_common::trading_rules::round_down_to_lot(
+                delta,
+                quant_common::trading_rules::LOT_SIZE,
+            ))
         } else {
+            // 卖出:允许零头清仓(不足100股部分一次性清),不取整。
             ("sell", -delta)
         };
         let target_value = qty * price;
@@ -663,14 +673,16 @@ async fn apply_fill_to_position(
             if qty <= max_qty_by_cash {
                 (qty, fill_amount)
             } else {
-                // 缩减到 cash 可承担量(保留 4 位小数,避免粉尘)
-                let scaled = (max_qty_by_cash * Decimal::from(10000)).floor()
-                    / Decimal::from(10000);
+                // 缩减到 cash 可承担量,再按100股向下取整(A股/ETF 1手=100,合规)。
+                let scaled = quant_common::trading_rules::round_down_to_lot(
+                    max_qty_by_cash,
+                    quant_common::trading_rules::LOT_SIZE,
+                );
                 if scaled <= Decimal::ZERO {
                     return;
                 }
                 warn!(
-                    "[rebalance] {} 无杠杆账户 {} 买入缩减: 目标{} → {}(cash={:.2} 不足满仓+滑点)",
+                    "[rebalance] {} 无杠杆账户 {} 买入缩减: 目标{} → {}(cash={:.2} 不足满仓+滑点,按100取整)",
                     account_id, sym, qty, scaled, cash
                 );
                 (scaled, scaled * fill_price)
@@ -906,6 +918,8 @@ mod tests {
             leverage_regime_threshold: 0.9,
             slippage_pct: 0.005,
             mvo_objective: "minvariance".into(),
+            kelly_fraction: 0.25,
+            score_candidate_pool_size: 200,
         };
         assert!((sc_slippage_pct(&sc) - 0.005).abs() < 1e-12);
     }

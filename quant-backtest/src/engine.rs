@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use super::portfolio::{DailyPosition, FeeConfig, Portfolio, Trade};
+use quant_common::trading_rules::round_down_to_lot;
 
 // ─── Attribution types ────────────────────────────────────────────
 
@@ -1368,10 +1369,15 @@ impl BacktestEngine {
                 continue;
             }
 
+            // 目标持仓量记录:A股/ETF 按100股向下取整,与买入执行(1484)一致。
+            // 卖出场景目标量可能含零头,但记录取整反映"A股持仓应为100倍数"的真实约束。
             let target_quantity = if price.is_zero() {
                 None
             } else {
-                Some((target_amount / price).floor())
+                Some(round_down_to_lot(
+                    target_amount / price,
+                    quant_common::trading_rules::LOT_SIZE,
+                ))
             };
             self.targets.push(PortfolioTarget {
                 trade_date: market.date,
@@ -1480,7 +1486,9 @@ impl BacktestEngine {
             if capped_amount.is_zero() {
                 continue;
             }
-            let qty = (capped_amount / price).floor();
+            // A股/ETF 买入必须按100股/份向下取整(1手=100)。
+            // 卖出允许零头清仓不取整(见下方 sell 段),仅买入取整。
+            let qty = round_down_to_lot(capped_amount / price, quant_common::trading_rules::LOT_SIZE);
             if !qty.is_zero() {
                 // Pre-check for constraint violations
                 let participation_rate = self.participation_rate_for(market, sym, qty * *price);
