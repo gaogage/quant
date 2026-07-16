@@ -192,7 +192,7 @@ impl Portfolio {
         quantity: Decimal,
         price: Decimal,
     ) -> Option<Decimal> {
-        self.buy_with_cost(date, symbol, quantity, price, Decimal::zero())
+        self.buy_with_cost(date, symbol, quantity, price, Decimal::zero(), None)
     }
 
     /// 买入：含手续费、滑点和按参与率估算的冲击成本
@@ -204,12 +204,19 @@ impl Portfolio {
         quantity: Decimal,
         price: Decimal,
         participation_rate: Decimal,
+        up_limit: Option<Decimal>,
     ) -> Option<Decimal> {
         if quantity.is_zero() {
             return None;
         }
         let slippage = self.effective_slippage(participation_rate);
-        let slippage_price = price * (Decimal::ONE + slippage);
+        // 滑点价钳制涨停价:买入实际成交价不得超 up_limit(涨停封板无对手盘,
+        // 即使有滑点也只能到涨停价)。无 up_limit(None)不钳制。
+        let raw_slippage_price = price * (Decimal::ONE + slippage);
+        let slippage_price = match up_limit {
+            Some(ul) if ul > Decimal::ZERO => raw_slippage_price.min(ul),
+            _ => raw_slippage_price,
+        };
         let amount = quantity * slippage_price;
         let commission =
             (amount * self.effective_commission_rate()).max(self.effective_min_commission());
@@ -270,7 +277,7 @@ impl Portfolio {
         quantity: Decimal,
         price: Decimal,
     ) -> Option<Decimal> {
-        self.sell_with_cost(date, symbol, quantity, price, Decimal::zero())
+        self.sell_with_cost(date, symbol, quantity, price, Decimal::zero(), None)
     }
 
     /// 卖出：含手续费、印花税、滑点和按参与率估算的冲击成本
@@ -282,6 +289,7 @@ impl Portfolio {
         quantity: Decimal,
         price: Decimal,
         participation_rate: Decimal,
+        down_limit: Option<Decimal>,
     ) -> Option<Decimal> {
         if quantity.is_zero() {
             return None;
@@ -291,7 +299,13 @@ impl Portfolio {
             return None;
         }
         let slippage = self.effective_slippage(participation_rate);
-        let slippage_price = price * (Decimal::ONE - slippage);
+        // 滑点价钳制跌停价:卖出实际成交价不得低于 down_limit(跌停封板无对手盘,
+        // 即使有滑点也只能到跌停价)。无 down_limit(None)不钳制。
+        let raw_slippage_price = price * (Decimal::ONE - slippage);
+        let slippage_price = match down_limit {
+            Some(dl) if dl > Decimal::ZERO => raw_slippage_price.max(dl),
+            _ => raw_slippage_price,
+        };
         let amount = quantity * slippage_price;
         let commission =
             (amount * self.effective_commission_rate()).max(self.effective_min_commission());

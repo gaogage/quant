@@ -1001,6 +1001,7 @@ impl BacktestEngine {
                     capped_quantity,
                     price,
                     participation_rate,
+                    market.down_limit.get(&symbol).copied(),
                 )
                 .is_some()
             {
@@ -1472,7 +1473,14 @@ impl BacktestEngine {
             let participation_rate = self.participation_rate_for(market, sym, capped_qty * price);
             if self
                 .portfolio
-                .sell_with_cost(market.date, sym, capped_qty, price, participation_rate)
+                .sell_with_cost(
+                    market.date,
+                    sym,
+                    capped_qty,
+                    price,
+                    participation_rate,
+                    market.down_limit.get(sym).copied(),
+                )
                 .is_some()
             {
                 let executed_weight = (capped_qty * price) / total_value;
@@ -1543,7 +1551,14 @@ impl BacktestEngine {
 
                 if self
                     .portfolio
-                    .buy_with_cost(market.date, sym, qty, *price, participation_rate)
+                    .buy_with_cost(
+                        market.date,
+                        sym,
+                        qty,
+                        *price,
+                        participation_rate,
+                        market.up_limit.get(sym).copied(),
+                    )
                     .is_some()
                 {
                     let executed_weight = (qty * *price) / total_value;
