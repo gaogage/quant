@@ -16235,8 +16235,13 @@ pub async fn materialize_pit_combo(
     // $4 = as_of（季度调仓点，同时是 PIT 截止日）；$5 = 下季 as_of（开区间末）
     let per_quarter_sql = r#"
 WITH pit AS (
+    -- PIT 因子集:JOIN factor_definition status='active' 过滤废弃因子。
+    -- 早期原始版因子(mom_20d 等)未进 definition 表,后期 _std 版才注册;
+    -- 废弃因子的 factor_evaluation 历史 IC 残留,若不过滤会进 combo 导致:
+    -- 1)INNER JOIN factor_value 取不到数据静默跳过;2)权重分母含废弃因子 ICIR 虚高→raw_score 压低。
     SELECT DISTINCT ON (fe.factor_code) fe.factor_code, fe.mean_ic, fe.ic_ir
     FROM factor_evaluation fe
+    JOIN factor_definition fd ON fd.factor_code = fe.factor_code AND fd.status = 'active'
     WHERE fe.horizon = $3 AND fe.end_date <= $4
       AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
       AND fe.factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)'
@@ -16270,6 +16275,39 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
             .get(i + 1)
             .copied()
             .unwrap_or_else(|| end_date + chrono::Duration::days(1));
+
+        // 覆盖率门禁:季度调仓点因子数据完整性检查。
+        // pit 因子集(活跃因子)中,实际有当日 factor_value 数据的比例。
+        // 覆盖率<50%告警(仍物化但记日志,供排查),=0 跳过该季度(无数据无法打分)。
+        let coverage: Option<(i64, i64)> = sqlx::query_as(
+            r#"SELECT
+                 (SELECT COUNT(DISTINCT fe.factor_code) FROM factor_evaluation fe
+                   JOIN factor_definition fd ON fd.factor_code=fe.factor_code AND fd.status='active'
+                   WHERE fe.horizon=$1 AND fe.end_date<=$2 AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
+                     AND fe.factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)') AS pit_n,
+                 (SELECT COUNT(DISTINCT fe.factor_code) FROM factor_evaluation fe
+                   JOIN factor_definition fd ON fd.factor_code=fe.factor_code AND fd.status='active'
+                   JOIN factor_value fv ON fv.factor_code=fe.factor_code AND fv.factor_version=$3
+                     AND fv.trade_date=$2 AND fv.normalized_value IS NOT NULL
+                   WHERE fe.horizon=$1 AND fe.end_date<=$2 AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
+                     AND fe.factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)') AS have_n"#,
+        )
+        .bind(horizon)
+        .bind(as_of)
+        .bind(factor_version)
+        .fetch_one(db)
+        .await
+        .ok();
+        if let Some((pit_n, have_n)) = coverage {
+            if pit_n > 0 && have_n == 0 {
+                tracing::warn!(combo = combo_name, quarter = %as_of, pit_factors = pit_n, "季度因子数据完全缺失,跳过物化(避免空打分)");
+                continue;
+            }
+            if pit_n > 0 && have_n * 2 < pit_n {
+                tracing::warn!(combo = combo_name, quarter = %as_of, pit = pit_n, have = have_n, pct = have_n * 100 / pit_n, "季度因子覆盖率<50%,打分将基于部分因子(权重自动按有数据因子重归一化)");
+            }
+        }
+
         let res = sqlx::query(per_quarter_sql)
             .bind(combo_name)
             .bind(factor_version)
