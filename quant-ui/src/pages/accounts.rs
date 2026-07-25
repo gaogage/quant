@@ -4,8 +4,9 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use crate::api;
-use crate::components::charts::CumulativeLineChart;
+use crate::components::charts::{CumulativeLineChart, ReturnVsBenchmarkChart};
 use dioxus::events::{Key, KeyboardEvent};
+use dioxus::events::FormEvent;
 
 // ── 过滤器子组件：使用 Dioxus 信号管理状态，通过 use_callback 稳定回调避免重渲染 ──
 
@@ -971,6 +972,10 @@ pub fn AccountsContent() -> Element {
                                                             }
                                                         }
                                                     }
+                                                    div {
+                                                        h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-2", "收益率曲线 vs 沪深300" }
+                                                        AccountReturnChart { account_id: aid.clone() }
+                                                    }
                                                 }
                                                 div { class: "grid grid-cols-1 md:grid-cols-2 gap-4",
                                                     div {
@@ -1049,6 +1054,11 @@ pub fn AccountsContent() -> Element {
                                             }
                                         }
                                     }
+
+                                    // P3-3: 调仓历史 — 按交易日卡片展示(买/卖笔数+金额)
+                                    div { class: "mt-4",
+                                        RebalanceHistoryPanel { account_id: aid.clone() }
+                                    }
                                 }
                             }
                         }
@@ -1056,6 +1066,245 @@ pub fn AccountsContent() -> Element {
                 }
             }
 
+        }
+    }
+}
+
+/// 收益率曲线子面板 — 在账号详情"资产大类占比"右侧展示。
+/// 默认最近 1 年，可通过日期选择器自定义起止时间。
+fn js_date_str(y: i32, m0: i32, d: i32) -> String {
+    format!("{:04}-{:02}-{:02}", y, m0 + 1, d)
+}
+
+#[component]
+fn AccountReturnChart(account_id: String) -> Element {
+    // 默认最近 1 年（用 js_sys::Date 获取 WASM 环境下的今天）
+    let now = js_sys::Date::new_0();
+    let cur_year = now.get_full_year() as i32;
+    let cur_month = now.get_month() as i32;       // 0-based
+    let cur_day = now.get_date() as i32;
+    let default_end = js_date_str(cur_year, cur_month, cur_day);
+    // 一年前：粗略减 1 年（月日相同，闰日 2/29 退化为 2/28 由 JS Date 自动归正，这里用字符串拼接足够）
+    let default_start = js_date_str(cur_year - 1, cur_month, cur_day);
+
+    let mut chart_data = use_signal(|| Value::Null);
+    let mut loading = use_signal(|| true);
+    let mut start_date = use_signal(|| default_start.clone());
+    let mut end_date = use_signal(|| default_end.clone());
+    let mut load_trigger = use_signal(|| 0u32);
+
+    let aid_effect = account_id.clone();
+    use_effect(move || {
+        let aid = aid_effect.clone();
+        let s = start_date.read().clone();
+        let e = end_date.read().clone();
+        let _trigger = *load_trigger.read(); // 触发重加载
+        spawn(async move {
+            loading.set(true);
+            if let Ok(v) = api::get_nav_history_range(&aid, &s, &e).await {
+                chart_data.set(v["data"].clone());
+            }
+            loading.set(false);
+        });
+    });
+
+    if *loading.read() {
+        return rsx! {
+            div { class: "flex items-center justify-center h-48",
+                div { class: "animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full" }
+            }
+        };
+    }
+
+    let data = chart_data.read();
+    let nav_points: Vec<Value> = data["nav_history"].as_array().cloned().unwrap_or_default();
+    let benchmark = &data["benchmark"];
+    let bench_curve: Vec<Value> = benchmark["curve"].as_array().cloned().unwrap_or_default();
+
+    if nav_points.len() < 2 {
+        return rsx! {
+            div { class: "text-xs text-gray-400 py-8 text-center", "选定日期范围内无 NAV 数据" }
+        };
+    }
+
+    let canvas_id = format!("acct-ret-chart-{}", account_id);
+
+    let start_input = start_date.read().clone();
+    let end_input = end_date.read().clone();
+
+    let dates: Vec<String> = nav_points.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
+    let acct_ret: Vec<f64> = nav_points.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
+    let bench_dates: Vec<String> = bench_curve.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
+    let bench_ret: Vec<f64> = bench_curve.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
+
+    rsx! {
+        div { class: "space-y-2",
+            div { class: "flex items-center gap-2 text-xs",
+                input {
+                    r#type: "date",
+                    class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
+                    value: "{start_input}",
+                    onchange: move |e: FormEvent| {
+                        start_date.set(e.value().to_string());
+                        let t = *load_trigger.read();
+                        load_trigger.set(t.wrapping_add(1));
+                    },
+                }
+                span { class: "text-gray-400", "—" }
+                input {
+                    r#type: "date",
+                    class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
+                    value: "{end_input}",
+                    onchange: move |e: FormEvent| {
+                        end_date.set(e.value().to_string());
+                        let t = *load_trigger.read();
+                        load_trigger.set(t.wrapping_add(1));
+                    },
+                }
+            }
+
+            ReturnVsBenchmarkChart {
+                dates: dates,
+                acct_ret: acct_ret,
+                bench_dates: bench_dates,
+                bench_ret: bench_ret,
+                canvas_id: canvas_id,
+            }
+        }
+    }
+}
+
+/// P3-3: 调仓历史子面板 — 在账号详情展开区域显示，按交易日汇总。
+#[component]
+fn RebalanceHistoryPanel(account_id: String) -> Element {
+    let mut data = use_signal(|| Vec::<Value>::new());
+    let mut loading = use_signal(|| true);
+    let mut expanded_date = use_signal(String::new);
+
+    let aid = account_id.clone();
+    use_effect(move || {
+        let id = aid.clone();
+        spawn(async move {
+            match api::get_rebalance_history(&id).await {
+                Ok(v) => {
+                    if let Some(arr) = v["data"]["rebalance_history"].as_array() {
+                        data.set(arr.clone());
+                    }
+                }
+                Err(_) => {}
+            }
+            loading.set(false);
+        });
+    });
+
+    if *loading.read() {
+        return rsx! { div { class: "text-xs text-gray-400 py-2", "加载调仓历史…" } };
+    }
+
+    let items = data.read();
+    if items.is_empty() {
+        return rsx! {
+            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4",
+                div { class: "text-xs text-gray-400 dark:text-gray-500 text-center py-2", "暂无调仓记录" }
+            }
+        };
+    }
+    let total_days = items.len();
+
+    rsx! {
+        div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4",
+            h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-3",
+                {format!("📋 调仓历史 ({})", total_days)}
+            }
+            div { class: "space-y-2 max-h-80 overflow-y-auto",
+                for item in items.iter() {
+                    {
+                        let date = item["date"].as_str().unwrap_or("-").to_string();
+                        let buy_n = item["buy_count"].as_i64().unwrap_or(0);
+                        let sell_n = item["sell_count"].as_i64().unwrap_or(0);
+                        let buy_amt = item["buy_amount"].as_f64().unwrap_or(0.0);
+                        let sell_amt = item["sell_amount"].as_f64().unwrap_or(0.0);
+                        let turnover = item["turnover"].as_f64().unwrap_or(0.0);
+                        let trades = item["trades"].as_array().cloned().unwrap_or_default();
+                        let has_trades = buy_n > 0 || sell_n > 0;
+                        let count_text = if has_trades {
+                            format!("{}笔交易 · 买入{}笔(¥{:.0}) / 卖出{}笔(¥{:.0})", buy_n + sell_n, buy_n, buy_amt, sell_n, sell_amt)
+                        } else {
+                            "当日无交易".to_string()
+                        };
+                        let is_open = *expanded_date.read() == date;
+                        let date_toggle = date.clone();
+                        let arrow = if is_open { "▼" } else { "▶" };
+                        rsx! {
+                            div {
+                                div {
+                                    class: "flex items-center justify-between border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 bg-white dark:bg-gray-900 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition",
+                                    onclick: move |_| {
+                                        if *expanded_date.read() == date_toggle {
+                                            expanded_date.set(String::new());
+                                        } else {
+                                            expanded_date.set(date_toggle.clone());
+                                        }
+                                    },
+                                    div { class: "flex items-center gap-2",
+                                        span { class: "text-xs text-gray-400 dark:text-gray-500 w-4 text-center", "{arrow}" }
+                                        div {
+                                            div { class: "text-xs font-mono text-gray-900 dark:text-white", "{date}" }
+                                            div { class: "text-xs text-gray-500 dark:text-gray-400 mt-0.5", "{count_text}" }
+                                        }
+                                    }
+                                    if turnover > 0.0 {
+                                        span { class: "text-xs px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300",
+                                            "¥{(turnover * 100.0).round() / 100.0}"
+                                        }
+                                    }
+                                }
+                                if is_open {
+                                    div { class: "mt-1 border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 overflow-hidden",
+                                        table { class: "w-full text-xs",
+                                            thead {
+                                                tr { class: "text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-800",
+                                                    th { class: "text-left py-1.5 pl-3 pr-2", "代码" }
+                                                    th { class: "text-center py-1.5 px-1", "方向" }
+                                                    th { class: "text-right py-1.5 px-1", "数量" }
+                                                    th { class: "text-right py-1.5 px-1", "目标价" }
+                                                    th { class: "text-right py-1.5 pr-3 pl-1", "成交价" }
+                                                }
+                                            }
+                                            tbody {
+                                                for t in trades.iter() {
+                                                    {
+                                                        let sym = t["symbol"].as_str().unwrap_or("-");
+                                                        let side = t["side"].as_str().unwrap_or("-");
+                                                        let qty = t["quantity"].as_str().unwrap_or("-");
+                                                        let target_price = t["target_price"].as_str().unwrap_or("-");
+                                                        let fill_price = t["fill_price"].as_str().unwrap_or("-");
+                                                        let side_color = if side == "buy" {
+                                                            "text-red-600 dark:text-red-400"
+                                                        } else {
+                                                            "text-green-600 dark:text-green-400"
+                                                        };
+                                                        let side_label = if side == "buy" { "买入" } else { "卖出" };
+                                                        rsx! {
+                                                            tr { class: "border-b border-gray-50 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/50",
+                                                                td { class: "py-1.5 pl-3 pr-2 font-mono text-gray-900 dark:text-white", "{sym}" }
+                                                                td { class: "py-1.5 px-1 text-center {side_color}", "{side_label}" }
+                                                                td { class: "py-1.5 px-1 text-right font-mono text-gray-700 dark:text-gray-300", "{qty}" }
+                                                                td { class: "py-1.5 px-1 text-right font-mono text-gray-500 dark:text-gray-400", "{target_price}" }
+                                                                td { class: "py-1.5 pr-3 pl-1 text-right font-mono text-gray-700 dark:text-gray-300", "{fill_price}" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

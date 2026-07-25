@@ -55,6 +55,7 @@ pub fn build_dingtalk_webhook_url() -> Option<String> {
 
 /// 钉钉应用消息发送（需 DINGTALK_CLIENT_ID + DINGTALK_CLIENT_SECRET）。
 /// 流程：获取 access_token → 通过工作通知发送消息。
+#[allow(dead_code)]
 pub async fn send_dingtalk_app_message(title: &str, text: &str) -> Result<(), String> {
     let client_id =
         dingtalk_client_id().ok_or_else(|| "DINGTALK_CLIENT_ID not configured".to_string())?;

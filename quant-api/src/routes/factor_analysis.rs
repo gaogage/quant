@@ -49,7 +49,7 @@ pub fn compute_ic(
         if rows.len() < 5 {
             continue; // 截面样本太少,跳过
         }
-        let ic = spearman_rank_ic(&rows.iter().map(|(s, fv, fr)| (fv.clone(), fr.clone())).collect::<Vec<_>>());
+        let ic = spearman_rank_ic(&rows.iter().map(|(_s, fv, fr)| (fv.clone(), fr.clone())).collect::<Vec<_>>());
         if ic.is_finite() {
             rank_ic_series.push(ic);
         }

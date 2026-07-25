@@ -24,6 +24,7 @@ use crate::routes::trading::update_current_nav;
 pub const DEFAULT_RISK_FREE_RATE: f64 = 0.02;
 
 /// 统一逐日模拟的盯市 NAV 结果（绩效口径：current_nav 复利）。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DailyNav {
     pub date: NaiveDate,

@@ -8,6 +8,7 @@
 use sqlx::PgPool;
 
 /// 解析后的完整策略树(composite 或单 asset 账号都会解析成此结构)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ResolvedStrategy {
     pub strategy_id: String,
@@ -25,6 +26,7 @@ pub enum StrategyType {
     Asset,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MvoParams {
     pub vol_target: f64,
@@ -78,6 +80,7 @@ impl AssetClass {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AssetStrategy {
     pub strategy_id: String,
@@ -85,6 +88,7 @@ pub struct AssetStrategy {
     pub security: SecurityConfig,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
     pub signal_source: String, // prediction_blend / factor_combo / fixed

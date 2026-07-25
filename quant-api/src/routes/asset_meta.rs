@@ -25,6 +25,7 @@ pub fn classify_asset(symbol: &str) -> String {
 /// 注意:与 [`classify_asset`] 的分类标签不同,这里返回无后缀的简称
 /// (如 "黄金" 而非 "黄金ETF"),且 `513500.SH` 返回 "SP500"(非"标普"),
 /// `511260.SH` 未列出(走回退返回原 symbol)。
+#[allow(dead_code)]
 pub fn etf_display_name(sym: &str) -> String {
     match sym {
         "518880.SH" => "黄金".into(),

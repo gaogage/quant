@@ -1,0 +1,16 @@
+{
+  "_comment": "DDD 重构 audit hash 金标准(Step 0 安全网)。每步重构 MR 必须保证此 hash 不变,证明回测行为等价。变更需 MR 说明原因 + review 确认。",
+  "_generated_at": "2026-07-25",
+  "_config": {
+    "scenario": "phase2_db_runner_smoke",
+    "trading_days": 40,
+    "symbols": 25,
+    "rebalance_every_n_days": 10,
+    "basket_size": 8,
+    "start_date": "2024-01-02",
+    "end_date": "2024-12-31",
+    "benchmark": "000300.SH"
+  },
+  "equity_curve_sha256": "f53cf2b3fc201130323fec8bba416931230910a627fdc651037582831cc10cf3",
+  "signal_hash_sha256": "d1ee0c46975b02bded46ca5dc44b39d4ae19fbdd90b4909f7aa3a3de83d6c95b"
+}

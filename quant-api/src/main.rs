@@ -12,7 +12,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{info, info_span, Span};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::time::LocalTime, EnvFilter};
 use uuid::Uuid;
 
 mod auth;
@@ -34,6 +34,7 @@ pub struct AppState {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
+        .with_timer(LocalTime::rfc_3339())
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("quant=info")),
         )
@@ -149,6 +150,10 @@ async fn main() {
         .route(
             "/api/v1/quant/data/sync/adj-factor/background",
             post(routes::sync::sync_adj_factor_background),
+        )
+        .route(
+            "/api/v1/quant/data/sync/adj-factor/backfill",
+            post(routes::sync::sync_adj_factor_backfill),
         )
         .route(
             "/api/v1/quant/data/sync/fund-adj",
@@ -939,10 +944,18 @@ async fn main() {
             "/api/v1/admin/rebalance",
             post(routes::admin::manual_rebalance),
         )
+        .route(
+            "/api/v1/admin/performance-report",
+            post(routes::admin::trigger_performance_report),
+        )
         .route("/api/v1/admin/sync/status", get(routes::admin::sync_status))
         .route(
             "/api/v1/admin/sync/repair",
             post(routes::admin::repair_sync),
+        )
+        .route(
+            "/api/v1/admin/factor-health",
+            get(routes::admin::factor_health),
         )
         // ── 策略 ──
         .route(
@@ -973,6 +986,10 @@ async fn main() {
             "/api/v1/strategies/{id}/equity-curve/readiness-audit",
             get(routes::equity_curve_sync::handle_equity_curve_readiness_audit),
         )
+        .route(
+            "/api/v1/strategies/{id}/equity-curve/composite-sync",
+            post(routes::equity_curve_sync::handle_composite_equity_curve_sync),
+        )
         // ── 账号 ──
         .route("/api/v1/accounts", get(routes::accounts::list_accounts))
         .route("/api/v1/accounts", post(routes::accounts::create_account))
@@ -995,6 +1012,14 @@ async fn main() {
         .route(
             "/api/v1/accounts/{id}/push-dingtalk",
             post(routes::accounts::push_account_dingtalk),
+        )
+        .route(
+            "/api/v1/accounts/{id}/nav-history",
+            get(routes::accounts::nav_history),
+        )
+        .route(
+            "/api/v1/accounts/{id}/rebalance-history",
+            get(routes::accounts::rebalance_history),
         )
         .layer(CorsLayer::permissive())
         .layer(trace_layer);

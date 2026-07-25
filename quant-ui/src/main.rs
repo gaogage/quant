@@ -52,6 +52,12 @@ fn UsersPage() -> Element {
     pages::admin::users::UsersPage()
 }
 
+#[component]
+fn FactorHealthPage() -> Element {
+    if !auth::AuthState::is_admin() { let nav = use_navigator(); nav.replace(Route::LoginPage {}); return rsx! { div {} }; }
+    pages::factor_health::FactorHealthPage()
+}
+
 // 登录页面
 #[component]
 fn LoginPage() -> Element {
@@ -76,6 +82,8 @@ enum Route {
         TasksPage {},
         #[route("/users")]
         UsersPage {},
+        #[route("/factors")]
+        FactorHealthPage {},
     #[end_layout]
     #[route("/login")]
     LoginPage {},

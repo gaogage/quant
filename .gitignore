@@ -32,3 +32,4 @@ bin/
 **/bin/**
 
 CLAUDE.md
+.env.quant

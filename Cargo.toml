@@ -38,7 +38,7 @@ anyhow = "1"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "local-time"] }
 log = "0.4"
 
 # Time
@@ -53,6 +53,9 @@ dotenv = "0.15"
 # Numerical
 rust_decimal = { version = "1", features = ["serde"] }
 
+# Hashing (audit 回测基线 hash 守卫,Step 0 DDD 重构安全网)
+sha2 = "0.10"
+
 # ML / Data Science
 ndarray = { version = "0.16", features = ["rayon", "serde"] }
 polars = { version = "0.52", features = ["lazy", "temporal", "dtype-datetime", "ndarray"] }
@@ -63,3 +66,11 @@ quant-common = { path = "quant-common" }
 quant-data = { path = "quant-data" }
 quant-backtest = { path = "quant-backtest" }
 quant-factor = { path = "quant-factor" }
+
+# 生产构建优化(与 aip 对齐):fat LTO + 单编译单元 + panic 直接 abort，
+# 适合 Docker 镜像场景(体积更小、运行更快，牺牲部分编译时长)。
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

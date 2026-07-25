@@ -249,9 +249,23 @@ pub async fn rebalance_account(
                 quant_common::trading_rules::LOT_SIZE,
             ))
         } else {
-            // 卖出:允许零头清仓(不足100股部分一次性清),不取整。
-            ("sell", -delta)
+            // 卖出:
+            // - 全仓清仓(target_qty == 0):允许零头一次性清光
+            // - 部分减仓:卖出量向下取整到100股(1手),保证剩余持仓仍为100整数倍
+            let sell_qty = -delta;
+            if target_qty > Decimal::ZERO {
+                ("sell", quant_common::trading_rules::round_down_to_lot(
+                    sell_qty,
+                    quant_common::trading_rules::LOT_SIZE,
+                ))
+            } else {
+                ("sell", sell_qty)
+            }
         };
+        // 取整后 qty 为 0 则跳过（不足 1 手不产生交易）
+        if qty <= Decimal::ZERO {
+            continue;
+        }
         // A 股交易阻断(停牌/涨跌停)——按 side 区分(P2-A 批量预加载):
         // 涨停('U')禁买可卖、跌停('D')禁卖可买、停牌买卖都禁。方向未知(NULL)保守都禁。
         if let Some(block) = trade_block_map.get(&p.symbol) {
@@ -416,9 +430,21 @@ pub async fn rebalance_account(
                 quant_common::trading_rules::LOT_SIZE,
             ))
         } else {
-            // 卖出:允许零头清仓(不足100股部分一次性清),不取整。
-            ("sell", -delta)
+            // 卖出(ETF):全仓清仓允许零头,部分减仓向下取整到100份
+            let sell_qty = -delta;
+            if target_qty > Decimal::ZERO {
+                ("sell", quant_common::trading_rules::round_down_to_lot(
+                    sell_qty,
+                    quant_common::trading_rules::LOT_SIZE,
+                ))
+            } else {
+                ("sell", sell_qty)
+            }
         };
+        // 取整后 qty 为 0 则跳过（不足 1 手不产生交易）
+        if qty <= Decimal::ZERO {
+            continue;
+        }
         let target_value = qty * price;
         let trade = crate::routes::trading::PlannedTrade {
             account_id: account_id.to_string(),
@@ -455,8 +481,27 @@ pub async fn rebalance_account(
     }
 
     // 9. NAV 重算:统一走 trading::update_current_nav(正确口径:持仓市值+cash-margin)
+    // update_current_nav 现同步更新 peak_nav / max_drawdown_pct（P0-3 修复）
     update_current_nav(db, account_id).await?;
     try_auto_repay(db, account_id).await.ok();
+
+    // P0-3 修复(2026-07-20): 实盘调仓路径此前只走 update_current_nav，从不维护
+    // total_trades / last_signal_date（只有 paper.rs 旧回放路径维护）。在此补齐：
+    // n = 本次成功成交笔数（A股建仓/清仓 + ETF 建仓），date = 调仓信号日。
+    // 到达此处说明未命中"n==0 且 持仓空"的错误早返回，即信号已生成，应记录 last_signal_date。
+    sqlx::query(
+        "UPDATE paper_account SET
+             total_trades = COALESCE(total_trades, 0) + $2,
+             last_signal_date = $3
+         WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .bind(n as i32)
+    .bind(date)
+    .execute(db)
+    .await
+    .map_err(|e| format!("update_account_stats: {}", e))?;
+
     Ok(n)
 }
 
@@ -549,8 +594,14 @@ async fn force_liquidation(
         }
         let need_repay_d = rust_decimal::Decimal::from_f64_retain(need_repay).unwrap_or(rust_decimal::Decimal::ZERO);
         let mut sell_qty = need_repay_d / sell_price;
+        // A股/ETF 最小交易单位 100，向下取整（部分卖出）；全仓清仓允许零头
         if sell_qty > qty {
             sell_qty = qty; // 清空该只
+        } else {
+            sell_qty = quant_common::trading_rules::round_down_to_lot(
+                sell_qty,
+                quant_common::trading_rules::LOT_SIZE,
+            );
         }
         if sell_qty <= rust_decimal::Decimal::new(1, 2) {
             break; // 量太小,避免死循环
@@ -754,6 +805,15 @@ async fn apply_fill_to_position(
         .await;
     } else {
         // sell
+        // 防御性兜底:A股/ETF 卖出量取整到100整数倍(全仓清仓已在 caller 处理)
+        let qty = quant_common::trading_rules::round_down_to_lot(
+            qty,
+            quant_common::trading_rules::LOT_SIZE,
+        );
+        if qty <= Decimal::ZERO {
+            return; // 取整后为 0，不执行卖出
+        }
+        let fill_amount = qty * fill_price; // 重算以匹配取整后的 qty
         // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
         // last_trade_date IS NULL(历史数据未标记)兜底允许卖出,避免误拦正常持仓。
         let t1_blocked: bool = sqlx::query_scalar(

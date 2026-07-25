@@ -6,7 +6,7 @@
 //! DELETE /api/v1/accounts/{id}   — 删除账号
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
     Json,
 };
@@ -14,7 +14,10 @@ use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use chrono::Datelike;
+// 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
+use quant_common::time_utils::fmt_datetime;
+
+use chrono::{Datelike, NaiveDate};
 
 use crate::auth::middleware::UserContext;
 use crate::routes::mvo_engine::compute_metrics;
@@ -152,6 +155,7 @@ struct AccountListRow {
 
 // ── 请求体 ──────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateAccountRequest {
     pub strategy_id: String,
@@ -164,6 +168,7 @@ pub struct CreateAccountRequest {
     pub signal_source: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct UpdateAccountRequest {
     pub name: Option<String>,
@@ -287,7 +292,10 @@ pub async fn list_accounts(
             "leverage_enabled": r.leverage_enabled, "leverage_mode": r.leverage_mode,
             "leverage_multiplier": r.leverage_multiplier, "status": r.status,
             "owner": r.user_id.unwrap_or_default(),
-            "current_nav": r.current_nav, "cash": r.cash, "max_drawdown": r.max_drawdown_pct,
+            "current_nav": r.current_nav, "cash": r.cash,
+            "max_drawdown": perf.max_drawdown_pct
+                .or_else(|| r.max_drawdown_pct.map(|v| v * 100.0))
+                .unwrap_or(0.0),
             "leverage_cap": r.leverage_cap,
             "margin_amount": r.margin_amount, "reserve_amount": r.reserve_amount,
             "strategy_version_id": r.strategy_version_id.unwrap_or_default(),
@@ -304,29 +312,37 @@ pub async fn list_accounts(
 
 // ── 详情 ────────────────────────────────────────────────
 
+/// 账号访问权限校验：admin 可访问任意账号；非 admin 只能访问自己拥有的账号(或无主账号)。
+/// account_detail / nav_history / rebalance_history 三个端点共用同一套校验规则。
+async fn check_account_access(
+    db: &sqlx::PgPool,
+    user: &UserContext,
+    account_id: &str,
+) -> Result<(), axum::response::Response> {
+    if user.role == "admin" {
+        return Ok(());
+    }
+    let owner = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await;
+    match owner {
+        Ok(Some((Some(oid),))) if oid == user.user_id => Ok(()),
+        Ok(Some((None,))) => Ok(()),
+        _ => Err(Json(serde_json::json!({"code": 403, "message": "无权访问"})).into_response()),
+    }
+}
+
 /// GET /api/v1/accounts/{id} — 账号详情（绩效+持仓+交易记录）
 pub async fn account_detail(
     State(state): State<Arc<AppState>>,
     user: UserContext,
     Path(account_id): Path<String>,
 ) -> impl IntoResponse {
-    // 权限校验
-    let is_admin = user.role == "admin";
-    if !is_admin {
-        let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(&account_id)
-        .fetch_optional(&state.db)
-        .await;
-        match owner {
-            Ok(Some((Some(oid),))) if oid == user.user_id => {}
-            Ok(Some((None,))) => {}
-            _ => {
-                return Json(serde_json::json!({"code": 403, "message": "无权访问"}))
-                    .into_response()
-            }
-        }
+    if let Err(resp) = check_account_access(&state.db, &user, &account_id).await {
+        return resp;
     }
 
     // 基本信息
@@ -453,7 +469,7 @@ pub async fn account_detail(
                 "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
                 "limit_price": lim.map(|v| v.to_string()).unwrap_or_default(),
                 "fill_price": fill_price.map(|v| v.to_string()).unwrap_or_default(),
-                "fill_time": fill_time.map(|t| t.to_string()).unwrap_or_default(),
+                "fill_time": fmt_datetime(fill_time).unwrap_or_default(),
                 "planned": {
                     "target_price": target_price.map(|v| v.to_string()),
                     "price_upper": upper.map(|v| v.to_string()),
@@ -475,7 +491,7 @@ pub async fn account_detail(
             "leverage_enabled": le, "leverage_mode": lm,
             "leverage_multiplier": lmp, "signal_source": ss,
             "status": st, "owner": uid.unwrap_or_default(),
-            "created_at": created.map(|t| t.to_string()),
+            "created_at": fmt_datetime(created.map(|t| t)),
             "metrics": {
                 "annual_return_pct": annual_return,
                 "cumulative_return_pct": (cum_ret * 100.0).round() / 100.0,
@@ -491,6 +507,323 @@ pub async fn account_detail(
             "positions": positions,
             "trades": trades,
         }
+    }))
+    .into_response()
+}
+
+// ── NAV 历史（P3-1 dashboard 画曲线用）─────────────────────
+
+#[derive(Deserialize)]
+pub struct NavHistoryParams {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+/// GET /api/v1/accounts/{id}/nav-history
+///
+/// 返回 paper_nav_snapshot 的逐日 NAV 序列 + 回测对比 + 基准（沪深300）曲线。
+/// 可选 start_date / end_date 限定时间范围，供前端日期选择器用。
+pub async fn nav_history(
+    State(state): State<Arc<AppState>>,
+    user: UserContext,
+    Path(account_id): Path<String>,
+    Query(params): Query<NavHistoryParams>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_account_access(&state.db, &user, &account_id).await {
+        return resp;
+    }
+
+    // 解析可选日期范围（格式 YYYY-MM-DD），None 时用极值兜底保证 SQL 统一
+    let parse_date = |s: &Option<String>| -> Option<NaiveDate> {
+        s.as_ref()
+            .and_then(|v| NaiveDate::parse_from_str(v, "%Y-%m-%d").ok())
+    };
+    let start_date = parse_date(&params.start_date)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
+    let end_date = parse_date(&params.end_date)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2099, 12, 31).unwrap());
+
+    // 从 paper_nav_snapshot 读取逐日 NAV 序列
+    let nav_rows: Vec<(NaiveDate, f64, f64, f64, f64)> = sqlx::query_as(
+        "SELECT snapshot_date, nav::double precision,
+                COALESCE(daily_return, 0)::double precision,
+                COALESCE(cumulative_return, 0)::double precision,
+                COALESCE(max_drawdown, 0)::double precision
+         FROM paper_nav_snapshot
+         WHERE paper_account_id = $1
+           AND snapshot_date >= $2
+           AND snapshot_date <= $3
+         ORDER BY snapshot_date",
+    )
+    .bind(&account_id)
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    // 与回测对比
+    let backtest_curve = query_backtest_comparison(&state.db, &account_id, &nav_rows).await;
+
+    // 基准曲线（沪深300）：以 NAV 序列首日~末日为区间，索引收盘价归一化为累计收益率
+    let benchmark = query_benchmark_curve(&state.db, &nav_rows).await;
+
+    let nav_data: Vec<serde_json::Value> = nav_rows
+        .into_iter()
+        .map(|(d, nav, dr, cr, mdd)| {
+            serde_json::json!({
+                "date": d.format("%Y-%m-%d").to_string(),
+                "nav": (nav * 100.0).round() / 100.0,
+                "daily_return": (dr * 100.0).round() / 100.0,
+                "cumulative_return": (cr * 100.0).round() / 100.0,
+                "max_drawdown": (mdd * 100.0).round() / 100.0,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "code": 0,
+        "data": {
+            "nav_history": nav_data,
+            "backtest_comparison": backtest_curve,
+            "benchmark": benchmark,
+        }
+    }))
+    .into_response()
+}
+
+/// 按 NAV 快照起点，取回测同期 backtest_equity_curve 归一化后的累计收益序列，
+/// 供前端画"实盘 vs 回测"双线对比图。归一化基准 = 双方在起始日的值都设为 0%。
+async fn query_backtest_comparison(
+    db: &sqlx::PgPool,
+    account_id: &str,
+    nav_rows: &[(NaiveDate, f64, f64, f64, f64)],
+) -> serde_json::Value {
+    let Some((from_date, ..)) = nav_rows.first().copied() else {
+        return serde_json::Value::Null;
+    };
+    let Some((to_date, ..)) = nav_rows.last().copied() else {
+        return serde_json::Value::Null;
+    };
+
+    let acct_meta: Option<(Option<String>, f64)> = sqlx::query_as(
+        "SELECT strategy_version_id, COALESCE(leverage_multiplier, 1.0)::double precision \
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some((Some(sv_id), leverage_multiplier)) = acct_meta else {
+        return serde_json::Value::Null;
+    };
+
+    // P1 修复:优先读 composite 合成曲线(消除纯 A 股曲线的结构性偏差),
+    // 按账号 leverage_multiplier 放大(composite 曲线本身无杠杆)。缺失则回退 A 股曲线。
+    let composite_rows: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as(
+        "SELECT trade_date, portfolio_value::double precision FROM backtest_composite_equity_curve
+         WHERE strategy_id = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date",
+    )
+    .bind(&sv_id)
+    .bind(from_date)
+    .bind(to_date)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let bt_rows: Vec<(chrono::NaiveDate, f64)> = if !composite_rows.is_empty() {
+        composite_rows
+    } else {
+        let Ok(rs) = crate::routes::strategy::load_resolved_strategy(db, &sv_id).await else {
+            return serde_json::Value::Null;
+        };
+        let a_share = rs
+            .assets
+            .iter()
+            .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare);
+        let Some(task_id) = a_share.and_then(|a| a.security.equity_curve_task_id.clone()) else {
+            return serde_json::Value::Null;
+        };
+        sqlx::query_as(
+            "SELECT trade_date, portfolio_value::double precision FROM backtest_equity_curve
+             WHERE task_id = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date",
+        )
+        .bind(&task_id)
+        .bind(from_date)
+        .bind(to_date)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default()
+    };
+
+    if bt_rows.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let base = bt_rows[0].1;
+    if base <= 0.0 {
+        return serde_json::Value::Null;
+    }
+
+    let series: Vec<serde_json::Value> = bt_rows
+        .into_iter()
+        .map(|(d, pv)| {
+            let ret_pct = (pv / base - 1.0) * leverage_multiplier * 100.0;
+            serde_json::json!({
+                "date": d.format("%Y-%m-%d").to_string(),
+                "cumulative_return": (ret_pct * 100.0).round() / 100.0,
+            })
+        })
+        .collect();
+
+    serde_json::json!(series)
+}
+
+/// 查询基准（沪深300 `000300.SH`）在 NAV 序列区间内的日线收盘价，归一化为累计收益率序列。
+///
+/// 基准固定为 `000300.SH`（与 `paper.rs` 中 `req.benchmark.unwrap_or("000300.SH")` 默认一致）。
+/// 归一化：首日 close 为基准 0%，后续 `cumulative_return = (close_i / close_first - 1.0) * 100.0`。
+/// 若区间内无指数数据，返回 Null。
+async fn query_benchmark_curve(
+    db: &sqlx::PgPool,
+    nav_rows: &[(NaiveDate, f64, f64, f64, f64)],
+) -> serde_json::Value {
+    let Some((from_date, ..)) = nav_rows.first().copied() else {
+        return serde_json::Value::Null;
+    };
+    let Some((to_date, ..)) = nav_rows.last().copied() else {
+        return serde_json::Value::Null;
+    };
+
+    let bench_symbol = "000300.SH"; // 与 paper.rs 默认一致
+
+    let bp_rows: Vec<(NaiveDate, f64)> = sqlx::query_as(
+        "SELECT trade_date, close::double precision
+         FROM market_index_daily_bar
+         WHERE symbol = $1 AND trade_date >= $2 AND trade_date <= $3
+         ORDER BY trade_date",
+    )
+    .bind(bench_symbol)
+    .bind(from_date)
+    .bind(to_date)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    if bp_rows.len() < 2 {
+        return serde_json::Value::Null;
+    }
+    let first_close = bp_rows[0].1;
+    if first_close <= 0.0 {
+        return serde_json::Value::Null;
+    }
+
+    let curve: Vec<serde_json::Value> = bp_rows
+        .into_iter()
+        .map(|(d, close)| {
+            let cum_ret = (close / first_close - 1.0) * 100.0;
+            serde_json::json!({
+                "date": d.format("%Y-%m-%d").to_string(),
+                "cumulative_return": (cum_ret * 100.0).round() / 100.0,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "symbol": bench_symbol,
+        "name": "沪深300",
+        "curve": curve,
+    })
+}
+
+// ── 调仓历史（P3-3）───────────────────────────────────────
+
+/// GET /api/v1/accounts/{id}/rebalance-history
+///
+/// 按交易日分组汇总调仓记录。从 paper_order 表聚合，每交易日一组：
+/// - 交易日 / 买笔数+金额 / 卖笔数+金额 / 每笔交易明细（trades 数组）
+/// 点击日期可展开查看当日所有成交明细。
+pub async fn rebalance_history(
+    State(state): State<Arc<AppState>>,
+    user: UserContext,
+    Path(account_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_account_access(&state.db, &user, &account_id).await {
+        return resp;
+    }
+
+    // 1. 聚合摘要（按日期）
+    let rows: Vec<(chrono::NaiveDate, i64, i64, f64, f64)> = sqlx::query_as(
+        "SELECT DATE(created_at),
+                COUNT(*) FILTER (WHERE side='buy')::bigint,
+                COUNT(*) FILTER (WHERE side='sell')::bigint,
+                COALESCE(SUM(target_value) FILTER (WHERE side='buy'), 0)::double precision,
+                COALESCE(SUM(target_value) FILTER (WHERE side='sell'), 0)::double precision
+         FROM paper_order
+         WHERE paper_account_id = $1 AND status = 'filled'
+         GROUP BY 1 ORDER BY 1 DESC LIMIT 60",
+    )
+    .bind(&account_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    // 2. 交易明细（全部 filled 订单，含成交价）
+    let trades: Vec<(chrono::NaiveDate, String, String, String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, String)> = sqlx::query_as(
+        "SELECT DATE(o.created_at) as trade_date,
+                o.order_id, o.symbol, o.side,
+                o.quantity, o.target_price,
+                f.price as fill_price,
+                o.status
+         FROM paper_order o
+         LEFT JOIN paper_fill f ON o.order_id = f.planned_order_id
+         WHERE o.paper_account_id = $1 AND o.status = 'filled'
+         ORDER BY o.created_at DESC",
+    )
+    .bind(&account_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    // 3. 按日期分组交易明细
+    let mut trades_by_date: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for (trade_date, oid, symbol, side, qty, target_price, fill_price, status) in trades {
+        let key = trade_date.format("%Y-%m-%d").to_string();
+        trades_by_date.entry(key).or_default().push(serde_json::json!({
+            "order_id": oid,
+            "symbol": symbol,
+            "side": side,
+            "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
+            "target_price": target_price.map(|v| v.to_string()),
+            "fill_price": fill_price.map(|v| v.to_string()),
+            "status": status,
+        }));
+    }
+
+    let history: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(date, buy_n, sell_n, buy_amt, sell_amt)| {
+            let total = buy_n + sell_n;
+            let turnover = buy_amt + sell_amt;
+            let date_str = date.format("%Y-%m-%d").to_string();
+            let day_trades = trades_by_date.remove(&date_str).unwrap_or_default();
+            serde_json::json!({
+                "date": date_str,
+                "buy_count": buy_n,
+                "sell_count": sell_n,
+                "total_count": total,
+                "buy_amount": (buy_amt * 100.0).round() / 100.0,
+                "sell_amount": (sell_amt * 100.0).round() / 100.0,
+                "turnover": (turnover * 100.0).round() / 100.0,
+                "trades": day_trades,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "code": 0,
+        "data": { "rebalance_history": history }
     }))
     .into_response()
 }
@@ -811,7 +1144,7 @@ pub async fn push_account_dingtalk(
     .ok()
     .flatten();
 
-    let mdd = perf.and_then(|(m,)| m).unwrap_or(0.0) / 100.0; // pct → decimal
+    let mdd = perf.and_then(|(m,)| m).unwrap_or(0.0); // DB 存的是小数（0.1238 = 12.38%），dingtalk.rs 会 ×100 显示为百分比
     let cum_ret = if nav > 0.0 {
         // 从 paper_account 获取 initial_capital 计算
         let cap: Option<(f64,)> = sqlx::query_as(

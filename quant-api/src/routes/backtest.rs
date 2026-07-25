@@ -33,6 +33,9 @@ use quant_backtest::signal_generator::{
     TradableUniverseProfile,
 };
 
+// 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
+use quant_common::time_utils::fmt_rfc3339_local;
+
 use crate::AppState;
 
 #[derive(Debug, Default, Deserialize)]
@@ -840,10 +843,10 @@ async fn cleanup_stale_backtest_tasks_inner(
                     "status": status,
                     "next_status": stale_backtest_cleanup_terminal_status(status),
                     "progress": progress,
-                    "last_heartbeat_at": last_heartbeat_at.map(|ts| ts.to_rfc3339()),
-                    "started_at": started_at.map(|ts| ts.to_rfc3339()),
-                    "created_at": created_at.to_rfc3339(),
-                    "observed_at": observed_at.to_rfc3339(),
+                    "last_heartbeat_at": fmt_rfc3339_local(*last_heartbeat_at),
+                    "started_at": fmt_rfc3339_local(*started_at),
+                    "created_at": fmt_rfc3339_local(Some(*created_at)),
+                    "observed_at": fmt_rfc3339_local(Some(observed_at)),
                     "heartbeat_timeout_seconds": timeout_seconds,
                 })
             },

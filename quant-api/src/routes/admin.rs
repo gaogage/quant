@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 use crate::auth::middleware::{require_admin, UserContext};
 use crate::AppState;
+// 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
+use quant_common::time_utils::fmt_datetime;
 // ── User Management ─────────────────────────────────────────
 
 /// GET /api/v1/admin/users — list all users
@@ -200,7 +202,7 @@ pub async fn list_tasks(
         .map(|(n, tt, en, cron, p, lr, rc)| {
             serde_json::json!({
                 "task_name": n, "task_type": tt, "enabled": en, "schedule_cron": cron,
-                "params": p, "last_run_at": lr.map(|t| t.to_string()), "run_count": rc
+                "params": p, "last_run_at": fmt_datetime(lr), "run_count": rc
             })
         })
         .collect();
@@ -264,6 +266,45 @@ pub async fn run_task(
 }
 
 // ── Data Sync Status ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PerformanceReportRequest {
+    /// 日报日期(YYYYMMDD),不传则用今日
+    pub date: Option<String>,
+}
+
+/// POST /api/v1/admin/performance-report — 手动触发实盘绩效日报(遍历所有 active 模拟盘)
+///
+/// 正常由 16:00 EOD scheduler 自动触发(scheduler.rs push_daily_performance_report)，
+/// 此端点用于手动补发/重发(如当日 EOD 时段服务重启错过自动触发)。
+pub async fn trigger_performance_report(
+    State(state): State<Arc<AppState>>,
+    admin: UserContext,
+    Json(req): Json<PerformanceReportRequest>,
+) -> axum::response::Response {
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
+
+    let date = req
+        .date
+        .as_deref()
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok())
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+
+    match crate::routes::scheduler::push_daily_performance_report(&state.db, date).await {
+        Ok(_) => Json(serde_json::json!({
+            "code": 0,
+            "message": format!("绩效日报已生成并推送 {}", date.format("%Y-%m-%d"))
+        }))
+        .into_response(),
+        Err(e) => Json(serde_json::json!({
+            "code": 1,
+            "message": format!("绩效日报生成失败: {}", e)
+        }))
+        .into_response(),
+    }
+}
 
 /// GET /api/v1/admin/sync/status — check data freshness
 pub async fn sync_status(
@@ -1166,6 +1207,7 @@ pub async fn repair_sync(
 
 // ── ML 全市场预测重建 ─────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RebuildFullUniverseRequest {
     /// 预测起始日期（YYYYMMDD），默认今天
@@ -1336,4 +1378,87 @@ pub async fn manual_rebalance(
         }))
         .into_response(),
     }
+}
+
+// ── Factor Health (P3-2) ──────────────────────────────────────
+
+/// GET /api/v1/admin/factor-health — v24 14 因子每日覆盖率 + 滞缓状态
+pub async fn factor_health(
+    State(state): State<Arc<AppState>>,
+    admin: UserContext,
+) -> axum::response::Response {
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
+
+    let today = chrono::Utc::now().date_naive();
+
+    // 最近交易日
+    let latest_trade: Option<chrono::NaiveDate> = sqlx::query_scalar(
+        "SELECT trade_date FROM market_trade_calendar
+         WHERE is_open = true AND trade_date <= $1
+         ORDER BY trade_date DESC LIMIT 1",
+    )
+    .bind(today)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let mut factors: Vec<serde_json::Value> = Vec::new();
+    if let Some(latest_td) = latest_trade {
+        let window_start = latest_td - chrono::Duration::days(30);
+
+        // 单次查询拿每因子最新日覆盖数 + 近 30 日 max
+        for code in crate::routes::scheduler::V24_FACTOR_CODES {
+            let fresh: Option<(chrono::NaiveDate, i64, i64)> = sqlx::query_as(
+                "WITH per_day AS (
+                    SELECT trade_date, COUNT(DISTINCT symbol) AS cnt
+                    FROM factor_value
+                    WHERE factor_code = $1 AND factor_version = '1.0.0'
+                      AND trade_date >= $2
+                    GROUP BY trade_date
+                 ),
+                 latest AS (
+                    SELECT trade_date, cnt FROM per_day ORDER BY trade_date DESC LIMIT 1
+                 )
+                 SELECT l.trade_date, l.cnt, COALESCE(MAX(p.cnt), 0) AS recent_max
+                 FROM latest l CROSS JOIN per_day p",
+            )
+            .bind(code)
+            .bind(window_start)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+            let (factor_dt, latest_cnt, recent_max) = fresh.unwrap_or((today, 0, 0));
+            let is_stale = factor_dt < latest_td;
+            let coverage_pct = if recent_max > 0 {
+                (latest_cnt as f64 / recent_max as f64 * 1000.0).round() / 10.0
+            } else {
+                0.0
+            };
+
+            factors.push(serde_json::json!({
+                "factor_code": code,
+                "latest_date": factor_dt.format("%Y-%m-%d").to_string(),
+                "latest_count": latest_cnt,
+                "recent_max_count": recent_max,
+                "coverage_pct": coverage_pct,
+                "is_stale": is_stale,
+                "gap_days": if is_stale { (latest_td - factor_dt).num_days() } else { 0 },
+            }));
+        }
+    }
+
+    Json(serde_json::json!({
+        "code": 0,
+        "data": {
+            "check_date": today.format("%Y-%m-%d").to_string(),
+            "latest_trade_date": latest_trade.map(|d| d.format("%Y-%m-%d").to_string()),
+            "factors": factors,
+        }
+    }))
+    .into_response()
 }

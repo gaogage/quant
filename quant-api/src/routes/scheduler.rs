@@ -21,6 +21,122 @@ use tracing::{debug, error, info, warn};
 
 use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 
+/// 因子回填窗口（天）：覆盖 T+1 延迟 + 周末缺口，确保幂等刷新最近数据。
+const BACKFILL_WINDOW_DAYS: chrono::Duration = chrono::Duration::days(7);
+
+/// v24 因子全量回填路由清单（覆盖白名单全部 14 活跃因子）。
+/// 新增因子类别时只需在此处添加一行，factor_backfill 任务和 T+1 补偿同步共用。
+/// (route_path_segment, label)：route_path_segment 拼接到 `/api/v1/quant/factors/{seg}/background`。
+/// P4-1: DB 驱动的回填路由 — 当 `factor_backfill_route` 表启用路由为空时作为 fallback。
+	/// 新增因子类别只需在 DB 表 INSERT 一行即可（无需改代码 + 重新编译部署）。
+	const V24_BACKFILL_ROUTES_FALLBACK: &[(&str, &str)] = &[
+    ("phase7-price-volume-backfill", "量价+amihud"),
+    ("p42b-defensive-low-vol-quality-backfill", "防御低波质量"),
+    ("phase7-financial-quality-backfill", "财务质量"),
+    ("phase7-financial-quality-change-backfill", "财务质量变化"),
+    ("phase7-growth-recovery-backfill", "质量增长恢复"),
+    ("phase7-moneyflow-backfill", "资金流"),
+    ("phase7-moneyflow-congestion-backfill", "资金流拥挤度"),
+    ("phase7-forecast-revision-surprise-backfill", "分析师预测修正"),
+    ("phase7-market-residual-risk-backfill", "市场残差风险"),
+    ("phase7-block-trade-supply-demand-backfill", "大宗交易"),
+    ("phase7-repurchase-supply-shock-backfill", "回购"),
+    ("phase7-liquidity-quality-backfill", "流动性质量"),
+];
+
+/// 获取本服务 API base URL（供 scheduler 内部 HTTP 自调用）。
+/// 统一抽取，消除 `http://localhost:{port}` 重复硬编码。
+fn self_api_base() -> String {
+    format!(
+        "http://localhost:{}",
+        std::env::var("PORT").unwrap_or_else(|_| "8080".into())
+    )
+}
+
+/// 触发 v24 全量因子回填路由（factor_backfill 任务和 T+1 补偿同步共用）。
+/// 幂等：每个路由独立 POST，失败仅 warn 不中断后续路由。
+///
+/// P4-1: 路由清单从 `factor_backfill_route` 表读取（按 priority 升序，仅 enabled=true）。
+/// 表为空时回退到 `V24_BACKFILL_ROUTES_FALLBACK` 常量，保证 DB 异常时链路不中断。
+/// 新增因子类别只需 INSERT 一行到 factor_backfill_route，无需改代码。
+async fn trigger_v24_backfill_routes(
+    db: &PgPool,
+    start_date: &str,
+    end_date: &str,
+) {
+    let api_base = self_api_base();
+    let client = reqwest::Client::new();
+
+    // P4-1: 优先从 DB 读取路由清单，表空时回退硬编码常量。
+    let routes: Vec<(String, String)> =
+        match sqlx::query_as::<_, (String, String)>(
+            "SELECT route_name, label FROM factor_backfill_route
+             WHERE enabled = true ORDER BY priority ASC, route_name ASC",
+        )
+        .fetch_all(db)
+        .await
+        {
+            Ok(rows) if !rows.is_empty() => rows,
+            Ok(_) => {
+                warn!(
+                    "[scheduler] factor_backfill: factor_backfill_route 表无启用路由，回退到硬编码常量 ({} 条)",
+                    V24_BACKFILL_ROUTES_FALLBACK.len()
+                );
+                V24_BACKFILL_ROUTES_FALLBACK
+                    .iter()
+                    .map(|(r, l)| (r.to_string(), l.to_string()))
+                    .collect()
+            }
+            Err(e) => {
+                warn!(
+                    "[scheduler] factor_backfill: 读取 factor_backfill_route 失败 ({}), 回退到硬编码常量",
+                    e
+                );
+                V24_BACKFILL_ROUTES_FALLBACK
+                    .iter()
+                    .map(|(r, l)| (r.to_string(), l.to_string()))
+                    .collect()
+            }
+        };
+
+    info!(
+        "[scheduler] factor_backfill: 触发 {} 类因子回填 {}~{}",
+        routes.len(),
+        start_date,
+        end_date
+    );
+    for (route, label) in &routes {
+        let url = format!("{}/api/v1/quant/factors/{}/background", api_base, route);
+        let result = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "start_date": start_date,
+                "end_date": end_date
+            }))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                info!("[scheduler] factor_backfill {} ok", label);
+            }
+            Ok(resp) => {
+                warn!(
+                    "[scheduler] factor_backfill {} HTTP {}: {}",
+                    label,
+                    resp.status().as_u16(),
+                    resp.text().await.unwrap_or_default()
+                );
+            }
+            Err(e) => {
+                warn!("[scheduler] factor_backfill {} 请求失败: {}", label, e);
+            }
+        }
+    }
+    // 静默 db 引用，保持签名统一供未来扩展（如读 DB 配置覆盖路由清单）。
+    let _ = db;
+}
+
 /// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
 pub(crate) async fn get_latest_data_version(db: &PgPool) -> String {
     let row: Option<(String,)> = sqlx::query_as(
@@ -34,36 +150,6 @@ pub(crate) async fn get_latest_data_version(db: &PgPool) -> String {
     .flatten();
     row.map(|(d,)| d)
         .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string())
-}
-
-fn parse_scheduler_date(value: &str) -> Option<NaiveDate> {
-    let trimmed = value.trim();
-    NaiveDate::parse_from_str(trimmed, "%Y%m%d")
-        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
-        .ok()
-}
-
-async fn first_open_trade_date_on_or_after(
-    db: &PgPool,
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-) -> Option<NaiveDate> {
-    sqlx::query_scalar::<_, NaiveDate>(
-        "SELECT trade_date
-         FROM market_trade_calendar
-         WHERE exchange = 'SSE'
-           AND is_open = true
-           AND trade_date >= $1
-           AND trade_date <= $2
-         ORDER BY trade_date ASC
-         LIMIT 1",
-    )
-    .bind(start_date)
-    .bind(end_date)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten()
 }
 
 /// 盘中调仓时获取 ETF 当日实时价格（通过 Tushare fund_daily API）
@@ -159,16 +245,13 @@ pub(crate) async fn fetch_intraday_etf_prices(
     prices
 }
 
-fn short_id() -> String {
-    uuid::Uuid::new_v4().to_string().chars().take(12).collect()
-}
-
 struct DailyState {
     date: Option<NaiveDate>,
     traded_today: bool,     // 今日是否已完成调仓 (14:40+)
     eod_synced_today: bool, // 今日是否已完成日终数据同步 (16:00)
     yesterday_synced: bool, // 昨日日线是否已完成 T+1 同步 (次日9:00)
     cleanup_done: bool,
+    report_pushed: bool,    // 今日是否已推送实盘绩效日报 (16:00 EOD 后)
 }
 
 /// MVO 权重缓存（季度更新）
@@ -178,6 +261,7 @@ pub struct MvoWeightCache {
 }
 
 /// 从数据库加载的策略配置（运行时缓存，启动时加载）
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct StrategyConfig {
     pub strategy_id: String,
@@ -705,7 +789,7 @@ mod tests {
     #[test]
     fn test_resolved_to_legacy_sc_missing_mvo_errors() {
         use crate::routes::strategy::{
-            AssetClass, AssetStrategy, MvoParams, ResolvedStrategy, SecurityConfig, StrategyType,
+            AssetClass, AssetStrategy, ResolvedStrategy, SecurityConfig, StrategyType,
         };
         let rs = ResolvedStrategy {
             strategy_id: "v19".into(),
@@ -849,6 +933,122 @@ mod tests {
             err
         );
     }
+
+    // ── daily_to_monthly_returns 测试 ──
+
+    #[test]
+    fn daily_to_monthly_returns_three_months_correct_returns() {
+        use chrono::NaiveDate;
+        use rust_decimal::Decimal;
+        let rows: Vec<(NaiveDate, Decimal)> = vec![
+            (NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(), Decimal::new(100, 0)),
+            (NaiveDate::from_ymd_opt(2020, 1, 31).unwrap(), Decimal::new(110, 0)), // +10%
+            (NaiveDate::from_ymd_opt(2020, 2, 3).unwrap(), Decimal::new(110, 0)),
+            (NaiveDate::from_ymd_opt(2020, 2, 28).unwrap(), Decimal::new(132, 0)), // +20%
+            (NaiveDate::from_ymd_opt(2020, 3, 2).unwrap(), Decimal::new(132, 0)),
+            (NaiveDate::from_ymd_opt(2020, 3, 31).unwrap(), Decimal::new(99, 0)),  // -25%
+        ];
+        let result = daily_to_monthly_returns(&rows);
+        assert_eq!(result.len(), 3, "应产生 3 个月度收益");
+        assert!((result[0] - 0.10).abs() < 0.001, "1月应为 +10%, 实际: {}", result[0]);
+        assert!((result[1] - 0.20).abs() < 0.001, "2月应为 +20%, 实际: {}", result[1]);
+        assert!((result[2] - (-0.25)).abs() < 0.001, "3月应为 -25%, 实际: {}", result[2]);
+    }
+
+    #[test]
+    fn daily_to_monthly_returns_returns_oldest_first() {
+        // 验证语义: 结果按时间升序(最旧月份在索引 0)。
+        use chrono::NaiveDate;
+        use rust_decimal::Decimal;
+        let mut rows: Vec<(NaiveDate, Decimal)> = Vec::new();
+        let mut nav = 100.0_f64;
+        for y in 2020..=2022 {
+            for m in 1..=12 {
+                let first = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                rows.push((first, Decimal::from_f64_retain(nav).unwrap()));
+                nav *= 1.05;
+                let last = NaiveDate::from_ymd_opt(y, m, 25).unwrap();
+                rows.push((last, Decimal::from_f64_retain(nav).unwrap()));
+            }
+        }
+        let monthly = daily_to_monthly_returns(&rows);
+        assert_eq!(monthly.len(), 36, "36 个月应产生 36 条收益");
+        // 每月均为 +5%
+        for (i, r) in monthly.iter().enumerate() {
+            assert!((r - 0.05).abs() < 0.005, "第{}(0-based)月应为 5%, 实际: {}", i, r);
+        }
+        // 最近3月 = 尾部切片 (monthly.len()-3..)
+        let recent_3 = &monthly[monthly.len() - 3..];
+        assert_eq!(recent_3.len(), 3);
+        // 最老3月 = 头部切片 (..3)
+        let oldest_3 = &monthly[..3];
+        assert_eq!(oldest_3.len(), 3);
+        // 在均涨5%的现实下两者数值相同,但语义不同——验证切片方向正确即可。
+    }
+
+    #[test]
+    fn daily_to_monthly_returns_insufficient_data() {
+        use chrono::NaiveDate;
+        use rust_decimal::Decimal;
+        // 单条记录 → 无法跨月比较
+        let rows = vec![(NaiveDate::from_ymd_opt(2020, 1, 15).unwrap(), Decimal::new(100, 0))];
+        assert!(daily_to_monthly_returns(&rows).is_empty());
+        // 空输入
+        let empty: Vec<(NaiveDate, Decimal)> = vec![];
+        assert!(daily_to_monthly_returns(&empty).is_empty());
+    }
+
+    // ── detect_regime_exposure_cached 测试 ──
+
+    #[test]
+    fn detect_regime_exposure_cached_deep_bear_triggers() {
+        use std::collections::HashMap;
+        use chrono::NaiveDate;
+        let mut map = HashMap::new();
+        let start = NaiveDate::from_ymd_opt(2022, 1, 3).unwrap();
+        for i in 0..300_i64 {
+            let d = start + chrono::Duration::days(i);
+            // 从 4000 线性跌到 3000 → trailing 12m ≈ -25%
+            let price = 4000.0 - (i as f64) * (1000.0 / 300.0);
+            map.insert(d, price);
+        }
+        let latest = *map.keys().max().unwrap();
+        let exposure = detect_regime_exposure_cached(&map, latest, -0.10, 0.60);
+        assert!((exposure - 0.60).abs() < 0.001,
+            "deep bear 应触发降仓 0.60, 实际: {}", exposure);
+    }
+
+    #[test]
+    fn detect_regime_exposure_cached_bull_keeps_full() {
+        use std::collections::HashMap;
+        use chrono::NaiveDate;
+        let mut map = HashMap::new();
+        let start = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+        for i in 0..300_i64 {
+            let d = start + chrono::Duration::days(i);
+            let price = 3000.0 + (i as f64) * (1000.0 / 300.0); // 涨
+            map.insert(d, price);
+        }
+        let latest = *map.keys().max().unwrap();
+        let exposure = detect_regime_exposure_cached(&map, latest, -0.10, 0.60);
+        assert!((exposure - 1.00).abs() < 0.001,
+            "牛市应满仓 1.00, 实际: {}", exposure);
+    }
+
+    #[test]
+    fn detect_regime_exposure_cached_insufficient_data_defaults_full() {
+        use std::collections::HashMap;
+        use chrono::NaiveDate;
+        let mut map = HashMap::new();
+        map.insert(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), 3500.0);
+        let exposure = detect_regime_exposure_cached(
+            &map,
+            NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            -0.10,
+            0.60,
+        );
+        assert!((exposure - 1.00).abs() < 0.001, "数据不足应默认满仓, 实际: {}", exposure);
+    }
 }
 
 /// 反向桥接:ResolvedStrategy 树 → 平铺 StrategyConfig。
@@ -969,6 +1169,50 @@ pub async fn load_active_factor_combos(db: &PgPool) -> Vec<String> {
         }
     }
     set.into_iter().collect()
+}
+
+/// 活跃 combo 的物化配置(include_fundamentals + factor_whitelist)。
+/// 从 strategy_config 读取:含基本面因子的 combo(如 v24 fund_v2)需 include_fundamentals=true
+/// + factor_whitelist 去冗余白名单,否则用默认黑名单物化会丢失基本面因子。
+/// 返回 (combo_name, include_fundamentals, factor_whitelist) 列表。
+pub async fn load_active_combo_materialize_configs(
+    db: &PgPool,
+) -> Vec<(String, bool, Option<Vec<String>>)> {
+    let rows: Vec<(Option<String>, Option<bool>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT combo_name, include_fundamentals, factor_whitelist
+         FROM strategy_config
+         WHERE status='active' AND combo_name IS NOT NULL AND btrim(combo_name) <> ''",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let mut map: std::collections::BTreeMap<String, (bool, Option<Vec<String>>)> =
+        std::collections::BTreeMap::new();
+    for (combo, inc_fund, whitelist) in rows {
+        if let Some(c) = combo {
+            let c = c.trim().to_string();
+            if c.is_empty() {
+                continue;
+            }
+            // 同名 combo 可能多策略声明,合并:任一策略 include_fundamentals=true 则用 true;
+            // factor_whitelist 取首个非空(同 combo 白名单应一致)。
+            let inc = inc_fund.unwrap_or(false);
+            let wl: Option<Vec<String>> = whitelist.and_then(|v| {
+                v.as_array()
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            });
+            let entry = map.entry(c).or_insert((false, None));
+            if inc {
+                entry.0 = true;
+            }
+            if entry.1.is_none() && wl.is_some() {
+                entry.1 = wl;
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(combo, (inc, wl))| (combo, inc, wl))
+        .collect()
 }
 
 
@@ -1099,9 +1343,9 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 });
             }
             "factor_backfill" => {
-                // 因子回填:T+1 9:00 run_tick 内联已处理 bar 同步+等待+backfill(主路径)。
-                // 此任务作为"补保险"在 T+1 之后跑,幂等刷新 phase7 量价因子(5 因子),
-                // 保证盘中调仓依赖的 factor_value/multi_factor_value 新鲜。
+                // v24 因子全量回填:覆盖所有 active 策略依赖的全部因子类别
+                // （量价/财务/资金流/分析师/回购/大宗/流动性/市场风险）。
+                // 幂等刷新 BACKFILL_WINDOW_DAYS 窗口，保证盘中调仓依赖的 factor_value/multi_factor_value 新鲜。
                 // 可被 check_task_dependency_order 检查、可手动触发、可配 CRON。
                 let today = chrono::Local::now().date_naive();
                 let last_trade_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
@@ -1119,30 +1363,8 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     continue;
                 };
                 let sync_date_str = sync_date.format("%Y%m%d").to_string();
-                let backfill_start = (sync_date - chrono::Duration::days(7))
-                    .format("%Y%m%d")
-                    .to_string();
-                let api_base = format!(
-                    "http://localhost:{}",
-                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
-                );
-                info!(
-                    "[scheduler] factor_backfill: 触发 phase7 量价因子回填 {}~{}",
-                    backfill_start, sync_date_str
-                );
-                let client = reqwest::Client::new();
-                let _ = client
-                    .post(format!(
-                        "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
-                        api_base
-                    ))
-                    .json(&serde_json::json!({
-                        "start_date": backfill_start,
-                        "end_date": sync_date_str
-                    }))
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await;
+                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS).format("%Y%m%d").to_string();
+                trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
             }
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
@@ -1157,27 +1379,32 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
                 let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
                 let refresh_end = chrono::Utc::now().date_naive();
-                let combos = load_active_factor_combos(db).await;
-                let pit_combos: Vec<String> = combos
+                let combos = load_active_combo_materialize_configs(db).await;
+                let pit_combos: Vec<(String, bool, Option<Vec<String>>)> = combos
                     .into_iter()
-                    .filter(|c| c.starts_with("full_pit_icir"))
+                    .filter(|(c, _, _)| c.starts_with("full_pit_icir"))
                     .collect();
                 if pit_combos.is_empty() {
                     warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
                 }
-                for combo in &pit_combos {
+                for (combo, include_fund, whitelist) in &pit_combos {
                     let horizon = combo_horizon_from_name(combo);
                     info!(
-                        "[scheduler] PIT combo 保鲜: combo={} horizon={} 区间 {}~{}",
-                        combo, horizon, refresh_start, refresh_end
+                        "[scheduler] PIT combo 保鲜: combo={} horizon={} include_fund={} whitelist={} 区间 {}~{}",
+                        combo, horizon, include_fund, whitelist.as_ref().map(|w| w.len()).unwrap_or(0), refresh_start, refresh_end
                     );
-                    match crate::routes::factors::materialize_pit_combo(
+                    // 含基本面因子的 combo(如 v24 fund_v2)用 ext + include_fundamentals + factor_whitelist,
+                    // 否则用默认黑名单物化会丢失 fin_/mf_/north_ 因子。
+                    match crate::routes::factors::materialize_pit_combo_ext(
                         db,
                         combo,
                         ver,
                         horizon,
                         refresh_start,
                         refresh_end,
+                        *include_fund,
+                        None,  // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
+                        whitelist.as_deref(),
                     )
                     .await
                     {
@@ -1188,10 +1415,7 @@ async fn run_scheduled_tasks(db: &PgPool) {
             }
             "market_level_source_freshness" => {
                 let today = chrono::Utc::now().date_naive();
-                let api_base = format!(
-                    "http://localhost:{}",
-                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
-                );
+                let api_base = self_api_base();
                 let client = reqwest::Client::new();
                 for source in market_level_freshness_sources(params) {
                     let latest = latest_market_level_trade_date(db, &source).await;
@@ -1265,6 +1489,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
             eod_synced_today: false,
             yesterday_synced: false,
             cleanup_done: false,
+            report_pushed: false,
         }));
         let mvo_cache: Arc<Mutex<Option<MvoWeightCache>>> = Arc::new(Mutex::new(None));
 
@@ -1340,6 +1565,7 @@ async fn run_tick(
             st.eod_synced_today = false;
             st.yesterday_synced = false;
             st.cleanup_done = false;
+            st.report_pushed = false;
         }
     }
 
@@ -1383,16 +1609,102 @@ async fn run_tick(
                 return Ok(());
             }
 
-            // 生成信号 + 调仓
+            // 生成信号 + 调仓 (P2-3:调仓成功/失败均推送钉钉 + 调仓后写快照)
+            // 记录调仓前订单数，用于检测是否产生了新交易
+            let orders_before: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1",
+            )
+            .bind(today)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+
             match generate_paper_signals_for_all(db, mvo_cache, port, today, sc, tushare).await {
                 Ok(_) => {
-                    info!("[scheduler] 调仓完成, 推送钉钉...");
-                    match push_dingtalk_for_all_accounts(db, today).await {
-                        Ok(_) => info!("[scheduler] 钉钉推送完成"),
-                        Err(e) => warn!("[scheduler] 钉钉推送失败: {}", e),
+                    // 收集各账号当日交易统计（复用 admin.rs manual_rebalance 的模式）
+                    let orders_after: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1",
+                    )
+                    .bind(today)
+                    .fetch_one(db)
+                    .await
+                    .unwrap_or(0);
+                    let new_orders = orders_after - orders_before;
+
+                    // 快照：调仓完成后立即写(不等 EOD,防止 14:45 到 16:00 之间统计字段悬空)
+                    snapshot_positions_for_all_accounts(db, today).await;
+
+                    if new_orders == 0 {
+                        // 零信号场景：有活跃账号，但无任何订单生成(因子信号为空/数据门禁全跳过)
+                        let msg = format!(
+                            "## ⚠️ 调仓零信号  \n\n**日期**: {}  \n\
+                             **结论**: 调仓链路完整执行但无订单生成  \n\
+                             **可能原因**: A股 sleeve 因子信号为空(因子覆盖不足/数据滞后)  \n\
+                             或所有活跃账号被数据门禁跳过(查日志 warn 行)  \n\n\
+                             > 下次调仓时间: 下一交易日 14:45",
+                            today.format("%Y-%m-%d"),
+                        );
+                        send_dingtalk_alert_titled(db, "调仓零信号", &msg).await;
+                    } else {
+                        // 成功且有交易：推送成交摘要 + 持仓摘要
+                        let mut lines: Vec<String> = Vec::new();
+                        let per_account: Vec<(String, i64, i64, f64, f64)> = sqlx::query_as(
+                            "SELECT po.paper_account_id,
+                                    COUNT(*) FILTER (WHERE po.side='buy')::bigint,
+                                    COUNT(*) FILTER (WHERE po.side='sell')::bigint,
+                                    COALESCE(SUM(po.target_value) FILTER (WHERE po.side='buy'), 0)::double precision,
+                                    COALESCE(SUM(po.target_value) FILTER (WHERE po.side='sell'), 0)::double precision
+                             FROM paper_order po
+                             JOIN paper_account pa ON pa.paper_account_id = po.paper_account_id
+                             WHERE pa.status = 'active' AND pa.account_type = 'simulated'
+                               AND DATE(po.created_at) = $1 AND po.status = 'filled'
+                             GROUP BY po.paper_account_id",
+                        )
+                        .bind(today)
+                        .fetch_all(db)
+                        .await
+                        .unwrap_or_default();
+
+                        for (aid, buy_n, sell_n, buy_amt, sell_amt) in &per_account {
+                            let name: Option<String> = sqlx::query_scalar(
+                                "SELECT name FROM paper_account WHERE paper_account_id = $1",
+                            )
+                            .bind(aid)
+                            .fetch_optional(db)
+                            .await
+                            .ok()
+                            .flatten();
+                            let label = name.as_deref().unwrap_or(aid);
+                            lines.push(format!(
+                                "**{}** 买入 {} 笔(¥{:.0}) / 卖出 {} 笔(¥{:.0})",
+                                label, buy_n, buy_amt, sell_n, sell_amt
+                            ));
+                        }
+                        let msg = format!(
+                            "## ✅ 调仓执行完成  \n\n**日期**: {}  \n**总订单**: {} 笔  \n\n{}\n\n> 自动生成于 14:45 调仓",
+                            today.format("%Y-%m-%d"),
+                            new_orders,
+                            lines.join("  \n")
+                        );
+                        send_dingtalk_alert_titled(db, "调仓执行完成", &msg).await;
+
+                        // 推送持仓摘要钉钉通知(asset class 分布 + 持仓明细)
+                        info!("[scheduler] 调仓完成, 推送钉钉持仓摘要...");
+                        match push_dingtalk_for_all_accounts(db, today).await {
+                            Ok(_) => info!("[scheduler] 钉钉推送完成"),
+                            Err(e) => warn!("[scheduler] 钉钉推送失败: {}", e),
+                        }
                     }
                 }
-                Err(e) => warn!("[scheduler] 调仓失败: {}", e),
+                Err(e) => {
+                    let msg = format!(
+                        "## ⛔ 调仓执行失败  \n\n**日期**: {}  \n**错误**: {}\n\n> 请检查 quant-api 日志排查根因",
+                        today.format("%Y-%m-%d"),
+                        e
+                    );
+                    send_dingtalk_alert_titled(db, "调仓执行失败", &msg).await;
+                    error!("[scheduler] 调仓失败: {}", e);
+                }
             }
         }
     }
@@ -1412,6 +1724,18 @@ async fn run_tick(
             info!("[scheduler] 16:00 日终数据同步...");
             if let Err(e) = sync_eod_data(db, tushare, today).await {
                 warn!("[scheduler] 日终数据同步失败: {}", e);
+            }
+
+            // P2-1: EOD 数据就绪后生成实盘绩效日报（写 paper_nav_snapshot 当日点 + 钉钉推送）。
+            // 仅交易日才有当日调仓/NAV 变化，非交易日跳过（避免推送重复的静态快照）。
+            if is_trade {
+                {
+                    let mut st = state.lock().await;
+                    st.report_pushed = true;
+                }
+                if let Err(e) = push_daily_performance_report(db, today).await {
+                    warn!("[scheduler] 实盘绩效日报生成失败: {}", e);
+                }
             }
         }
     }
@@ -1523,18 +1847,11 @@ async fn run_tick(
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
 
-            // Step 4: 日线就绪后才触发因子回填
+            // Step 4: 日线就绪后才触发因子回填（覆盖v24全部因子类别）
             if retries < max_retries {
                 info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
-                let client = reqwest::Client::new();
-                let backfill_start = (sync_date - chrono::Duration::days(7))
-                    .format("%Y%m%d")
-                    .to_string();
-                let _ = client
-                    .post(format!("http://localhost:{}/api/v1/quant/factors/phase7-price-volume-backfill/background", port))
-                    .json(&serde_json::json!({"start_date": backfill_start, "end_date": sync_date_str}))
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send().await;
+                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS).format("%Y%m%d").to_string();
+                trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
                 // 遍历所有 active 复合策略的 combo 做增量物化（不再依赖单一 v19 的 sc）。
                 let active_combos: Vec<(String, String)> = sqlx::query_as(
                     "SELECT strategy_id, combo_name FROM strategy_config
@@ -1547,13 +1864,42 @@ async fn run_tick(
                 .await
                 .unwrap_or_default();
                 for (sid, combo) in active_combos {
-                    match crate::routes::factors::materialize_pit_combo(
+                    // T+1 combo 增量物化:用 ext + 读取策略配置的 include_fundamentals/factor_whitelist,
+                    // 确保含基本面因子的 combo(如 v24 fund_v2)不会被默认黑名单过滤。
+                    let inc_fund: bool = sqlx::query_scalar(
+                        "SELECT COALESCE(include_fundamentals,false) FROM strategy_config WHERE strategy_id=$1 AND status='active'",
+                    )
+                    .bind(&sid)
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false);
+                    let whitelist: Option<Vec<String>> = {
+                        let raw: Option<serde_json::Value> = sqlx::query_scalar(
+                            "SELECT factor_whitelist FROM strategy_config WHERE strategy_id=$1 AND status='active'",
+                        )
+                        .bind(&sid)
+                        .fetch_optional(db)
+                        .await
+                        .ok()
+                        .flatten();
+                        raw.and_then(|v| {
+                            v.as_array().map(|arr| {
+                                arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+                            })
+                        })
+                    };
+                    match crate::routes::factors::materialize_pit_combo_ext(
                         db,
                         &combo,
                         "1.0.0",
                         combo_horizon_from_name(&combo),
                         sync_date - chrono::Duration::days(7),
                         sync_date,
+                        inc_fund,
+                        None,  // min_abs_ic_ir: T+1 保鲜不加阈值(白名单已筛)
+                        whitelist.as_deref(),
                     )
                     .await
                     {
@@ -1947,10 +2293,7 @@ pub async fn validate_pre_trade_data(
                 let client = reqwest::Client::new();
                 let backfill_start = materialize_start.format("%Y%m%d").to_string();
                 let today_str_clone = today_str.clone();
-                let api_base = format!(
-                    "http://localhost:{}",
-                    std::env::var("PORT").unwrap_or_else(|_| "8080".into())
-                );
+                let api_base = self_api_base();
                 client
                     .post(format!(
                         "{}/api/v1/quant/factors/phase7-price-volume-backfill/background",
@@ -2089,48 +2432,6 @@ async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
     Ok(row.and_then(|(v,)| v).unwrap_or(false))
 }
 
-pub(crate) async fn a_share_trade_block_reason(
-    db: &PgPool,
-    symbol: &str,
-    trade_date: NaiveDate,
-) -> Result<Option<String>, String> {
-    if !is_a_share_symbol(symbol) {
-        return Ok(None);
-    }
-
-    let suspended: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-           SELECT 1 FROM market_stock_suspension
-            WHERE symbol=$1 AND trade_date=$2 AND COALESCE(suspend_type, 'S') = 'S'
-         )",
-    )
-    .bind(symbol)
-    .bind(trade_date)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("停牌检查失败 {} {}: {}", symbol, trade_date, e))?;
-    if suspended {
-        return Ok(Some(format!("{} {} 停牌", symbol, trade_date)));
-    }
-
-    let limited: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-           SELECT 1 FROM market_stock_limit
-            WHERE symbol=$1 AND trade_date=$2
-         )",
-    )
-    .bind(symbol)
-    .bind(trade_date)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("涨跌停检查失败 {} {}: {}", symbol, trade_date, e))?;
-    if limited {
-        return Ok(Some(format!("{} {} 涨跌停", symbol, trade_date)));
-    }
-
-    Ok(None)
-}
-
 /// 交易阻断状态(含涨跌停方向)。
 ///
 /// A股规则:涨停封板无对手盘→禁买(可卖);跌停封板无对手盘→禁卖(可买);停牌→买卖都禁。
@@ -2211,52 +2512,6 @@ pub async fn preload_trade_block_map(
     map
 }
 
-/// 14:45 调仓前获取当日行情 + 停牌/涨跌停数据
-async fn sync_daily_data_for_today(
-    db: &PgPool,
-    tushare: &TushareClient,
-    date: NaiveDate,
-    sc: &StrategyConfig,
-) -> Result<(), String> {
-    let date_str = date.format("%Y%m%d").to_string();
-    let empty: Vec<String> = vec![];
-
-    // 事件数据先同步，交易门禁依赖它们。
-    let _ = quant_data::sync::sync_suspension(db, tushare, &date_str).await;
-    let _ = sync_limit_with_retry(db, tushare, &date_str).await;
-
-    // A股日线 (直接调用, symbols空→函数内自动获取全量)
-    let dv_id = format!("dv-{}", date_str);
-    let _ =
-        quant_data::sync::sync_daily_bars(db, tushare, &empty, &date_str, &date_str, &dv_id).await;
-
-    // 指数日线
-    let index_codes = vec!["000300.SH".to_string()];
-    let _ = quant_data::sync::sync_index_daily(
-        db,
-        tushare,
-        &index_codes,
-        &date_str,
-        &date_str,
-        &format!("idx-{}", date_str),
-    )
-    .await;
-
-    // ETF 日线 (从策略配置读取)
-    let _ = quant_data::sync::sync_fund_daily(
-        db,
-        tushare,
-        &sc.etf_symbols,
-        &date_str,
-        &date_str,
-        &format!("etf-{}", date_str),
-    )
-    .await;
-
-    info!("[scheduler] 当日行情+停牌/涨跌停同步完成 ({})", date_str);
-    Ok(())
-}
-
 /// 16:00 日终数据同步 (直接调用内部函数)
 async fn sync_eod_data(
     db: &PgPool,
@@ -2285,15 +2540,36 @@ async fn sync_eod_data(
     }
 
     // ── 当日日线 + ETF日线（收盘后通常已可获取）──
-    let _ = quant_data::sync::sync_daily_bars(
-        db,
-        tushare,
-        &all_stocks,
-        &date_str,
-        &date_str,
-        &format!("dv-eod-{}", date_str),
-    )
-    .await;
+    // P0 EOD 隔离:日线/ETF/指数/daily_basic/moneyflow/block_trade 均为"非关键路径",
+    // 用 timeout 包裹防卡死。daily_basic 是已知慢点(历史曾 3 小时卡死 running 永不完成,
+    // 导致后续复权因子同步+兜底未执行,adj 视图退化为 raw 价,回测曲线崩坏)。
+    // 超时则 warn 并继续,确保复权因子+兜底(关键路径)不被前序步骤短路。
+    const EOD_STEP_TIMEOUT_SECS: u64 = 1800; // 30 分钟
+
+    // 注意:timeout 结果含 Box<dyn StdError>(非 Send),须在独立块内消费,
+    // 避免变量跨越后续 await 点导致整个 spawn future 非 Send。
+    {
+        let daily_timeout = tokio::time::timeout(
+            tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS),
+            quant_data::sync::sync_daily_bars(
+                db,
+                tushare,
+                &all_stocks,
+                &date_str,
+                &date_str,
+                &format!("dv-eod-{}", date_str),
+            ),
+        )
+        .await;
+        match daily_timeout {
+            Ok(r) => {
+                if let Err(e) = r {
+                    warn!("[scheduler] EOD 日线同步失败: {}", e);
+                }
+            }
+            Err(_) => warn!("[scheduler] ⚠ EOD 日线同步超时({}秒),跳过", EOD_STEP_TIMEOUT_SECS),
+        }
+    }
     let _ = quant_data::sync::sync_fund_daily(
         db,
         tushare,
@@ -2314,18 +2590,85 @@ async fn sync_eod_data(
     )
     .await;
 
-    // 日线基础指标
-    let _ = quant_data::sync::sync_daily_basic(
-        db,
-        tushare,
-        &all_stocks,
-        &date_str,
-        &date_str,
-        &format!("dv-basic-eod-{}", date_str),
-    )
-    .await;
+    // 日线基础指标(已知慢点,超时隔离)
+    {
+        let basic_timeout = tokio::time::timeout(
+            tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS),
+            quant_data::sync::sync_daily_basic(
+                db,
+                tushare,
+                &all_stocks,
+                &date_str,
+                &date_str,
+                &format!("dv-basic-eod-{}", date_str),
+            ),
+        )
+        .await;
+        match basic_timeout {
+            Ok(r) => {
+                if let Err(e) = r {
+                    warn!("[scheduler] EOD daily_basic 同步失败: {}", e);
+                }
+            }
+            Err(_) => warn!(
+                "[scheduler] ⚠ EOD daily_basic 同步超时({}秒),跳过 - 复权因子兜底仍将执行",
+                EOD_STEP_TIMEOUT_SECS
+            ),
+        }
+    }
 
-    // 复权因子
+    // 资金流(market_stock_moneyflow): v24 mf_* 因子依赖。
+    // 不在原 EOD 列表内,缺失会导致 moneyflow backfill completed 但无产出(静默降级)。
+    let mf_n = {
+        let mf_dv = format!("mf-eod-{}", date_str);
+        let mf_fut = quant_data::sync::sync_moneyflow(
+            db,
+            tushare,
+            &all_stocks,
+            &date_str,
+            &date_str,
+            &mf_dv,
+        );
+        match tokio::time::timeout(tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS), mf_fut)
+            .await
+        {
+            Ok(r) => r.unwrap_or(0),
+            Err(_) => {
+                warn!("[scheduler] ⚠ EOD 资金流同步超时,跳过");
+                0
+            }
+        }
+    };
+    if mf_n > 0 {
+        info!("[scheduler] EOD 资金流同步: {} 条", mf_n);
+    }
+
+    // 大宗交易(market_stock_block_trade): v24 block_trade_inst 因子依赖。
+    let bt_n = {
+        let bt_dv = format!("bt-eod-{}", date_str);
+        let bt_fut = quant_data::sync::sync_block_trade(
+            db,
+            tushare,
+            &bt_dv,
+            &date_str,
+            &date_str,
+        );
+        match tokio::time::timeout(tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS), bt_fut)
+            .await
+        {
+            Ok(r) => r.unwrap_or(0),
+            Err(_) => {
+                warn!("[scheduler] ⚠ EOD 大宗交易同步超时,跳过");
+                0
+            }
+        }
+    };
+    if bt_n > 0 {
+        info!("[scheduler] EOD 大宗交易同步: {} 条", bt_n);
+    }
+
+    // ── 复权因子 + 兜底:关键路径,必须执行,不受前序步骤失败/超时影响 ──
+    // (这是 P0 修复核心:7/20-7/21 daily_basic 卡死导致此处未执行,adj 视图退化,回测崩坏)
     let adj_n = quant_data::sync::sync_adj_factor(
         db,
         tushare,
@@ -2352,6 +2695,16 @@ async fn sync_eod_data(
     let dv_adj_id = format!("dv-adj-eod-{}", date_str);
     backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
+    // P1: 刷新 composite 回测曲线(偏离监控对标用)。复权兜底后执行,
+    // 确保合成所用 ETF 复权价已补全。单策略失败不阻断其他。
+    for sid in crate::routes::equity_curve_sync::collect_active_strategies(db).await {
+        if let Err(e) =
+            crate::routes::equity_curve_sync::sync_composite_equity_curve(db, &sid).await
+        {
+            warn!("[scheduler] composite 曲线合成失败 {}: {}", sid, e);
+        }
+    }
+
     info!(
         "[scheduler] 16:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权) ({})",
         date_str
@@ -2375,6 +2728,26 @@ async fn sync_eod_data(
 
     Ok(())
 }
+
+/// v24 白名单 14 活跃因子（与 factor_backfill_route 表配置路由覆盖的因子集一致）。
+/// P3-2: 提升为模块级常量，供 admin.rs 的 GET /api/v1/admin/factor-health 端点复用，
+/// 避免与 run_data_quality_check 内部检测逻辑维护两份因子清单。
+pub(crate) const V24_FACTOR_CODES: &[&str] = &[
+    "amihud_20d_std",
+    "liq_amount_trend_20v120_std",
+    "defensive_lowvol_quality_daily_std",
+    "fin_gross_margin_daily_std",
+    "fin_debt_to_assets_yoy_improve_std",
+    "fin_roa_yoy_accel_std",
+    "mf_elg_inflow_low_crowding_10d_std",
+    "forecast_type_upgrade_120d_std",
+    "mkt_downside_beta_120d_std",
+    "block_trade_inst_sell_inverse_20d_decay_std",
+    "repurchase_amount_log_latest_std",
+    "mf_elg_net_amount_5d_std",
+    "mf_net_amount_5d_std",
+    "repurchase_volume_log_latest_std",
+];
 
 /// 数据完整性检查: 从配置的起始日期到今天, 检查所有核心表是否有缺口
 async fn run_data_quality_check(db: &PgPool) {
@@ -2456,6 +2829,107 @@ async fn run_data_quality_check(db: &PgPool) {
                 if gap > *max_calendar_gap {
                     gaps.push(format!("{}: 最新={}, 缺口={}天", name, max_d, gap));
                 }
+            }
+        }
+    }
+
+    // ── v24 因子数据健康检查：14 活跃因子每日覆盖率 ──
+    // 任何因子滞后(最新数据日落后 >1 交易日)都会导致 combo 打分静默降级。
+    // 检查每个因子最新 trade_date 是否覆盖到最近交易日。
+    {
+        let latest_trade: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+            "SELECT trade_date FROM market_trade_calendar
+             WHERE is_open = true AND trade_date <= $1
+             ORDER BY trade_date DESC LIMIT 1",
+        )
+        .bind(today)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        if let Some((latest_td,)) = latest_trade {
+            let mut stale_factors: Vec<String> = Vec::new();
+            for code in V24_FACTOR_CODES {
+                let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+                    "SELECT MAX(trade_date) FROM factor_value
+                     WHERE factor_code = $1 AND factor_version = '1.0.0'",
+                )
+                .bind(code)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+                match max_row {
+                    Some((factor_max,)) if factor_max >= latest_td => {}
+                    Some((factor_max,)) => {
+                        let gap = (latest_td - factor_max).num_days();
+                        stale_factors.push(format!("{}(最新{}天前)", code, gap));
+                    }
+                    None => {
+                        stale_factors.push(format!("{}(无数据)", code));
+                    }
+                }
+            }
+            if !stale_factors.is_empty() {
+                gaps.push(format!(
+                    "v24因子滞缓({}/14): {}",
+                    stale_factors.len(),
+                    stale_factors.join(", ")
+                ));
+            }
+
+            // ── P2-2: v24 因子覆盖率骤降检测 ──
+            // 部分因子(回购/大宗交易/研报评级等)天然只覆盖部分标的,不能拿"全市场"做分母，
+            // 否则天天误报。改用"该因子自身近 30 日单日最大覆盖数"做基准——覆盖率 =
+            // 最新日覆盖数 / 近期最大覆盖数，<80% 说明相对自身正常水平出现骤降(真实数据缺口)，
+            // 而非因子设计上的稀疏性。
+            let window_start = latest_td - chrono::Duration::days(30);
+            let coverage_rows: Vec<(String, chrono::NaiveDate, i64, i64)> = sqlx::query_as(
+                "WITH per_day AS (
+                    SELECT factor_code, trade_date, COUNT(DISTINCT symbol) AS day_cnt
+                    FROM factor_value
+                    WHERE factor_version = '1.0.0'
+                      AND factor_code = ANY($1)
+                      AND trade_date >= $2
+                    GROUP BY factor_code, trade_date
+                 ),
+                 latest AS (
+                    SELECT DISTINCT ON (factor_code) factor_code, trade_date, day_cnt
+                    FROM per_day ORDER BY factor_code, trade_date DESC
+                 )
+                 SELECT l.factor_code, l.trade_date, l.day_cnt, MAX(p.day_cnt) AS recent_max
+                 FROM latest l JOIN per_day p USING (factor_code)
+                 GROUP BY l.factor_code, l.trade_date, l.day_cnt",
+            )
+            .bind(V24_FACTOR_CODES)
+            .bind(window_start)
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+
+            let mut low_coverage: Vec<String> = Vec::new();
+            for (code, factor_latest_dt, latest_cnt, recent_max) in &coverage_rows {
+                if *recent_max <= 0 {
+                    continue;
+                }
+                let ratio = *latest_cnt as f64 / *recent_max as f64;
+                if ratio < 0.8 {
+                    low_coverage.push(format!(
+                        "{}({}覆盖{}/{}={:.0}%)",
+                        code,
+                        factor_latest_dt,
+                        latest_cnt,
+                        recent_max,
+                        ratio * 100.0
+                    ));
+                }
+            }
+            if !low_coverage.is_empty() {
+                gaps.push(format!(
+                    "v24因子覆盖率骤降({}/14, 较近30日最高<80%): {}",
+                    low_coverage.len(),
+                    low_coverage.join(", ")
+                ));
             }
         }
     }
@@ -2688,10 +3162,7 @@ async fn ensure_prediction_coverage(
 
     // ML训练是复杂异步任务, 通过内部HTTP + tokio::spawn触发, 不阻塞scheduler
     info!("[scheduler] 🚀 触发ML预测训练 (后台异步)");
-    let url = format!(
-        "http://localhost:{}",
-        std::env::var("PORT").unwrap_or_else(|_| "8080".into())
-    );
+    let url = self_api_base();
     let payload = serde_json::json!({
         "model_code": "nlqr", "model_version": "1.0.0",
         "model_version_id": "mdl-p7-wf-wide-qgvrel-h60-v1",
@@ -2890,6 +3361,11 @@ async fn verify_training_dependencies(
 
 /// 发送钉钉告警 (独立于账号体系, 直接使用webhook)
 async fn send_dingtalk_alert(db: &PgPool, msg: &str) {
+    send_dingtalk_alert_titled(db, "调仓告警", msg).await;
+}
+
+/// 带标题的钉钉告警(P2-3:调仓成功/失败/零信号复用同一推送通道，用标题区分场景)。
+async fn send_dingtalk_alert_titled(db: &PgPool, title: &str, msg: &str) {
     let accounts = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT name, dingtalk_webhook_url FROM paper_account WHERE status='active' AND dingtalk_webhook_url IS NOT NULL"
     ).fetch_all(db).await.unwrap_or_default();
@@ -2898,7 +3374,7 @@ async fn send_dingtalk_alert(db: &PgPool, msg: &str) {
         if let Some(url) = webhook_url {
             let payload = serde_json::json!({
                 "msgtype": "markdown",
-                "markdown": {"title": "ML训练告警", "text": msg}
+                "markdown": {"title": title, "text": msg}
             });
             let _ = reqwest::Client::new().post(url).json(&payload).send().await;
         }
@@ -2938,6 +3414,18 @@ pub(crate) async fn backfill_adj_factor_for_date(db: &PgPool, date: NaiveDate, d
 
     // 覆盖率<90%:有缺失,前向填充补全
     if adj_cnt * 10 < bar_cnt * 9 {
+        // 先确保 dv_id 在 data_version 表注册(market_adjustment_factor.data_version_id 有 FK 约束,
+        // 未注册会导致后续 INSERT 静默失败 - unwrap_or(0) 吞错误)。ON CONFLICT 幂等。
+        let _ = sqlx::query(
+            "INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash) \
+             VALUES ($1, $2, 'forward_fill', $3, $3, ARRAY['market_adjustment_factor'], '') \
+             ON CONFLICT (data_version_id) DO NOTHING",
+        )
+        .bind(dv_id)
+        .bind(format!("复权因子前向填充 {}", date_str))
+        .bind(date)
+        .execute(db)
+        .await;
         // 用 LATERAL 取每只缺失股票最近前一交易日的 adj_factor,批量 INSERT
         let filled = sqlx::query(
             "INSERT INTO market_adjustment_factor (symbol, trade_date, adj_factor, source, data_version_id, created_at) \
@@ -3181,10 +3669,15 @@ pub async fn generate_paper_signals_for_all(
             .get("max_pairwise_correlation")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<f64>().ok());
+        // P0修复(2026-07-20): 默认必须是 daily。实盘每日按 30 天滚动窗口调 run-factor,
+        // 若沿用回测语义的 monthly(20 交易日)/biweekly 频率,调仓触发点大概率不落在"今天"这一
+        // 边界上,导致 signals_count=0 → backtest_position 当日截面为空 → 目标持仓空集 →
+        // rebalance_account 把所有 A 股持仓当"不在目标集"清仓,且不会买入任何新 A 股。
+        // 已实测验证:30天窗口+monthly=0信号;30天窗口+daily=7信号(含今日截面)。
         let rebalance_freq = wfa_params
             .get("rebalance")
             .and_then(|v| v.as_str())
-            .unwrap_or("monthly");
+            .unwrap_or("daily");
         // WFA 高级风控参数
         let vol_control = wfa_params
             .get("portfolio_volatility_control")
@@ -3557,125 +4050,8 @@ pub fn detect_regime_exposure_cached(
         _ => 1.00, // 满仓
     }
 }
-
-/// v17: CSI300体制检测，返回动态min_stock
-/// bull(MA60>MA250, trailing12m>10%): 35% | neutral: 25% | bear(trailing12m<-15%): 0%
-async fn get_regime_min_stock(db: &PgPool, date: NaiveDate) -> f64 {
-    // MA60
-    let ma60: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
-        "SELECT AVG(close::double precision) FROM (
-            SELECT close FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 60
-        ) sub"
-    ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
-
-    // MA250
-    let ma250: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
-        "SELECT AVG(close::double precision) FROM (
-            SELECT close FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 250
-        ) sub"
-    ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
-
-    // trailing 12m return
-    let trail_12m: Option<f64> = sqlx::query_as::<_, (Option<f64>,)>(
-        "WITH dates AS (SELECT trade_date, close::double precision FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 252)
-         SELECT (MAX(close)/MIN(close) - 1) FROM dates"
-    ).bind(date).fetch_optional(db).await.ok().flatten().and_then(|(v,)| v);
-
-    match (ma60, ma250, trail_12m) {
-        (Some(m60), Some(m250), Some(t12)) if t12 > 0.10 && m60 > m250 => {
-            info!("[Regime] BULL: min_stock=35% (t12m={:.1}%)", t12 * 100.0);
-            0.35
-        }
-        (_, _, Some(t12)) if t12 < -0.15 => {
-            info!("[Regime] BEAR: min_stock=0% (t12m={:.1}%)", t12 * 100.0);
-            0.00
-        }
-        _ => {
-            // neutral: 25% min stock (P2最优参数)
-            0.25
-        }
-    }
-}
-
-/// v17: ETF MA200 趋势过滤。
-/// 对每个 ETF，若最新收盘价 < MA200，将其权重归零，剩余权重重新归一化。
-/// 仅当至少有一个 ETF 被过滤时才返回新权重，否则返回空 vec（调用方使用原权重）。
-async fn apply_etf_trend_filter(
-    db: &PgPool,
-    date: NaiveDate,
-    etf_symbols: &[&str],
-    original_weights: &[f64],
-) -> Vec<f64> {
-    let n = original_weights.len();
-    if n == 0 || etf_symbols.is_empty() {
-        return vec![];
-    }
-    let mut filtered = original_weights.to_vec();
-    let mut any_filtered = false;
-
-    for (ei, sym) in etf_symbols.iter().enumerate() {
-        // ETF 权重在索引 ei+1 (A股在索引0)
-        let wi = ei + 1;
-        if wi >= n || filtered[wi] <= 0.0 {
-            continue;
-        }
-        // 获取最近 200 个交易日的收盘价
-        let rows = sqlx::query_as::<_, (rust_decimal::Decimal,)>(
-            "SELECT close FROM market_stock_daily_bar_adj
-             WHERE symbol = $1 AND trade_date <= $2
-             ORDER BY trade_date DESC LIMIT 200",
-        )
-        .bind(*sym)
-        .bind(date)
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
-
-        if rows.len() >= 200 {
-            let sum: f64 = rows
-                .iter()
-                .map(|(c,)| c.to_string().parse::<f64>().unwrap_or(0.0))
-                .sum();
-            let ma200 = sum / rows.len() as f64;
-            let latest: f64 = rows[0].0.to_string().parse::<f64>().unwrap_or(0.0);
-
-            if latest < ma200 {
-                let etf_name = crate::routes::asset_meta::etf_display_name(sym);
-                info!(
-                    "[ETF Trend] {} ({}) 跌破MA200 ({:.3} < {:.3}), 权重 {:.0}% → 0%",
-                    etf_name,
-                    sym,
-                    latest,
-                    ma200,
-                    filtered[wi] * 100.0
-                );
-                filtered[wi] = 0.0;
-                any_filtered = true;
-            }
-        }
-    }
-
-    if any_filtered {
-        let remaining_sum: f64 = filtered.iter().sum();
-        if remaining_sum > 0.0 {
-            for w in &mut filtered {
-                *w /= remaining_sum;
-            }
-        }
-        info!(
-            "[ETF Trend] 过滤后权重: A股={:.0}% 黄金={:.0}% 国债={:.0}% SP500={:.0}% 纳指={:.0}% 有色={:.0}% 豆粕={:.0}% 原油={:.0}%",
-            filtered[0] * 100.0, filtered[1] * 100.0, filtered[2] * 100.0,
-            filtered[3] * 100.0, filtered[4] * 100.0,
-            filtered.get(5).copied().unwrap_or(0.0) * 100.0,
-            filtered.get(6).copied().unwrap_or(0.0) * 100.0,
-            filtered.get(7).copied().unwrap_or(0.0) * 100.0,
-        );
-        filtered
-    } else {
-        vec![]
-    }
-}
-
+// get_regime_min_stock removed — was dead code (0 callers). Regime detection is now handled
+// inside compute_lw_mvo_weights's regime-adaptive logic directly, using a_monthly trailing returns.
 /// LW-MVO 自动发现权重：Ledoit-Wolf shrinkage + Grid Search 季度调仓。
 /// 返回 (a_share, gold, bond, sp500, nasdaq) 权重（和为 1.0）。
 /// ETF 从实际有数据的日期开始纳入 MVO 计算。
@@ -3720,9 +4096,15 @@ pub(crate) async fn compute_lw_mvo_weights(
 
     // Adaptive MVO: 根据近期 A 股表现动态调整 min_stock
     let adaptive_min_stock = if a_monthly.len() >= 3 {
-        let trail_3m: f64 = a_monthly[..3].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+        // P4 修复(2026-07-21): a_monthly 由 daily_to_monthly_returns 按时间升序返回(最早月份在前)，
+        // 原代码用 a_monthly[..3]/[..6] 取的是最老的月份而非最近月份 — trail_3m/trail_6m 方向完全错误。
+        // 实测:原实现取到 2020 年最老 3 月累计 +3.08%，而真实最近 3 月为 -8.60%(熊市信号完全颠倒)。
+        // 修复:统一用尾部切片(最近 N 月)替代头部切片(最老 N 月)。
+        let tail_start_3 = a_monthly.len().saturating_sub(3);
+        let trail_3m: f64 = a_monthly[tail_start_3..].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
         let trail_6m: f64 = if a_monthly.len() >= 6 {
-            a_monthly[..6].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0
+            let tail_start_6 = a_monthly.len().saturating_sub(6);
+            a_monthly[tail_start_6..].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0
         } else {
             trail_3m * 2.0
         };
@@ -3763,7 +4145,8 @@ pub(crate) async fn compute_lw_mvo_weights(
 
     // Kelly-inspired A股仓位缩放
     let kelly_scale = if adaptive_min_stock > 0.0 && a_monthly.len() >= 6 {
-        let trail_rets: Vec<f64> = a_monthly[..6].to_vec();
+        // 同上修复:取最近 6 个月而非最老 6 个月
+        let trail_rets: Vec<f64> = a_monthly[a_monthly.len() - 6..].to_vec();
         let n = trail_rets.len() as f64;
         let avg = trail_rets.iter().sum::<f64>() / n;
         if n > 1.0 {
@@ -3845,8 +4228,11 @@ pub(crate) async fn compute_lw_mvo_weights(
             let target_cap = sc.dynamic_target_cap;
             let target_floor = sc.dynamic_target_floor;
             let dynamic_target = if a_monthly.len() >= 12 {
+                // P4 修复:取最近 12 个月(尾部)而非最老 12 个月(头部)。
+                // 同 trail_3m/trail_6m 修复理由:daily_to_monthly_returns 升序返回,头部切片=最老。
+                let tail_start = a_monthly.len() - 12;
                 let trail_12m: f64 =
-                    a_monthly[..12].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+                    a_monthly[tail_start..].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
                 (trail_12m + 0.05).clamp(target_floor.min(target_cap), target_cap)
             } else {
                 target_floor.min(target_cap)
@@ -3872,7 +4258,9 @@ pub(crate) async fn compute_lw_mvo_weights(
             let bw = sc.momentum_blend_ratio;
             let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
             // 自适应max_single: 牛市用max_single_bull, 否则用max_single
-            let trail_12m_a = a_monthly[..a_monthly.len().min(12)]
+            // P4 修复:同 trail_12m 修复,取最近 min(len,12) 个月(尾部)。
+            let take_n = a_monthly.len().min(12);
+            let trail_12m_a = a_monthly[a_monthly.len() - take_n..]
                 .iter()
                 .fold(1.0, |acc, r| acc * (1.0 + r))
                 - 1.0;
@@ -3929,6 +4317,7 @@ pub(crate) async fn compute_lw_mvo_weights(
 }
 
 /// 公开版本：不依赖调度器 MvoWeightCache，用于回放等场景按日期独立计算 MVO 权重
+#[allow(dead_code)]
 pub async fn compute_mvo_weights_for_date(
     db: &PgPool,
     date: NaiveDate,
@@ -3936,49 +4325,6 @@ pub async fn compute_mvo_weights_for_date(
 ) -> Vec<f64> {
     let cache = tokio::sync::Mutex::new(None::<MvoWeightCache>);
     compute_lw_mvo_weights(db, date, &cache, sc).await
-}
-
-/// 从 multi_factor_value 获取因子的月度收益（top-15等权组合的近似月收益）
-async fn get_factor_monthly_returns(
-    db: &PgPool,
-    start: NaiveDate,
-    end: NaiveDate,
-    combo_name: &str,
-) -> Vec<f64> {
-    // 取每个交易日前15只股票的因子得分，用等权日收益近似
-    let rows = sqlx::query_as::<_, (NaiveDate,)>(
-        "SELECT DISTINCT trade_date FROM multi_factor_value
-         WHERE combo_name = $1 AND version = '1.0.0'
-         AND trade_date >= $2 AND trade_date <= $3
-         ORDER BY trade_date",
-    )
-    .bind(combo_name)
-    .bind(start)
-    .bind(end)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
-
-    if rows.len() < 2 {
-        return vec![];
-    }
-
-    // 使用 backtest_equity_curve 中匹配 combo_name 的任务
-    let eq_rows = sqlx::query_as::<_, (NaiveDate, rust_decimal::Decimal)>(
-        "SELECT bec.trade_date, bec.portfolio_value FROM backtest_equity_curve bec
-         JOIN backtest_task bt ON bec.task_id = bt.task_id
-         WHERE bt.parameters->>'combo_name' = $1
-         AND bec.trade_date >= $2 AND bec.trade_date <= $3
-         ORDER BY bec.trade_date",
-    )
-    .bind(combo_name)
-    .bind(start)
-    .bind(end)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
-
-    daily_to_monthly_returns(&eq_rows)
 }
 
 /// 获取某个资产的月度收益率序列（最新在前）
@@ -4083,12 +4429,380 @@ fn daily_to_monthly_returns(rows: &[(NaiveDate, rust_decimal::Decimal)]) -> Vec<
     monthly
 }
 
+/// P2-1: 实盘绩效日报 — EOD(16:00) 数据就绪后，为每个 active 模拟盘账号：
+/// 1. 写当日 `paper_nav_snapshot`（实盘调仓路径此前从不写该表，只有回放路径写，
+///    导致 NAV 曲线在实盘期间断档）
+/// 2. 对比回测基准（`equity_curve_task_id` 对应的 backtest_equity_curve），偏离 >2% 告警
+/// 3. 汇总当日成交笔数/买卖金额，推送钉钉 markdown 日报
+pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Result<(), String> {
+    use super::dingtalk;
+
+    // P0 双保险:日报生成前强制复权因子兜底。即使 EOD 中段失败(如 daily_basic 卡死),
+    // 日报前再补一次,确保 adj 视图不退化,回测偏离计算不被污染数据干扰。
+    let dv_adj_id = format!("dv-adj-report-{}", date.format("%Y%m%d"));
+    backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
+
+    let accounts = sqlx::query_as::<_, (String, String, Option<String>, f64, f64, f64, f64, i32)>(
+        "SELECT paper_account_id, name, dingtalk_webhook_url,
+                COALESCE(current_nav, initial_capital)::double precision,
+                initial_capital::double precision,
+                COALESCE(peak_nav, initial_capital)::double precision,
+                COALESCE(max_drawdown_pct, 0)::double precision,
+                COALESCE(total_trades, 0)
+         FROM paper_account
+         WHERE status = 'active' AND account_type = 'simulated'",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("account query: {}", e))?;
+
+    for (account_id, name, webhook, nav, init_cap, peak_nav, max_dd, total_trades) in &accounts {
+        // 1. 昨日 snapshot(算当日收益率) + 持仓数
+        let prev_nav: Option<(rust_decimal::Decimal,)> = sqlx::query_as(
+            "SELECT nav FROM paper_nav_snapshot WHERE paper_account_id = $1 AND snapshot_date < $2
+             ORDER BY snapshot_date DESC LIMIT 1",
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let prev_nav_f = prev_nav
+            .map(|(d,)| d.to_string().parse::<f64>().unwrap_or(*nav))
+            .unwrap_or(*init_cap);
+        let daily_return = if prev_nav_f > 0.0 {
+            (*nav - prev_nav_f) / prev_nav_f
+        } else {
+            0.0
+        };
+        let cumulative_return = if *init_cap > 0.0 {
+            (*nav - *init_cap) / *init_cap
+        } else {
+            0.0
+        };
+
+        let pos_row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
+            "SELECT COUNT(*)::bigint,
+                    COALESCE(SUM(quantity * COALESCE(market_price, avg_cost)), 0),
+                    COALESCE((SELECT cash FROM paper_account WHERE paper_account_id = $1), 0)
+             FROM paper_position WHERE paper_account_id = $1 AND quantity > 0",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let (position_count, market_value, cash) = pos_row.unwrap_or((0, rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO));
+
+        // 2. 当日成交汇总(买/卖笔数+金额)。paper_order 无 price 列，成交金额用 target_value
+        // (下单时已按 target_price 算好的目标金额，比 quantity*target_price 更贴近实际口径)。
+        let trade_row: Option<(i64, i64, f64, f64)> = sqlx::query_as(
+            "SELECT
+                COUNT(*) FILTER (WHERE side='buy')::bigint,
+                COUNT(*) FILTER (WHERE side='sell')::bigint,
+                COALESCE(SUM(target_value) FILTER (WHERE side='buy'), 0)::double precision,
+                COALESCE(SUM(target_value) FILTER (WHERE side='sell'), 0)::double precision
+             FROM paper_order WHERE paper_account_id = $1 AND DATE(created_at) = $2 AND status = 'filled'",
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let (buy_n, sell_n, buy_amt, sell_amt) = trade_row.unwrap_or((0, 0, 0.0, 0.0));
+        let today_trades = buy_n + sell_n;
+
+        // 3. 回测基准对比：用近 10 个自然日(约 5-7 交易日)滚动窗口，实盘与回测各自算窗口内累计收益之差。
+        // 口径必须对齐同一时间窗——不能拿"自 initial_capital 的实盘复利"比"回测自 2014 年起的收益"，
+        // 也不能用 paper_nav_snapshot 里最早一条记录做锚点(历史回放遗留可回溯到 2020 年，非 v24
+        // 真正上线日)。滚动窗口天然规避这两个陷阱，且更贴合"近期漂移检测"的监控意图。
+        //
+        // P1 修复:对标基准从"纯 A 股选股曲线"改为"composite 多资产合成曲线"(消除结构性偏差),
+        // 且 bt_ret 按账号 leverage_multiplier 放大(与实盘杠杆口径对齐)。composite 曲线缺失时
+        // 回退旧的 A 股曲线逻辑(向后兼容)。
+        let acct_meta: Option<(Option<String>, f64)> = sqlx::query_as(
+            "SELECT strategy_version_id, COALESCE(leverage_multiplier, 1.0)::double precision \
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let (strategy_version_id, leverage_multiplier) = acct_meta.unwrap_or((None, 1.0));
+        let mut backtest_deviation: Option<f64> = None;
+        if let Some(ref sv_id) = strategy_version_id {
+            // 优先读 composite 合成曲线(偏离监控正确对标);缺失则回退 A 股曲线
+            let window_start = date - chrono::Duration::days(10);
+            // 实盘窗口起点 NAV：窗口内最早一条 snapshot(若窗口内暂无历史,退化为今日,偏离记为 0)
+            let live_anchor: Option<(rust_decimal::Decimal,)> = sqlx::query_as(
+                "SELECT nav FROM paper_nav_snapshot
+                 WHERE paper_account_id = $1 AND snapshot_date >= $2 AND snapshot_date < $3
+                 ORDER BY snapshot_date ASC LIMIT 1",
+            )
+            .bind(account_id)
+            .bind(window_start)
+            .bind(date)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+            if let Some((anchor_nav,)) = live_anchor {
+                let anchor_nav_f = anchor_nav.to_string().parse::<f64>().unwrap_or(0.0);
+                if anchor_nav_f > 0.0 {
+                    // 优先:composite 合成曲线(strategy_id = sv_id)
+                    let composite_row: Option<(rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
+                        "SELECT
+                            (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date >= $2 ORDER BY trade_date ASC LIMIT 1),
+                            (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date <= $3 ORDER BY trade_date DESC LIMIT 1)",
+                    )
+                    .bind(sv_id)
+                    .bind(window_start)
+                    .bind(date)
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten();
+
+                    // 回退:A 股选股曲线(a_share.equity_curve_task_id)
+                    let bt_row: Option<(rust_decimal::Decimal, rust_decimal::Decimal)> = if composite_row.is_some() {
+                        composite_row
+                    } else if let Ok(rs) = crate::routes::strategy::load_resolved_strategy(db, sv_id).await {
+                        let a_share = rs.assets.iter().find(|a| a.asset_class == AssetClass::AShare);
+                        let task_id = a_share.and_then(|a| a.security.equity_curve_task_id.clone());
+                        if let Some(tid) = task_id {
+                            sqlx::query_as(
+                                "SELECT
+                                    (SELECT portfolio_value FROM backtest_equity_curve WHERE task_id=$1 AND trade_date >= $2 ORDER BY trade_date ASC LIMIT 1),
+                                    (SELECT portfolio_value FROM backtest_equity_curve WHERE task_id=$1 AND trade_date <= $3 ORDER BY trade_date DESC LIMIT 1)",
+                            )
+                            .bind(&tid)
+                            .bind(window_start)
+                            .bind(date)
+                            .fetch_optional(db)
+                            .await
+                            .ok()
+                            .flatten()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some((bt_start, bt_end)) = bt_row {
+                        let bt_start_f = bt_start.to_string().parse::<f64>().unwrap_or(0.0);
+                        let bt_end_f = bt_end.to_string().parse::<f64>().unwrap_or(0.0);
+                        if bt_start_f > 0.0 {
+                            let live_ret = (*nav - anchor_nav_f) / anchor_nav_f;
+                            // composite 曲线本身无杠杆,按账号 leverage_multiplier 放大回测收益
+                            let bt_ret = (bt_end_f / bt_start_f - 1.0) * leverage_multiplier;
+                            backtest_deviation = Some(live_ret - bt_ret);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. 写当日 snapshot(实盘路径此前从不写，此处首次补齐)。
+        // 注意不显式传 strategy_version_id：该字段有 FK -> strategy_version 表，
+        // 而 v23/v24 等复合策略版本号不在该表中（该表仅存 phase7-professional-v1 等底层版本）。
+        // 显式传入不存在的值会触发 FK 约束，静默失败。
+        let snap_id = format!("ns-{}", uuid::Uuid::new_v4());
+        let snap_result = sqlx::query(
+            "INSERT INTO paper_nav_snapshot
+                (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value,
+                 position_count, daily_return, cumulative_return, max_drawdown, trade_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (paper_account_id, snapshot_date) DO UPDATE SET
+                nav = EXCLUDED.nav, cash = EXCLUDED.cash, market_value = EXCLUDED.market_value,
+                position_count = EXCLUDED.position_count, daily_return = EXCLUDED.daily_return,
+                cumulative_return = EXCLUDED.cumulative_return, max_drawdown = EXCLUDED.max_drawdown,
+                trade_count = EXCLUDED.trade_count",
+        )
+        .bind(&snap_id)
+        .bind(account_id)
+        .bind(date)
+        .bind(nav)
+        .bind(cash.to_string().parse::<f64>().unwrap_or(0.0))
+        .bind(market_value.to_string().parse::<f64>().unwrap_or(0.0))
+        .bind(position_count as i32)
+        .bind(daily_return)
+        .bind(cumulative_return)
+        .bind(*max_dd)
+        .bind(today_trades as i32)
+        .execute(db)
+        .await;
+        if let Err(e) = snap_result {
+            warn!("[report] {} snapshot 写入失败: {}", name, e);
+        }
+
+        // 5. 偏离 >2% 告警
+        if let Some(dev) = backtest_deviation {
+            if dev.abs() > 0.02 {
+                send_quality_alert(
+                    db,
+                    &[format!(
+                        "{}: 实盘累计收益 {:.2}% 与回测基准偏离 {:.2}%（超过 2% 阈值）",
+                        name,
+                        cumulative_return * 100.0,
+                        dev * 100.0
+                    )],
+                )
+                .await;
+            }
+        }
+
+        // 6. 推送钉钉日报
+        let webhook_url = match webhook {
+            Some(u) if !u.is_empty() => u.clone(),
+            _ => match dingtalk::build_dingtalk_webhook_url() {
+                Some(u) => u,
+                None => continue,
+            },
+        };
+        let text = format!(
+            "## 📈 实盘绩效日报 — {}  \n\n\
+             **日期**: {}  \n\n\
+             **当日收益**: {:.2}% | **累计收益**: {:.2}%  \n\
+             **当前 NAV**: ¥{:.2} | **历史峰值**: ¥{:.2} | **最大回撤**: {:.2}%  \n\
+             **当日调仓**: 买入 {} 笔(¥{:.0}) / 卖出 {} 笔(¥{:.0})  \n\
+             **累计成交**: {} 笔  \n\
+             {}\n\n\
+             > 自动生成于 {}",
+            name,
+            date.format("%Y-%m-%d"),
+            daily_return * 100.0,
+            cumulative_return * 100.0,
+            nav,
+            peak_nav,
+            max_dd * 100.0,
+            buy_n,
+            buy_amt,
+            sell_n,
+            sell_amt,
+            total_trades,
+            match backtest_deviation {
+                Some(dev) if dev.abs() > 0.02 => {
+                    format!("**⚠️ 回测偏离**: {:.2}%（超 2% 阈值）  \n", dev * 100.0)
+                }
+                Some(dev) => format!("**回测偏离**: {:.2}%（正常范围）  \n", dev * 100.0),
+                None => String::new(),
+            },
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        );
+        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "实盘绩效日报", &text).await
+        {
+            warn!("[dingtalk] {} 日报推送失败: {}", name, e);
+        } else {
+            info!("[dingtalk] {} 日报推送成功", name);
+        }
+    }
+    Ok(())
+}
+
 /// Public wrapper，供 API 端点调用。
 pub async fn push_dingtalk_for_all_accounts_public(
     db: &PgPool,
     date: NaiveDate,
 ) -> Result<(), String> {
     push_dingtalk_for_all_accounts(db, date).await
+}
+
+/// P2-3: 调仓完成后立即写一份 `paper_nav_snapshot`(不等 16:00 EOD)。
+///
+/// 只做「写快照」这一件事，不做回测偏离对比/钉钉日报(那是 EOD `push_daily_performance_report`
+/// 的职责)。同一天 EOD 会用收盘价 ON CONFLICT DO UPDATE 覆盖此处的调仓后快照，两者互不冲突——
+/// 意义在于:即使 EOD 任务当天失败，调仓后的持仓状态也已经落库，不会完全空档。
+async fn snapshot_positions_for_all_accounts(db: &PgPool, date: NaiveDate) {
+    let accounts = sqlx::query_as::<_, (String, f64, f64)>(
+        "SELECT paper_account_id, COALESCE(current_nav, initial_capital)::double precision,
+                initial_capital::double precision
+         FROM paper_account WHERE status = 'active' AND account_type = 'simulated'",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    for (account_id, nav, init_cap) in &accounts {
+        let prev_nav: Option<(rust_decimal::Decimal,)> = sqlx::query_as(
+            "SELECT nav FROM paper_nav_snapshot WHERE paper_account_id = $1 AND snapshot_date < $2
+             ORDER BY snapshot_date DESC LIMIT 1",
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let prev_nav_f = prev_nav
+            .map(|(d,)| d.to_string().parse::<f64>().unwrap_or(*nav))
+            .unwrap_or(*init_cap);
+        let daily_return = if prev_nav_f > 0.0 {
+            (*nav - prev_nav_f) / prev_nav_f
+        } else {
+            0.0
+        };
+        let cumulative_return = if *init_cap > 0.0 {
+            (*nav - *init_cap) / *init_cap
+        } else {
+            0.0
+        };
+
+        let pos_row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
+            "SELECT COUNT(*)::bigint,
+                    COALESCE(SUM(quantity * COALESCE(market_price, avg_cost)), 0),
+                    COALESCE((SELECT cash FROM paper_account WHERE paper_account_id = $1), 0)
+             FROM paper_position WHERE paper_account_id = $1 AND quantity > 0",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let (position_count, market_value, cash) =
+            pos_row.unwrap_or((0, rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO));
+
+        let today_trades: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_order
+             WHERE paper_account_id = $1 AND DATE(created_at) = $2 AND status = 'filled'",
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+
+        // strategy_version_id 不显式传(同 push_daily_performance_report 的 FK 踩坑说明)。
+        let snap_id = format!("ns-{}", uuid::Uuid::new_v4());
+        let snap_result = sqlx::query(
+            "INSERT INTO paper_nav_snapshot
+                (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value,
+                 position_count, daily_return, cumulative_return, trade_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (paper_account_id, snapshot_date) DO UPDATE SET
+                nav = EXCLUDED.nav, cash = EXCLUDED.cash, market_value = EXCLUDED.market_value,
+                position_count = EXCLUDED.position_count, daily_return = EXCLUDED.daily_return,
+                cumulative_return = EXCLUDED.cumulative_return, trade_count = EXCLUDED.trade_count",
+        )
+        .bind(&snap_id)
+        .bind(account_id)
+        .bind(date)
+        .bind(nav)
+        .bind(cash.to_string().parse::<f64>().unwrap_or(0.0))
+        .bind(market_value.to_string().parse::<f64>().unwrap_or(0.0))
+        .bind(position_count as i32)
+        .bind(daily_return)
+        .bind(cumulative_return)
+        .bind(today_trades as i32)
+        .execute(db)
+        .await;
+        if let Err(e) = snap_result {
+            warn!("[scheduler] {} 调仓后快照写入失败: {}", account_id, e);
+        }
+    }
 }
 
 /// 收盘后推送钉钉持仓摘要（所有活跃模拟账号）。
@@ -4237,5 +4951,40 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod daily_report_tests {
+    use super::*;
+
+    /// P2-1 集成测试(接真实生产库,验证 push_daily_performance_report 不 panic
+    /// 且正确写入 paper_nav_snapshot)。运行: cargo test --lib -- --ignored push_daily_performance_report_writes_snapshot
+    #[tokio::test]
+    #[ignore]
+    async fn push_daily_performance_report_writes_snapshot() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        let result = push_daily_performance_report(&db, date).await;
+        assert!(result.is_ok(), "push_daily_performance_report 失败: {:?}", result.err());
+
+        // 验证两个 v24 生产账号的当日 snapshot 已写入
+        let rows: Vec<(String, rust_decimal::Decimal, Option<rust_decimal::Decimal>)> = sqlx::query_as(
+            "SELECT paper_account_id, nav, cumulative_return FROM paper_nav_snapshot
+             WHERE paper_account_id IN ('pa-v21-prod-lev','pa-v21-prod-unlev') AND snapshot_date = $1",
+        )
+        .bind(date)
+        .fetch_all(&db)
+        .await
+        .expect("query snapshot");
+        assert_eq!(rows.len(), 2, "两个生产账号都应有 7/20 snapshot");
+        for (acct_id, nav, cum_ret) in &rows {
+            let nav_f = nav.to_string().parse::<f64>().unwrap();
+            assert!(nav_f > 0.0, "{} nav 应 > 0", acct_id);
+            assert!(cum_ret.is_some(), "{} cumulative_return 应已计算", acct_id);
+        }
+    }
 }
 

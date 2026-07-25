@@ -1631,6 +1631,7 @@ fn compute_mvo_weights_pit(
 
 // ── 通用 MVO 模拟：对任意回测叠加 LW-MVO 多资产配置 ──────────
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 pub struct MvoSimulateRequest {
     /// ETF 列表，默认 ["518880.SH","511010.SH","513500.SH","513100.SH"]
@@ -1639,9 +1640,13 @@ pub struct MvoSimulateRequest {
     /// MVO 回看月数（默认 36）
     #[serde(default = "mvo_sim_default_lookback")]
     pub mvo_lookback_months: usize,
-    /// 最小 A 股配置（默认 0.08）
+    /// 最小 A 股配置（默认 0.08，仅 mvo_backtest 旧路径用）。
+    /// run_mvo_simulate 路径用 min_stock_override 覆盖策略配置;None 时用策略 min_stock。
     #[serde(default = "mvo_sim_default_min_stock")]
     pub min_stock: f64,
+    /// A股最小配置覆盖(WFA 参数搜索用)。None 时用策略配置的 min_stock;
+    /// 给定时覆盖 load_resolved_strategy 的 rs.min_stock,用于 walk-forward 搜最优 A 股配置。
+    pub min_stock_override: Option<f64>,
     /// 调仓频率："quarterly"（默认）或 "monthly"
     #[serde(default = "mvo_sim_default_rebalance")]
     pub rebalance_freq: String,
@@ -1734,6 +1739,13 @@ async fn run_mvo_simulate(
         .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare)
     {
         a.security.equity_curve_task_id = Some(task_id.to_string());
+    }
+    // min_stock_override:WFA 参数搜索时覆盖策略配置的 A 股最小配置。
+    // None 时保留策略 min_stock(v23=0.12),给定时覆盖 rs.mvo.min_stock 用于 walk-forward 搜最优档。
+    if let Some(ms) = req.min_stock_override.filter(|m| *m >= 0.0 && *m <= 1.0) {
+        if let Some(mvo) = rs.mvo.as_mut() {
+            mvo.min_stock = ms;
+        }
     }
 
     // 曲线日期范围（从 a_share asset 的 equity_curve_task_id 取）

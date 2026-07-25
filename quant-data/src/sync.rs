@@ -7568,14 +7568,13 @@ pub async fn get_st_symbols_at_date(
     pool: &PgPool,
     as_of_date: NaiveDate,
 ) -> Result<Vec<String>, String> {
-    let rows = sqlx::query_as!(
-        MarketStSymbol,
+    let rows: Vec<MarketStSymbol> = sqlx::query_as(
         r#"SELECT DISTINCT symbol FROM market_stock_name_history
            WHERE is_st = true
              AND start_date <= $1
              AND (end_date IS NULL OR end_date >= $1)"#,
-        as_of_date,
     )
+    .bind(as_of_date)
     .fetch_all(pool)
     .await
     .map_err(|e| format!("查询 ST 列表失败: {}", e))?;
@@ -7588,8 +7587,7 @@ pub async fn get_pit_main_board_non_st_symbols(
     pool: &PgPool,
     as_of_date: NaiveDate,
 ) -> Result<Vec<String>, String> {
-    let rows = sqlx::query_as!(
-        MarketStSymbol,
+    let rows: Vec<MarketStSymbol> = sqlx::query_as(
         r#"SELECT ms.symbol FROM market_stock ms
            WHERE ms.list_status = 'L'
              AND ms.list_date <= $1
@@ -7603,8 +7601,8 @@ pub async fn get_pit_main_board_non_st_symbols(
                    AND (end_date IS NULL OR end_date >= $1)
              )
            ORDER BY ms.symbol"#,
-        as_of_date,
     )
+    .bind(as_of_date)
     .fetch_all(pool)
     .await
     .map_err(|e| format!("查询主板非ST列表失败: {}", e))?;
@@ -7612,6 +7610,7 @@ pub async fn get_pit_main_board_non_st_symbols(
 }
 
 // 内部辅助结构体
+#[derive(sqlx::FromRow)]
 struct MarketStSymbol {
     symbol: String,
 }

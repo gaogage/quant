@@ -10,6 +10,7 @@ use tracing::{info, warn};
 /// Validate A-share equity curve for outliers and flat segments.
 /// Returns Err on fatal issues (outliers, eval-period flat streaks > 5 days).
 /// Warns on training-period flat streaks.
+#[allow(dead_code)]
 pub fn validate_equity_curve(
     a_nav: &[(NaiveDate, f64)],
     eval_start: NaiveDate,
@@ -76,6 +77,7 @@ pub fn validate_equity_curve(
 }
 
 /// Check equity curve and ETF price data coverage.
+#[allow(dead_code)]
 pub fn validate_data_coverage(
     a_nav: &[(NaiveDate, f64)],
     etf_prices: &HashMap<String, HashMap<NaiveDate, f64>>,
@@ -150,6 +152,7 @@ pub fn validate_data_coverage(
 }
 
 /// Check monthly training data has at least 12 months.
+#[allow(dead_code)]
 pub fn validate_training_data(
     monthly_rets: &[(String, NaiveDate, Vec<f64>)],
     etf_count: usize,

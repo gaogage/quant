@@ -449,6 +449,229 @@ pub async fn handle_equity_curve_readiness_audit(
     }
 }
 
+/// POST /api/v1/strategies/{strategy_id}/equity-curve/composite-sync
+/// 手动触发 composite 回测曲线合成(全周期)。历史数据修复重跑 A 股曲线后调用。
+pub async fn handle_composite_equity_curve_sync(
+    Path(strategy_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+    let db = match sqlx::PgPool::connect(&url).await {
+        Ok(db) => db,
+        Err(e) => return Json(serde_json::json!({"code": 1, "message": format!("db: {}", e)})),
+    };
+    match sync_composite_equity_curve(&db, &strategy_id).await {
+        Ok(n) => Json(serde_json::json!({
+            "code": 0,
+            "data": {"strategy_id": strategy_id, "status": "completed", "rows": n}
+        })),
+        Err(e) => Json(serde_json::json!({"code": 1, "message": e})),
+    }
+}
+
+// ===== composite 回测曲线合成(P1:偏离监控对标) =====
+
+/// 建表 SQL(backtest_composite_equity_curve),幂等执行。
+/// 注意:sqlx::execute 不支持单语句内多条 SQL,故拆成两条分别执行。
+const BACKTEST_COMPOSITE_TABLE_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS backtest_composite_equity_curve (\
+    strategy_id   VARCHAR NOT NULL,\
+    trade_date    DATE NOT NULL,\
+    portfolio_value NUMERIC(20,4) NOT NULL,\
+    a_share_value NUMERIC(20,4),\
+    etf_value     NUMERIC(20,4),\
+    created_at    TIMESTAMPTZ DEFAULT NOW(),\
+    PRIMARY KEY (strategy_id, trade_date)\
+)";
+
+const BACKTEST_COMPOSITE_INDEX_DDL: &str = "\
+CREATE INDEX IF NOT EXISTS idx_bcec_strategy_date \
+    ON backtest_composite_equity_curve (strategy_id, trade_date)";
+
+async fn ensure_composite_curve_table(db: &PgPool) -> Result<(), String> {
+    sqlx::query(BACKTEST_COMPOSITE_TABLE_DDL)
+        .execute(db)
+        .await
+        .map_err(|e| format!("create backtest_composite_equity_curve: {}", e))?;
+    sqlx::query(BACKTEST_COMPOSITE_INDEX_DDL)
+        .execute(db)
+        .await
+        .map_err(|e| format!("create idx_bcec_strategy_date: {}", e))?;
+    Ok(())
+}
+
+/// 合成 composite 级别回测曲线并落库。
+///
+/// 合成方法:
+/// - A 股部分:直接取 a_share 子行的回测曲线 portfolio_value(已含选股收益)。
+/// - ETF 部分:按 composite.default_weights 权重,用各 ETF 复权价日收益复利合成
+///   etf_nav(t) = etf_nav(t-1) × (1 + Σ w_i × r_i(t)),r_i = close_i(t)/close_i(t-1) - 1。
+///   ETF 缺当日行情的权重归零并入当日组合。
+/// - composite 合成:w_a_norm × a_share_nav(t) + w_etf_norm × etf_nav(t),
+///   权重 = (min_stock, Σetf_weights) 归一化;曲线首日对齐到 a_share 曲线首日值。
+///
+/// 落库:INSERT ... ON CONFLICT (strategy_id, trade_date) DO UPDATE。
+/// 返回写入行数。
+pub async fn sync_composite_equity_curve(
+    db: &PgPool,
+    strategy_id: &str,
+) -> Result<usize, String> {
+    use std::collections::HashMap;
+
+    ensure_composite_curve_table(db).await?;
+
+    let rs = crate::routes::strategy::load_resolved_strategy(db, strategy_id).await?;
+    if rs.strategy_type != crate::routes::strategy::StrategyType::Composite {
+        return Err(format!("{} 非 composite 策略,无法合成 composite 曲线", strategy_id));
+    }
+    let mvo = rs.mvo.as_ref().ok_or("composite 缺 MVO 参数")?;
+
+    // A 股子行的回测曲线 task_id
+    let a_share = rs
+        .assets
+        .iter()
+        .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare)
+        .ok_or("composite 缺 a_share 子策略")?;
+    let a_task_id = a_share
+        .security
+        .equity_curve_task_id
+        .as_ref()
+        .ok_or("a_share 子策略缺 equity_curve_task_id")?;
+
+    // 权重:A 股用 min_stock,ETF 用 default_weights(按 etf_symbols 顺序)
+    let w_a = mvo.min_stock;
+    let etf_syms = &rs.etf_symbols;
+    let etf_ws = &mvo.default_weights;
+    if etf_syms.len() != etf_ws.len() {
+        return Err(format!(
+            "etf_symbols({}) 与 default_weights({}) 长度不一致",
+            etf_syms.len(),
+            etf_ws.len()
+        ));
+    }
+    let w_etf_sum: f64 = etf_ws.iter().sum();
+    let total = w_a + w_etf_sum;
+    if total <= 0.0 {
+        return Err("权重总和 <= 0".into());
+    }
+    let w_a_norm = w_a / total;
+    let w_etf_norm = w_etf_sum / total;
+    let etf_w_norm: Vec<f64> = etf_ws.iter().map(|w| w / total).collect();
+
+    // 1. 取 A 股回测曲线 portfolio_value 序列(按 trade_date 升序)
+    let a_curve: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as::<_, (chrono::NaiveDate, rust_decimal::Decimal)>(
+        "SELECT trade_date, portfolio_value FROM backtest_equity_curve \
+         WHERE task_id = $1 ORDER BY trade_date ASC",
+    )
+    .bind(a_task_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("load a_share curve: {}", e))?
+    .into_iter()
+    .map(|(d, v)| (d, v.to_string().parse::<f64>().unwrap_or(0.0)))
+    .collect();
+    if a_curve.is_empty() {
+        return Err(format!("A 股回测曲线为空 (task_id={})", a_task_id));
+    }
+    let start_date = a_curve.first().unwrap().0;
+    let end_date = a_curve.last().unwrap().0;
+    let a_nav_start = a_curve.first().unwrap().1;
+    if a_nav_start <= 0.0 {
+        return Err("A 股曲线首日 portfolio_value <= 0".into());
+    }
+
+    // 2. 取各 ETF raw close(非复权价),按 (symbol, date) 聚合。
+    // 用 raw 而非 adj 视图:ETF 的 adj_factor 在数据层有质量问题(如 513100 adj=5.002 错误,
+    // 511010 国债ETF adj 在 7/17/7/21 跳变 140↔146),会扭曲复利合成。ETF 非除权日 adj_factor
+    // 恒定,用 raw close 算日收益率 r=close(t)/close(t-1)-1 与 adj 等价,但规避 adj 数据错误。
+    let mut etf_prices: HashMap<String, HashMap<chrono::NaiveDate, f64>> = HashMap::new();
+    for sym in etf_syms.iter() {
+        let prices: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as::<_, (chrono::NaiveDate, rust_decimal::Decimal)>(
+            "SELECT trade_date, close FROM market_stock_daily_bar \
+             WHERE symbol = $1 AND trade_date BETWEEN $2 AND $3 ORDER BY trade_date ASC",
+        )
+        .bind(sym)
+        .bind(start_date)
+        .bind(end_date)
+        .fetch_all(db)
+        .await
+        .map_err(|e| format!("load etf {} prices: {}", sym, e))?
+        .into_iter()
+        .map(|(d, v)| (d, v.to_string().parse::<f64>().unwrap_or(0.0)))
+        .collect();
+        let m: HashMap<chrono::NaiveDate, f64> = prices.into_iter().collect();
+        etf_prices.insert(sym.clone(), m);
+    }
+
+    // 3. 合成 composite 曲线:遍历 A 股曲线每个交易日
+    let mut etf_nav = 1.0_f64; // ETF 组合净值从 1.0 起步
+    let mut rows: Vec<(chrono::NaiveDate, f64, f64, f64)> = Vec::with_capacity(a_curve.len());
+    let mut prev_etf_prices: Vec<Option<f64>> = etf_syms.iter().map(|_| None).collect();
+
+    for (date, a_val) in a_curve.iter() {
+        // ETF 当日加权收益
+        let mut day_ret = 0.0_f64;
+        let mut day_weight_used = 0.0_f64;
+        for (i, sym) in etf_syms.iter().enumerate() {
+            let w_i = etf_w_norm[i];
+            if let Some(prices) = etf_prices.get(sym) {
+                if let Some(cur) = prices.get(date) {
+                    if let Some(prev) = prev_etf_prices[i].take() {
+                        if prev > 0.0 {
+                            let r = cur / prev - 1.0;
+                            day_ret += w_i * r;
+                            day_weight_used += w_i;
+                        }
+                    }
+                    prev_etf_prices[i] = Some(*cur);
+                }
+            }
+        }
+        // ETF 组合净值复利(权重未满载时按实际已用权重归一,避免未上市ETF稀释)
+        if day_weight_used > 0.0 {
+            etf_nav *= 1.0 + day_ret;
+        }
+        // composite 合成:A 股曲线绝对值 × w_a_norm + ETF组合(缩放到A股首日) × w_etf_norm
+        let a_contrib = a_val * w_a_norm;
+        let etf_contrib = etf_nav * a_nav_start * w_etf_norm;
+        let composite_nav = a_contrib + etf_contrib;
+        rows.push((*date, composite_nav, *a_val, etf_nav * a_nav_start));
+    }
+
+    // 4. 批量 UPSERT 落库
+    let mut upserted = 0usize;
+    for (date, pv, av, ev) in &rows {
+        let r = sqlx::query(
+            "INSERT INTO backtest_composite_equity_curve \
+             (strategy_id, trade_date, portfolio_value, a_share_value, etf_value) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (strategy_id, trade_date) DO UPDATE SET \
+             portfolio_value = EXCLUDED.portfolio_value, \
+             a_share_value = EXCLUDED.a_share_value, \
+             etf_value = EXCLUDED.etf_value",
+        )
+        .bind(strategy_id)
+        .bind(date)
+        .bind(rust_decimal::Decimal::from_f64_retain(*pv).unwrap_or_default())
+        .bind(rust_decimal::Decimal::from_f64_retain(*av).unwrap_or_default())
+        .bind(rust_decimal::Decimal::from_f64_retain(*ev).unwrap_or_default())
+        .execute(db)
+        .await
+        .map_err(|e| format!("upsert composite curve {}: {}", date, e))?;
+        upserted += r.rows_affected() as usize;
+    }
+    info!(
+        "[composite-sync] {} 合成 {} 个交易日 ({}~{}),A股权重={:.3} ETF权重={:.3}",
+        strategy_id,
+        rows.len(),
+        start_date,
+        end_date,
+        w_a_norm,
+        w_etf_norm
+    );
+    Ok(upserted)
+}
+
 // ===== 集成测试(需 DB,默认 ignore) =====
 
 #[cfg(test)]

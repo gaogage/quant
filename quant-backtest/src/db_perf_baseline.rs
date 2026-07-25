@@ -5,6 +5,7 @@ use crate::runner::BacktestRunner;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -66,6 +67,11 @@ pub struct DbPerfBaselineReport {
     pub sharpe_ratio: Decimal,
     pub max_drawdown: Decimal,
     pub turnover: Decimal,
+    /// 权益曲线 (date, nav) 的 SHA-256，nav 保留 6 位小数消除浮点抖动。
+    /// DDD 重构 audit 守卫:此 hash 不变即证明回测权益曲线行为等价。
+    pub equity_curve_sha256: String,
+    /// 信号序列 (date, symbol, weight) 的 SHA-256，weight 保留 8 位小数。
+    pub signal_hash_sha256: String,
 }
 
 pub fn parse_db_perf_args<I, S>(args: I) -> Result<DbPerfBaselineConfig, String>
@@ -156,6 +162,9 @@ pub async fn run_db_perf_baseline(
     let output = runner.run(&task_id, backtest_config, &signals).await?;
     let elapsed_ms = started_at.elapsed().as_millis();
 
+    let equity_curve_sha256 = hash_equity_curve(&output.equity_curve);
+    let signal_hash_sha256 = hash_signals(&signals);
+
     Ok(DbPerfBaselineReport {
         scenario: "phase2_db_runner_smoke".to_string(),
         task_id,
@@ -182,7 +191,54 @@ pub async fn run_db_perf_baseline(
         sharpe_ratio: output.metrics.sharpe_ratio,
         max_drawdown: output.metrics.max_drawdown_pct,
         turnover: output.metrics.turnover,
+        equity_curve_sha256,
+        signal_hash_sha256,
     })
+}
+
+/// 对权益曲线 (date, nav) 序列做 SHA-256。
+/// nav 保留 6 位小数(`{:.6}`)消除跨机器浮点抖动,保证 audit hash 稳定。
+pub fn hash_equity_curve(curve: &[(NaiveDate, Decimal)]) -> String {
+    let mut hasher = Sha256::new();
+    for (date, nav) in curve {
+        hasher.update(date.format("%Y-%m-%d").to_string().as_bytes());
+        hasher.update(b"|");
+        // 保留 6 位小数,消除浮点表示差异
+        hasher.update(format!("{:.6}", nav).as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// 对信号序列 (date, symbol, weight) 做 SHA-256。
+/// 按 date 升序、symbol 升序排列后 hash,weight 保留 8 位小数。
+pub fn hash_signals(signals: &HashMap<NaiveDate, StrategySignal>) -> String {
+    let mut entries: Vec<(NaiveDate, Vec<(String, Decimal)>)> = signals
+        .iter()
+        .map(|(date, sig)| {
+            let mut weights: Vec<(String, Decimal)> =
+                sig.target_weights.iter().map(|(s, w)| (s.clone(), *w)).collect();
+            weights.sort_by(|a, b| a.0.cmp(&b.0));
+            (*date, weights)
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (date, weights) in entries {
+        hasher.update(date.format("%Y-%m-%d").to_string().as_bytes());
+        hasher.update(b"|");
+        for (symbol, weight) in weights {
+            hasher.update(symbol.as_bytes());
+            hasher.update(b":");
+            hasher.update(format!("{:.8}", weight).as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn normalize_config(mut config: DbPerfBaselineConfig) -> DbPerfBaselineConfig {
@@ -431,6 +487,41 @@ mod tests {
         assert_eq!(
             redact_database_url("postgres://user:secret@localhost/quant"),
             "postgres://***@localhost/quant"
+        );
+    }
+
+    #[test]
+    fn hash_equity_curve_is_stable_and_distinguishes_changes() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let curve_a = vec![
+            (d1, Decimal::new(1234567, 3)), // 1234.567
+            (d2, Decimal::new(1245678, 3)), // 1245.678
+        ];
+        let curve_b = vec![
+            (d1, Decimal::new(1234567, 3)),
+            (d2, Decimal::new(9999999, 3)), // 不同 nav
+        ];
+        let ha = hash_equity_curve(&curve_a);
+        let hb = hash_equity_curve(&curve_b);
+        // 相同输入产出相同 hash(确定性)
+        assert_eq!(ha, hash_equity_curve(&curve_a));
+        // 不同输入产出不同 hash(区分性)
+        assert_ne!(ha, hb);
+        // hash 是 64 位十六进制(SHA-256)
+        assert_eq!(ha.len(), 64);
+        assert!(ha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_equity_curve_ignores_float_jitter_beyond_6_decimals() {
+        let d = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        // 1.2345674 和 1.2345676 在 6 位小数截断后都是 1.234567,hash 应一致
+        let curve_jitter_a = vec![(d, Decimal::new(12345674, 7))];
+        let curve_jitter_b = vec![(d, Decimal::new(12345676, 7))];
+        assert_eq!(
+            hash_equity_curve(&curve_jitter_a),
+            hash_equity_curve(&curve_jitter_b)
         );
     }
 }

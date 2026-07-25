@@ -10,6 +10,8 @@ use quant_common::phase7::{
     build_layered_search_plan, CandidateMetrics, CandidateTargets, CandidateType,
     LayeredSearchConfig, LayeredSearchPlan, LocalResourcePlan,
 };
+// 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
+use quant_common::time_utils::fmt_rfc3339_local;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -3266,7 +3268,7 @@ pub async fn get_optimization(
             "status": row.9,
             "best_trial_id": row.10,
             "progress": row.11,
-            "created_at": row.12.map(|ts| ts.to_rfc3339()),
+            "created_at": fmt_rfc3339_local(row.12),
             "trial_total": counts.0,
             "trial_completed": counts.1,
             "trial_failed": counts.2,
@@ -3479,9 +3481,9 @@ async fn cleanup_stale_optimization_tasks_inner(
                     "status": status,
                     "next_status": optimization_cleanup_task_status_transition(status),
                     "progress": progress,
-                    "last_heartbeat_at": last_heartbeat_at.map(|ts| ts.to_rfc3339()),
-                    "created_at": created_at.to_rfc3339(),
-                    "observed_at": observed_at.to_rfc3339(),
+                    "last_heartbeat_at": fmt_rfc3339_local(*last_heartbeat_at),
+                    "created_at": fmt_rfc3339_local(Some(*created_at)),
+                    "observed_at": fmt_rfc3339_local(Some(observed_at)),
                     "heartbeat_timeout_seconds": timeout_seconds,
                 })
             },
@@ -3599,9 +3601,9 @@ async fn cleanup_stale_experiment_runs_inner(
                     "related_entity_id": related_entity_id,
                     "status": status,
                     "next_status": experiment_cleanup_status_transition(status),
-                    "started_at": started_at.map(|ts| ts.to_rfc3339()),
-                    "created_at": created_at.to_rfc3339(),
-                    "observed_at": observed_at.to_rfc3339(),
+                    "started_at": fmt_rfc3339_local(*started_at),
+                    "created_at": fmt_rfc3339_local(Some(*created_at)),
+                    "observed_at": fmt_rfc3339_local(Some(observed_at)),
                     "timeout_seconds": default_timeout_seconds,
                 })
             },

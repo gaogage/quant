@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::api;
 use crate::auth::AuthState;
+use crate::components::charts::NavComparisonChart;
 use crate::Route;
 
 #[component]
@@ -119,6 +120,11 @@ pub fn DashboardContent() -> Element {
 
             if !blueprint.read().is_null() {
                 BlueprintProgressPanel { data: blueprint.read().clone() }
+            }
+
+            // P3-1: v24 实盘绩效 Dashboard（NAV 曲线 + 关键指标）
+            V24PerformanceSection {
+                accounts: accounts.read().clone(),
             }
 
             // 账号列表
@@ -340,6 +346,98 @@ fn MetricBox(label: String, value: String) -> Element {
         div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-md p-3 min-w-0",
             div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "{label}" }
             div { class: "text-sm font-medium text-gray-900 dark:text-white truncate", "{value}" }
+        }
+    }
+}
+
+/// P3-1: v24 实盘绩效面板 — 从账号列表中选第一个挂了策略的活跃模拟账号，
+/// 加载其 NAV 历史(paper_nav_snapshot) + 回测同期对比曲线。
+#[component]
+fn V24PerformanceSection(accounts: Vec<Value>) -> Element {
+    // 选取第一个 active 模拟盘且挂了策略的账号作为展示对象
+    let target = accounts.iter().find(|a| {
+        a["status"].as_str() == Some("active")
+            && a["account_type"].as_str() == Some("simulated")
+            && a["strategy_version_id"].as_str().map(|s| !s.is_empty()).unwrap_or(false)
+    }).cloned();
+
+    let Some(acc) = target else {
+        return rsx! { div {} };
+    };
+    let account_id = acc["account_id"].as_str().unwrap_or("").to_string();
+    let acc_name = acc["name"].as_str().unwrap_or("-").to_string();
+    if account_id.is_empty() {
+        return rsx! { div {} };
+    }
+
+    let mut nav_history = use_signal(|| Value::Null);
+    let mut nh_loading = use_signal(|| true);
+    let aid_for_effect = account_id.clone();
+
+    use_effect(move || {
+        let aid = aid_for_effect.clone();
+        spawn(async move {
+            if let Ok(v) = api::get_nav_history(&aid).await {
+                nav_history.set(v["data"].clone());
+            }
+            nh_loading.set(false);
+        });
+    });
+
+    if *nh_loading.read() {
+        return rsx! {
+            div { class: "mb-8 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-5",
+                div { class: "animate-spin h-6 w-6 border-4 border-blue-500 border-t-transparent rounded-full" }
+            }
+        };
+    }
+
+    let data = nav_history.read();
+    let nav_points: Vec<Value> = data["nav_history"].as_array().cloned().unwrap_or_default();
+    if nav_points.len() < 2 {
+        return rsx! { div {} };
+    }
+    let bt_points: Vec<Value> = data["backtest_comparison"].as_array().cloned().unwrap_or_default();
+
+    let dates: Vec<String> = nav_points.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
+    let live_ret: Vec<f64> = nav_points.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
+    let bt_dates: Vec<String> = bt_points.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
+    let bt_ret: Vec<f64> = bt_points.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
+
+    let last = nav_points.last().cloned().unwrap_or(Value::Null);
+    let cur_nav = last["nav"].as_f64().unwrap_or(0.0);
+    let cur_cum_ret = last["cumulative_return"].as_f64().unwrap_or(0.0);
+    let cur_mdd = nav_points.iter().map(|p| p["max_drawdown"].as_f64().unwrap_or(0.0)).fold(0.0_f64, f64::max);
+    let sharpe = acc["sharpe_ratio"].as_f64().unwrap_or(0.0);
+
+    // 与回测偏离(用最后一点对比,同 P2-1 push_daily_performance_report 的窗口思路,这里取全窗口)
+    let bt_last_ret = bt_ret.last().copied().unwrap_or(0.0);
+    let deviation = cur_cum_ret - bt_last_ret;
+    let dev_cls = if deviation.abs() > 2.0 { "text-red-600 dark:text-red-400" } else { "text-gray-500 dark:text-gray-400" };
+
+    rsx! {
+        section { class: "mb-8 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-5",
+            div { class: "flex items-center justify-between mb-4",
+                h2 { class: "text-lg font-semibold text-gray-900 dark:text-white", "v24 实盘绩效 — {acc_name}" }
+                if !bt_points.is_empty() {
+                    span { class: "text-xs {dev_cls}", "与回测偏离 {deviation:+.2}%" }
+                }
+            }
+
+            div { class: "grid grid-cols-4 gap-3 mb-5",
+                MetricBox { label: "当前净值".to_string(), value: format!("¥{:.0}", cur_nav) }
+                MetricBox { label: "累计收益".to_string(), value: format!("{:+.2}%", cur_cum_ret) }
+                MetricBox { label: "最大回撤".to_string(), value: format!("{:.2}%", cur_mdd) }
+                MetricBox { label: "Sharpe".to_string(), value: format!("{:.2}", sharpe) }
+            }
+
+            NavComparisonChart {
+                dates: dates,
+                live_ret: live_ret,
+                bt_dates: bt_dates,
+                bt_ret: bt_ret,
+                canvas_id: "v24-nav-chart".to_string(),
+            }
         }
     }
 }

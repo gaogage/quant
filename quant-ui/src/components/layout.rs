@@ -51,6 +51,7 @@ pub fn AppLayout() -> Element {
     let data_cls = link_css(route == Route::DataPage {}, false);
     let tasks_cls = link_css(route == Route::TasksPage {}, false);
     let users_cls = link_css(route == Route::UsersPage {}, false);
+    let factors_cls = link_css(route == Route::FactorHealthPage {}, false);
 
     rsx! {
         div { class: "min-h-screen flex flex-col",
@@ -74,6 +75,7 @@ pub fn AppLayout() -> Element {
                             Link { to: Route::DataPage {}, class: "{data_cls}", "数据" }
                             Link { to: Route::TasksPage {}, class: "{tasks_cls}", "任务" }
                             Link { to: Route::UsersPage {}, class: "{users_cls}", "用户" }
+                            Link { to: Route::FactorHealthPage {}, class: "{factors_cls}", "因子健康" }
                         }
                     }
                 }

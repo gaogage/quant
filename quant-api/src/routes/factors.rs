@@ -16217,6 +16217,36 @@ pub async fn materialize_pit_combo(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<u64, String> {
+    materialize_pit_combo_ext(db, combo_name, factor_version, horizon, start_date, end_date, false, None, None).await
+}
+
+/// 扩展版物化:支持纳入基本面因子(fin_/mf_/north_)与 IC 强度阈值筛选。
+/// - include_fundamentals: true 时黑名单移除 fin_|margin_|mf_|north_(block_/ar_ 原本不在黑名单,自动进)。
+///   用于新建含基本面因子的 combo(如 full_pit_icir_37f_h20_fund),与原量价 combo 做 A/B 对比。
+/// - min_abs_ic_ir: PIT 因子 ic_ir 绝对值下限(如 0.20),只让强预测力因子进 combo,弱因子(量价/基本面)都排除。
+///   None 时不加阈值(保留原行为,兼容现有 combo)。
+pub async fn materialize_pit_combo_ext(
+    db: &sqlx::PgPool,
+    combo_name: &str,
+    factor_version: &str,
+    horizon: i16,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    include_fundamentals: bool,
+    min_abs_ic_ir: Option<f64>,
+    factor_whitelist: Option<&[String]>,
+) -> Result<u64, String> {
+    // 黑名单正则:include_fundamentals=true 时移除 fin_|margin_|mf_|north_,让基本面因子进 combo。
+    // block_/ar_ 原本不在黑名单。cf_/div_/event_/val_ 等始终排除(数据口径/事件类未纳入)。
+    let blacklist_re = if include_fundamentals {
+        "^(cf_|div_|event_|external|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)"
+    } else {
+        "^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)"
+    };
+    // IC 强度阈值片段:min_abs_ic_ir 给定时加 ABS(fe.ic_ir) >= $n 条件,只留强因子。
+    // 占位 {ic_threshold} 替换为 "" 或 "AND ABS(fe.ic_ir) >= $N"(参数索引在调用处绑定)。
+    // factor_whitelist:去冗余白名单(按 IC 相关性聚类选的代表因子)。给定时只让指定因子进 combo,
+    // 避免同源因子(如 fin_roe/fin_roa/fin_margin 相关 0.9+)放大信号扭曲 ICIR 加权。None 时不过滤。
     // 逐季度循环：每季用其调仓点(季度首个交易日)的 PIT 权重，单独 execute（自动提交）。
     // 可观测(逐季写入)、可增量(实盘只重跑最近季度)、避免单事务过重。
     let quarters: Vec<NaiveDate> = sqlx::query_scalar::<_, NaiveDate>(
@@ -16233,18 +16263,26 @@ pub async fn materialize_pit_combo(
     .map_err(|e| format!("materialize_pit_combo quarters: {}", e))?;
 
     // $4 = as_of（季度调仓点，同时是 PIT 截止日）；$5 = 下季 as_of（开区间末）
+    // $6 = blacklist_re（黑名单正则，参数化支持 include_fundamentals 分支）
+    // $7 = min_abs_ic_ir（IC 强度阈值，NULL 时不筛选）
+    // $8 = factor_whitelist（去冗余白名单，NULL 时不筛选）
     let per_quarter_sql = r#"
 WITH pit AS (
     -- PIT 因子集:JOIN factor_definition status='active' 过滤废弃因子。
     -- 早期原始版因子(mom_20d 等)未进 definition 表,后期 _std 版才注册;
     -- 废弃因子的 factor_evaluation 历史 IC 残留,若不过滤会进 combo 导致:
     -- 1)INNER JOIN factor_value 取不到数据静默跳过;2)权重分母含废弃因子 ICIR 虚高→raw_score 压低。
+    -- 黑名单正则($6)与 IC 阈值($7)参数化:include_fundamentals=true 时移除 fin_/mf_/north_,
+    -- min_abs_ic_ir 给定时只留强预测力因子(量价+基本面统一筛选,避免弱因子稀释权重)。
+    -- factor_whitelist($8)给定时只让去冗余代表因子进 combo,避免同源信号放大。
     SELECT DISTINCT ON (fe.factor_code) fe.factor_code, fe.mean_ic, fe.ic_ir
     FROM factor_evaluation fe
     JOIN factor_definition fd ON fd.factor_code = fe.factor_code AND fd.status = 'active'
     WHERE fe.horizon = $3 AND fe.end_date <= $4
       AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
-      AND fe.factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)'
+      AND fe.factor_code !~ $6
+      AND ($7 IS NULL OR ABS(fe.ic_ir) >= $7)
+      AND ($8 IS NULL OR fe.factor_code = ANY($8))
     ORDER BY fe.factor_code, fe.end_date DESC
 ),
 wsum AS (SELECT SUM(ABS(ic_ir)) AS tot FROM pit),
@@ -16279,22 +16317,30 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
         // 覆盖率门禁:季度调仓点因子数据完整性检查。
         // pit 因子集(活跃因子)中,实际有当日 factor_value 数据的比例。
         // 覆盖率<50%告警(仍物化但记日志,供排查),=0 跳过该季度(无数据无法打分)。
+        // 黑名单($4)与 IC 阈值($5)与白名单($6)同 per_quarter_sql 口径,保证门禁与实际物化一致。
         let coverage: Option<(i64, i64)> = sqlx::query_as(
             r#"SELECT
                  (SELECT COUNT(DISTINCT fe.factor_code) FROM factor_evaluation fe
                    JOIN factor_definition fd ON fd.factor_code=fe.factor_code AND fd.status='active'
                    WHERE fe.horizon=$1 AND fe.end_date<=$2 AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
-                     AND fe.factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)') AS pit_n,
+                     AND fe.factor_code !~ $4
+                     AND ($5 IS NULL OR ABS(fe.ic_ir) >= $5)
+                     AND ($6 IS NULL OR fe.factor_code = ANY($6))) AS pit_n,
                  (SELECT COUNT(DISTINCT fe.factor_code) FROM factor_evaluation fe
                    JOIN factor_definition fd ON fd.factor_code=fe.factor_code AND fd.status='active'
                    JOIN factor_value fv ON fv.factor_code=fe.factor_code AND fv.factor_version=$3
                      AND fv.trade_date=$2 AND fv.normalized_value IS NOT NULL
                    WHERE fe.horizon=$1 AND fe.end_date<=$2 AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
-                     AND fe.factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)') AS have_n"#,
+                     AND fe.factor_code !~ $4
+                     AND ($5 IS NULL OR ABS(fe.ic_ir) >= $5)
+                     AND ($6 IS NULL OR fe.factor_code = ANY($6))) AS have_n"#,
         )
         .bind(horizon)
         .bind(as_of)
         .bind(factor_version)
+        .bind(blacklist_re)
+        .bind(min_abs_ic_ir)
+        .bind(factor_whitelist)
         .fetch_one(db)
         .await
         .ok();
@@ -16314,6 +16360,9 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
             .bind(horizon)
             .bind(as_of)
             .bind(q_end)
+            .bind(blacklist_re)
+            .bind(min_abs_ic_ir)
+            .bind(factor_whitelist)
             .execute(db)
             .await
             .map_err(|e| format!("materialize_pit_combo q={}: {}", as_of, e))?;
@@ -16441,6 +16490,16 @@ pub struct MaterializePitComboRequest {
     pub horizon: i16,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    /// 是否纳入基本面因子(fin_/mf_/north_)。true 时黑名单移除这些前缀,用于新建含基本面 combo。
+    /// 默认 false:保持原量价 combo 行为。
+    #[serde(default)]
+    pub include_fundamentals: bool,
+    /// PIT 因子 ic_ir 绝对值下限。给定(如 0.20)时只留强预测力因子进 combo。
+    /// 默认 None:不加阈值,兼容现有 combo。
+    pub min_abs_ic_ir: Option<f64>,
+    /// 去冗余白名单:按 IC 相关性聚类选的代表因子列表。
+    /// 给定时只让指定因子进 combo,避免同源信号放大。默认 None:不额外过滤。
+    pub factor_whitelist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -16943,10 +17002,13 @@ pub async fn materialize_pit_combo_background(
     .execute(&state.db)
     .await;
 
+    let include_fund = req.include_fundamentals;
+    let min_ic_ir = req.min_abs_ic_ir;
+    let whitelist = req.factor_whitelist.clone();
     let state = state.clone();
     let tid = task_id.clone();
     tokio::spawn(async move {
-        match materialize_pit_combo(&state.db, &combo_name, &version, horizon, start, end).await {
+        match materialize_pit_combo_ext(&state.db, &combo_name, &version, horizon, start, end, include_fund, min_ic_ir, whitelist.as_deref()).await {
             Ok(rows) => {
                 let _ = sqlx::query(
                     "UPDATE data_sync_task SET status='completed', total_count=$2, success_count=$2,

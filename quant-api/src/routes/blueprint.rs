@@ -9,6 +9,9 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use std::sync::Arc;
 
+// 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
+use quant_common::time_utils::fmt_rfc3339_local;
+
 use crate::auth::middleware::UserContext;
 use crate::AppState;
 
@@ -80,7 +83,7 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
     }
 
     Ok(json!({
-        "as_of": chrono::Utc::now().to_rfc3339(),
+        "as_of": fmt_rfc3339_local(Some(chrono::Utc::now())).unwrap_or_default(),
         "canonical": {
             "strategies": strategies,
             "scope": "active simulated accounts and full PIT canonical lineage",

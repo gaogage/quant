@@ -38,6 +38,7 @@ pub struct PlannedTrade {
 
 // ── 实际交易 ──────────────────────────────────────────
 
+#[allow(dead_code)]
 pub struct ActualTrade {
     pub planned_order_id: String,
     pub fill_price: Decimal,
@@ -154,6 +155,7 @@ pub async fn execute_simulated_trade(
 
 // ── 融资借款 ──────────────────────────────────────────
 
+#[allow(dead_code)]
 pub async fn execute_margin_borrow(
     db: &PgPool,
     account_id: &str,
@@ -282,11 +284,31 @@ pub async fn try_auto_repay(db: &PgPool, account_id: &str) -> Result<Option<Stri
 /// 改返回 `Result<f64>`(P1-B 性能优化):mvo_simulate 循环内可直接拿 NAV,
 /// 省去紧随其后的 `SELECT current_nav` 一次 DB 往返(~N 次,N=模拟天数)。
 pub async fn update_current_nav(db: &PgPool, account_id: &str) -> Result<f64, String> {
+    // P0-3 修复(2026-07-20): 原实现只更新 current_nav，peak_nav/max_drawdown_pct 在实盘调仓
+    // 路径中从不更新（只有 paper.rs 旧回放路径维护）。现改为单条原子 UPDATE 同步维护三者：
+    //   peak_nav = GREATEST(旧peak, 新nav)            -- 单调递增的水位线
+    //   max_drawdown_pct = GREATEST(旧max_dd, 当前回撤) -- 当前回撤=(新peak-新nav)/新peak
+    // SET 表达式中的 peak_nav/max_drawdown_pct 引用 UPDATE 前的旧值（PostgreSQL 语义），
+    // calc.nav 由 paper_position 聚合 + cash - margin 计算得出（均为本语句未修改的列，安全）。
     let nav: f64 = sqlx::query_scalar(
         "UPDATE paper_account SET
-         current_nav = (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id = $1)
-                     + COALESCE(cash,0) - COALESCE(margin_amount,0)
-         WHERE paper_account_id = $1 RETURNING current_nav::double precision",
+         current_nav = calc.nav,
+         peak_nav = GREATEST(COALESCE(peak_nav, calc.nav), calc.nav),
+         max_drawdown_pct = GREATEST(
+             COALESCE(max_drawdown_pct, 0),
+             CASE WHEN GREATEST(COALESCE(peak_nav, calc.nav), calc.nav) > 0
+                  THEN GREATEST(0,
+                      (GREATEST(COALESCE(peak_nav, calc.nav), calc.nav) - calc.nav)
+                      / GREATEST(COALESCE(peak_nav, calc.nav), calc.nav))
+                  ELSE 0 END
+         )
+         FROM (
+             SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id = $1)
+                  + COALESCE(cash,0) - COALESCE(margin_amount,0) AS nav
+             FROM paper_account WHERE paper_account_id = $1
+         ) calc
+         WHERE paper_account_id = $1
+         RETURNING current_nav::double precision",
     )
     .bind(account_id)
     .fetch_one(db)

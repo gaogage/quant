@@ -22,6 +22,9 @@ use tokio::{process::Command, time::timeout};
 use tracing::info;
 use uuid::Uuid;
 
+// 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
+use quant_common::time_utils::fmt_rfc3339_local;
+
 use crate::phase7_alpha_admission::{
     industry_prosperity_alpha_admission_policy, industry_prosperity_alpha_admission_policy_static,
     INDUSTRY_MEMBERSHIP_COVERAGE_THRESHOLD, INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
@@ -2265,6 +2268,7 @@ fn exchange_announcement_pdf_parse_status(probe: &Value) -> String {
     .to_string()
 }
 
+#[cfg(test)]
 fn exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
     category: &str,
     title: &str,
@@ -8273,8 +8277,7 @@ fn phase7_date_json(date: Option<NaiveDate>) -> Value {
 }
 
 fn phase7_datetime_json(date: Option<chrono::DateTime<chrono::Utc>>) -> Value {
-    date.map(|date| json!(date.to_rfc3339()))
-        .unwrap_or(Value::Null)
+    json!(fmt_rfc3339_local(date))
 }
 
 fn phase7_ratio(numerator: i64, denominator: i64) -> Option<f64> {
@@ -17256,6 +17259,64 @@ pub async fn sync_adj_factor_background(
     Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "running"}}))
 }
 
+/// POST /api/v1/quant/data/sync/adj-factor/backfill
+/// 手动触发复权因子前向填充兜底,修复任意日期的复权因子缺失(不必重跑整个 EOD)。
+/// 用于事后修复如 7/20-7/21 EOD 卡死导致的复权因子缺失,避免 adj 视图退化为 raw 价。
+#[derive(Debug, Deserialize)]
+pub struct BackfillAdjFactorReq {
+    /// 目标日期 YYYYMMDD(必填)
+    pub date: String,
+    /// 向前回溯几天(默认 5),对每个日期逐日前向填充
+    #[serde(default)]
+    pub days: Option<i64>,
+}
+
+pub async fn sync_adj_factor_backfill(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BackfillAdjFactorReq>,
+) -> impl IntoResponse {
+    let target = match NaiveDate::parse_from_str(&req.date, "%Y%m%d") {
+        Ok(d) => d,
+        Err(e) => {
+            return Json(
+                json!({"code": 1, "message": format!("date 格式错误(需 YYYYMMDD): {}", e)}),
+            )
+        }
+    };
+    let days = req.days.unwrap_or(5).max(0);
+    let dv_id = format!("dv-adj-backfill-{}", req.date);
+    info!(date = %target, days, %dv_id, "手动触发复权因子前向填充兜底");
+
+    // 逐日调用 backfill_adj_factor_for_date(幂等,非交易日/无 bar 自动跳过)
+    let mut processed: Vec<Value> = Vec::new();
+    for i in 0..=days {
+        let d = target - Duration::days(i);
+        let bar_cnt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT symbol) FROM market_stock_daily_bar WHERE trade_date = $1",
+        )
+        .bind(d)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+        crate::routes::scheduler::backfill_adj_factor_for_date(&state.db, d, &dv_id).await;
+        let adj_cnt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT symbol) FROM market_adjustment_factor WHERE trade_date = $1",
+        )
+        .bind(d)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+        let pct = if bar_cnt > 0 { adj_cnt * 100 / bar_cnt } else { 100 };
+        processed.push(json!({
+            "date": d.format("%Y-%m-%d").to_string(),
+            "bar_count": bar_cnt,
+            "adj_count": adj_cnt,
+            "coverage_pct": pct,
+        }));
+    }
+    Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "completed", "processed": processed}}))
+}
+
 /// POST /api/v1/quant/data/sync/index-daily
 #[derive(Debug, Deserialize)]
 pub struct SyncIndexDailyReq {
@@ -20720,7 +20781,7 @@ async fn build_main_business_readiness_audit(
                     "row_count": row_count.unwrap_or(0),
                     "error_message": error_message,
                     "task_id": task_id,
-                    "updated_at": updated_at.map(|value| value.to_rfc3339()),
+                    "updated_at": fmt_rfc3339_local(*updated_at),
                 })
             },
         )
@@ -24487,7 +24548,7 @@ pub async fn sync_task_status(
                 "success": success,
                 "failed": failed,
                 "progress": progress,
-                "last_heartbeat_at": last_heartbeat_at.map(|ts| ts.to_rfc3339()),
+                "last_heartbeat_at": fmt_rfc3339_local(last_heartbeat_at),
                 "heartbeat_timeout_seconds": heartbeat_timeout_seconds,
                 "stale": stale,
                 "retry_of_task_id": retry_of_task_id,
@@ -24558,10 +24619,10 @@ pub async fn cleanup_stale_sync_tasks(
                     "task_type": task_type,
                     "status": status,
                     "progress": progress,
-                    "last_heartbeat_at": last_heartbeat_at.map(|ts| ts.to_rfc3339()),
-                    "started_at": started_at.map(|ts| ts.to_rfc3339()),
-                    "created_at": created_at.map(|ts| ts.to_rfc3339()),
-                    "observed_at": observed_at.map(|ts| ts.to_rfc3339()),
+                    "last_heartbeat_at": fmt_rfc3339_local(*last_heartbeat_at),
+                    "started_at": fmt_rfc3339_local(*started_at),
+                    "created_at": fmt_rfc3339_local(*created_at),
+                    "observed_at": fmt_rfc3339_local(observed_at),
                     "heartbeat_timeout_seconds": timeout_seconds,
                     "cleanup_action": stale_sync_task_cleanup_action(status),
                     "terminal_status": stale_sync_task_cleanup_terminal_status(status)

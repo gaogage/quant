@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::AppState;
 
 /// 持仓 + 行业标签(归因基础数据)。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PositionWithIndustry {
     pub symbol: String,

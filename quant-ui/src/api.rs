@@ -370,3 +370,23 @@ pub async fn run_historical_replay(
         "end_date": end_date,
     })).await
 }
+
+/// P3-1: NAV 历史序列(逐日 NAV/日收益/累计收益/回撤)+ 三基准对比，供 dashboard NAV 曲线用
+pub async fn get_nav_history(account_id: &str) -> Result<Value, String> {
+    get(&format!("/api/v1/accounts/{}/nav-history", account_id)).await
+}
+
+/// 带日期范围的 NAV 历史（账号详情页收益率曲线用），start/end 格式 YYYY-MM-DD
+pub async fn get_nav_history_range(account_id: &str, start: &str, end: &str) -> Result<Value, String> {
+    get(&format!("/api/v1/accounts/{}/nav-history?start_date={}&end_date={}", account_id, start, end)).await
+}
+
+/// P3-2: v24 14 因子每日覆盖率 + 滞缓状态
+pub async fn admin_factor_health() -> Result<Value, String> {
+    get("/api/v1/admin/factor-health").await
+}
+
+/// P3-3: 调仓历史(按交易日分组摘要)
+pub async fn get_rebalance_history(account_id: &str) -> Result<Value, String> {
+    get(&format!("/api/v1/accounts/{}/rebalance-history", account_id)).await
+}
