@@ -918,7 +918,6 @@ pub(crate) async fn persist_optimization_experiment_run(
     signal_cache_stats: Option<&Value>,
     backtest_cache_stats: Option<&Value>,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let throughput = if elapsed_ms > 0 {
         Some(executed as f64 * 1000.0 / elapsed_ms as f64)
     } else {
@@ -953,23 +952,17 @@ pub(crate) async fn persist_optimization_experiment_run(
         "failed"
     };
 
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at, completed_at)
-         VALUES ($1, 'optimization_trial_batch_release_gate', 'optimization_task', $2,
-                 $3, $4, $5, now(), now())",
+    create_experiment_run(
+        db,
+        "optimization_trial_batch_release_gate",
+        "optimization_task",
+        Some(task_id),
+        &config,
+        &metrics,
+        experiment_status,
     )
-    .bind(&experiment_run_id)
-    .bind(task_id)
-    .bind(&config)
-    .bind(&metrics)
-    .bind(experiment_status)
-    .execute(db)
     .await
-    .map_err(|error| format!("Failed to insert optimization experiment_run: {}", error))?;
-
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to insert optimization experiment_run: {}", error))
 }
 
 
@@ -1530,28 +1523,17 @@ pub(crate) async fn persist_elite_validation_report_experiment(
     config: &Value,
     metrics: &Value,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at, completed_at)
-         VALUES ($1, 'professional_elite_validation_report', 'optimization_task', $2,
-                 $3, $4, 'completed', now(), now())",
+    create_experiment_run(
+        db,
+        "professional_elite_validation_report",
+        "optimization_task",
+        Some(task_id),
+        config,
+        metrics,
+        "completed",
     )
-    .bind(&experiment_run_id)
-    .bind(task_id)
-    .bind(config)
-    .bind(metrics)
-    .execute(db)
     .await
-    .map_err(|error| {
-        format!(
-            "Failed to insert elite validation experiment_run: {}",
-            error
-        )
-    })?;
-
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to insert elite validation experiment_run: {}", error))
 }
 
 
@@ -2242,6 +2224,152 @@ pub(crate) async fn refresh_task_progress(db: &sqlx::PgPool, task_id: &str) -> R
     .map_err(|error| format!("Failed to refresh optimization task progress: {}", error))?;
 
     Ok(best_trial_id)
+}
+
+// ─── DDD Step 4b：experiment_run 通用写入 ─────────────────────────
+//
+// 消除 8 处重复的 `INSERT INTO experiment_run(...)` 样板。所有调用点的
+// 表结构一致(experiment_run_id/experiment_type/related_entity_type/
+// related_entity_id/config/metrics/status/started_at/completed_at)，
+// 差异仅在于 related_entity_id 是否自引用、status 是否为 "running"(此时
+// completed_at 留 NULL，其余状态写 now())。
+
+/// 创建一条 `experiment_run` 记录，返回生成的 `experiment_run_id`。
+///
+/// - `related_entity_id`：为 `None` 时自引用（写入刚生成的 `experiment_run_id`），
+///   对应原 wfa_engine.rs 两处 OOS walk-forward 用自身 ID 占位的场景。
+/// - `status`：`"running"` 时 `completed_at` 留 NULL；其余状态（`completed`/
+///   `partial`/`failed`）写入 `now()`。`started_at` 始终写 `now()`。
+pub(crate) async fn create_experiment_run(
+    db: &sqlx::PgPool,
+    experiment_type: &str,
+    related_entity_type: &str,
+    related_entity_id: Option<&str>,
+    config: &Value,
+    metrics: &Value,
+    status: &str,
+) -> Result<String, String> {
+    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
+    let related_entity_id = related_entity_id.unwrap_or(&experiment_run_id);
+
+    if status == "running" {
+        sqlx::query(
+            "INSERT INTO experiment_run
+               (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+                config, metrics, status, started_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now())",
+        )
+        .bind(&experiment_run_id)
+        .bind(experiment_type)
+        .bind(related_entity_type)
+        .bind(related_entity_id)
+        .bind(config)
+        .bind(metrics)
+        .bind(status)
+        .execute(db)
+        .await
+        .map_err(|error| format!("Failed to insert experiment_run ({experiment_type}): {error}"))?;
+    } else {
+        sqlx::query(
+            "INSERT INTO experiment_run
+               (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+                config, metrics, status, started_at, completed_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())",
+        )
+        .bind(&experiment_run_id)
+        .bind(experiment_type)
+        .bind(related_entity_type)
+        .bind(related_entity_id)
+        .bind(config)
+        .bind(metrics)
+        .bind(status)
+        .execute(db)
+        .await
+        .map_err(|error| format!("Failed to insert experiment_run ({experiment_type}): {error}"))?;
+    }
+
+    Ok(experiment_run_id)
+}
+
+#[cfg(test)]
+mod experiment_run_tests {
+    use super::create_experiment_run;
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    /// 验证 `create_experiment_run` 能向真实 DB 写入记录,且字段语义正确:
+    /// - related_entity_id=None 时自引用 experiment_run_id
+    /// - status="running" 时 completed_at 为 NULL
+    /// - status="completed" 时 completed_at 非 NULL
+    ///
+    /// 需 DB,默认不跑(--ignored 触发)。运行:
+    ///   cargo test -p quant-api --lib experiment_run_tests -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn create_experiment_run_persists_running_and_completed() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("DB 连接成功");
+
+        // running 状态:related_entity_id 自引用,completed_at 应为 NULL
+        let running_id = create_experiment_run(
+            &db,
+            "test_create_experiment_run",
+            "test_entity",
+            None,
+            &json!({"scenario": "running"}),
+            &json!({"step": 0}),
+            "running",
+        )
+        .await
+        .expect("写入 running 记录");
+
+        let (status, related, completed): (String, String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                "SELECT status, related_entity_id, completed_at FROM experiment_run \
+                 WHERE experiment_run_id = $1",
+            )
+            .bind(&running_id)
+            .fetch_one(&db)
+            .await
+            .expect("回读 running 记录");
+        assert_eq!(status, "running");
+        assert_eq!(related, running_id, "related_entity_id 应自引用");
+        assert!(completed.is_none(), "running 状态 completed_at 必须为 NULL");
+
+        // completed 状态:显式 related_entity_id,completed_at 应非 NULL
+        let completed_id = create_experiment_run(
+            &db,
+            "test_create_experiment_run",
+            "test_entity",
+            Some("rel-123"),
+            &json!({"scenario": "completed"}),
+            &json!({"step": 1}),
+            "completed",
+        )
+        .await
+        .expect("写入 completed 记录");
+
+        let (status, related, completed): (String, String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                "SELECT status, related_entity_id, completed_at FROM experiment_run \
+                 WHERE experiment_run_id = $1",
+            )
+            .bind(&completed_id)
+            .fetch_one(&db)
+            .await
+            .expect("回读 completed 记录");
+        assert_eq!(status, "completed");
+        assert_eq!(related, "rel-123");
+        assert!(completed.is_some(), "completed 状态 completed_at 必须非 NULL");
+
+        // 清理测试数据(避免污染)
+        let _ = sqlx::query(
+            "DELETE FROM experiment_run WHERE experiment_type = 'test_create_experiment_run'",
+        )
+        .execute(&db)
+        .await;
+    }
 }
 
 

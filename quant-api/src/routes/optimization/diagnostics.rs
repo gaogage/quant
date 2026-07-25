@@ -5402,33 +5402,23 @@ pub(crate) async fn persist_alpha_source_diagnostics_report(
     version: &str,
     report: &Value,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let config = json!({
         "combo_name": combo_name,
         "version": version,
         "report_type": "alpha_source_diagnostics",
         "point_in_time_scope": "multi_factor_value only; no label/backtest/OOS metrics",
     });
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at, completed_at)
-         VALUES ($1, 'alpha_source_diagnostics_report', 'alpha_source', $2,
-                 $3, $4, 'completed', now(), now())",
+    create_experiment_run(
+        db,
+        "alpha_source_diagnostics_report",
+        "alpha_source",
+        Some(&format!("{combo_name}@{version}")),
+        &config,
+        report,
+        "completed",
     )
-    .bind(&experiment_run_id)
-    .bind(format!("{combo_name}@{version}"))
-    .bind(&config)
-    .bind(report)
-    .execute(db)
     .await
-    .map_err(|error| {
-        format!(
-            "Failed to persist alpha source diagnostics report: {}",
-            error
-        )
-    })?;
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to persist alpha source diagnostics report: {}", error))
 }
 
 
@@ -5439,7 +5429,6 @@ pub(crate) async fn persist_main_business_diagnostics_report(
     profiles: &[MainBusinessDiagnosticsProfile],
     report: &Value,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let profile_names = profiles
         .iter()
         .map(|profile| profile.as_str())
@@ -5453,25 +5442,17 @@ pub(crate) async fn persist_main_business_diagnostics_report(
         "research_only": true,
         "does_not_write_multi_factor_value": true,
     });
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at, completed_at)
-         VALUES ($1, 'main_business_source_diagnostics_report', 'alpha_source', 'main_business',
-                 $2, $3, 'completed', now(), now())",
+    create_experiment_run(
+        db,
+        "main_business_source_diagnostics_report",
+        "alpha_source",
+        Some("main_business"),
+        &config,
+        report,
+        "completed",
     )
-    .bind(&experiment_run_id)
-    .bind(&config)
-    .bind(report)
-    .execute(db)
     .await
-    .map_err(|error| {
-        format!(
-            "Failed to persist main_business source diagnostics report: {}",
-            error
-        )
-    })?;
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to persist main_business source diagnostics report: {}", error))
 }
 
 
@@ -5480,32 +5461,22 @@ pub(crate) async fn persist_feature_profile_readiness_report(
     feature_profile: &str,
     report: &Value,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let config = json!({
         "feature_profile": feature_profile,
         "report_type": "feature_profile_readiness",
         "point_in_time_scope": "factor_value only; no backtest/OOS metrics",
     });
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at, completed_at)
-         VALUES ($1, 'feature_profile_readiness_report', 'feature_profile', $2,
-                 $3, $4, 'completed', now(), now())",
+    create_experiment_run(
+        db,
+        "feature_profile_readiness_report",
+        "feature_profile",
+        Some(feature_profile),
+        &config,
+        report,
+        "completed",
     )
-    .bind(&experiment_run_id)
-    .bind(feature_profile)
-    .bind(&config)
-    .bind(report)
-    .execute(db)
     .await
-    .map_err(|error| {
-        format!(
-            "Failed to persist feature-profile readiness report: {}",
-            error
-        )
-    })?;
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to persist feature-profile readiness report: {}", error))
 }
 
 

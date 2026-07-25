@@ -4260,7 +4260,6 @@ pub(crate) async fn persist_oos_walk_forward_experiment(
     gates: &Value,
     cache_report: &Value,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let config = oos_walk_forward_experiment_config(req, plan);
     let metrics = json!({
         "windows": windows,
@@ -4271,26 +4270,17 @@ pub(crate) async fn persist_oos_walk_forward_experiment(
         },
         "cache": cache_report,
     });
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at, completed_at)
-         VALUES ($1, 'phase7_oos_walk_forward_discovery', 'oos_discovery', $2,
-                 $3, $4, 'completed', now(), now())",
+    create_experiment_run(
+        db,
+        "phase7_oos_walk_forward_discovery",
+        "oos_discovery",
+        None,
+        &config,
+        &metrics,
+        "completed",
     )
-    .bind(&experiment_run_id)
-    .bind(&experiment_run_id)
-    .bind(&config)
-    .bind(&metrics)
-    .execute(db)
     .await
-    .map_err(|error| {
-        format!(
-            "Failed to insert OOS walk-forward experiment_run: {}",
-            error
-        )
-    })?;
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to insert OOS walk-forward experiment_run: {}", error))
 }
 
 
@@ -4299,7 +4289,6 @@ pub(crate) async fn create_running_oos_walk_forward_experiment(
     req: &Phase7OosWalkForwardDiscoveryRequest,
     plan: &Value,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let config = oos_walk_forward_experiment_config(req, plan);
     let metrics = oos_walk_forward_progress_metrics(
         plan["window_count"].as_u64().unwrap_or(0) as usize,
@@ -4307,26 +4296,17 @@ pub(crate) async fn create_running_oos_walk_forward_experiment(
         &json!({}),
         &json!({}),
     );
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at)
-         VALUES ($1, 'phase7_oos_walk_forward_discovery', 'oos_discovery', $2,
-                 $3, $4, 'running', now())",
+    create_experiment_run(
+        db,
+        "phase7_oos_walk_forward_discovery",
+        "oos_discovery",
+        None,
+        &config,
+        &metrics,
+        "running",
     )
-    .bind(&experiment_run_id)
-    .bind(&experiment_run_id)
-    .bind(&config)
-    .bind(&metrics)
-    .execute(db)
     .await
-    .map_err(|error| {
-        format!(
-            "Failed to insert running OOS walk-forward experiment_run: {}",
-            error
-        )
-    })?;
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to insert running OOS walk-forward experiment_run: {}", error))
 }
 
 
@@ -4708,32 +4688,22 @@ pub(crate) async fn persist_return_risk_cache_economics_report(
     stats_experiment_run_id: &str,
     report: &Value,
 ) -> Result<String, String> {
-    let experiment_run_id = format!("exp-{}", Uuid::new_v4());
     let config = json!({
         "raw_experiment_run_id": raw_experiment_run_id,
         "stats_experiment_run_id": stats_experiment_run_id,
         "comparison": "return_risk_cache_economics",
     });
-    sqlx::query(
-        "INSERT INTO experiment_run
-           (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
-            config, metrics, status, started_at, completed_at)
-         VALUES ($1, 'return_risk_cache_economics_report', 'experiment_pair', $2,
-                 $3, $4, 'completed', now(), now())",
+    create_experiment_run(
+        db,
+        "return_risk_cache_economics_report",
+        "experiment_pair",
+        Some(raw_experiment_run_id),
+        &config,
+        report,
+        "completed",
     )
-    .bind(&experiment_run_id)
-    .bind(raw_experiment_run_id)
-    .bind(&config)
-    .bind(report)
-    .execute(db)
     .await
-    .map_err(|error| {
-        format!(
-            "Failed to insert return/risk cache economics experiment_run: {}",
-            error
-        )
-    })?;
-    Ok(experiment_run_id)
+    .map_err(|error| format!("Failed to insert return/risk cache economics experiment_run: {}", error))
 }
 
 
