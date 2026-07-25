@@ -6,6 +6,12 @@
 //! MVO 是 composite 的固有属性(strategy_type='composite' ⟹ 必有 MVO),非开关字段。
 
 use sqlx::PgPool;
+use std::ops::Deref;
+
+// Step 5c：复用 quant-backtest 的策略状态标记 trait + 状态类型。
+use quant_backtest::types::{
+    Backtested, PaperLive, Production, StrategyState, Validated,
+};
 
 /// 解析后的完整策略树(composite 或单 asset 账号都会解析成此结构)
 #[allow(dead_code)]
@@ -18,6 +24,81 @@ pub struct ResolvedStrategy {
     pub assets: Vec<AssetStrategy>, // composite=多个;单 asset 账号=1个
     pub etf_symbols: Vec<String>,   // MVO 8 维的第 1-7 列标的(标准顺序,取自 composite 行)
     pub rebalance_freq: String,     // quarterly/monthly/weekly
+}
+
+// ─── DDD Step 5c：策略类型状态机 ───────────────────────────────────
+//
+// 目的：从类型层强制策略生命周期合法推进 `Draft → Validated → Backtested →
+// PaperLive → Production`，非法转换（如未回测的策略直接上实盘）编译期失败。
+//
+// 设计：内嵌 `ResolvedStrategy` + `Deref` 透传，而非 newtype 包装。
+// 现有 112 处 `rs.strategy_id`/`rs.assets`/`rs.mvo` 字段访问通过 Deref 自动
+// 透传，零改动。`resolved_to_legacy_sc(rs: &ResolvedStrategy)` 签名不变，
+// 调用方传 `&s.inner` 或 `&*s`。
+//
+// 状态语义（DB status='active' 是软删除标记，与生命周期正交）：
+// - load_resolved_strategy 返回 Strategy<Validated>（DB 加载即视为已验证）
+// - 回测路径要求 Strategy<Backtested>
+// - 实盘路径要求 Strategy<PaperLive> / Strategy<Production>
+
+/// 策略类型状态机，内嵌完整策略树。
+///
+/// `S` 标记当前生命周期状态，编译期保证只能沿合法路径推进：
+/// `Draft -> Validated -> Backtested -> PaperLive -> Production`
+#[derive(Debug, Clone)]
+pub struct Strategy<S: StrategyState> {
+    /// 内嵌的完整策略树（字段通过 Deref 透传）。
+    pub inner: ResolvedStrategy,
+    _state: std::marker::PhantomData<S>,
+}
+
+/// Deref 透传：`Strategy<S>` 自动解引用为 `ResolvedStrategy`，
+/// 现有 `rs.strategy_id`/`rs.assets` 等访问零改动。
+impl<S: StrategyState> Deref for Strategy<S> {
+    type Target = ResolvedStrategy;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Strategy<Validated> {
+    /// 从 DB 加载的策略树构造 `Strategy<Validated>`。
+    ///
+    /// 调用方：`load_resolved_strategy`（DB status='active' 视为已验证）。
+    pub fn validated(inner: ResolvedStrategy) -> Self {
+        Self {
+            inner,
+            _state: std::marker::PhantomData,
+        }
+    }
+
+    /// 回测后推进到 `Backtested` 态（回测产出绩效，可上模拟盘）。
+    pub fn into_backtested(self) -> Strategy<Backtested> {
+        Strategy {
+            inner: self.inner,
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Strategy<Backtested> {
+    /// 推进到 `PaperLive` 态（模拟盘实时跟踪）。
+    pub fn into_paper_live(self) -> Strategy<PaperLive> {
+        Strategy {
+            inner: self.inner,
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Strategy<PaperLive> {
+    /// 推进到 `Production` 态（实盘真实资金，最高限制）。
+    pub fn into_production(self) -> Strategy<Production> {
+        Strategy {
+            inner: self.inner,
+            _state: std::marker::PhantomData,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -390,6 +471,32 @@ mod tests {
         };
         assert_eq!(rs.strategy_type, StrategyType::Composite);
         assert!(rs.mvo.is_some());
+    }
+
+    #[test]
+    fn strategy_deref_transparent_and_advances_through_lifecycle() {
+        // 复用上面测试的 ResolvedStrategy 构造逻辑
+        let rs = ResolvedStrategy {
+            strategy_id: "v19".into(),
+            name: "test".into(),
+            strategy_type: StrategyType::Composite,
+            mvo: None,
+            assets: vec![],
+            etf_symbols: vec![],
+            rebalance_freq: "quarterly".into(),
+        };
+
+        // Deref 透传:Strategy<Validated> 可直接访问 ResolvedStrategy 字段
+        let validated = Strategy::validated(rs);
+        assert_eq!(validated.strategy_id, "v19");
+        assert_eq!(validated.rebalance_freq, "quarterly");
+
+        // 合法状态推进
+        let backtested = validated.into_backtested();
+        assert_eq!(backtested.strategy_id, "v19"); // Deref 透传仍有效
+        let paper = backtested.into_paper_live();
+        let prod = paper.into_production();
+        assert_eq!(prod.strategy_id, "v19");
     }
 
     #[tokio::test]

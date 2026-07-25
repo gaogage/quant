@@ -119,6 +119,11 @@ impl RawBar {
 }
 
 // ─── 策略类型状态机 ───────────────────────────────────────────────
+//
+// 注意：`Strategy<S>` 完整定义（内嵌 ResolvedStrategy）在 quant-api/src/routes/
+// strategy.rs，因为策略树属于 API 层（ResolvedStrategy 在 quant-api，quant-backtest
+// 不能反向依赖 quant-api）。本 crate 只定义共享的 `StrategyState` trait + 状态标记
+// 类型，供 quant-api 的 Strategy<S> 复用。
 
 /// 策略生命周期状态标记 trait。
 ///
@@ -152,78 +157,9 @@ impl StrategyState for Backtested {}
 impl StrategyState for PaperLive {}
 impl StrategyState for Production {}
 
-/// 策略类型状态机。
-///
-/// `S` 标记当前生命周期状态，编译期保证只能沿合法路径推进：
-/// `Draft -> Validated -> Backtested -> PaperLive -> Production`
-///
-/// 当前为骨架，不含策略参数字段（Step 5 填充并迁移现有策略切换代码）。
-#[derive(Debug, Clone)]
-pub struct Strategy<S: StrategyState> {
-    /// 策略版本 ID（不变量，跨状态保持）。
-    pub strategy_version_id: String,
-    _state: std::marker::PhantomData<S>,
-}
-
-impl Strategy<Draft> {
-    pub fn new(strategy_version_id: impl Into<String>) -> Self {
-        Self {
-            strategy_version_id: strategy_version_id.into(),
-            _state: std::marker::PhantomData,
-        }
-    }
-}
-
-// 合法状态转换（编译期门禁）：只允许向前推进。
-impl From<Strategy<Draft>> for Strategy<Validated> {
-    fn from(s: Strategy<Draft>) -> Self {
-        Self {
-            strategy_version_id: s.strategy_version_id,
-            _state: std::marker::PhantomData,
-        }
-    }
-}
-
-impl From<Strategy<Validated>> for Strategy<Backtested> {
-    fn from(s: Strategy<Validated>) -> Self {
-        Self {
-            strategy_version_id: s.strategy_version_id,
-            _state: std::marker::PhantomData,
-        }
-    }
-}
-
-impl From<Strategy<Backtested>> for Strategy<PaperLive> {
-    fn from(s: Strategy<Backtested>) -> Self {
-        Self {
-            strategy_version_id: s.strategy_version_id,
-            _state: std::marker::PhantomData,
-        }
-    }
-}
-
-impl From<Strategy<PaperLive>> for Strategy<Production> {
-    fn from(s: Strategy<PaperLive>) -> Self {
-        Self {
-            strategy_version_id: s.strategy_version_id,
-            _state: std::marker::PhantomData,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strategy_advances_through_lifecycle() {
-        let draft = Strategy::<Draft>::new("h20_v1");
-        let validated: Strategy<Validated> = draft.into();
-        let backtested: Strategy<Backtested> = validated.into();
-        let paper: Strategy<PaperLive> = backtested.into();
-        let prod: Strategy<Production> = paper.into();
-        assert_eq!(prod.strategy_version_id, "h20_v1");
-    }
 
     #[test]
     fn verified_bar_holds_data_version() {
