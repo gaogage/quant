@@ -61,8 +61,8 @@ use quant_backtest::signal_generator::{
 use super::*;
 
 pub(crate) struct RobustnessEvaluation {
-    status: String,
-    gates: Value,
+    pub(crate) status: String,
+    pub(crate) gates: Value,
 }
 
 
@@ -553,7 +553,7 @@ pub(crate) async fn load_robustness_timeseries_analysis(
 
 impl RobustnessDailyPoint {
     #[cfg(test)]
-    fn new(trade_date: &str, portfolio_value: f64, benchmark_value: Option<f64>) -> Self {
+    pub(crate) fn new(trade_date: &str, portfolio_value: f64, benchmark_value: Option<f64>) -> Self {
         Self {
             trade_date: NaiveDate::parse_from_str(trade_date, "%Y-%m-%d").expect("valid date"),
             portfolio_value,
@@ -564,7 +564,7 @@ impl RobustnessDailyPoint {
 
 
 impl RobustnessTimeSeriesAnalysis {
-    fn from_points(
+    pub(crate) fn from_points(
         points: &[RobustnessDailyPoint],
         window_size: usize,
         step_size: usize,

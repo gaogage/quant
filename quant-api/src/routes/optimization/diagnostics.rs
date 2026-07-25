@@ -1332,37 +1332,37 @@ pub(crate) fn futures_price_chain_component_orientation_contract_json(
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceDailyBreadthStatus {
-    passed: bool,
-    status: &'static str,
-    raw_weak_day_count: usize,
-    structural_early_weak_day_count: usize,
-    unexplained_weak_day_count: usize,
-    weak_day_threshold: i64,
-    weak_day_min_to_threshold_ratio: f64,
-    weak_day_ratio: f64,
-    weak_day_region_end_ratio: f64,
-    first_weak_day: Option<NaiveDate>,
-    last_weak_day: Option<NaiveDate>,
+pub(crate) struct AlphaSourceDailyBreadthStatus {
+    pub(crate) passed: bool,
+    pub(crate) status: &'static str,
+    pub(crate) raw_weak_day_count: usize,
+    pub(crate) structural_early_weak_day_count: usize,
+    pub(crate) unexplained_weak_day_count: usize,
+    pub(crate) weak_day_threshold: i64,
+    pub(crate) weak_day_min_to_threshold_ratio: f64,
+    pub(crate) weak_day_ratio: f64,
+    pub(crate) weak_day_region_end_ratio: f64,
+    pub(crate) first_weak_day: Option<NaiveDate>,
+    pub(crate) last_weak_day: Option<NaiveDate>,
 }
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceMarketScopeBreadthStatus {
-    passed: bool,
-    status: &'static str,
-    eligible_days: usize,
-    joined_days: usize,
-    missing_eligible_days: usize,
-    min_ratio: f64,
-    p10_ratio: f64,
-    p50_ratio: f64,
-    p95_ratio: f64,
-    max_ratio: f64,
-    weak_day_count: usize,
-    weak_day_threshold_ratio: f64,
-    first_weak_day: Option<NaiveDate>,
-    last_weak_day: Option<NaiveDate>,
+pub(crate) struct AlphaSourceMarketScopeBreadthStatus {
+    pub(crate) passed: bool,
+    pub(crate) status: &'static str,
+    pub(crate) eligible_days: usize,
+    pub(crate) joined_days: usize,
+    pub(crate) missing_eligible_days: usize,
+    pub(crate) min_ratio: f64,
+    pub(crate) p10_ratio: f64,
+    pub(crate) p50_ratio: f64,
+    pub(crate) p95_ratio: f64,
+    pub(crate) max_ratio: f64,
+    pub(crate) weak_day_count: usize,
+    pub(crate) weak_day_threshold_ratio: f64,
+    pub(crate) first_weak_day: Option<NaiveDate>,
+    pub(crate) last_weak_day: Option<NaiveDate>,
 }
 
 
@@ -1520,13 +1520,13 @@ pub(crate) fn alpha_source_market_scope_breadth_json(status: &AlphaSourceMarketS
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AlphaSourceResearchDiagnosticsOptions {
-    include_research_metrics: bool,
-    include_exposure_regime_metrics: bool,
-    return_horizons: Vec<i64>,
-    bucket_count: i64,
-    max_rank_ic_days: i64,
-    max_exposure_regime_days: i64,
+pub(crate) struct AlphaSourceResearchDiagnosticsOptions {
+    pub(crate) include_research_metrics: bool,
+    pub(crate) include_exposure_regime_metrics: bool,
+    pub(crate) return_horizons: Vec<i64>,
+    pub(crate) bucket_count: i64,
+    pub(crate) max_rank_ic_days: i64,
+    pub(crate) max_exposure_regime_days: i64,
 }
 
 
@@ -3056,18 +3056,18 @@ pub(crate) struct AlphaSourceDailyRankIc {
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceRankIcSummary {
-    horizon_days: i64,
-    sampled_days: i64,
-    first_sample_date: Option<NaiveDate>,
-    last_sample_date: Option<NaiveDate>,
-    mean_rank_ic: f64,
-    median_rank_ic: f64,
-    p05_rank_ic: f64,
-    p95_rank_ic: f64,
-    positive_day_ratio: f64,
-    min_daily_sample_size: i64,
-    max_daily_sample_size: i64,
+pub(crate) struct AlphaSourceRankIcSummary {
+    pub(crate) horizon_days: i64,
+    pub(crate) sampled_days: i64,
+    pub(crate) first_sample_date: Option<NaiveDate>,
+    pub(crate) last_sample_date: Option<NaiveDate>,
+    pub(crate) mean_rank_ic: f64,
+    pub(crate) median_rank_ic: f64,
+    pub(crate) p05_rank_ic: f64,
+    pub(crate) p95_rank_ic: f64,
+    pub(crate) positive_day_ratio: f64,
+    pub(crate) min_daily_sample_size: i64,
+    pub(crate) max_daily_sample_size: i64,
 }
 
 
@@ -3140,15 +3140,15 @@ pub(crate) struct AlphaSourceExposureRow {
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceGroupReturnSummary {
-    horizon_days: i64,
-    bucket_count: i64,
-    low_score_bucket_avg_return: f64,
-    high_score_bucket_avg_return: f64,
-    high_minus_low_spread: f64,
-    monotonicity_score: f64,
-    total_sample_count: i64,
-    buckets: Vec<AlphaSourceBucketReturn>,
+pub(crate) struct AlphaSourceGroupReturnSummary {
+    pub(crate) horizon_days: i64,
+    pub(crate) bucket_count: i64,
+    pub(crate) low_score_bucket_avg_return: f64,
+    pub(crate) high_score_bucket_avg_return: f64,
+    pub(crate) high_minus_low_spread: f64,
+    pub(crate) monotonicity_score: f64,
+    pub(crate) total_sample_count: i64,
+    pub(crate) buckets: Vec<AlphaSourceBucketReturn>,
 }
 
 
@@ -3169,11 +3169,11 @@ impl AlphaSourceGroupReturnSummary {
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceIndustryExposure {
-    industry: String,
-    avg_weight: f64,
-    max_daily_weight: f64,
-    active_days: i64,
+pub(crate) struct AlphaSourceIndustryExposure {
+    pub(crate) industry: String,
+    pub(crate) avg_weight: f64,
+    pub(crate) max_daily_weight: f64,
+    pub(crate) active_days: i64,
 }
 
 
@@ -3190,18 +3190,18 @@ impl AlphaSourceIndustryExposure {
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceHighBucketExposureSummary {
-    sampled_days: i64,
-    avg_high_score_bucket_symbols: f64,
-    avg_high_bucket_industry_hhi: f64,
-    max_single_industry_weight: f64,
-    top_industries: Vec<AlphaSourceIndustryExposure>,
-    median_high_vs_universe_amount_ratio: f64,
-    median_high_vs_universe_circ_mv_ratio: f64,
-    median_high_vs_universe_total_mv_ratio: f64,
-    high_bucket_amount_missing_ratio: f64,
-    high_bucket_circ_mv_missing_ratio: f64,
-    high_bucket_industry_missing_ratio: f64,
+pub(crate) struct AlphaSourceHighBucketExposureSummary {
+    pub(crate) sampled_days: i64,
+    pub(crate) avg_high_score_bucket_symbols: f64,
+    pub(crate) avg_high_bucket_industry_hhi: f64,
+    pub(crate) max_single_industry_weight: f64,
+    pub(crate) top_industries: Vec<AlphaSourceIndustryExposure>,
+    pub(crate) median_high_vs_universe_amount_ratio: f64,
+    pub(crate) median_high_vs_universe_circ_mv_ratio: f64,
+    pub(crate) median_high_vs_universe_total_mv_ratio: f64,
+    pub(crate) high_bucket_amount_missing_ratio: f64,
+    pub(crate) high_bucket_circ_mv_missing_ratio: f64,
+    pub(crate) high_bucket_industry_missing_ratio: f64,
 }
 
 
@@ -3254,14 +3254,14 @@ impl AlphaSourceMarketRegime {
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceRegimeSplitSummary {
-    horizon_days: i64,
-    regime: String,
-    sampled_days: i64,
-    labeled_rows: i64,
-    avg_forward_return: f64,
-    rank_ic: AlphaSourceRankIcSummary,
-    group_return: AlphaSourceGroupReturnSummary,
+pub(crate) struct AlphaSourceRegimeSplitSummary {
+    pub(crate) horizon_days: i64,
+    pub(crate) regime: String,
+    pub(crate) sampled_days: i64,
+    pub(crate) labeled_rows: i64,
+    pub(crate) avg_forward_return: f64,
+    pub(crate) rank_ic: AlphaSourceRankIcSummary,
+    pub(crate) group_return: AlphaSourceGroupReturnSummary,
 }
 
 

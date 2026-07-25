@@ -135,10 +135,10 @@ pub(crate) enum OptimizationTrialBacktestRequest {
 
 
 pub(crate) struct FactorSignalBatchPrewarmPlan {
-    requested_trials: usize,
-    factor_requests: Vec<RunFactorBacktestReq>,
-    prediction_trials: usize,
-    invalid_trials: usize,
+    pub(crate) requested_trials: usize,
+    pub(crate) factor_requests: Vec<RunFactorBacktestReq>,
+    pub(crate) prediction_trials: usize,
+    pub(crate) invalid_trials: usize,
 }
 
 

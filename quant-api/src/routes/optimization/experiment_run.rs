@@ -61,16 +61,16 @@ use quant_backtest::signal_generator::{
 use super::*;
 
 pub(crate) struct NormalizedPromoteRequest {
-    trial_id: String,
-    target_strategy_version: String,
-    candidate_name: String,
-    promotion_mode: String,
-    gate_policy: String,
-    freeze_after_approval: bool,
-    reviewer: Option<String>,
-    reason: String,
-    notes: Option<String>,
-    status: String,
+    pub(crate) trial_id: String,
+    pub(crate) target_strategy_version: String,
+    pub(crate) candidate_name: String,
+    pub(crate) promotion_mode: String,
+    pub(crate) gate_policy: String,
+    pub(crate) freeze_after_approval: bool,
+    pub(crate) reviewer: Option<String>,
+    pub(crate) reason: String,
+    pub(crate) notes: Option<String>,
+    pub(crate) status: String,
 }
 
 

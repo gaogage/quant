@@ -16337,5 +16337,33 @@ mod tests {
         assert!(err.contains("pre-registered"));
         assert!(err.contains("free_form_factor"));
     }
+
+    /// PoC:验证 LayeredSearchConfig 的 序列化→反序列化 round-trip 无精度损失。
+    /// 选 professional_risk_breakthrough(有继承链:local_professional → breakthrough →
+    /// risk_breakthrough)作为最复杂样本。若此 profile round-trip 等价,则全部 162 个
+    /// 构造器(同结构同类型)可安全外置为 JSON。
+    ///
+    /// Step 4g 外置方案的前提验证。运行:
+    ///   cargo test -p quant-api --lib phase7_search_config_roundtrip
+    #[test]
+    fn phase7_search_config_roundtrip_preserves_complex_profile() {
+        use quant_api::discovery::phase7::LayeredSearchConfig;
+
+        let original = LayeredSearchConfig::professional_risk_breakthrough_default();
+
+        // 序列化
+        let json_str = serde_json::to_string(&original).expect("序列化成功");
+        assert!(!json_str.is_empty(), "序列化结果非空");
+
+        // 反序列化
+        let restored: LayeredSearchConfig =
+            serde_json::from_str(&json_str).expect("反序列化成功");
+
+        // 逐字段比较(PartialEq 已 derive,直接 == 即可覆盖全部 40 个字段)
+        assert_eq!(
+            original, restored,
+            "round-trip 后配置必须完全相等(含 Decimal 精度/Vec 顺序)"
+        );
+    }
 }
 

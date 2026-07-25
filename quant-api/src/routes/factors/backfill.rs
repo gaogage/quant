@@ -334,77 +334,77 @@ pub struct Phase7AlphaBlendProfilesBackfillRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct Phase7AlphaBlendSourcePlan {
-    combo_name: String,
-    version: String,
-    weight: f64,
+pub(crate) struct Phase7AlphaBlendSourcePlan {
+    pub(crate) combo_name: String,
+    pub(crate) version: String,
+    pub(crate) weight: f64,
 }
 
 #[derive(Debug, Clone)]
-struct SetBasedFactorBackfillPlan {
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-    version: String,
-    combo_name: String,
-    statement_timeout_ms: u64,
-    task_type: &'static str,
-    source: &'static str,
-    heartbeat_timeout_seconds: i32,
-    bundle_name: &'static str,
-    category: &'static str,
-    phase: &'static str,
-    dependencies: &'static [&'static str],
-    combo_method: &'static str,
-    experiment_type: &'static str,
-    source_combos: Vec<Phase7AlphaBlendSourcePlan>,
+pub(crate) struct SetBasedFactorBackfillPlan {
+    pub(crate) start_date: NaiveDate,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) version: String,
+    pub(crate) combo_name: String,
+    pub(crate) statement_timeout_ms: u64,
+    pub(crate) task_type: &'static str,
+    pub(crate) source: &'static str,
+    pub(crate) heartbeat_timeout_seconds: i32,
+    pub(crate) bundle_name: &'static str,
+    pub(crate) category: &'static str,
+    pub(crate) phase: &'static str,
+    pub(crate) dependencies: &'static [&'static str],
+    pub(crate) combo_method: &'static str,
+    pub(crate) experiment_type: &'static str,
+    pub(crate) source_combos: Vec<Phase7AlphaBlendSourcePlan>,
 }
 
-type Phase7PriceVolumeBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7FinancialQualityBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7FinancialQualityChangeBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7EarningsRecoveryPersistenceBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7IndustryResidualQualityBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7RelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7QualityRelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7GrowthRecoveryBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7ValuationBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7MoneyflowBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7MoneyflowCongestionBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7SupplyFloatShockBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7CashflowQualityBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7DividendQualityBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7EventAlphaBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7EventWindowAlphaBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7EventSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7ForecastRevisionSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7RepurchaseSupplyShockBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7BlockTradeSupplyDemandBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7UnlockSupplyPressureBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7LiquidityQualityBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7MarketResidualRiskBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7IndustryProsperityBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7FuturesPriceChainBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7EquityPledgePressureBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7ShareholderStructureBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7MarginDetailBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7AnalystRevisionBackfillPlan = SetBasedFactorBackfillPlan;
-type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7PriceVolumeBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7FinancialQualityBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7FinancialQualityChangeBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7EarningsRecoveryPersistenceBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7IndustryResidualQualityBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7RelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7QualityRelativeStrengthBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7GrowthRecoveryBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7ValuationBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7MoneyflowBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7MoneyflowCongestionBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7SupplyFloatShockBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7CashflowQualityBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7DividendQualityBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7EventAlphaBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7EventWindowAlphaBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7EventSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7ForecastRevisionSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7RepurchaseSupplyShockBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7BlockTradeSupplyDemandBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7UnlockSupplyPressureBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7LiquidityQualityBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7MarketResidualRiskBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7IndustryProsperityBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7FuturesPriceChainBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7EquityPledgePressureBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7ShareholderStructureBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7MarginDetailBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7AnalystRevisionBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7AlphaBlendBackfillPlan = SetBasedFactorBackfillPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FinancialAnnualChangeMode {
+pub(crate) enum FinancialAnnualChangeMode {
     PercentChange,
     Difference,
     Decrease,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SupplyFloatShockMode {
+pub(crate) enum SupplyFloatShockMode {
     GrowthInverse,
     ChurnInverse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LiquidityQualitySignal {
+pub(crate) enum LiquidityQualitySignal {
     ImpactImprovement,
     AmountTrend,
     AmountStability,
@@ -412,7 +412,7 @@ enum LiquidityQualitySignal {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MarketResidualRiskSignal {
+pub(crate) enum MarketResidualRiskSignal {
     LowBeta,
     LowDownsideBeta,
     LowResidualVolatility,
@@ -420,21 +420,21 @@ enum MarketResidualRiskSignal {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndustryProsperitySignal {
+pub(crate) enum IndustryProsperitySignal {
     ReturnMomentum,
     PositiveBreadth,
     AmountTrend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FuturesPriceChainSignal {
+pub(crate) enum FuturesPriceChainSignal {
     PriceMomentum,
     InventoryTightness,
     NetPositionTrend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase7BackfillFactorKind {
+pub(crate) enum Phase7BackfillFactorKind {
     Reversal,
     DownsideVolatility,
     AmihudIlliquidity,
@@ -567,23 +567,23 @@ enum Phase7BackfillFactorKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SetBasedFactorSpec {
-    factor_code: &'static str,
-    name: &'static str,
-    period: i32,
-    kind: Phase7BackfillFactorKind,
-    weight: f64,
+pub(crate) struct SetBasedFactorSpec {
+    pub(crate) factor_code: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) period: i32,
+    pub(crate) kind: Phase7BackfillFactorKind,
+    pub(crate) weight: f64,
 }
 
 #[derive(Debug, Clone)]
-struct SetBasedFactorBackfillReport {
-    factor_rows: usize,
-    combo_rows: usize,
-    factor_rows_by_code: Vec<(String, usize)>,
+pub(crate) struct SetBasedFactorBackfillReport {
+    pub(crate) factor_rows: usize,
+    pub(crate) combo_rows: usize,
+    pub(crate) factor_rows_by_code: Vec<(String, usize)>,
 }
 
 #[derive(Debug, Clone)]
-enum SetBasedFactorBackfillCompletion {
+pub(crate) enum SetBasedFactorBackfillCompletion {
     Completed {
         report: SetBasedFactorBackfillReport,
         elapsed_ms: u64,
@@ -594,20 +594,20 @@ enum SetBasedFactorBackfillCompletion {
     },
 }
 
-type Phase7BackfillFactorSpec = SetBasedFactorSpec;
-type Phase7BackfillCompletion = SetBasedFactorBackfillCompletion;
+pub(crate) type Phase7BackfillFactorSpec = SetBasedFactorSpec;
+pub(crate) type Phase7BackfillCompletion = SetBasedFactorBackfillCompletion;
 
-type SetBasedFactorSqlBuilder = fn(&SetBasedFactorSpec) -> String;
+pub(crate) type SetBasedFactorSqlBuilder = fn(&SetBasedFactorSpec) -> String;
 
 #[derive(Debug, Clone, Copy)]
-struct SetBasedFactorBackfillJob<'a> {
-    plan: &'a SetBasedFactorBackfillPlan,
-    specs: &'a [SetBasedFactorSpec],
-    factor_sql: SetBasedFactorSqlBuilder,
+pub(crate) struct SetBasedFactorBackfillJob<'a> {
+    pub(crate) plan: &'a SetBasedFactorBackfillPlan,
+    pub(crate) specs: &'a [SetBasedFactorSpec],
+    pub(crate) factor_sql: SetBasedFactorSqlBuilder,
 }
 
 impl<'a> SetBasedFactorBackfillJob<'a> {
-    fn new(
+    pub(crate) fn new(
         plan: &'a SetBasedFactorBackfillPlan,
         specs: &'a [SetBasedFactorSpec],
         factor_sql: SetBasedFactorSqlBuilder,
@@ -619,41 +619,41 @@ impl<'a> SetBasedFactorBackfillJob<'a> {
         }
     }
 
-    fn total_steps(&self) -> usize {
+    pub(crate) fn total_steps(&self) -> usize {
         self.specs.len().saturating_add(1)
     }
 }
 
 impl SetBasedFactorBackfillCompletion {
-    fn completed_with(report: SetBasedFactorBackfillReport, elapsed_ms: u64) -> Self {
+    pub(crate) fn completed_with(report: SetBasedFactorBackfillReport, elapsed_ms: u64) -> Self {
         Self::Completed { report, elapsed_ms }
     }
 
-    fn cancelled_with(report: SetBasedFactorBackfillReport, elapsed_ms: u64) -> Self {
+    pub(crate) fn cancelled_with(report: SetBasedFactorBackfillReport, elapsed_ms: u64) -> Self {
         Self::Cancelled { report, elapsed_ms }
     }
 
-    fn task_status(&self) -> &'static str {
+    pub(crate) fn task_status(&self) -> &'static str {
         match self {
             Self::Completed { .. } => "completed",
             Self::Cancelled { .. } => "cancelled",
         }
     }
 
-    fn experiment_status(&self) -> &'static str {
+    pub(crate) fn experiment_status(&self) -> &'static str {
         match self {
             Self::Completed { .. } => "completed",
             Self::Cancelled { .. } => "partial",
         }
     }
 
-    fn report(&self) -> &SetBasedFactorBackfillReport {
+    pub(crate) fn report(&self) -> &SetBasedFactorBackfillReport {
         match self {
             Self::Completed { report, .. } | Self::Cancelled { report, .. } => report,
         }
     }
 
-    fn elapsed_ms(&self) -> u64 {
+    pub(crate) fn elapsed_ms(&self) -> u64 {
         match self {
             Self::Completed { elapsed_ms, .. } | Self::Cancelled { elapsed_ms, .. } => *elapsed_ms,
         }
@@ -667,7 +667,7 @@ impl SetBasedFactorBackfillReport {
 }
 
 impl Phase7PriceVolumeBackfillRequest {
-    fn into_plan(self) -> Result<Phase7PriceVolumeBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7PriceVolumeBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -715,7 +715,7 @@ impl Phase7PriceVolumeBackfillRequest {
 }
 
 impl Phase7FinancialQualityBackfillRequest {
-    fn into_plan(self) -> Result<Phase7FinancialQualityBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7FinancialQualityBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -760,7 +760,7 @@ impl Phase7FinancialQualityBackfillRequest {
 }
 
 impl Phase7FinancialQualityChangeBackfillRequest {
-    fn into_plan(self) -> Result<Phase7FinancialQualityChangeBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7FinancialQualityChangeBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -808,7 +808,7 @@ impl Phase7FinancialQualityChangeBackfillRequest {
 }
 
 impl Phase7EarningsRecoveryPersistenceBackfillRequest {
-    fn into_plan(self) -> Result<Phase7EarningsRecoveryPersistenceBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7EarningsRecoveryPersistenceBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -856,7 +856,7 @@ impl Phase7EarningsRecoveryPersistenceBackfillRequest {
 }
 
 impl Phase7IndustryResidualQualityBackfillRequest {
-    fn into_plan(self) -> Result<Phase7IndustryResidualQualityBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7IndustryResidualQualityBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -908,7 +908,7 @@ impl Phase7IndustryResidualQualityBackfillRequest {
 }
 
 impl Phase7RelativeStrengthBackfillRequest {
-    fn into_plan(self) -> Result<Phase7RelativeStrengthBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7RelativeStrengthBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -953,7 +953,7 @@ impl Phase7RelativeStrengthBackfillRequest {
 }
 
 impl Phase7QualityRelativeStrengthBackfillRequest {
-    fn into_plan(self) -> Result<Phase7QualityRelativeStrengthBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7QualityRelativeStrengthBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1007,7 +1007,7 @@ impl Phase7QualityRelativeStrengthBackfillRequest {
 }
 
 impl Phase7GrowthRecoveryBackfillRequest {
-    fn into_plan(self) -> Result<Phase7GrowthRecoveryBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7GrowthRecoveryBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1052,7 +1052,7 @@ impl Phase7GrowthRecoveryBackfillRequest {
 }
 
 impl Phase7ValuationBackfillRequest {
-    fn into_plan(self) -> Result<Phase7ValuationBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7ValuationBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1096,7 +1096,7 @@ impl Phase7ValuationBackfillRequest {
 }
 
 impl Phase7MoneyflowBackfillRequest {
-    fn into_plan(self) -> Result<Phase7MoneyflowBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7MoneyflowBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1140,7 +1140,7 @@ impl Phase7MoneyflowBackfillRequest {
 }
 
 impl Phase7MoneyflowCongestionBackfillRequest {
-    fn into_plan(self) -> Result<Phase7MoneyflowCongestionBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7MoneyflowCongestionBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1192,7 +1192,7 @@ impl Phase7MoneyflowCongestionBackfillRequest {
 }
 
 impl Phase7SupplyFloatShockBackfillRequest {
-    fn into_plan(self) -> Result<Phase7SupplyFloatShockBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7SupplyFloatShockBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1240,7 +1240,7 @@ impl Phase7SupplyFloatShockBackfillRequest {
 }
 
 impl Phase7CashflowQualityBackfillRequest {
-    fn into_plan(self) -> Result<Phase7CashflowQualityBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7CashflowQualityBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1285,7 +1285,7 @@ impl Phase7CashflowQualityBackfillRequest {
 }
 
 impl Phase7DividendQualityBackfillRequest {
-    fn into_plan(self) -> Result<Phase7DividendQualityBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7DividendQualityBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1330,7 +1330,7 @@ impl Phase7DividendQualityBackfillRequest {
 }
 
 impl Phase7EventAlphaBackfillRequest {
-    fn into_plan(self) -> Result<Phase7EventAlphaBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7EventAlphaBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1380,7 +1380,7 @@ impl Phase7EventAlphaBackfillRequest {
 }
 
 impl Phase7EventWindowAlphaBackfillRequest {
-    fn into_plan(self) -> Result<Phase7EventWindowAlphaBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7EventWindowAlphaBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1434,7 +1434,7 @@ impl Phase7EventWindowAlphaBackfillRequest {
 }
 
 impl Phase7EventSurpriseBackfillRequest {
-    fn into_plan(self) -> Result<Phase7EventSurpriseBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7EventSurpriseBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -1484,7 +1484,7 @@ impl Phase7EventSurpriseBackfillRequest {
 }
 
 impl Phase7ForecastRevisionSurpriseBackfillRequest {
-    fn into_plan(self) -> Result<Phase7ForecastRevisionSurpriseBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7ForecastRevisionSurpriseBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1532,7 +1532,7 @@ impl Phase7ForecastRevisionSurpriseBackfillRequest {
 }
 
 impl Phase7RepurchaseSupplyShockBackfillRequest {
-    fn into_plan(self) -> Result<Phase7RepurchaseSupplyShockBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7RepurchaseSupplyShockBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1580,7 +1580,7 @@ impl Phase7RepurchaseSupplyShockBackfillRequest {
 }
 
 impl Phase7BlockTradeSupplyDemandBackfillRequest {
-    fn into_plan(self) -> Result<Phase7BlockTradeSupplyDemandBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7BlockTradeSupplyDemandBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1632,7 +1632,7 @@ impl Phase7BlockTradeSupplyDemandBackfillRequest {
 }
 
 impl Phase7UnlockSupplyPressureBackfillRequest {
-    fn into_plan(self) -> Result<Phase7UnlockSupplyPressureBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7UnlockSupplyPressureBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1684,7 +1684,7 @@ impl Phase7UnlockSupplyPressureBackfillRequest {
 }
 
 impl Phase7LiquidityQualityBackfillRequest {
-    fn into_plan(self) -> Result<Phase7LiquidityQualityBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7LiquidityQualityBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1729,7 +1729,7 @@ impl Phase7LiquidityQualityBackfillRequest {
 }
 
 impl Phase7MarketResidualRiskBackfillRequest {
-    fn into_plan(self) -> Result<Phase7MarketResidualRiskBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7MarketResidualRiskBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
@@ -1777,7 +1777,7 @@ impl Phase7MarketResidualRiskBackfillRequest {
 }
 
 impl Phase7IndustryProsperityBackfillRequest {
-    fn into_plan(self) -> Result<Phase7IndustryProsperityBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7IndustryProsperityBackfillPlan, String> {
         validate_industry_prosperity_entrypoint_admission(
             INDUSTRY_PROSPERITY_SOURCE,
             self.alpha_admission_gate_id
@@ -1844,7 +1844,7 @@ impl Phase7IndustryProsperityBackfillRequest {
 }
 
 impl Phase7FuturesPriceChainBackfillRequest {
-    fn into_plan(self) -> Result<Phase7FuturesPriceChainBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7FuturesPriceChainBackfillPlan, String> {
         validate_futures_price_chain_entrypoint_admission(
             FUTURES_PRICE_CHAIN_SOURCE,
             self.alpha_admission_gate_id
@@ -1913,7 +1913,7 @@ impl Phase7FuturesPriceChainBackfillRequest {
 }
 
 impl Phase7EquityPledgePressureBackfillRequest {
-    fn into_plan(self) -> Result<Phase7EquityPledgePressureBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7EquityPledgePressureBackfillPlan, String> {
         validate_equity_pledge_entrypoint_admission(
             EQUITY_PLEDGE_PRESSURE_SOURCE,
             self.alpha_admission_gate_id
@@ -1978,7 +1978,7 @@ impl Phase7EquityPledgePressureBackfillRequest {
 }
 
 impl Phase7ShareholderStructureBackfillRequest {
-    fn into_plan(self) -> Result<Phase7ShareholderStructureBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7ShareholderStructureBackfillPlan, String> {
         validate_shareholder_structure_entrypoint_admission(
             SHAREHOLDER_STRUCTURE_SOURCE,
             self.alpha_admission_gate_id
@@ -2043,7 +2043,7 @@ impl Phase7ShareholderStructureBackfillRequest {
 }
 
 impl Phase7MarginDetailBackfillRequest {
-    fn into_plan(self) -> Result<Phase7MarginDetailBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7MarginDetailBackfillPlan, String> {
         validate_margin_detail_entrypoint_admission(
             MARGIN_DETAIL_SOURCE,
             self.alpha_admission_gate_id
@@ -2111,7 +2111,7 @@ impl Phase7MarginDetailBackfillRequest {
 }
 
 impl Phase7AnalystRevisionBackfillRequest {
-    fn into_plan(self) -> Result<Phase7AnalystRevisionBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7AnalystRevisionBackfillPlan, String> {
         validate_analyst_revision_entrypoint_admission(
             ANALYST_REVISION_SOURCE,
             self.alpha_admission_gate_id
@@ -2179,7 +2179,7 @@ impl Phase7AnalystRevisionBackfillRequest {
 }
 
 impl Phase7AlphaBlendBackfillRequest {
-    fn into_plan(self) -> Result<Phase7AlphaBlendBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<Phase7AlphaBlendBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -2283,7 +2283,7 @@ impl Phase7AlphaBlendBackfillRequest {
 }
 
 impl Phase7AlphaBlendProfilesBackfillRequest {
-    fn into_plans(self) -> Result<Vec<Phase7AlphaBlendBackfillPlan>, String> {
+    pub(crate) fn into_plans(self) -> Result<Vec<Phase7AlphaBlendBackfillPlan>, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -2394,7 +2394,7 @@ impl Phase7AlphaBlendProfilesBackfillRequest {
 }
 
 
-fn phase7_price_volume_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_price_volume_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "rev_5d_std",
@@ -2472,7 +2472,7 @@ fn p42b_defensive_low_vol_quality_specs() -> Vec<Phase7BackfillFactorSpec> {
     }]
 }
 
-fn phase7_financial_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_financial_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fin_roe_daily_std",
@@ -2537,7 +2537,7 @@ fn phase7_financial_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_financial_quality_change_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_financial_quality_change_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fin_roe_yoy_accel_std",
@@ -2602,7 +2602,7 @@ fn phase7_financial_quality_change_backfill_specs() -> Vec<Phase7BackfillFactorS
     ]
 }
 
-fn phase7_earnings_recovery_persistence_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_earnings_recovery_persistence_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fin_eps_yoy_recovery_persist_std",
@@ -2657,7 +2657,7 @@ fn phase7_earnings_recovery_persistence_backfill_specs() -> Vec<Phase7BackfillFa
     ]
 }
 
-fn phase7_industry_residual_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_industry_residual_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fin_roe_indrel_daily_std",
@@ -2722,7 +2722,7 @@ fn phase7_industry_residual_quality_backfill_specs() -> Vec<Phase7BackfillFactor
     ]
 }
 
-fn phase7_relative_strength_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_relative_strength_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "mkt_rel_mom_20d_std",
@@ -2755,7 +2755,7 @@ fn phase7_relative_strength_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_quality_relative_strength_combo_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_quality_relative_strength_combo_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fin_roe_daily_std",
@@ -2848,7 +2848,7 @@ fn phase7_quality_relative_strength_combo_specs() -> Vec<Phase7BackfillFactorSpe
     ]
 }
 
-fn phase7_growth_recovery_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_growth_recovery_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fin_eps_yoy_recovery_std",
@@ -2913,7 +2913,7 @@ fn phase7_growth_recovery_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_valuation_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_valuation_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "val_pe_ttm_low_std",
@@ -2962,7 +2962,7 @@ fn phase7_valuation_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_moneyflow_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_moneyflow_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "mf_net_amount_5d_std",
@@ -3017,7 +3017,7 @@ fn phase7_moneyflow_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_moneyflow_congestion_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_moneyflow_congestion_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "mf_net_inflow_low_crowding_20d_std",
@@ -3058,7 +3058,7 @@ fn phase7_moneyflow_congestion_backfill_specs() -> Vec<Phase7BackfillFactorSpec>
     ]
 }
 
-fn phase7_supply_float_shock_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_supply_float_shock_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "float_share_growth_20d_inverse_std",
@@ -3096,7 +3096,7 @@ fn phase7_supply_float_shock_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_cashflow_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_cashflow_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "cf_ocf_to_profit_latest_std",
@@ -3145,7 +3145,7 @@ fn phase7_cashflow_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_dividend_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_dividend_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "div_paid_years_4y_std",
@@ -3191,7 +3191,7 @@ fn phase7_dividend_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_event_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_event_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "event_forecast_change_mid_std",
@@ -3251,7 +3251,7 @@ fn phase7_event_alpha_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_event_window_alpha_backfill_specs_for_plan(
+pub(crate) fn phase7_event_window_alpha_backfill_specs_for_plan(
     plan: &Phase7EventWindowAlphaBackfillPlan,
 ) -> Vec<Phase7BackfillFactorSpec> {
     if is_event_reaction_segments_combo(&plan.combo_name) {
@@ -3350,7 +3350,7 @@ fn event_window_dependencies(combo_name: &str) -> &'static [&'static str] {
     }
 }
 
-fn phase7_event_window_alpha_backfill_specs_for_days(
+pub(crate) fn phase7_event_window_alpha_backfill_specs_for_days(
     window_days: i32,
 ) -> Vec<Phase7BackfillFactorSpec> {
     let window_days = window_days.max(1);
@@ -3426,7 +3426,7 @@ fn phase7_event_window_alpha_backfill_specs_for_days(
     ]
 }
 
-fn phase7_event_post_return_curve_backfill_specs_for_days(
+pub(crate) fn phase7_event_post_return_curve_backfill_specs_for_days(
     window_days: i32,
 ) -> Vec<Phase7BackfillFactorSpec> {
     let window_days = window_days.max(1);
@@ -3474,19 +3474,19 @@ fn phase7_event_post_return_curve_backfill_specs_for_days(
     ]
 }
 
-fn phase7_event_reaction_segment_backfill_specs_for_days(
+pub(crate) fn phase7_event_reaction_segment_backfill_specs_for_days(
     window_days: i32,
 ) -> Vec<Phase7BackfillFactorSpec> {
     phase7_event_reaction_backfill_specs_for_days(window_days, false)
 }
 
-fn phase7_event_reaction_reversal_backfill_specs_for_days(
+pub(crate) fn phase7_event_reaction_reversal_backfill_specs_for_days(
     window_days: i32,
 ) -> Vec<Phase7BackfillFactorSpec> {
     phase7_event_reaction_backfill_specs_for_days(window_days, true)
 }
 
-fn phase7_event_reaction_backfill_specs_for_days(
+pub(crate) fn phase7_event_reaction_backfill_specs_for_days(
     window_days: i32,
     reversal: bool,
 ) -> Vec<Phase7BackfillFactorSpec> {
@@ -3554,7 +3554,7 @@ fn phase7_event_reaction_backfill_specs_for_days(
     specs
 }
 
-fn phase7_event_surprise_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_event_surprise_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "event_forecast_surprise_bucket_std",
@@ -3639,7 +3639,7 @@ fn phase7_event_surprise_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_forecast_revision_surprise_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_forecast_revision_surprise_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "forecast_pchange_revision_delta_120d_std",
@@ -3718,7 +3718,7 @@ fn phase7_forecast_revision_surprise_backfill_specs() -> Vec<Phase7BackfillFacto
     ]
 }
 
-fn phase7_repurchase_supply_shock_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_repurchase_supply_shock_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "repurchase_amount_log_latest_std",
@@ -3756,7 +3756,7 @@ fn phase7_repurchase_supply_shock_backfill_specs() -> Vec<Phase7BackfillFactorSp
     ]
 }
 
-fn phase7_block_trade_supply_demand_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_block_trade_supply_demand_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "block_trade_inst_buy_20d_decay_std",
@@ -3797,7 +3797,7 @@ fn phase7_block_trade_supply_demand_backfill_specs() -> Vec<Phase7BackfillFactor
     ]
 }
 
-fn phase7_unlock_supply_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_unlock_supply_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "unlock_pressure_30d_neg_ratio_std",
@@ -3823,7 +3823,7 @@ fn phase7_unlock_supply_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpe
     ]
 }
 
-fn phase7_liquidity_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_liquidity_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "liq_impact_improve_20v120_std",
@@ -3872,7 +3872,7 @@ fn phase7_liquidity_quality_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_market_residual_risk_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_market_residual_risk_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "mkt_low_beta_120d_std",
@@ -3921,7 +3921,7 @@ fn phase7_market_residual_risk_backfill_specs() -> Vec<Phase7BackfillFactorSpec>
     ]
 }
 
-fn phase7_industry_prosperity_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_industry_prosperity_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "ind_pros_ret_mom_20v120_std",
@@ -3959,7 +3959,7 @@ fn phase7_industry_prosperity_backfill_specs() -> Vec<Phase7BackfillFactorSpec> 
     ]
 }
 
-fn phase7_futures_price_chain_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_futures_price_chain_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fpc_price_mom_20v60_std",
@@ -3991,7 +3991,7 @@ fn phase7_futures_price_chain_backfill_specs() -> Vec<Phase7BackfillFactorSpec> 
     ]
 }
 
-fn phase7_equity_pledge_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_equity_pledge_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![Phase7BackfillFactorSpec {
         factor_code: "eq_pledge_low_ratio_std",
         name: "P3.20 PIT equity pledge low pressure ratio",
@@ -4001,7 +4001,7 @@ fn phase7_equity_pledge_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpe
     }]
 }
 
-fn phase7_shareholder_structure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_shareholder_structure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "sh_holder_count_decline_1y_std",
@@ -4027,7 +4027,7 @@ fn phase7_shareholder_structure_backfill_specs() -> Vec<Phase7BackfillFactorSpec
     ]
 }
 
-fn phase7_margin_detail_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_margin_detail_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "md_financing_buy_intensity_20d_std",
@@ -4053,7 +4053,7 @@ fn phase7_margin_detail_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     ]
 }
 
-fn phase7_analyst_revision_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_analyst_revision_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "ar_rating_change_net_20d_std",
@@ -4369,7 +4369,7 @@ pub struct P42bLargeCapMomentumReversalBackfillRequest {
 }
 
 impl P42bLargeCapMomentumReversalBackfillRequest {
-    fn into_plan(self) -> Result<SetBasedFactorBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<SetBasedFactorBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -4557,7 +4557,7 @@ pub struct P42bDefensiveLowVolQualityBackfillRequest {
 }
 
 impl P42bDefensiveLowVolQualityBackfillRequest {
-    fn into_plan(self) -> Result<SetBasedFactorBackfillPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<SetBasedFactorBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2016, 2, 1).expect("static date"),
@@ -8812,7 +8812,7 @@ async fn run_phase7_alpha_blend_profiles_backfill(
 }
 
 
-fn alpha_blend_profile_backfill_total_steps(plans: &[Phase7AlphaBlendBackfillPlan]) -> usize {
+pub(crate) fn alpha_blend_profile_backfill_total_steps(plans: &[Phase7AlphaBlendBackfillPlan]) -> usize {
     plans
         .iter()
         .map(|plan| quarterly_backfill_segments(plan.start_date, plan.end_date).len())
@@ -8883,7 +8883,7 @@ async fn run_set_based_factor_backfill(
 }
 
 
-fn yearly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+pub(crate) fn yearly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
     if start > end {
         return Vec::new();
     }
@@ -8925,7 +8925,7 @@ fn next_quarter_start(date: NaiveDate) -> NaiveDate {
     }
 }
 
-fn quarterly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+pub(crate) fn quarterly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
     if start > end {
         return Vec::new();
     }
@@ -8943,14 +8943,14 @@ fn quarterly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDa
     segments
 }
 
-fn margin_detail_backfill_segments(
+pub(crate) fn margin_detail_backfill_segments(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Vec<(NaiveDate, NaiveDate)> {
     quarterly_backfill_segments(start, end)
 }
 
-fn monthly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+pub(crate) fn monthly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
     if start > end {
         return Vec::new();
     }
@@ -9445,7 +9445,7 @@ async fn run_segmented_margin_detail_backfill(
 }
 
 
-struct FuturesPriceChainSegmentBackfillRows {
+pub(crate) struct FuturesPriceChainSegmentBackfillRows {
     product_rows_by_code: Vec<(String, usize)>,
     combo_rows: usize,
 }
@@ -10088,7 +10088,7 @@ async fn execute_set_based_combo_backfill(
 }
 
 
-fn phase7_combo_required_factor_count(
+pub(crate) fn phase7_combo_required_factor_count(
     specs: &[SetBasedFactorSpec],
     plan: &SetBasedFactorBackfillPlan,
 ) -> i64 {
@@ -10161,7 +10161,7 @@ async fn execute_phase7_alpha_blend_backfill(
 }
 
 
-fn phase7_alpha_blend_required_source_count(plan: &Phase7AlphaBlendBackfillPlan) -> i64 {
+pub(crate) fn phase7_alpha_blend_required_source_count(plan: &Phase7AlphaBlendBackfillPlan) -> i64 {
     match plan.combo_method {
         "weighted_combo_optional_overlay" => 1,
         _ => plan.source_combos.len() as i64,
@@ -10251,7 +10251,7 @@ fn elapsed_millis(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn factor_backfill_profile_metrics(
+pub(crate) fn factor_backfill_profile_metrics(
     report: &SetBasedFactorBackfillReport,
     elapsed_ms: u64,
 ) -> serde_json::Value {
@@ -10331,7 +10331,7 @@ async fn persist_factor_backfill_experiment_run(
 }
 
 
-fn factor_backfill_combo_weights_json(
+pub(crate) fn factor_backfill_combo_weights_json(
     specs: &[SetBasedFactorSpec],
 ) -> Result<serde_json::Value, String> {
     let weights = specs
@@ -10341,13 +10341,13 @@ fn factor_backfill_combo_weights_json(
     serde_json::to_value(weights).map_err(|error| format!("Failed to encode weights: {}", error))
 }
 
-fn alpha_blend_source_records_json(
+pub(crate) fn alpha_blend_source_records_json(
     sources: &[Phase7AlphaBlendSourcePlan],
 ) -> Result<serde_json::Value, String> {
     serde_json::to_value(sources).map_err(|error| format!("Failed to encode sources: {}", error))
 }
 
-fn alpha_blend_weights_json(
+pub(crate) fn alpha_blend_weights_json(
     sources: &[Phase7AlphaBlendSourcePlan],
 ) -> Result<serde_json::Value, String> {
     let weights = sources
@@ -10363,7 +10363,7 @@ fn alpha_blend_weights_json(
 }
 
 
-fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
+pub(crate) fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
     match spec.kind {
         Phase7BackfillFactorKind::Reversal => phase7_reversal_backfill_sql(spec.period),
         Phase7BackfillFactorKind::DownsideVolatility => {
@@ -10543,7 +10543,7 @@ fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
     }
 }
 
-fn phase7_reversal_backfill_sql(period: i32) -> String {
+pub(crate) fn phase7_reversal_backfill_sql(period: i32) -> String {
     format!(
         "WITH priced AS (
             SELECT
@@ -10595,7 +10595,7 @@ fn phase7_reversal_backfill_sql(period: i32) -> String {
 /// momentum = (close - prev_mom_close)/prev_mom_close(强势为正)。
 /// 两个 CUME_DIST ∈ [0,1],乘积 ∈ [0,1],高=同时超跌+强势。
 /// PIT:量价当日已知;市值取 trade_date<=当日 最近值;available_at = trade_date。
-fn phase7_large_cap_momentum_reversal_backfill_sql(
+pub(crate) fn phase7_large_cap_momentum_reversal_backfill_sql(
     reversal_period: i32,
     momentum_period: i32,
     large_cap_threshold_yi: i32,
@@ -10679,7 +10679,7 @@ fn phase7_large_cap_momentum_reversal_backfill_sql(
 /// raw_value = CUME_DIST(-volatility) × CUME_DIST(fin_roe),捕获"既低波又高质量"的非线性协同。
 /// 低波(防御性)+ 高质量(高 ROE)是防御板块的核心选股逻辑,补偿 ascending 在此失效。
 /// PIT:量价当日已知;fin_roe 用 available_at <= trade_date;available_at = trade_date。
-fn phase7_defensive_low_vol_quality_backfill_sql(
+pub(crate) fn phase7_defensive_low_vol_quality_backfill_sql(
     volatility_period: i32,
     industries: &[&str],
 ) -> String {
@@ -10777,7 +10777,7 @@ fn phase7_defensive_low_vol_quality_backfill_sql(
     )
 }
 
-fn phase7_downside_volatility_backfill_sql(period: i32) -> String {
+pub(crate) fn phase7_downside_volatility_backfill_sql(period: i32) -> String {
     let preceding = period - 1;
     format!(
         "WITH returns AS (
@@ -10841,7 +10841,7 @@ fn phase7_downside_volatility_backfill_sql(period: i32) -> String {
     )
 }
 
-fn phase7_amihud_backfill_sql(period: i32) -> String {
+pub(crate) fn phase7_amihud_backfill_sql(period: i32) -> String {
     let preceding = period - 1;
     format!(
         "WITH observations AS (
@@ -10906,7 +10906,7 @@ fn phase7_amihud_backfill_sql(period: i32) -> String {
     )
 }
 
-fn phase7_amount_intensity_backfill_sql(period: i32) -> String {
+pub(crate) fn phase7_amount_intensity_backfill_sql(period: i32) -> String {
     format!(
         "WITH raw AS (
             SELECT
@@ -10951,7 +10951,7 @@ fn phase7_amount_intensity_backfill_sql(period: i32) -> String {
     )
 }
 
-fn phase7_relative_momentum_backfill_sql(period: i32, industry_relative: bool) -> String {
+pub(crate) fn phase7_relative_momentum_backfill_sql(period: i32, industry_relative: bool) -> String {
     let baseline_select = if industry_relative {
         "trade_date, industry, AVG(stock_return) AS baseline_return"
     } else {
@@ -11031,7 +11031,7 @@ fn phase7_relative_momentum_backfill_sql(period: i32, industry_relative: bool) -
     )
 }
 
-fn phase7_financial_latest_backfill_sql(
+pub(crate) fn phase7_financial_latest_backfill_sql(
     source_column: &'static str,
     higher_is_better: bool,
 ) -> String {
@@ -11095,7 +11095,7 @@ fn phase7_financial_latest_backfill_sql(
     )
 }
 
-fn phase7_industry_relative_financial_latest_backfill_sql(
+pub(crate) fn phase7_industry_relative_financial_latest_backfill_sql(
     source_column: &'static str,
     higher_is_better: bool,
 ) -> String {
@@ -11172,7 +11172,7 @@ fn phase7_industry_relative_financial_latest_backfill_sql(
     )
 }
 
-fn phase7_financial_annual_change_backfill_sql(
+pub(crate) fn phase7_financial_annual_change_backfill_sql(
     source_column: &'static str,
     mode: FinancialAnnualChangeMode,
 ) -> String {
@@ -11266,7 +11266,7 @@ fn phase7_financial_annual_change_backfill_sql(
     )
 }
 
-fn phase7_financial_annual_acceleration_backfill_sql(
+pub(crate) fn phase7_financial_annual_acceleration_backfill_sql(
     source_column: &'static str,
     mode: FinancialAnnualChangeMode,
 ) -> String {
@@ -11420,7 +11420,7 @@ fn phase7_financial_annual_acceleration_backfill_sql(
     )
 }
 
-fn phase7_financial_annual_persistence_backfill_sql(
+pub(crate) fn phase7_financial_annual_persistence_backfill_sql(
     source_column: &'static str,
     mode: FinancialAnnualChangeMode,
 ) -> String {
@@ -11553,7 +11553,7 @@ fn phase7_financial_annual_persistence_backfill_sql(
     )
 }
 
-fn phase7_daily_basic_latest_backfill_sql(
+pub(crate) fn phase7_daily_basic_latest_backfill_sql(
     source_column: &'static str,
     higher_is_better: bool,
     positive_only: bool,
@@ -11601,7 +11601,7 @@ fn phase7_daily_basic_latest_backfill_sql(
     )
 }
 
-fn phase7_moneyflow_backfill_sql(
+pub(crate) fn phase7_moneyflow_backfill_sql(
     period: i32,
     amount_expression: &'static str,
     higher_is_better: bool,
@@ -11671,7 +11671,7 @@ fn phase7_moneyflow_backfill_sql(
     )
 }
 
-fn phase7_moneyflow_congestion_backfill_sql(period: i32, flow_expression: &'static str) -> String {
+pub(crate) fn phase7_moneyflow_congestion_backfill_sql(period: i32, flow_expression: &'static str) -> String {
     let preceding = period - 1;
 
     format!(
@@ -11783,7 +11783,7 @@ fn phase7_moneyflow_congestion_backfill_sql(period: i32, flow_expression: &'stat
     )
 }
 
-fn phase7_supply_float_shock_backfill_sql(
+pub(crate) fn phase7_supply_float_shock_backfill_sql(
     share_expression: &'static str,
     horizon_days: i32,
     mode: SupplyFloatShockMode,
@@ -11892,7 +11892,7 @@ fn phase7_supply_float_shock_backfill_sql(
     )
 }
 
-fn phase7_liquidity_quality_backfill_sql(
+pub(crate) fn phase7_liquidity_quality_backfill_sql(
     signal: LiquidityQualitySignal,
     short_window: i32,
     long_window: i32,
@@ -12077,7 +12077,7 @@ fn phase7_liquidity_quality_backfill_sql(
     )
 }
 
-fn phase7_market_residual_risk_backfill_sql(
+pub(crate) fn phase7_market_residual_risk_backfill_sql(
     signal: MarketResidualRiskSignal,
     short_window: i32,
     long_window: i32,
@@ -12269,7 +12269,7 @@ fn phase7_market_residual_risk_backfill_sql(
     )
 }
 
-fn phase7_cashflow_latest_backfill_sql(
+pub(crate) fn phase7_cashflow_latest_backfill_sql(
     value_expression: &'static str,
     required_filter: &'static str,
     higher_is_better: bool,
@@ -12342,7 +12342,7 @@ fn phase7_cashflow_latest_backfill_sql(
     )
 }
 
-fn phase7_dividend_rolling_quality_backfill_sql(
+pub(crate) fn phase7_dividend_rolling_quality_backfill_sql(
     value_expression: &'static str,
     higher_is_better: bool,
 ) -> String {
@@ -12428,7 +12428,7 @@ fn phase7_dividend_rolling_quality_backfill_sql(
     )
 }
 
-fn phase7_event_latest_backfill_sql(
+pub(crate) fn phase7_event_latest_backfill_sql(
     source_table: &'static str,
     value_expression: &'static str,
     higher_is_better: bool,
@@ -12515,7 +12515,7 @@ fn phase7_event_latest_backfill_sql(
     )
 }
 
-fn phase7_block_trade_window_backfill_sql(
+pub(crate) fn phase7_block_trade_window_backfill_sql(
     value_expression: &'static str,
     higher_is_better: bool,
     window_days: i32,
@@ -12613,7 +12613,7 @@ fn phase7_block_trade_window_backfill_sql(
     )
 }
 
-fn phase7_unlock_pressure_backfill_sql(horizon_days: i32) -> String {
+pub(crate) fn phase7_unlock_pressure_backfill_sql(horizon_days: i32) -> String {
     let horizon_days = horizon_days.clamp(1, 365);
     format!(
         "WITH trade_days AS (
@@ -12679,7 +12679,7 @@ fn phase7_unlock_pressure_backfill_sql(horizon_days: i32) -> String {
     )
 }
 
-fn phase7_industry_prosperity_backfill_sql(
+pub(crate) fn phase7_industry_prosperity_backfill_sql(
     signal: IndustryProsperitySignal,
     short_window: i32,
     long_window: i32,
@@ -12892,7 +12892,7 @@ fn phase7_industry_prosperity_backfill_sql(
     )
 }
 
-fn phase7_industry_prosperity_multi_backfill_sql() -> String {
+pub(crate) fn phase7_industry_prosperity_multi_backfill_sql() -> String {
     let warmup_days = 360;
     let min_members = 20;
     format!(
@@ -13116,11 +13116,11 @@ fn phase7_industry_prosperity_multi_backfill_sql() -> String {
     )
 }
 
-fn phase7_futures_price_chain_backfill_sql(_signal: FuturesPriceChainSignal) -> String {
+pub(crate) fn phase7_futures_price_chain_backfill_sql(_signal: FuturesPriceChainSignal) -> String {
     panic!("futures_price_chain factors must use the shared multi-signal builder to avoid repeated raw-table scans")
 }
 
-fn phase7_futures_price_chain_product_signal_backfill_sql() -> &'static str {
+pub(crate) fn phase7_futures_price_chain_product_signal_backfill_sql() -> &'static str {
     "WITH daily_raw_symbol AS (
         SELECT
             ts_code,
@@ -13387,7 +13387,7 @@ fn phase7_futures_price_chain_product_signal_backfill_sql() -> &'static str {
     ORDER BY signal_code"
 }
 
-fn phase7_futures_price_chain_combo_backfill_sql() -> &'static str {
+pub(crate) fn phase7_futures_price_chain_combo_backfill_sql() -> &'static str {
     "WITH weights AS (
         SELECT key AS factor_code, value::double precision AS weight
         FROM jsonb_each_text($3::jsonb)
@@ -13573,7 +13573,7 @@ fn phase7_futures_price_chain_combo_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-fn phase7_equity_pledge_pressure_backfill_sql() -> &'static str {
+pub(crate) fn phase7_equity_pledge_pressure_backfill_sql() -> &'static str {
     "WITH weights AS (
         SELECT key AS factor_code, value::double precision AS weight
         FROM jsonb_each_text($3::jsonb)
@@ -13717,7 +13717,7 @@ fn phase7_equity_pledge_pressure_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-fn phase7_shareholder_structure_backfill_sql() -> &'static str {
+pub(crate) fn phase7_shareholder_structure_backfill_sql() -> &'static str {
     "WITH weights AS (
         SELECT key AS factor_code, value::double precision AS weight
         FROM jsonb_each_text($3::jsonb)
@@ -13974,7 +13974,7 @@ fn phase7_shareholder_structure_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-fn phase7_margin_detail_backfill_sql() -> &'static str {
+pub(crate) fn phase7_margin_detail_backfill_sql() -> &'static str {
     "WITH weights AS (
         SELECT key AS factor_code, value::double precision AS weight
         FROM jsonb_each_text($3::jsonb)
@@ -14238,7 +14238,7 @@ fn phase7_margin_detail_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-fn phase7_analyst_revision_backfill_sql(
+pub(crate) fn phase7_analyst_revision_backfill_sql(
     value_expression: &'static str,
     higher_is_better: bool,
     window_days: i32,
@@ -14394,7 +14394,7 @@ fn phase7_analyst_revision_backfill_sql(
     )
 }
 
-fn phase7_analyst_revision_multi_backfill_sql() -> String {
+pub(crate) fn phase7_analyst_revision_multi_backfill_sql() -> String {
     "WITH trade_days AS (
         SELECT trade_date
         FROM market_trade_calendar
@@ -14583,7 +14583,7 @@ fn phase7_analyst_revision_multi_backfill_sql() -> String {
         .to_string()
 }
 
-fn phase7_forecast_revision_backfill_sql(
+pub(crate) fn phase7_forecast_revision_backfill_sql(
     value_expression: &'static str,
     higher_is_better: bool,
     max_event_age_days: i32,
@@ -14712,7 +14712,7 @@ fn phase7_forecast_revision_backfill_sql(
     )
 }
 
-fn phase7_event_window_backfill_sql(
+pub(crate) fn phase7_event_window_backfill_sql(
     source_table: &'static str,
     value_expression: &'static str,
     higher_is_better: bool,
@@ -14801,7 +14801,7 @@ fn phase7_event_window_backfill_sql(
     )
 }
 
-fn phase7_event_post_return_curve_backfill_sql(
+pub(crate) fn phase7_event_post_return_curve_backfill_sql(
     source_table: &'static str,
     event_filter_expression: &'static str,
     higher_is_better: bool,
@@ -14929,7 +14929,7 @@ fn phase7_event_post_return_curve_backfill_sql(
     )
 }
 
-fn phase7_combo_backfill_sql() -> &'static str {
+pub(crate) fn phase7_combo_backfill_sql() -> &'static str {
     "WITH weights AS (
         SELECT key AS factor_code, value::double precision AS weight
         FROM jsonb_each_text($3::jsonb)
@@ -14962,14 +14962,14 @@ fn phase7_combo_backfill_sql() -> &'static str {
 }
 
 
-fn phase7_alpha_blend_backfill_sql(combo_method: &str) -> &'static str {
+pub(crate) fn phase7_alpha_blend_backfill_sql(combo_method: &str) -> &'static str {
     match combo_method {
         "weighted_combo_optional_overlay" => phase7_optional_overlay_blend_backfill_sql(),
         _ => phase7_strict_alpha_blend_backfill_sql(),
     }
 }
 
-fn phase7_strict_alpha_blend_backfill_sql() -> &'static str {
+pub(crate) fn phase7_strict_alpha_blend_backfill_sql() -> &'static str {
     "WITH sources AS (
         SELECT combo_name, version, weight
         FROM jsonb_to_recordset($3::jsonb)
@@ -15001,7 +15001,7 @@ fn phase7_strict_alpha_blend_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-fn phase7_optional_overlay_blend_backfill_sql() -> &'static str {
+pub(crate) fn phase7_optional_overlay_blend_backfill_sql() -> &'static str {
     "WITH sources AS (
         SELECT
             source_record.item ->> 'combo_name' AS combo_name,

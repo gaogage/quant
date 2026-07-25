@@ -376,15 +376,15 @@ pub struct SyncFinancialFactorRequest {
 }
 
 #[derive(Debug)]
-struct FinancialIndicatorRow {
-    symbol: String,
-    ann_date: NaiveDate,
-    end_date: NaiveDate,
-    value: Decimal,
+pub(crate) struct FinancialIndicatorRow {
+    pub(crate) symbol: String,
+    pub(crate) ann_date: NaiveDate,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) value: Decimal,
 }
 
 impl FinancialIndicatorRow {
-    fn to_factor_value(&self) -> FinancialFactorValue {
+    pub(crate) fn to_factor_value(&self) -> FinancialFactorValue {
         let value: f64 = self.value.try_into().unwrap_or(f64::NAN);
         FinancialFactorValue {
             symbol: self.symbol.clone(),
@@ -397,23 +397,23 @@ impl FinancialIndicatorRow {
 }
 
 #[derive(Debug)]
-struct FinancialFactorValue {
-    symbol: String,
-    date: NaiveDate,
-    available_at: NaiveDate,
-    report_end_date: NaiveDate,
-    value: f64,
+pub(crate) struct FinancialFactorValue {
+    pub(crate) symbol: String,
+    pub(crate) date: NaiveDate,
+    pub(crate) available_at: NaiveDate,
+    pub(crate) report_end_date: NaiveDate,
+    pub(crate) value: f64,
 }
 
-struct FinancialFactorSpec {
-    code: &'static str,
-    source_column: &'static str,
-    name: &'static str,
-    category: &'static str,
+pub(crate) struct FinancialFactorSpec {
+    pub(crate) code: &'static str,
+    pub(crate) source_column: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) category: &'static str,
 }
 
 
-fn parse_financial_factor(name: &str) -> Option<FinancialFactorSpec> {
+pub(crate) fn parse_financial_factor(name: &str) -> Option<FinancialFactorSpec> {
     match name {
         "roe" | "roe_ttm" => Some(FinancialFactorSpec {
             code: "fin_roe",
@@ -1567,7 +1567,7 @@ pub async fn combine_factors(
 
 /// Parse factor string like "mom_20d" → ("momentum", 20) or "turn_5d" → ("turnover", 5)
 
-fn parse_factor(name: &str) -> Option<(&'static str, usize)> {
+pub(crate) fn parse_factor(name: &str) -> Option<(&'static str, usize)> {
     let name = name.strip_suffix("_std").unwrap_or(name);
     if let Some(rest) = name.strip_prefix("mom_") {
         let period: usize = rest.trim_end_matches('d').parse().ok()?;

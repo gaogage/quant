@@ -335,18 +335,18 @@ pub struct EvaluateRollingPitRequest {
 
 #[derive(Debug, Clone)]
 
-struct EvaluateRollingPitPlan {
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-    version: String,
-    horizon: i16,
-    train_lookback_days: i64,
-    max_windows: Option<usize>,
-    factor_codes: Option<Vec<String>>,
+pub(crate) struct EvaluateRollingPitPlan {
+    pub(crate) start_date: NaiveDate,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) version: String,
+    pub(crate) horizon: i16,
+    pub(crate) train_lookback_days: i64,
+    pub(crate) max_windows: Option<usize>,
+    pub(crate) factor_codes: Option<Vec<String>>,
 }
 
 impl EvaluateRollingPitRequest {
-    fn into_plan(self) -> Result<EvaluateRollingPitPlan, String> {
+    pub(crate) fn into_plan(self) -> Result<EvaluateRollingPitPlan, String> {
         let start_date = parse_phase7_backfill_date(
             self.start_date,
             NaiveDate::from_ymd_opt(2014, 1, 1).expect("static date"),
