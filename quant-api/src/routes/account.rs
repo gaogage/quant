@@ -51,7 +51,25 @@ pub struct Account<P: AccountPolicy> {
     pub strategy_version_id: String,
     /// 账户净值（NAV）。
     pub nav: Decimal,
+    /// 杠杆配置：仅 `MarginAccount` 非空，编译期区分有无杠杆。
+    pub leverage_config: Option<LeverageConfig>,
     _policy: std::marker::PhantomData<P>,
+}
+
+/// 杠杆配置（仅保证金账户语义）。
+///
+/// 类型门禁：`Account<CashAccount>` 的 `leverage_config` 始终为 `None`，
+/// 编译期消除"无杠杆账户误融资"（commit 10695d7 修过运行期版本）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeverageConfig {
+    /// 杠杆倍数（> 1.0 才生效）。
+    pub multiplier: f64,
+    /// 杠杆模式：'fixed' 固定倍数 / 'vol_target' 波动率目标动态杠杆。
+    pub mode: String,
+    /// 维持担保比例平仓线（如 1.3）。
+    pub liquidation_threshold: f64,
+    /// 维持担保比例警戒线（如 1.5）。
+    pub warning_threshold: f64,
 }
 
 impl Account<CashAccount> {
@@ -60,16 +78,18 @@ impl Account<CashAccount> {
             account_id: account_id.into(),
             strategy_version_id: strategy_version_id.into(),
             nav: Decimal::ZERO,
+            leverage_config: None, // 现金账户无杠杆
             _policy: std::marker::PhantomData,
         }
     }
 
     /// 现金账户升级为保证金账户（允许开通杠杆）。
-    pub fn enable_margin(self) -> Account<MarginAccount> {
+    pub fn enable_margin(self, config: LeverageConfig) -> Account<MarginAccount> {
         Account {
             account_id: self.account_id,
             strategy_version_id: self.strategy_version_id,
             nav: self.nav,
+            leverage_config: Some(config),
             _policy: std::marker::PhantomData,
         }
     }
@@ -79,39 +99,55 @@ impl Account<MarginAccount> {
     pub fn new_margin(
         account_id: impl Into<String>,
         strategy_version_id: impl Into<String>,
+        config: LeverageConfig,
     ) -> Self {
         Self {
             account_id: account_id.into(),
             strategy_version_id: strategy_version_id.into(),
             nav: Decimal::ZERO,
+            leverage_config: Some(config),
             _policy: std::marker::PhantomData,
         }
     }
-}
 
-/// 杠杆倍数：仅保证金账户可设置 > 1。
-///
-/// 类型门禁：此函数签名为 `&Account<MarginAccount>`，编译期保证现金账户无法调用。
-pub fn leverage_multiplier(_account: &Account<MarginAccount>) -> Decimal {
-    // Step 5 迁移实际杠杆配置，当前返回占位值。
-    Decimal::ONE
+    /// 杠杆配置（编译期保证只有 MarginAccount 可调用）。
+    pub fn leverage_config(&self) -> &LeverageConfig {
+        self.leverage_config.as_ref().expect("MarginAccount 必有 leverage_config")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn cash_account_can_become_margin() {
-        let cash = Account::<CashAccount>::new_cash("acc_v24", "h20_v1");
-        let margin: Account<MarginAccount> = cash.enable_margin();
-        assert_eq!(margin.account_id, "acc_v24");
+    fn sample_leverage_config() -> LeverageConfig {
+        LeverageConfig {
+            multiplier: 2.0,
+            mode: "fixed".into(),
+            liquidation_threshold: 1.3,
+            warning_threshold: 1.5,
+        }
     }
 
     #[test]
-    fn leverage_only_on_margin() {
-        let margin = Account::<MarginAccount>::new_margin("acc_v24", "h20_v1");
-        // 编译期门禁：下行若改为 CashAccount 会编译失败（无该函数实现）。
-        let _lev = leverage_multiplier(&margin);
+    fn cash_account_has_no_leverage_config() {
+        let cash = Account::<CashAccount>::new_cash("acc_v24", "h20_v1");
+        assert!(cash.leverage_config.is_none(), "现金账户无杠杆配置");
+    }
+
+    #[test]
+    fn cash_account_can_become_margin() {
+        let cash = Account::<CashAccount>::new_cash("acc_v24", "h20_v1");
+        let margin: Account<MarginAccount> = cash.enable_margin(sample_leverage_config());
+        assert_eq!(margin.account_id, "acc_v24");
+        assert_eq!(margin.leverage_config().multiplier, 2.0);
+    }
+
+    #[test]
+    fn margin_account_holds_leverage_config() {
+        let margin = Account::<MarginAccount>::new_margin("acc_v24", "h20_v1", sample_leverage_config());
+        // 编译期门禁：leverage_config() 仅 MarginAccount 可调用
+        assert_eq!(margin.leverage_config().mode, "fixed");
+        assert_eq!(margin.leverage_config().liquidation_threshold, 1.3);
     }
 }
