@@ -1,4 +1,4 @@
-use quant_common::phase7::{screen_optimization_results, CandidateTargets};
+use quant_api::discovery::phase7::{screen_optimization_results, CandidateTargets};
 use serde_json::{json, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|row| {
             matches!(
                 row.candidate_type,
-                quant_common::phase7::CandidateType::Professional
+                quant_api::discovery::phase7::CandidateType::Professional
             )
         })
         .count();

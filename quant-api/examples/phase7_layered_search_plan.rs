@@ -1,4 +1,4 @@
-use quant_common::phase7::{build_layered_search_plan, LayeredSearchConfig, LocalResourcePlan};
+use quant_api::discovery::phase7::{build_layered_search_plan, LayeredSearchConfig, LocalResourcePlan};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut resource_plan = LocalResourcePlan::local_mac();

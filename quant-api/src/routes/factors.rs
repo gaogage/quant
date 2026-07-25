@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use chrono::{Datelike, NaiveDate};
-use quant_common::phase7::phase7_alpha_blend_profiles;
+use quant_api::discovery::phase7::phase7_alpha_blend_profiles;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
