@@ -6,3 +6,5 @@ pub mod perf_baseline;
 pub mod portfolio;
 pub mod runner;
 pub mod signal_generator;
+/// 领域类型状态骨架(Step 2)
+pub mod types;

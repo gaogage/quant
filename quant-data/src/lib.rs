@@ -11,3 +11,4 @@ pub mod model {
 pub mod db;
 pub mod repository;
 pub mod sync;
+pub mod versioning;
