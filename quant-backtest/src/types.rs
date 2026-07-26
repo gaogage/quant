@@ -132,14 +132,19 @@ impl RawBar {
 pub trait StrategyState: private::Sealed {}
 
 /// 草稿态：策略参数未验证，不可回测。
+#[derive(Debug)]
 pub struct Draft;
 /// 已验证态：参数通过 WFA + bootstrap，可回测。
+#[derive(Debug)]
 pub struct Validated;
 /// 已回测态：产出回测绩效，可上模拟盘。
+#[derive(Debug)]
 pub struct Backtested;
 /// 模拟盘态：实时跟踪但无真实资金。
+#[derive(Debug)]
 pub struct PaperLive;
 /// 实盘态：真实资金运行，最高限制。
+#[derive(Debug)]
 pub struct Production;
 
 mod private {

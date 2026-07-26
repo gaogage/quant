@@ -6,7 +6,7 @@
 //! MVO 是 composite 的固有属性(strategy_type='composite' ⟹ 必有 MVO),非开关字段。
 
 use sqlx::PgPool;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 // Step 5c：复用 quant-backtest 的策略状态标记 trait + 状态类型。
 use quant_backtest::types::{
@@ -61,6 +61,18 @@ impl<S: StrategyState> Deref for Strategy<S> {
     }
 }
 
+/// DerefMut 透传：`let mut rs = load_resolved_strategy(...)` 后修改字段
+/// （如 portfolio.rs 覆盖 equity_curve_task_id）零改动。
+///
+/// 安全性：状态标记是 `PhantomData`（零运行时开销），`DerefMut` 只暴露
+/// `inner` 的可变引用，不改变状态 `S`——状态推进仍只能通过 `into_*` 方法，
+/// 非法转换编译期拒绝。
+impl<S: StrategyState> DerefMut for Strategy<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 impl Strategy<Validated> {
     /// 从 DB 加载的策略树构造 `Strategy<Validated>`。
     ///
@@ -73,6 +85,11 @@ impl Strategy<Validated> {
     }
 
     /// 回测后推进到 `Backtested` 态（回测产出绩效，可上模拟盘）。
+    ///
+    /// 骨架：当前调用点通过 deref coercion 透传 `&Strategy<Validated>` 给
+    /// 接受 `&ResolvedStrategy` 的函数（如 `run_daily_simulation`），未强制
+    /// 状态推进。实盘路径状态校验（要求 `Strategy<Production>`）留后续。
+    #[allow(dead_code)]
     pub fn into_backtested(self) -> Strategy<Backtested> {
         Strategy {
             inner: self.inner,
@@ -83,6 +100,7 @@ impl Strategy<Validated> {
 
 impl Strategy<Backtested> {
     /// 推进到 `PaperLive` 态（模拟盘实时跟踪）。
+    #[allow(dead_code)]
     pub fn into_paper_live(self) -> Strategy<PaperLive> {
         Strategy {
             inner: self.inner,
@@ -93,6 +111,7 @@ impl Strategy<Backtested> {
 
 impl Strategy<PaperLive> {
     /// 推进到 `Production` 态（实盘真实资金，最高限制）。
+    #[allow(dead_code)]
     pub fn into_production(self) -> Strategy<Production> {
         Strategy {
             inner: self.inner,
@@ -258,10 +277,14 @@ fn parse_str_array(v: &Option<serde_json::Value>) -> Vec<String> {
 }
 
 /// 从 DB 加载策略树。composite 加载 MVO + 子 asset 行;单 asset 账号 mvo=None,assets=[自身]。
+///
+/// Step 5c 接入：返回 `Strategy<Validated>`（DB status='active' 视为已验证）。
+/// 调用方通过 `Deref`/`DerefMut` 透传访问 `ResolvedStrategy` 字段，零改动；
+/// 状态推进用 `into_backtested()`/`into_paper_live()`/`into_production()`。
 pub async fn load_resolved_strategy(
     db: &PgPool,
     strategy_id: &str,
-) -> Result<ResolvedStrategy, String> {
+) -> Result<Strategy<Validated>, String> {
     // 1. 主行
     let main: Option<CompositeRow> = sqlx::query_as::<_, CompositeRow>(
         "SELECT strategy_id, name, strategy_type,
@@ -293,7 +316,7 @@ pub async fn load_resolved_strategy(
         StrategyType::Asset => {
             // 单 asset 账号:mvo=None,assets=[自身]
             let asset_row = load_asset_row(db, strategy_id).await?;
-            Ok(ResolvedStrategy {
+            Ok(Strategy::validated(ResolvedStrategy {
                 strategy_id: main.strategy_id,
                 name: main.name,
                 strategy_type: StrategyType::Asset,
@@ -301,7 +324,7 @@ pub async fn load_resolved_strategy(
                 assets: vec![asset_row],
                 etf_symbols: parse_str_array(&main.etf_symbols),
                 rebalance_freq: main.rebalance_freq.unwrap_or_else(|| "quarterly".into()),
-            })
+            }))
         }
         StrategyType::Composite => {
             // composite:加载 MVO + 所有子 asset 行
@@ -335,7 +358,7 @@ pub async fn load_resolved_strategy(
                 kelly_fraction: main.kelly_fraction.unwrap_or(0.25),
                 score_candidate_pool_size: main.score_candidate_pool_size.unwrap_or(200) as i64,
             };
-            Ok(ResolvedStrategy {
+            Ok(Strategy::validated(ResolvedStrategy {
                 strategy_id: main.strategy_id,
                 name: main.name,
                 strategy_type: StrategyType::Composite,
@@ -343,7 +366,7 @@ pub async fn load_resolved_strategy(
                 assets: asset_rows,
                 etf_symbols: parse_str_array(&main.etf_symbols),
                 rebalance_freq: main.rebalance_freq.unwrap_or_else(|| "quarterly".into()),
-            })
+            }))
         }
     }
 }
