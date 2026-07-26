@@ -85,10 +85,83 @@ fn short_id() -> String {
         .to_string()
 }
 
+/// 杠杆倍数计算（Step 5d 从 rebalance_account 提取）。
+///
+/// margin 路径：regime > leverage_regime_threshold 且 multiplier > 1.0 时，
+/// 按 mode（vol_target 动态 / fixed 固定）算杠杆倍数。
+/// cash 路径（leverage_enabled=false）：恒 ONE。
+async fn compute_leverage_mult(
+    db: &PgPool,
+    account_id: &str,
+    sc: &StrategyConfig,
+    regime: f64,
+    leverage_enabled: bool,
+    leverage_multiplier: f64,
+    leverage_mode: &str,
+) -> Decimal {
+    if !leverage_enabled || regime <= sc.leverage_regime_threshold || leverage_multiplier <= 1.0 {
+        return Decimal::ONE;
+    }
+    if leverage_mode == "vol_target" {
+        Decimal::from_f64_retain(compute_vol_target_leverage(db, account_id, sc).await)
+            .unwrap_or(Decimal::ONE)
+    } else {
+        Decimal::from_f64_retain(leverage_multiplier).unwrap_or(Decimal::ONE)
+    }
+}
+
+/// 维保门控（Step 5d 从 rebalance_account 提取），仅 margin 路径调用。
+///
+/// 维保 < 平仓线：强平 + 禁买；维保 < 警戒线：禁买。
+/// 返回 warn_no_buy（是否禁止建仓）。
+async fn check_maintenance_gate(
+    db: &PgPool,
+    account_id: &str,
+    date: NaiveDate,
+    sc: &StrategyConfig,
+) -> bool {
+    // P2-D:维保 ratio + 阈值合并为 1 条 SQL(原 maintenance_ratio + SELECT thr 两次 DB)
+    let maint_info: Option<(f64, f64, f64)> = sqlx::query_as(
+        "SELECT
+            CASE WHEN COALESCE(margin_amount,0) < 0.000001 THEN 'Infinity'::float
+                 ELSE (COALESCE((SELECT SUM(market_value) FROM paper_position WHERE paper_account_id=$1),0)
+                       + COALESCE(cash,0)) / COALESCE(margin_amount,1)::float END,
+            COALESCE(liquidation_threshold, 1.3),
+            COALESCE(warning_threshold, 1.5)
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some((maint, liq_thr, warn_thr)) = maint_info else {
+        return false;
+    };
+    if maint.is_infinite() {
+        return false;
+    }
+    if maint < liq_thr {
+        // 平仓线:强平(正常由每日检查处理,此处兜底)
+        let _ = force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(sc)).await;
+        warn!("[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买", date, account_id, maint, liq_thr);
+        true
+    } else if maint < warn_thr {
+        warn!("[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买", date, account_id, maint, warn_thr);
+        true
+    } else {
+        false
+    }
+}
+
 /// 共享建仓:回放(EodClose)/实盘(Intraday)走同一套资金→权重→体制→杠杆→维保→建仓→NAV。
 /// 目标持仓驱动增量调仓:读当前持仓,算 delta(买不足/卖多余/清不在目标集的),经 trading 落计划+实际交易记录(含滑点)。
 /// task_id:实盘=run-factor 当日产生;回放=rs 的 a_share asset equity_curve_task_id(由调用方传入)。
 /// 返回建仓笔数。
+///
+/// Step 5d：杠杆计算与维保门控已提取为 `compute_leverage_mult` / `check_maintenance_gate`。
+/// apply_fill 已拆为 `apply_fill_cash`/`apply_fill_margin`（本函数内通过 leverage_enabled 分派）。
+/// 后续可进一步拆为 rebalance_cash_account/rebalance_margin_account 两个公开入口（需 paper 盘验证）。
 pub async fn rebalance_account(
     db: &PgPool,
     account_id: &str,
@@ -148,51 +221,22 @@ pub async fn rebalance_account(
         Decimal::ZERO
     };
 
-    // 4. 杠杆(共享 compute_vol_target_leverage)
-    let leverage_mult = if leverage_enabled && regime > sc.leverage_regime_threshold && leverage_multiplier > 1.0 {
-        if leverage_mode == "vol_target" {
-            Decimal::from_f64_retain(compute_vol_target_leverage(db, account_id, &sc).await)
-                .unwrap_or(Decimal::ONE)
-        } else {
-            Decimal::from_f64_retain(leverage_multiplier).unwrap_or(Decimal::ONE)
-        }
-    } else {
-        Decimal::ONE
-    };
+    // 4. 杠杆倍数:margin 路径算 vol_target/固定倍数,cash 路径恒 ONE。
+    // Step 5d:杠杆计算提取为 compute_leverage_mult,cash 路径 leverage_enabled=false
+    // 时函数内返回 ONE(编译期可通过 Account<CashAccount> 不调此函数进一步强化,留后续)。
+    let leverage_mult = compute_leverage_mult(
+        db, account_id, &sc, regime,
+        leverage_enabled, leverage_multiplier, leverage_mode,
+    ).await;
 
-    // 5. 维保门控(实盘口径):维保<警戒线禁买(跳过建仓段),平仓由每日盯市 check_maintenance_after_mark 处理。
-    // 建仓前的预防:若当前已警戒状态,本次 rebalance 不新买入(只允许调仓段卖出的减仓)。
-    // P2-D:维保 ratio + 阈值合并为 1 条 SQL(原 maintenance_ratio + SELECT thr 两次 DB)
-    let mut warn_no_buy = false;
-    if leverage_enabled {
-        let maint_info: Option<(f64, f64, f64)> = sqlx::query_as(
-            "SELECT
-                CASE WHEN COALESCE(margin_amount,0) < 0.000001 THEN 'Infinity'::float
-                     ELSE (COALESCE((SELECT SUM(market_value) FROM paper_position WHERE paper_account_id=$1),0)
-                           + COALESCE(cash,0)) / COALESCE(margin_amount,1)::float END,
-                COALESCE(liquidation_threshold, 1.3),
-                COALESCE(warning_threshold, 1.5)
-             FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
-        if let Some((maint, liq_thr, warn_thr)) = maint_info {
-            if !maint.is_infinite() {
-                if maint < liq_thr {
-                    // 平仓线:强平(正常由每日检查处理,此处兜底)
-                    let _ = force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(&sc)).await;
-                    warn_no_buy = true;
-                    warn!("[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买", date, account_id, maint, liq_thr);
-                } else if maint < warn_thr {
-                    warn_no_buy = true;
-                    warn!("[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买", date, account_id, maint, warn_thr);
-                }
-            }
-        }
-    }
+    // 5. 维保门控(实盘口径):仅 margin 路径。维保<警戒线禁买(跳过建仓段),
+    // 平仓由每日盯市 check_maintenance_after_mark 处理。
+    // Step 5d:维保门控提取为 check_maintenance_gate,cash 路径直接 false(不调)。
+    let warn_no_buy = if leverage_enabled {
+        check_maintenance_gate(db, account_id, date, &sc).await
+    } else {
+        false
+    };
     let scale = base_scale * leverage_mult;
 
     // 6. 读当前持仓(增量调仓基础)
