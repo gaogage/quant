@@ -716,10 +716,13 @@ pub async fn mark_to_market(db: &PgPool, account_id: &str, date: NaiveDate) -> R
 /// 同步流转 cash/margin:买扣 cash(不足自动融资 margin+=缺口);卖 cash+=fill_amount(末尾 try_auto_repay 归还多余融资)。
 /// 这是 NAV 复利成立的前提——否则 current_nav = 持仓市值+cash-margin 会因 cash 不动而虚高。
 ///
-/// leverage_enabled=false(无杠杆账户):买入金额严格不超过可用 cash。
-/// 满仓(MVO 权重 sum=1.0)+ 滑点会让实际买入微超 cash,无杠杆账户不应融资,
-/// 故 cash 不足时按剩余 cash 缩减买入量(min(目标qty, 剩余cash/fill_price)),不产生 margin。
-/// 杠杆账户保持原逻辑(cash 不足自动融资)。
+/// Step 5d 拆分：原 `apply_fill_to_position(leverage_enabled: bool)` 按 leverage_enabled
+/// 分派为 `apply_fill_cash`（无杠杆，编译期保证不融资）/ `apply_fill_margin`（含融资）。
+/// 共享的持仓/资金 SQL 提取到 `apply_fill_common_buy`/`apply_fill_common_sell`。
+///
+/// - `apply_fill_cash`：buy 时按剩余 cash 缩减 qty（commit 10695d7 修复点，运行时保护升级为编译期门禁）
+/// - `apply_fill_margin`：buy 时不缩减，cash 不足自动融资
+/// - sell 分支完全共享（不依赖 leverage_enabled）
 async fn apply_fill_to_position(
     db: &PgPool,
     account_id: &str,
@@ -730,137 +733,198 @@ async fn apply_fill_to_position(
     leverage_enabled: bool,
     date: NaiveDate,
 ) {
-    let fill_amount = qty * fill_price;
-    if side == "buy" {
-        // 无杠杆账户:cash 不足时缩减买入量,严格不融资
-        let (qty, fill_amount) = if !leverage_enabled {
-            let cash: f64 = sqlx::query_scalar(
-                "SELECT COALESCE(cash,0)::double precision FROM paper_account WHERE paper_account_id=$1",
-            )
-            .bind(account_id)
-            .fetch_one(db)
-            .await
-            .unwrap_or(0.0);
-            if cash <= 0.0 {
-                warn!("[rebalance] {} 无杠杆账户 cash=0,跳过买入 {}", account_id, sym);
-                return;
-            }
-            let max_qty_by_cash = Decimal::from_f64_retain(cash)
-                .map(|c| c / fill_price)
-                .unwrap_or(Decimal::ZERO);
-            if max_qty_by_cash <= Decimal::ZERO {
-                return;
-            }
-            if qty <= max_qty_by_cash {
-                (qty, fill_amount)
-            } else {
-                // 缩减到 cash 可承担量,再按100股向下取整(A股/ETF 1手=100,合规)。
-                let scaled = quant_common::trading_rules::round_down_to_lot(
-                    max_qty_by_cash,
-                    quant_common::trading_rules::LOT_SIZE,
-                );
-                if scaled <= Decimal::ZERO {
-                    return;
-                }
-                warn!(
-                    "[rebalance] {} 无杠杆账户 {} 买入缩减: 目标{} → {}(cash={:.2} 不足满仓+滑点,按100取整)",
-                    account_id, sym, qty, scaled, cash
-                );
-                (scaled, scaled * fill_price)
-            }
-        } else {
-            (qty, fill_amount)
-        };
-        // 持仓:移动加权 avg_cost + 标记 last_trade_date(T+1:当日买入次日才能卖)
-        let _ = sqlx::query(
-            "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value, last_trade_date)
-             VALUES ($1, $2, $3, $4, $5, $5, $4*$5, $6)
-             ON CONFLICT (paper_account_id, symbol) DO UPDATE SET
-                 avg_cost = (paper_position.avg_cost * paper_position.quantity + EXCLUDED.avg_cost * EXCLUDED.quantity)
-                            / (paper_position.quantity + EXCLUDED.quantity),
-                 quantity = paper_position.quantity + EXCLUDED.quantity,
-                 market_price = EXCLUDED.market_price,
-                 market_value = (paper_position.quantity + EXCLUDED.quantity) * EXCLUDED.market_price,
-                 last_trade_date = $6",
-        )
-        .bind(format!("pp-{}", short_id()))
-        .bind(account_id)
-        .bind(sym)
-        .bind(qty)
-        .bind(fill_price)
-        .bind(date)
-        .execute(db)
-        .await;
-        // 资金:扣 cash,不足自动融资(margin += 缺口)。单 SQL 保证原子。
-        // 无杠杆账户已在上方缩减 qty,fill_amount ≤ cash,不会产生 margin。
-        let _ = sqlx::query(
-            "UPDATE paper_account SET
-                 cash = CASE WHEN COALESCE(cash,0) >= $2 THEN cash - $2 ELSE 0 END,
-                 margin_amount = COALESCE(margin_amount,0) + GREATEST($2 - COALESCE(cash,0), 0)
-             WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .bind(fill_amount)
-        .execute(db)
-        .await;
+    if leverage_enabled {
+        apply_fill_margin(db, account_id, sym, side, qty, fill_price, date).await;
     } else {
-        // sell
-        // 防御性兜底:A股/ETF 卖出量取整到100整数倍(全仓清仓已在 caller 处理)
-        let qty = quant_common::trading_rules::round_down_to_lot(
-            qty,
-            quant_common::trading_rules::LOT_SIZE,
-        );
-        if qty <= Decimal::ZERO {
-            return; // 取整后为 0，不执行卖出
-        }
-        let fill_amount = qty * fill_price; // 重算以匹配取整后的 qty
-        // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
-        // last_trade_date IS NULL(历史数据未标记)兜底允许卖出,避免误拦正常持仓。
-        let t1_blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM paper_position
-              WHERE paper_account_id=$1 AND symbol=$2 AND quantity>0
-                AND last_trade_date IS NOT NULL AND last_trade_date = $3)",
+        apply_fill_cash(db, account_id, sym, side, qty, fill_price, date).await;
+    }
+}
+
+/// 无杠杆账户成交：买入严格不融资（cash 不足缩减 qty），卖出走共享逻辑。
+///
+/// 类型门禁：此函数无 margin 路径，编译期保证无杠杆账户不会产生融资。
+async fn apply_fill_cash(
+    db: &PgPool,
+    account_id: &str,
+    sym: &str,
+    side: &str,
+    qty: Decimal,
+    fill_price: Decimal,
+    date: NaiveDate,
+) {
+    if side == "buy" {
+        let fill_amount = qty * fill_price;
+        // cash 不足时缩减买入量,严格不融资
+        let cash: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(cash,0)::double precision FROM paper_account WHERE paper_account_id=$1",
         )
         .bind(account_id)
-        .bind(sym)
-        .bind(date)
         .fetch_one(db)
         .await
-        .unwrap_or(false);
-        if t1_blocked {
-            warn!(
-                "[rebalance] T+1 跳过卖出: {} {} 当日买入(last_trade_date={})不可卖",
-                account_id, sym, date
-            );
+        .unwrap_or(0.0);
+        if cash <= 0.0 {
+            warn!("[rebalance] {} 无杠杆账户 cash=0,跳过买入 {}", account_id, sym);
             return;
         }
-        let _ = sqlx::query(
-            "UPDATE paper_position SET quantity = quantity - $3,
-                 market_value = (quantity - $3) * market_price,
-                 last_trade_date = $4
-             WHERE paper_account_id = $1 AND symbol = $2 AND quantity >= $3",
-        )
-        .bind(account_id)
-        .bind(sym)
-        .bind(qty)
-        .bind(date)
-        .execute(db)
-        .await;
-        // qty 归零的行删除(保持持仓表干净)
-        let _ =
-            sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
-                .bind(account_id)
-                .execute(db)
-                .await;
-        // 资金回流:cash += fill_amount(末尾 try_auto_repay 会把超出 reserve 的部分还给 margin)
-        let _ = sqlx::query(
-            "UPDATE paper_account SET cash = COALESCE(cash,0) + $2 WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .bind(fill_amount)
-        .execute(db)
-        .await;
+        let max_qty_by_cash = Decimal::from_f64_retain(cash)
+            .map(|c| c / fill_price)
+            .unwrap_or(Decimal::ZERO);
+        if max_qty_by_cash <= Decimal::ZERO {
+            return;
+        }
+        let (qty, fill_amount) = if qty <= max_qty_by_cash {
+            (qty, fill_amount)
+        } else {
+            // 缩减到 cash 可承担量,再按100股向下取整(A股/ETF 1手=100,合规)。
+            let scaled = quant_common::trading_rules::round_down_to_lot(
+                max_qty_by_cash,
+                quant_common::trading_rules::LOT_SIZE,
+            );
+            if scaled <= Decimal::ZERO {
+                return;
+            }
+            warn!(
+                "[rebalance] {} 无杠杆账户 {} 买入缩减: 目标{} → {}(cash={:.2} 不足满仓+滑点,按100取整)",
+                account_id, sym, qty, scaled, cash
+            );
+            (scaled, scaled * fill_price)
+        };
+        apply_fill_common_buy(db, account_id, sym, qty, fill_price, fill_amount, date).await;
+    } else {
+        apply_fill_common_sell(db, account_id, sym, qty, fill_price, date).await;
     }
+}
+
+/// 杠杆账户成交：买入不缩减（cash 不足自动融资），卖出走共享逻辑。
+async fn apply_fill_margin(
+    db: &PgPool,
+    account_id: &str,
+    sym: &str,
+    side: &str,
+    qty: Decimal,
+    fill_price: Decimal,
+    date: NaiveDate,
+) {
+    if side == "buy" {
+        let fill_amount = qty * fill_price;
+        apply_fill_common_buy(db, account_id, sym, qty, fill_price, fill_amount, date).await;
+    } else {
+        apply_fill_common_sell(db, account_id, sym, qty, fill_price, date).await;
+    }
+}
+
+/// 买入共享逻辑：持仓 INSERT/UPDATE（移动加权 avg_cost）+ 资金 UPDATE（扣 cash，不足自动融资）。
+///
+/// 无杠杆账户已在 `apply_fill_cash` 上层缩减 qty，fill_amount ≤ cash，不会产生 margin。
+/// 杠杆账户 fill_amount 可能 > cash，margin_amount += 缺口。
+async fn apply_fill_common_buy(
+    db: &PgPool,
+    account_id: &str,
+    sym: &str,
+    qty: Decimal,
+    fill_price: Decimal,
+    fill_amount: Decimal,
+    date: NaiveDate,
+) {
+    // 持仓:移动加权 avg_cost + 标记 last_trade_date(T+1:当日买入次日才能卖)
+    let _ = sqlx::query(
+        "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value, last_trade_date)
+         VALUES ($1, $2, $3, $4, $5, $5, $4*$5, $6)
+         ON CONFLICT (paper_account_id, symbol) DO UPDATE SET
+             avg_cost = (paper_position.avg_cost * paper_position.quantity + EXCLUDED.avg_cost * EXCLUDED.quantity)
+                        / (paper_position.quantity + EXCLUDED.quantity),
+             quantity = paper_position.quantity + EXCLUDED.quantity,
+             market_price = EXCLUDED.market_price,
+             market_value = (paper_position.quantity + EXCLUDED.quantity) * EXCLUDED.market_price,
+             last_trade_date = $6",
+    )
+    .bind(format!("pp-{}", short_id()))
+    .bind(account_id)
+    .bind(sym)
+    .bind(qty)
+    .bind(fill_price)
+    .bind(date)
+    .execute(db)
+    .await;
+    // 资金:扣 cash,不足自动融资(margin += 缺口)。单 SQL 保证原子。
+    let _ = sqlx::query(
+        "UPDATE paper_account SET
+             cash = CASE WHEN COALESCE(cash,0) >= $2 THEN cash - $2 ELSE 0 END,
+             margin_amount = COALESCE(margin_amount,0) + GREATEST($2 - COALESCE(cash,0), 0)
+         WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .bind(fill_amount)
+    .execute(db)
+    .await;
+}
+
+/// 卖出共享逻辑：取整 + T+1 检查 + 持仓 UPDATE/DELETE + 资金回流。
+///
+/// 不依赖 leverage_enabled（无杠杆账户 margin=0 时 try_auto_repay 自然 no-op）。
+async fn apply_fill_common_sell(
+    db: &PgPool,
+    account_id: &str,
+    sym: &str,
+    qty: Decimal,
+    fill_price: Decimal,
+    date: NaiveDate,
+) {
+    // 防御性兜底:A股/ETF 卖出量取整到100整数倍(全仓清仓已在 caller 处理)
+    let qty = quant_common::trading_rules::round_down_to_lot(
+        qty,
+        quant_common::trading_rules::LOT_SIZE,
+    );
+    if qty <= Decimal::ZERO {
+        return; // 取整后为 0，不执行卖出
+    }
+    let fill_amount = qty * fill_price; // 重算以匹配取整后的 qty
+    // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
+    // last_trade_date IS NULL(历史数据未标记)兜底允许卖出,避免误拦正常持仓。
+    let t1_blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM paper_position
+          WHERE paper_account_id=$1 AND symbol=$2 AND quantity>0
+            AND last_trade_date IS NOT NULL AND last_trade_date = $3)",
+    )
+    .bind(account_id)
+    .bind(sym)
+    .bind(date)
+    .fetch_one(db)
+    .await
+    .unwrap_or(false);
+    if t1_blocked {
+        warn!(
+            "[rebalance] T+1 跳过卖出: {} {} 当日买入(last_trade_date={})不可卖",
+            account_id, sym, date
+        );
+        return;
+    }
+    let _ = sqlx::query(
+        "UPDATE paper_position SET quantity = quantity - $3,
+             market_value = (quantity - $3) * market_price,
+             last_trade_date = $4
+         WHERE paper_account_id = $1 AND symbol = $2 AND quantity >= $3",
+    )
+    .bind(account_id)
+    .bind(sym)
+    .bind(qty)
+    .bind(date)
+    .execute(db)
+    .await;
+    // qty 归零的行删除(保持持仓表干净)
+    let _ =
+        sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
+            .bind(account_id)
+            .execute(db)
+            .await;
+    // 资金回流:cash += fill_amount(末尾 try_auto_repay 会把超出 reserve 的部分还给 margin)
+    let _ = sqlx::query(
+        "UPDATE paper_account SET cash = COALESCE(cash,0) + $2 WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .bind(fill_amount)
+    .execute(db)
+    .await;
 }
 
 /// 策略级滑点(从 strategy_config.slippage_pct 字段读,默认 0.002=20bp)

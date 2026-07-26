@@ -116,6 +116,81 @@ impl Account<MarginAccount> {
     }
 }
 
+// ─── Step 5d 接入：load_account 工厂 ──────────────────────────────
+
+/// 从 DB 加载的账号类型（运行时分派 CashAccount / MarginAccount）。
+///
+/// `leverage_enabled` 是 paper_account 表的运行时值，无法用编译期类型直接覆盖，
+/// 故用枚举分派：调用方 match 后调 `rebalance_cash_account` / `rebalance_margin_account`。
+pub enum LoadedAccount {
+    Cash(Account<CashAccount>),
+    Margin(Account<MarginAccount>),
+}
+
+impl LoadedAccount {
+    /// 账号 ID（无论 Cash/Margin 都有）。
+    pub fn account_id(&self) -> &str {
+        match self {
+            LoadedAccount::Cash(a) => &a.account_id,
+            LoadedAccount::Margin(a) => &a.account_id,
+        }
+    }
+
+    /// 策略版本 ID（无论 Cash/Margin 都有）。
+    pub fn strategy_version_id(&self) -> &str {
+        match self {
+            LoadedAccount::Cash(a) => &a.strategy_version_id,
+            LoadedAccount::Margin(a) => &a.strategy_version_id,
+        }
+    }
+}
+
+/// 从 paper_account 表加载账号，按 leverage_enabled 分派为 Cash/Margin。
+///
+/// 类型门禁：leverage_enabled=false → CashAccount（编译期无杠杆路径），
+/// leverage_enabled=true → MarginAccount（携带 LeverageConfig）。
+/// 调用方 match LoadedAccount 后调 rebalance_cash_account / rebalance_margin_account。
+pub async fn load_account(
+    db: &sqlx::PgPool,
+    account_id: &str,
+) -> Result<LoadedAccount, String> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT leverage_enabled, leverage_multiplier, leverage_mode,
+                COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5),
+                strategy_version_id
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("load_account {}: {}", account_id, e))?
+    .ok_or_else(|| format!("账号不存在: {}", account_id))?;
+
+    let leverage_enabled: bool = row.get("leverage_enabled");
+    let strategy_version_id: String = row.get::<Option<String>, _>("strategy_version_id")
+        .unwrap_or_default();
+
+    if !leverage_enabled {
+        Ok(LoadedAccount::Cash(Account::<CashAccount>::new_cash(
+            account_id,
+            strategy_version_id,
+        )))
+    } else {
+        let config = LeverageConfig {
+            multiplier: row.get::<f64, _>("leverage_multiplier"),
+            mode: row.get::<Option<String>, _>("leverage_mode").unwrap_or_else(|| "fixed".into()),
+            liquidation_threshold: row.get("liquidation_threshold"),
+            warning_threshold: row.get("warning_threshold"),
+        };
+        Ok(LoadedAccount::Margin(Account::<MarginAccount>::new_margin(
+            account_id,
+            strategy_version_id,
+            config,
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
