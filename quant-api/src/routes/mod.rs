@@ -20,6 +20,7 @@ pub mod paper;
 pub mod portfolio;
 pub mod rebalance;
 pub mod scheduler;
+pub mod shared;
 pub mod strategies;
 pub mod strategy;
 pub mod sync;
