@@ -65,6 +65,16 @@ struct DailyBarRecord {
     close: Decimal,
     pre_close: Decimal,
     amount: Decimal,
+    /// 该 bar 所属数据版本（PIT 追溯印记，Step 5b 接入）。
+    ///
+    /// 行情表 (symbol, trade_date) 天然唯一（无跨 dv_id 重复），故此字段仅作
+    /// 追溯印记，不参与 WHERE 过滤——避免单一 dv_id 过滤丢失历史批次数据。
+    ///
+    /// 当前为骨架：从 SQL `data_version_id` 列填充，但下游 `DailyBarsByDate`
+    /// 暂不消费（待 build_market_day 接入 dv_id 时启用）。缓存键已纳入 dv_id
+    /// 维度（防跨版本污染），字段读取留待下游消费时打开。
+    #[allow(dead_code)]
+    data_version_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -167,7 +177,10 @@ pub struct BacktestDataCache {
     trading_days: HashMap<(NaiveDate, NaiveDate), Arc<Vec<NaiveDate>>>,
     benchmark_data:
         HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
-    daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    /// 行情缓存键：(data_version_id, start, end) —— Step 5b 纳入 dv_id 维度，
+    /// 防止不同 dv_id 的回测共享缓存（snapshot_key 声称按 dv_id 区分，底层
+    /// 缓存键须与之一致，否则跨版本命中污染数据）。
+    daily_bars: HashMap<(String, NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
     market_data_snapshots: HashMap<BacktestMarketDataSnapshotKey, Arc<BacktestMarketDataSnapshot>>,
     trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
     stats: BacktestDataCacheStats,
@@ -178,7 +191,7 @@ pub struct BacktestDataCacheSnapshot {
     trading_days: HashMap<(NaiveDate, NaiveDate), Arc<Vec<NaiveDate>>>,
     benchmark_data:
         HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
-    daily_bars: HashMap<(NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    daily_bars: HashMap<(String, NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
     market_data_snapshots: HashMap<BacktestMarketDataSnapshotKey, Arc<BacktestMarketDataSnapshot>>,
     trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
 }
@@ -322,6 +335,7 @@ impl BacktestDataCache {
 
     fn cached_daily_bar_symbols(
         &mut self,
+        data_version_id: &str,
         symbols: &[String],
         start: NaiveDate,
         end: NaiveDate,
@@ -334,20 +348,20 @@ impl BacktestDataCache {
         for symbol in symbols {
             if let Some(records) = self
                 .daily_bars
-                .get(&(start, end))
+                .get(&(data_version_id.to_string(), start, end))
                 .and_then(|bucket| bucket.get(&symbol))
             {
                 self.stats.daily_bar_symbol_hits += 1;
                 merge_daily_bar_records(&mut cached, records.as_ref());
-            } else if let Some(records) =
-                self.cached_daily_bar_records_from_covering_window(&symbol, start, end)
+            } else if let Some(records) = self
+                .cached_daily_bar_records_from_covering_window(data_version_id, &symbol, start, end)
             {
                 self.stats.daily_bar_symbol_hits += 1;
                 self.stats.daily_bar_covering_window_hits += 1;
                 merge_daily_bar_records(&mut cached, &records);
                 reusable_records.push((symbol, records));
-            } else if let Some(records) =
-                self.cached_daily_bar_records_from_market_data_snapshot(&symbol, start, end)
+            } else if let Some(records) = self
+                .cached_daily_bar_records_from_market_data_snapshot(data_version_id, &symbol, start, end)
             {
                 self.stats.daily_bar_symbol_hits += 1;
                 self.stats.daily_bar_snapshot_hits += 1;
@@ -360,7 +374,10 @@ impl BacktestDataCache {
         }
 
         if !reusable_records.is_empty() {
-            let bucket = self.daily_bars.entry((start, end)).or_default();
+            let bucket = self
+                .daily_bars
+                .entry((data_version_id.to_string(), start, end))
+                .or_default();
             for (symbol, records) in reusable_records {
                 bucket.insert(symbol, Arc::new(records));
             }
@@ -371,16 +388,22 @@ impl BacktestDataCache {
 
     fn cached_daily_bar_records_from_covering_window(
         &self,
+        data_version_id: &str,
         symbol: &str,
         start: NaiveDate,
         end: NaiveDate,
     ) -> Option<Vec<DailyBarRecord>> {
         self.daily_bars
             .iter()
-            .filter(|((cached_start, cached_end), bucket)| {
-                *cached_start <= start && *cached_end >= end && bucket.contains_key(symbol)
+            .filter(|((cached_dv_id, cached_start, cached_end), bucket)| {
+                cached_dv_id == data_version_id
+                    && *cached_start <= start
+                    && *cached_end >= end
+                    && bucket.contains_key(symbol)
             })
-            .min_by_key(|((cached_start, cached_end), _)| (*cached_end - *cached_start).num_days())
+            .min_by_key(|((_, cached_start, cached_end), _)| {
+                (*cached_end - *cached_start).num_days()
+            })
             .and_then(|(_, bucket)| bucket.get(symbol))
             .map(|records| {
                 records
@@ -394,6 +417,7 @@ impl BacktestDataCache {
 
     fn cached_daily_bar_records_from_market_data_snapshot(
         &self,
+        data_version_id: &str,
         symbol: &str,
         start: NaiveDate,
         end: NaiveDate,
@@ -401,7 +425,8 @@ impl BacktestDataCache {
         self.market_data_snapshots
             .values()
             .filter(|snapshot| {
-                snapshot.key.start_date <= start
+                snapshot.key.data_version_id == data_version_id
+                    && snapshot.key.start_date <= start
                     && snapshot.key.end_date >= end
                     && snapshot.daily_bars.contains_key(symbol)
             })
@@ -425,6 +450,7 @@ impl BacktestDataCache {
 
     fn insert_daily_bar_rows(
         &mut self,
+        data_version_id: &str,
         start: NaiveDate,
         end: NaiveDate,
         requested_symbols: &[String],
@@ -440,7 +466,10 @@ impl BacktestDataCache {
             by_symbol.entry(row.symbol.clone()).or_default().push(row);
         }
 
-        let bucket = self.daily_bars.entry((start, end)).or_default();
+        let bucket = self
+            .daily_bars
+            .entry((data_version_id.to_string(), start, end))
+            .or_default();
         let mut inserted = HashMap::new();
         for symbol in requested_symbols {
             let mut records = by_symbol.remove(&symbol).unwrap_or_default();
@@ -458,6 +487,7 @@ impl BacktestDataCache {
         key: BacktestMarketDataSnapshotKey,
         daily_bars: DailyBarsByDate,
     ) {
+        let data_version_id = key.data_version_id.clone();
         let mut by_symbol: HashMap<String, Vec<DailyBarRecord>> = HashMap::new();
         for (trade_date, day) in daily_bars {
             for (symbol, (open, close, pre_close, amount)) in day {
@@ -471,6 +501,7 @@ impl BacktestDataCache {
                         close,
                         pre_close,
                         amount,
+                        data_version_id: data_version_id.clone(),
                     });
             }
         }
@@ -495,7 +526,10 @@ impl BacktestDataCache {
         end: NaiveDate,
     ) {
         let mut daily_bars = HashMap::new();
-        if let Some(bucket) = self.daily_bars.get(&(start, end)) {
+        if let Some(bucket) = self
+            .daily_bars
+            .get(&(key.data_version_id.clone(), start, end))
+        {
             for symbol in normalized_symbol_key(symbols) {
                 if let Some(records) = bucket.get(&symbol) {
                     daily_bars.insert(symbol, Arc::clone(records));
@@ -680,7 +714,7 @@ impl BacktestRunner {
             .await?;
         if !symbols.is_empty() {
             let _ = self
-                .load_daily_bars_cached(cache, &symbols, start, end)
+                .load_daily_bars_cached(cache, data_version_id, &symbols, start, end)
                 .await?;
             cache.insert_market_data_snapshot_from_cache(
                 snapshot_key.clone(),
@@ -765,6 +799,7 @@ impl BacktestRunner {
                 Some(cache) => {
                     self.load_daily_bars_cached(
                         cache,
+                        &config.data_version_id,
                         &all_symbols,
                         config.start_date,
                         config.end_date,
@@ -772,8 +807,13 @@ impl BacktestRunner {
                     .await?
                 }
                 None => {
-                    self.load_daily_bars(&all_symbols, config.start_date, config.end_date)
-                        .await?
+                    self.load_daily_bars(
+                        &config.data_version_id,
+                        &all_symbols,
+                        config.start_date,
+                        config.end_date,
+                    )
+                    .await?
                 }
             };
             let trading_profiles = match data_cache.as_mut() {
@@ -911,10 +951,19 @@ impl BacktestRunner {
 
     async fn load_daily_bars(
         &self,
+        _data_version_id: &str,
         symbols: &[String],
         start: NaiveDate,
         end: NaiveDate,
     ) -> Result<DailyBarsByDate, sqlx::Error> {
+        // Step 5b：SELECT 暴露 data_version_id 列（视图已补，见 migration
+        // 20260725000002），承载 PIT 追溯印记。不加 WHERE dv_id 过滤——行情表
+        // (symbol, trade_date) 天然唯一（无跨 dv_id 重复），单一 dv_id 过滤会
+        // 丢失历史批次数据（dv_id 是"数据批次"非"数据版本"）。
+        //
+        // `_data_version_id` 当前仅用于与 cached 版签名对称（cached 版用它做
+        // 缓存键隔离）。裸版返回 DailyBarsByDate 不含 dv_id，待下游（build_market_day）
+        // 消费 dv_id 时再启用。
         let rows: Vec<(
             NaiveDate,
             String,
@@ -922,8 +971,9 @@ impl BacktestRunner {
             Decimal,
             Option<Decimal>,
             Option<Decimal>,
+            String,
         )> = sqlx::query_as(
-            "SELECT trade_date, symbol, open, close, pre_close, amount
+            "SELECT trade_date, symbol, open, close, pre_close, amount, data_version_id
              FROM market_stock_daily_bar_adj
              WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
              ORDER BY trade_date, symbol",
@@ -935,7 +985,7 @@ impl BacktestRunner {
         .await?;
 
         let mut result: DailyBarsByDate = HashMap::new();
-        for (d, sym, o, c, pc, amount) in rows {
+        for (d, sym, o, c, pc, amount, _dv_id) in rows {
             result.entry(d).or_default().insert(
                 sym,
                 (
@@ -952,11 +1002,13 @@ impl BacktestRunner {
     async fn load_daily_bars_cached(
         &self,
         cache: &mut BacktestDataCache,
+        data_version_id: &str,
         symbols: &[String],
         start: NaiveDate,
         end: NaiveDate,
     ) -> Result<DailyBarsByDate, sqlx::Error> {
-        let (missing_symbols, mut result) = cache.cached_daily_bar_symbols(symbols, start, end);
+        let (missing_symbols, mut result) =
+            cache.cached_daily_bar_symbols(data_version_id, symbols, start, end);
         if missing_symbols.is_empty() {
             return Ok(result);
         }
@@ -968,8 +1020,9 @@ impl BacktestRunner {
             Decimal,
             Option<Decimal>,
             Option<Decimal>,
+            String,
         )> = sqlx::query_as(
-            "SELECT trade_date, symbol, open, close, pre_close, amount
+            "SELECT trade_date, symbol, open, close, pre_close, amount, data_version_id
              FROM market_stock_daily_bar_adj
              WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
              ORDER BY trade_date, symbol",
@@ -983,17 +1036,19 @@ impl BacktestRunner {
         let rows = rows
             .into_iter()
             .map(
-                |(trade_date, symbol, open, close, pre_close, amount)| DailyBarRecord {
+                |(trade_date, symbol, open, close, pre_close, amount, row_dv_id)| DailyBarRecord {
                     trade_date,
                     symbol,
                     open: open.unwrap_or(close),
                     close,
                     pre_close: pre_close.unwrap_or(close),
                     amount: amount.unwrap_or_default(),
+                    data_version_id: row_dv_id,
                 },
             )
             .collect();
-        let inserted = cache.insert_daily_bar_rows(start, end, &missing_symbols, rows);
+        let inserted =
+            cache.insert_daily_bar_rows(data_version_id, start, end, &missing_symbols, rows);
         merge_daily_bars(&mut result, inserted);
         Ok(result)
     }
@@ -1492,17 +1547,19 @@ mod tests {
 
     #[test]
     fn backtest_data_cache_reuses_overlapping_daily_bar_symbols() {
+        let dv_id = "dv-test-001";
         let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
         let mut cache = BacktestDataCache::default();
 
         let first_symbols = vec!["000002.SZ".to_string(), "000001.SZ".to_string()];
         let (missing_first, cached_first) =
-            cache.cached_daily_bar_symbols(&first_symbols, start, end);
+            cache.cached_daily_bar_symbols(dv_id, &first_symbols, start, end);
         assert_eq!(missing_first, vec!["000001.SZ", "000002.SZ"]);
         assert!(cached_first.is_empty());
 
         cache.insert_daily_bar_rows(
+            dv_id,
             start,
             end,
             &missing_first,
@@ -1514,6 +1571,7 @@ mod tests {
                     close: Decimal::new(102, 1),
                     pre_close: Decimal::new(100, 1),
                     amount: Decimal::new(1000, 0),
+                    data_version_id: dv_id.into(),
                 },
                 DailyBarRecord {
                     trade_date: start,
@@ -1522,13 +1580,14 @@ mod tests {
                     close: Decimal::new(202, 1),
                     pre_close: Decimal::new(200, 1),
                     amount: Decimal::new(2000, 0),
+                    data_version_id: dv_id.into(),
                 },
             ],
         );
 
         let second_symbols = vec!["000002.SZ".to_string(), "000003.SZ".to_string()];
         let (missing_second, cached_second) =
-            cache.cached_daily_bar_symbols(&second_symbols, start, end);
+            cache.cached_daily_bar_symbols(dv_id, &second_symbols, start, end);
 
         assert_eq!(missing_second, vec!["000003.SZ"]);
         assert_eq!(
@@ -1545,6 +1604,7 @@ mod tests {
 
     #[test]
     fn backtest_data_cache_reuses_wider_daily_bar_window_for_narrower_request() {
+        let dv_id = "dv-test-002";
         let wide_start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let narrow_start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
         let narrow_end = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
@@ -1553,6 +1613,7 @@ mod tests {
 
         let symbols = vec!["000001.SZ".to_string()];
         cache.insert_daily_bar_rows(
+            dv_id,
             wide_start,
             wide_end,
             &symbols,
@@ -1564,6 +1625,7 @@ mod tests {
                     close: Decimal::new(102, 1),
                     pre_close: Decimal::new(100, 1),
                     amount: Decimal::new(1000, 0),
+                    data_version_id: dv_id.into(),
                 },
                 DailyBarRecord {
                     trade_date: narrow_start,
@@ -1572,6 +1634,7 @@ mod tests {
                     close: Decimal::new(112, 1),
                     pre_close: Decimal::new(110, 1),
                     amount: Decimal::new(1100, 0),
+                    data_version_id: dv_id.into(),
                 },
                 DailyBarRecord {
                     trade_date: narrow_end,
@@ -1580,6 +1643,7 @@ mod tests {
                     close: Decimal::new(122, 1),
                     pre_close: Decimal::new(120, 1),
                     amount: Decimal::new(1200, 0),
+                    data_version_id: dv_id.into(),
                 },
                 DailyBarRecord {
                     trade_date: wide_end,
@@ -1588,11 +1652,13 @@ mod tests {
                     close: Decimal::new(132, 1),
                     pre_close: Decimal::new(130, 1),
                     amount: Decimal::new(1300, 0),
+                    data_version_id: dv_id.into(),
                 },
             ],
         );
 
-        let (missing, cached) = cache.cached_daily_bar_symbols(&symbols, narrow_start, narrow_end);
+        let (missing, cached) =
+            cache.cached_daily_bar_symbols(dv_id, &symbols, narrow_start, narrow_end);
 
         assert!(missing.is_empty());
         assert_eq!(cached.len(), 2);
@@ -1652,8 +1718,12 @@ mod tests {
         }
         cache.insert_market_data_snapshot(key, snapshot_bars);
 
-        let (missing, cached) =
-            cache.cached_daily_bar_symbols(&["000002.SZ".to_string()], narrow_start, narrow_end);
+        let (missing, cached) = cache.cached_daily_bar_symbols(
+            "full-market-2016-v1",
+            &["000002.SZ".to_string()],
+            narrow_start,
+            narrow_end,
+        );
 
         assert!(missing.is_empty());
         assert_eq!(cached.len(), 2);
