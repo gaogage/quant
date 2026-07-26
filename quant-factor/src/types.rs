@@ -49,20 +49,26 @@ pub struct FactorOutput {
 
 // ─── DDD Step 5a：PIT 类型门禁 ─────────────────────────────────────
 //
-// 目的：从类型层杜绝"用了未注册版本的脏因子数据"。`PitSeries<T>` 只能由
-// `RawSeries::from_verified_pit` 构造（要求传入 data_version_id），
-// `standardize`/`evaluate`/`neutralize` 的 PIT 版签名只接受 `PitFactorOutput`，
-// 裸 `Vec<FactorValue>` 无法直接进入计算管线。
+// 目的：从类型层杜绝"用了未来函数泄露的脏因子数据"。`PitSeries<T>` 只能由
+// `RawSeries::from_pit_with_available_at` 构造（要求传入 `available_at` PIT 时间戳），
+// 进入计算管线的因子数据必须携带 PIT 印记。
 //
 // 设计原则：
 // - `RawSeries<T>`：DB 加载的原始数据，未校验，crate 外不可构造（new 为 pub(crate)）。
-// - `PitSeries<T>`：PIT 校验通过的数据，携带 data_version_id，唯一公开出口。
-// - 构造器私有化 + `from_verified_pit` 唯一出口，编译期强制 PIT 语义。
+// - `PitSeries<T>`：PIT 校验通过的数据，携带 `available_at`（因子可用日期），
+//   唯一公开出口。`available_at > 评估日` 的数据视为未来函数，门禁处过滤。
+// - 构造器私有化 + `from_pit_with_available_at` 唯一出口，编译期强制 PIT 语义。
+//
+// 语义说明（Step 5a 接入决策，2026-07-26）：
+// 原设计用 `data_version_id` 做 PIT 印记，但实测发现因子数据管线 dv_id 完全未
+// 落地（factor_value 12亿行0.04%、multi_factor_value 1.3亿行0%、factor_evaluation
+// 0%），所有 INSERT 不写 dv_id 列，且历史数据源行情批次未记录无法追溯重建。
+// 改用 `available_at`（因子原生 PIT 时间戳，100% 填充，语义正确无未来函数泄露）。
 
 /// DB 加载的原始因子序列，尚未做 PIT 校验。
 ///
 /// 仅 `quant-factor` crate 内部可构造（DB 查询结果直接组装），外部拿到后必须
-/// 调 `from_verified_pit` 升级为 `PitSeries` 才能进入计算管线。
+/// 调 `from_pit_with_available_at` 升级为 `PitSeries` 才能进入计算管线。
 #[derive(Debug, Clone)]
 pub struct RawSeries<T> {
     values: Vec<T>,
@@ -86,27 +92,34 @@ impl<T> RawSeries<T> {
 
     /// 唯一公开出口：把原始序列升级为 PIT 校验通过的序列。
     ///
-    /// 调用方负责确保 `data_version_id` 已在 `data_version` 表注册（Step 5b 的
-    /// `VerifiedBar::try_from_raw` 会在 DB 层做此校验；因子层只要求非空字符串）。
-    pub fn from_verified_pit(self, data_version_id: impl Into<String>) -> PitSeries<T> {
-        let dv_id = data_version_id.into();
-        assert!(!dv_id.is_empty(), "data_version_id 不能为空(PIT 印记)");
+    /// 调用方负责确保 `available_at` 是因子数据的真实可用日期（来自 DB 的
+    /// `available_at` 列或因子计算时的 `trade_date`）。`available_at > 评估日`
+    /// 的数据视为未来函数，调用方在门禁处过滤。
+    pub fn from_pit_with_available_at(
+        self,
+        available_at: impl Into<Option<chrono::NaiveDate>>,
+    ) -> PitSeries<T> {
+        let avail = available_at.into();
         PitSeries {
             values: self.values,
-            data_version_id: dv_id,
+            available_at: avail,
         }
     }
 }
 
-/// PIT 校验通过的因子序列，携带 `data_version_id` 追溯印记。
+/// PIT 校验通过的因子序列，携带 `available_at` 追溯印记。
 ///
-/// 类型门禁：只能由 `RawSeries::from_verified_pit` 构造。`standardize`/`evaluate`/
-/// `neutralize` 的 PIT 版签名只接受此类型（包在 `PitFactorOutput` 内）。
+/// 类型门禁：只能由 `RawSeries::from_pit_with_available_at` 构造。
+/// `available_at` 是因子数据的 PIT 时间戳（因子可用日期），
+/// `available_at > 评估日` 的数据视为未来函数泄露。
 #[derive(Debug, Clone)]
 pub struct PitSeries<T> {
     values: Vec<T>,
-    /// 该序列所属数据版本（PIT 追溯依据，非空）。
-    pub data_version_id: String,
+    /// 该序列的 PIT 可用日期（因子可用日期，非空时用于 PIT 门禁）。
+    ///
+    /// None 表示 PIT 时间戳未知（如内存计算路径未填充），此时门禁降级为
+    /// 无校验（与旧 FactorOutput 行为一致，向后兼容）。
+    pub available_at: Option<chrono::NaiveDate>,
 }
 
 impl<T> PitSeries<T> {
@@ -133,8 +146,7 @@ impl<T> PitSeries<T> {
 
 /// PIT 校验通过的因子输出，替代裸 `FactorOutput` 进入计算管线。
 ///
-/// `values` 为 `PitSeries<FactorValue>`，携带 data_version_id 印记。
-/// `standardize`/`evaluate`/`neutralize` 的 PIT 版签名接受此类型。
+/// `values` 为 `PitSeries<FactorValue>`，携带 `available_at` 印记。
 #[derive(Debug, Clone)]
 pub struct PitFactorOutput {
     pub name: String,
@@ -221,43 +233,48 @@ mod pit_tests {
     use super::*;
 
     #[test]
-    fn raw_series_upgrades_to_pit_with_dv_id() {
+    fn raw_series_upgrades_to_pit_with_available_at() {
+        let avail = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
         let raw = RawSeries::new(vec![FactorValue {
             symbol: "000001".into(),
-            date: NaiveDate::from_ymd_opt(2026, 7, 24).unwrap(),
+            date: avail,
             value: 1.5,
-            available_at: None,
+            available_at: Some(avail),
         }]);
-        let pit = raw.from_verified_pit("dv_20260724_v1");
-        assert_eq!(pit.data_version_id, "dv_20260724_v1");
+        let pit = raw.from_pit_with_available_at(Some(avail));
+        assert_eq!(pit.available_at, Some(avail));
         assert_eq!(pit.len(), 1);
         assert!(!pit.is_empty());
     }
 
     #[test]
-    #[should_panic(expected = "data_version_id 不能为空")]
-    fn empty_dv_id_rejected() {
+    fn none_available_at_degrades_gracefully() {
+        // 内存计算路径未填充 available_at 时，None 降级为无 PIT 校验
+        // （与旧 FactorOutput 行为一致，向后兼容）
         let raw: RawSeries<FactorValue> = RawSeries::new(vec![]);
-        let _ = raw.from_verified_pit("");
+        let pit = raw.from_pit_with_available_at(None);
+        assert_eq!(pit.available_at, None);
+        assert!(pit.is_empty());
     }
 
     #[test]
     fn pit_series_into_inner_yields_values() {
+        let avail = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
         let raw = RawSeries::new(vec![
             FactorValue {
                 symbol: "000001".into(),
-                date: NaiveDate::from_ymd_opt(2026, 7, 24).unwrap(),
+                date: avail,
                 value: 1.0,
-                available_at: None,
+                available_at: Some(avail),
             },
             FactorValue {
                 symbol: "000002".into(),
-                date: NaiveDate::from_ymd_opt(2026, 7, 24).unwrap(),
+                date: avail,
                 value: 2.0,
-                available_at: None,
+                available_at: Some(avail),
             },
         ]);
-        let pit = raw.from_verified_pit("dv_test");
+        let pit = raw.from_pit_with_available_at(Some(avail));
         let vals = pit.into_inner();
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0].symbol, "000001");
