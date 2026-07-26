@@ -1319,7 +1319,7 @@ pub async fn manual_rebalance(
 
     // 构造空 mvo_cache(首次计算时填充,先例 compute_mvo_weights_for_date)
     let mvo_cache = Arc::new(tokio::sync::Mutex::new(
-        None::<crate::routes::scheduler::MvoWeightCache>,
+        None::<crate::routes::shared::MvoWeightCache>,
     ));
 
     // 记录调仓前订单数(用于检测账号是否被数据门禁跳过)

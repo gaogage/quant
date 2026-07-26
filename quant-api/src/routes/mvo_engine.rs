@@ -117,7 +117,7 @@ pub async fn run_daily_simulation(
     start: NaiveDate,
     end: NaiveDate,
     price_source: PriceSource,
-    mvo_cache: &std::sync::Arc<tokio::sync::Mutex<Option<crate::routes::scheduler::MvoWeightCache>>>,
+    mvo_cache: &std::sync::Arc<tokio::sync::Mutex<Option<crate::routes::shared::MvoWeightCache>>>,
     tushare: &quant_data::tushare::client::TushareClient,
     reset_account: bool,
     leverage_enabled: bool,
@@ -217,7 +217,7 @@ pub async fn run_daily_simulation(
     for d in &dates {
         let d = *d;
         // P2-B:regime 提前算(只依赖 date + csi300_map),供 rebalance_account 复用,省调仓日内 1 次 DB
-        let regime = crate::routes::scheduler::detect_regime_exposure_cached(
+        let regime = crate::routes::shared::detect_regime_exposure_cached(
             &csi300_map,
             d,
             deep_bear_threshold,
@@ -380,7 +380,7 @@ mod tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env()
             .expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            None::<crate::routes::scheduler::MvoWeightCache>,
+            None::<crate::routes::shared::MvoWeightCache>,
         ));
 
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
@@ -475,7 +475,7 @@ mod tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env()
             .expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            None::<crate::routes::scheduler::MvoWeightCache>,
+            None::<crate::routes::shared::MvoWeightCache>,
         ));
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
@@ -550,7 +550,7 @@ mod tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env()
             .expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            None::<crate::routes::scheduler::MvoWeightCache>,
+            None::<crate::routes::shared::MvoWeightCache>,
         ));
         // 同区间 2017-2026（新 combo 曲线起点 2017）
         let start = NaiveDate::from_ymd_opt(2017, 1, 1).unwrap();
@@ -624,7 +624,7 @@ mod tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env()
             .expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            None::<crate::routes::scheduler::MvoWeightCache>,
+            None::<crate::routes::shared::MvoWeightCache>,
         ));
         let is_start = NaiveDate::from_ymd_opt(2017, 1, 1).unwrap();
         let is_end = NaiveDate::from_ymd_opt(2021, 12, 31).unwrap();
@@ -726,7 +726,7 @@ mod tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env()
             .expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            None::<crate::routes::scheduler::MvoWeightCache>,
+            None::<crate::routes::shared::MvoWeightCache>,
         ));
         let start = NaiveDate::from_ymd_opt(2014, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
@@ -819,7 +819,7 @@ mod tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env()
             .expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            None::<crate::routes::scheduler::MvoWeightCache>,
+            None::<crate::routes::shared::MvoWeightCache>,
         ));
 
         // 小区间 10 个交易日

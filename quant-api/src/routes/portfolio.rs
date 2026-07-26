@@ -1791,7 +1791,7 @@ async fn run_mvo_simulate(
     let tushare = quant_data::tushare::client::TushareClient::from_env()
         .map_err(|e| format!("tushare: {}", e))?;
     let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-        None::<crate::routes::scheduler::MvoWeightCache>,
+        None::<crate::routes::shared::MvoWeightCache>,
     ));
     let navs = crate::routes::mvo_engine::run_daily_simulation(
         db,

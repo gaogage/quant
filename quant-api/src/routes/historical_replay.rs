@@ -105,7 +105,7 @@ async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) 
     let tushare = quant_data::tushare::client::TushareClient::from_env()
         .map_err(|e| format!("tushare: {}", e))?;
     let cache = Arc::new(tokio::sync::Mutex::new(
-        None::<crate::routes::scheduler::MvoWeightCache>,
+        None::<crate::routes::shared::MvoWeightCache>,
     ));
     let navs = run_daily_simulation(
         db,
@@ -300,7 +300,7 @@ async fn run_wfa_stitched(
     let tushare = quant_data::tushare::client::TushareClient::from_env()
         .map_err(|e| format!("tushare: {}", e))?;
     let cache = Arc::new(tokio::sync::Mutex::new(
-        None::<crate::routes::scheduler::MvoWeightCache>,
+        None::<crate::routes::shared::MvoWeightCache>,
     ));
     let risk_free_rate = rs
         .mvo

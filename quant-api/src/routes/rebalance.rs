@@ -66,7 +66,7 @@ pub async fn select_positions(
 
 // rebalance_account 与 mark_to_market 由 Task 5 在此追加
 
-use crate::routes::scheduler::{
+use crate::routes::shared::{
     compute_lw_mvo_weights, compute_vol_target_leverage,
     detect_regime_exposure, fetch_intraday_etf_prices, resolved_to_legacy_sc,
     send_quality_alert, MvoWeightCache, StrategyConfig,
@@ -261,7 +261,7 @@ pub async fn rebalance_account(
     // P2-A:批量预加载当日 A 股停牌/涨跌停状态(替代循环内逐股查 2 次 DB)
     let block_symbols: Vec<String> = positions.iter().map(|p| p.symbol.clone()).collect();
     let trade_block_map =
-        crate::routes::scheduler::preload_trade_block_map(db, date, &block_symbols).await;
+        crate::routes::shared::preload_trade_block_map(db, date, &block_symbols).await;
     for p in &positions {
         if warn_no_buy {
             // 警戒禁买:不建仓,仅记录目标集(清仓段仍可减仓)
@@ -520,7 +520,7 @@ pub async fn rebalance_account(
     if n == 0 && positions.is_empty() && current_positions.is_empty() {
         let msg = format!("建仓 0 笔:策略 {} 当日已发行标的均无建仓,可能权益曲线/ETF价格数据缺失", rs.strategy_id);
         warn!("[rebalance] {}", msg);
-        crate::routes::scheduler::send_quality_alert(db, &[msg.clone()]).await;
+        crate::routes::shared::send_quality_alert(db, &[msg.clone()]).await;
         return Err(msg);
     }
 

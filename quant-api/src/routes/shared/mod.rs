@@ -12,6 +12,20 @@
 //! - send_quality_alert（质量告警）
 //! - preload_trade_block_map（涨跌停预加载）
 //! - MvoWeightCache / StrategyConfig（类型）
-//!
-//! 状态：模块骨架已建，迁移待实施（Step 6b 第二阶段）。
-//! 当前循环依赖不阻塞编译（Rust 允许模块间互 use），6b 是架构清洁非 bug 修复。
+
+mod strategy_config;
+mod mvo_weights;
+mod regime;
+mod alerts;
+mod trade_block;
+mod etf_prices;
+
+// pub(crate) 项用 pub(crate) use re-export（不能 pub use，否则 E0364）
+pub(crate) use strategy_config::resolved_to_legacy_sc;
+pub use strategy_config::StrategyConfig;
+pub(crate) use mvo_weights::{compute_lw_mvo_weights, compute_vol_target_leverage};
+pub use mvo_weights::MvoWeightCache;
+pub use regime::{detect_regime_exposure, detect_regime_exposure_cached};
+pub(crate) use alerts::send_quality_alert;
+pub use trade_block::{TradeBlock, preload_trade_block_map};
+pub(crate) use etf_prices::fetch_intraday_etf_prices;
