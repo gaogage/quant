@@ -1904,7 +1904,7 @@ async fn sync_eod_data(
     // 对当日有 bar 但缺 adj_factor 的股票,用最近前一交易日的 adj_factor 前向填充 INSERT。
     // 这是数学正确的兜底——除权日当日 Tushare 必返回新值(不会缺),缺失的必是非除权日。
     let dv_adj_id = format!("dv-adj-eod-{}", date_str);
-    backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
+    crate::routes::sync::market_data::backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
     // P1: 刷新 composite 回测曲线(偏离监控对标用)。复权兜底后执行,
     // 确保合成所用 ETF 复权价已补全。单策略失败不阻断其他。
@@ -2570,110 +2570,6 @@ async fn verify_training_dependencies(
     all_ok
 }
 
-/// 发送钉钉告警 (独立于账号体系, 直接使用webhook)
-/// 复权因子当日完整性兜底:校验覆盖率→前向填充补全→再校验告警。
-///
-/// adj_factor 表是「每日全量快照」(正常行数≈当日 bar 行数)。sync_adj_factor 按 symbol 逐只
-/// 拉 Tushare,部分超时会致当日只成功一部分。视图 COALESCE(adj_factor,1.0) 让缺失股票复权价
-/// 退化为 raw 价,与前后日断层,回测当日收益率/涨跌停错乱。
-///
-/// 补全:对当日有 bar 但缺 adj_factor 的股票,取该 symbol 最近前一交易日的 adj_factor INSERT。
-/// 数学正确——非除权日复权因子恒等于前值,缺失的必是非除权日(除权日 Tushare 必返回新值)。
-///
-/// 阈值:覆盖率<90%(adj_cnt < bar_cnt*0.9)才触发补全+告警,避免无谓写入。
-pub(crate) async fn backfill_adj_factor_for_date(db: &PgPool, date: NaiveDate, dv_id: &str) {
-    let date_str = date.format("%Y-%m-%d").to_string();
-    let bar_cnt: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT symbol) FROM market_stock_daily_bar WHERE trade_date = $1",
-    )
-    .bind(date)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-    let adj_cnt: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT symbol) FROM market_adjustment_factor WHERE trade_date = $1",
-    )
-    .bind(date)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-
-    if bar_cnt == 0 {
-        // 当日无 bar(非交易日或日线未同步),跳过
-        return;
-    }
-
-    // 覆盖率<90%:有缺失,前向填充补全
-    if adj_cnt * 10 < bar_cnt * 9 {
-        // 先确保 dv_id 在 data_version 表注册(market_adjustment_factor.data_version_id 有 FK 约束,
-        // 未注册会导致后续 INSERT 静默失败 - unwrap_or(0) 吞错误)。ON CONFLICT 幂等。
-        let _ = sqlx::query(
-            "INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash) \
-             VALUES ($1, $2, 'forward_fill', $3, $3, ARRAY['market_adjustment_factor'], '') \
-             ON CONFLICT (data_version_id) DO NOTHING",
-        )
-        .bind(dv_id)
-        .bind(format!("复权因子前向填充 {}", date_str))
-        .bind(date)
-        .execute(db)
-        .await;
-        // 用 LATERAL 取每只缺失股票最近前一交易日的 adj_factor,批量 INSERT
-        let filled = sqlx::query(
-            "INSERT INTO market_adjustment_factor (symbol, trade_date, adj_factor, source, data_version_id, created_at) \
-             SELECT b.symbol, $1::date, prev.adj_factor, 'forward_fill', $2, NOW() \
-             FROM (SELECT DISTINCT symbol FROM market_stock_daily_bar WHERE trade_date = $1) b \
-             LEFT JOIN LATERAL ( \
-                 SELECT a.adj_factor FROM market_adjustment_factor a \
-                 WHERE a.symbol = b.symbol AND a.trade_date < $1 \
-                 ORDER BY a.trade_date DESC LIMIT 1 \
-             ) prev ON true \
-             WHERE prev.adj_factor IS NOT NULL \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM market_adjustment_factor x \
-                   WHERE x.symbol = b.symbol AND x.trade_date = $1 \
-               ) \
-             ON CONFLICT (symbol, trade_date) DO NOTHING",
-        )
-        .bind(date)
-        .bind(dv_id)
-        .execute(db)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
-
-        let adj_cnt_after: i64 = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT symbol) FROM market_adjustment_factor WHERE trade_date = $1",
-        )
-        .bind(date)
-        .fetch_one(db)
-        .await
-        .unwrap_or(0);
-        let pct = if bar_cnt > 0 { adj_cnt_after * 100 / bar_cnt } else { 100 };
-        if filled > 0 {
-            info!(
-                "[scheduler] 复权因子前向填充: {} 补 {} 只 (adj {}→{} 覆盖率 {}%)",
-                date_str, filled, adj_cnt, adj_cnt_after, pct
-            );
-        }
-        // 补全后仍不足 90%:告警(可能前一交易日也大面积缺失,需人工查)
-        if adj_cnt_after * 10 < bar_cnt * 9 {
-            let msg = format!(
-                "复权因子缺失: {} 当日 bar {} 只,前向填充后 adj_factor {} 只(覆盖率 {}%),复权价可能仍退化,请人工核查",
-                date_str, bar_cnt, adj_cnt_after, pct
-            );
-            warn!("[scheduler] {}", msg);
-            send_quality_alert(db, &[msg]).await;
-        }
-    } else {
-        info!(
-            "[scheduler] 复权因子校验通过: {} bar={} adj_factor={} (覆盖率 {}%)",
-            date_str,
-            bar_cnt,
-            adj_cnt,
-            if bar_cnt > 0 { adj_cnt * 100 / bar_cnt } else { 100 }
-        );
-    }
-}
 /// 为所有活跃模拟账号生成交易信号（使用 LW-MVO 自动发现权重）。
 /// pub: 手动触发调仓(admin::manual_rebalance)复用,不依赖 scheduler DailyState。
 /// 内部 per-account 今日已交易检查保证幂等(今日已调仓账号跳过)。
@@ -3097,7 +2993,7 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
     // P0 双保险:日报生成前强制复权因子兜底。即使 EOD 中段失败(如 daily_basic 卡死),
     // 日报前再补一次,确保 adj 视图不退化,回测偏离计算不被污染数据干扰。
     let dv_adj_id = format!("dv-adj-report-{}", date.format("%Y%m%d"));
-    backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
+    crate::routes::sync::market_data::backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
     let accounts = sqlx::query_as::<_, (String, String, Option<String>, f64, f64, f64, f64, i32)>(
         "SELECT paper_account_id, name, dingtalk_webhook_url,
