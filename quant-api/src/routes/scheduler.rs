@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 
 use crate::routes::shared::{
     MvoWeightCache, StrategyConfig, compute_lw_mvo_weights,
-    resolved_to_legacy_sc, send_quality_alert,
+    resolved_to_legacy_sc, send_dingtalk_alert, send_dingtalk_alert_titled, send_quality_alert,
 };
 use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 
@@ -2571,26 +2571,6 @@ async fn verify_training_dependencies(
 }
 
 /// 发送钉钉告警 (独立于账号体系, 直接使用webhook)
-async fn send_dingtalk_alert(db: &PgPool, msg: &str) {
-    send_dingtalk_alert_titled(db, "调仓告警", msg).await;
-}
-
-/// 带标题的钉钉告警(P2-3:调仓成功/失败/零信号复用同一推送通道，用标题区分场景)。
-async fn send_dingtalk_alert_titled(db: &PgPool, title: &str, msg: &str) {
-    let accounts = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT name, dingtalk_webhook_url FROM paper_account WHERE status='active' AND dingtalk_webhook_url IS NOT NULL"
-    ).fetch_all(db).await.unwrap_or_default();
-
-    for (_name, webhook_url) in &accounts {
-        if let Some(url) = webhook_url {
-            let payload = serde_json::json!({
-                "msgtype": "markdown",
-                "markdown": {"title": title, "text": msg}
-            });
-            let _ = reqwest::Client::new().post(url).json(&payload).send().await;
-        }
-    }
-}
 /// 复权因子当日完整性兜底:校验覆盖率→前向填充补全→再校验告警。
 ///
 /// adj_factor 表是「每日全量快照」(正常行数≈当日 bar 行数)。sync_adj_factor 按 symbol 逐只
