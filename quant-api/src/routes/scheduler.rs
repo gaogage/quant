@@ -3230,44 +3230,39 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
                 let anchor_nav_f = anchor_nav.to_string().parse::<f64>().unwrap_or(0.0);
                 if anchor_nav_f > 0.0 {
                     // 优先:composite 合成曲线(strategy_id = sv_id)
-                    let composite_row: Option<(rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
-                        "SELECT
-                            (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date >= $2 ORDER BY trade_date ASC LIMIT 1),
-                            (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date <= $3 ORDER BY trade_date DESC LIMIT 1)",
+                    // 先检测 composite 是否有当日数据:盘后 Tushare 日线常延迟到次日 09:00 T+1 才入库,
+                    // 若 composite 缺当日(只有 <=昨日),用昨日 bt_end 对比今日 live_end 会造成窗口错位误报。
+                    // 此时跳过偏离计算,日报显示"数据未就绪",避免 -5% 级假性偏离告警。
+                    let composite_has_today: Option<(i64,)> = sqlx::query_as(
+                        "SELECT COUNT(*)::bigint FROM backtest_composite_equity_curve
+                         WHERE strategy_id=$1 AND trade_date = $2",
                     )
                     .bind(sv_id)
-                    .bind(window_start)
                     .bind(date)
                     .fetch_optional(db)
                     .await
                     .ok()
                     .flatten();
-
-                    // 回退:A 股选股曲线(a_share.equity_curve_task_id)
-                    let bt_row: Option<(rust_decimal::Decimal, rust_decimal::Decimal)> = if composite_row.is_some() {
-                        composite_row
-                    } else if let Ok(rs) = crate::routes::strategy::load_resolved_strategy(db, sv_id).await {
-                        let a_share = rs.assets.iter().find(|a| a.asset_class == AssetClass::AShare);
-                        let task_id = a_share.and_then(|a| a.security.equity_curve_task_id.clone());
-                        if let Some(tid) = task_id {
-                            sqlx::query_as(
-                                "SELECT
-                                    (SELECT portfolio_value FROM backtest_equity_curve WHERE task_id=$1 AND trade_date >= $2 ORDER BY trade_date ASC LIMIT 1),
-                                    (SELECT portfolio_value FROM backtest_equity_curve WHERE task_id=$1 AND trade_date <= $3 ORDER BY trade_date DESC LIMIT 1)",
-                            )
-                            .bind(&tid)
-                            .bind(window_start)
-                            .bind(date)
-                            .fetch_optional(db)
-                            .await
-                            .ok()
-                            .flatten()
-                        } else {
-                            None
-                        }
+                    let composite_ready = composite_has_today.map(|(c,)| c > 0).unwrap_or(false);
+                    // composite 缺当日数据时跳过偏离计算(A 股回退曲线同源于日线数据,也会缺当日,
+                    // 强行回退仍会窗口错位误报)。backtest_deviation 保持 None,日报显示"数据未就绪"。
+                    let composite_row: Option<(rust_decimal::Decimal, rust_decimal::Decimal)> = if composite_ready {
+                        sqlx::query_as(
+                            "SELECT
+                                (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date >= $2 ORDER BY trade_date ASC LIMIT 1),
+                                (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date <= $3 ORDER BY trade_date DESC LIMIT 1)",
+                        )
+                        .bind(sv_id)
+                        .bind(window_start)
+                        .bind(date)
+                        .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten()
                     } else {
                         None
                     };
+                    let bt_row = composite_row;
 
                     if let Some((bt_start, bt_end)) = bt_row {
                         let bt_start_f = bt_start.to_string().parse::<f64>().unwrap_or(0.0);
@@ -3366,7 +3361,7 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
                     format!("**⚠️ 回测偏离**: {:.2}%（超 2% 阈值）  \n", dev * 100.0)
                 }
                 Some(dev) => format!("**回测偏离**: {:.2}%（正常范围）  \n", dev * 100.0),
-                None => String::new(),
+                None => "**回测偏离**: 数据未就绪（composite 曲线缺当日，待 T+1 补齐）  \n".to_string(),
             },
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         );
