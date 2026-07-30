@@ -6,6 +6,7 @@ pub mod asset_meta;
 pub mod backtest;
 pub mod blueprint;
 pub mod cleanup;
+pub mod data_quality;
 pub mod data_validation;
 pub mod dingtalk;
 pub mod equity_curve_sync;
