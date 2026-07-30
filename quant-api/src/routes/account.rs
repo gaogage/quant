@@ -9,10 +9,7 @@
 //! - `Account<Policy>`：`Policy` 标记账户策略模式，编译期区分无杠杆/杠杆/多策略。
 //! - 状态转换通过 `From` 实现，强制合法路径。
 //!
-//! 本模块尚未被路由挂载（Step 5 迁移 accounts.rs 账户构建逻辑时接入），
-//! 允许 dead_code 直到届时启用。
-
-#![allow(dead_code)]
+//! 本模块已被 generate_paper_signals_for_all 接入（R2 激活 load_account 工厂）。
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -25,6 +22,7 @@ pub struct CashAccount;
 /// 保证金账户：允许杠杆融资做多（leverage_multiplier > 1）。
 pub struct MarginAccount;
 /// 多策略 blend 账户：多个子策略加权混合。
+#[allow(dead_code)] // 骨架：多策略 blend 账户尚未接入（当前只有 Cash/Margin）
 pub struct BlendAccount;
 
 mod private {
@@ -48,6 +46,7 @@ impl AccountPolicy for BlendAccount {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account<P: AccountPolicy> {
     pub account_id: String,
+    pub name: String,
     pub strategy_version_id: String,
     /// 账户净值（NAV）。
     pub nav: Decimal,
@@ -73,9 +72,14 @@ pub struct LeverageConfig {
 }
 
 impl Account<CashAccount> {
-    pub fn new_cash(account_id: impl Into<String>, strategy_version_id: impl Into<String>) -> Self {
+    pub fn new_cash(
+        account_id: impl Into<String>,
+        name: impl Into<String>,
+        strategy_version_id: impl Into<String>,
+    ) -> Self {
         Self {
             account_id: account_id.into(),
+            name: name.into(),
             strategy_version_id: strategy_version_id.into(),
             nav: Decimal::ZERO,
             leverage_config: None, // 现金账户无杠杆
@@ -84,9 +88,11 @@ impl Account<CashAccount> {
     }
 
     /// 现金账户升级为保证金账户（允许开通杠杆）。
+    #[allow(dead_code)] // 骨架：运行时通过 load_account 直接分派,不走 cash->margin 升级
     pub fn enable_margin(self, config: LeverageConfig) -> Account<MarginAccount> {
         Account {
             account_id: self.account_id,
+            name: self.name,
             strategy_version_id: self.strategy_version_id,
             nav: self.nav,
             leverage_config: Some(config),
@@ -98,11 +104,13 @@ impl Account<CashAccount> {
 impl Account<MarginAccount> {
     pub fn new_margin(
         account_id: impl Into<String>,
+        name: impl Into<String>,
         strategy_version_id: impl Into<String>,
         config: LeverageConfig,
     ) -> Self {
         Self {
             account_id: account_id.into(),
+            name: name.into(),
             strategy_version_id: strategy_version_id.into(),
             nav: Decimal::ZERO,
             leverage_config: Some(config),
@@ -129,10 +137,19 @@ pub enum LoadedAccount {
 
 impl LoadedAccount {
     /// 账号 ID（无论 Cash/Margin 都有）。
+    #[allow(dead_code)] // 保留：未来 LoadedAccount 调用方可能需要
     pub fn account_id(&self) -> &str {
         match self {
             LoadedAccount::Cash(a) => &a.account_id,
             LoadedAccount::Margin(a) => &a.account_id,
+        }
+    }
+
+    /// 账号名称（无论 Cash/Margin 都有）。
+    pub fn name(&self) -> &str {
+        match self {
+            LoadedAccount::Cash(a) => &a.name,
+            LoadedAccount::Margin(a) => &a.name,
         }
     }
 
@@ -141,6 +158,20 @@ impl LoadedAccount {
         match self {
             LoadedAccount::Cash(a) => &a.strategy_version_id,
             LoadedAccount::Margin(a) => &a.strategy_version_id,
+        }
+    }
+
+    /// 杠杆参数三元组 (leverage_enabled, multiplier, mode)，供下游 rebalance_account 兼容。
+    ///
+    /// R2 类型门禁：Cash 账号编译期保证 (false, 1.0, "fixed")，
+    /// Margin 账号从 LeverageConfig 取真实值。
+    pub fn leverage_params(&self) -> (bool, f64, String) {
+        match self {
+            LoadedAccount::Cash(_) => (false, 1.0, "fixed".into()),
+            LoadedAccount::Margin(a) => {
+                let cfg = a.leverage_config();
+                (true, cfg.multiplier, cfg.mode.clone())
+            }
         }
     }
 }
@@ -158,7 +189,7 @@ pub async fn load_account(
     let row = sqlx::query(
         "SELECT leverage_enabled, leverage_multiplier, leverage_mode,
                 COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5),
-                strategy_version_id
+                strategy_version_id, name
          FROM paper_account WHERE paper_account_id = $1",
     )
     .bind(account_id)
@@ -168,12 +199,14 @@ pub async fn load_account(
     .ok_or_else(|| format!("账号不存在: {}", account_id))?;
 
     let leverage_enabled: bool = row.get("leverage_enabled");
+    let name: String = row.get("name");
     let strategy_version_id: String = row.get::<Option<String>, _>("strategy_version_id")
         .unwrap_or_default();
 
     if !leverage_enabled {
         Ok(LoadedAccount::Cash(Account::<CashAccount>::new_cash(
             account_id,
+            name,
             strategy_version_id,
         )))
     } else {
@@ -185,6 +218,7 @@ pub async fn load_account(
         };
         Ok(LoadedAccount::Margin(Account::<MarginAccount>::new_margin(
             account_id,
+            name,
             strategy_version_id,
             config,
         )))
@@ -206,13 +240,13 @@ mod tests {
 
     #[test]
     fn cash_account_has_no_leverage_config() {
-        let cash = Account::<CashAccount>::new_cash("acc_v24", "h20_v1");
+        let cash = Account::<CashAccount>::new_cash("acc_v24", "v24 unlev", "h20_v1");
         assert!(cash.leverage_config.is_none(), "现金账户无杠杆配置");
     }
 
     #[test]
     fn cash_account_can_become_margin() {
-        let cash = Account::<CashAccount>::new_cash("acc_v24", "h20_v1");
+        let cash = Account::<CashAccount>::new_cash("acc_v24", "v24 unlev", "h20_v1");
         let margin: Account<MarginAccount> = cash.enable_margin(sample_leverage_config());
         assert_eq!(margin.account_id, "acc_v24");
         assert_eq!(margin.leverage_config().multiplier, 2.0);
@@ -220,9 +254,24 @@ mod tests {
 
     #[test]
     fn margin_account_holds_leverage_config() {
-        let margin = Account::<MarginAccount>::new_margin("acc_v24", "h20_v1", sample_leverage_config());
+        let margin = Account::<MarginAccount>::new_margin("acc_v24", "v24 lev", "h20_v1", sample_leverage_config());
         // 编译期门禁：leverage_config() 仅 MarginAccount 可调用
         assert_eq!(margin.leverage_config().mode, "fixed");
         assert_eq!(margin.leverage_config().liquidation_threshold, 1.3);
+    }
+
+    #[test]
+    fn loaded_account_leverage_params_cash_is_safe() {
+        let cash = Account::<CashAccount>::new_cash("acc", "name", "sv");
+        let loaded = LoadedAccount::Cash(cash);
+        // 类型门禁：Cash 账号编译期保证无杠杆
+        assert_eq!(loaded.leverage_params(), (false, 1.0, "fixed".to_string()));
+    }
+
+    #[test]
+    fn loaded_account_leverage_params_margin_carries_config() {
+        let margin = Account::<MarginAccount>::new_margin("acc", "name", "sv", sample_leverage_config());
+        let loaded = LoadedAccount::Margin(margin);
+        assert_eq!(loaded.leverage_params(), (true, 2.0, "fixed".to_string()));
     }
 }

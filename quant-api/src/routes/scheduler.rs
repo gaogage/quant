@@ -2581,8 +2581,8 @@ pub async fn generate_paper_signals_for_all(
     _sc: &StrategyConfig,
     tushare: &TushareClient,
 ) -> Result<(), String> {
-    let accounts = sqlx::query_as::<_, (String, String, bool, f64, String, Option<String>)>(
-        "SELECT paper_account_id, name, COALESCE(leverage_enabled, false), COALESCE(leverage_multiplier, 1.0), COALESCE(leverage_mode, 'fixed'), strategy_version_id FROM paper_account
+    let accounts = sqlx::query_as::<_, (String,)>(
+        "SELECT paper_account_id FROM paper_account
          WHERE status = 'active' AND account_type = 'simulated'",
     )
     .fetch_all(db).await
@@ -2592,30 +2592,30 @@ pub async fn generate_paper_signals_for_all(
         return Ok(());
     }
 
-    for (
-        account_id,
-        name,
-        leverage_enabled,
-        leverage_multiplier,
-        leverage_mode,
-        strategy_version_id,
-    ) in &accounts
+    for (account_id,) in &accounts
     {
-        let leverage_enabled = *leverage_enabled;
-        let leverage_multiplier = *leverage_multiplier;
-        let leverage_mode = leverage_mode.as_str();
-        // 账号挂策略(strategy_version_id) → 加载该策略配置;无配置则报错并跳过(不阻塞其他账号)
-        let strategy_version_id = match strategy_version_id.as_deref() {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                error!(
-                    "[paper] 账号 {} 未配置 strategy_version_id,跳过(配置错误,不阻塞其他账号)",
-                    account_id
-                );
+        // R2 类型门禁：load_account 按 leverage_enabled 分派 Cash/Margin，
+        // Cash 账号编译期保证无 leverage_config（杜绝无杠杆账户误融资）。
+        let loaded = match crate::routes::account::load_account(db, account_id).await {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("[paper] 账号 {} 加载失败,跳过: {}", account_id, e);
                 continue;
             }
         };
-        let rs = match crate::routes::strategy::load_resolved_strategy(db, strategy_version_id)
+        let name = loaded.name().to_string();
+        let strategy_version_id = loaded.strategy_version_id().to_string();
+        if strategy_version_id.is_empty() {
+            error!(
+                "[paper] 账号 {} 未配置 strategy_version_id,跳过(配置错误,不阻塞其他账号)",
+                account_id
+            );
+            continue;
+        }
+        // leverage_params: Cash 编译期返回 (false,1.0,"fixed"),Margin 取 LeverageConfig
+        let (leverage_enabled, leverage_multiplier, leverage_mode) = loaded.leverage_params();
+        let leverage_mode = leverage_mode.as_str();
+        let rs = match crate::routes::strategy::load_resolved_strategy(db, &strategy_version_id)
             .await
         {
             Ok(r) => r,
