@@ -1,12 +1,11 @@
 /// 数据同步路由
 use axum::{
-    extract::{Query, State},
+    extract::State,
     response::IntoResponse,
     Json,
 };
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::hash_map::DefaultHasher;
@@ -14,13 +13,9 @@ use std::env;
 use std::{
     collections::{BTreeMap, BTreeSet},
     hash::{Hash, Hasher},
-    path::Path,
     sync::Arc,
-    time::Duration as StdDuration,
 };
-use tokio::{process::Command, time::timeout};
 use tracing::info;
-use uuid::Uuid;
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
 use quant_common::time_utils::fmt_rfc3339_local;

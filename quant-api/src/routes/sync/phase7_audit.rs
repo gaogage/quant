@@ -4,32 +4,21 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
-use rust_decimal::Decimal;
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::Row;
-use std::collections::hash_map::DefaultHasher;
-use std::env;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    hash::{Hash, Hasher},
-    path::Path,
+    hash::Hasher,
     sync::Arc,
-    time::Duration as StdDuration,
 };
-use tokio::{process::Command, time::timeout};
-use tracing::info;
 use uuid::Uuid;
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
 use quant_common::time_utils::fmt_rfc3339_local;
 
-use crate::phase7_alpha_admission::{
-    industry_prosperity_alpha_admission_policy, industry_prosperity_alpha_admission_policy_static,
-    INDUSTRY_MEMBERSHIP_COVERAGE_THRESHOLD, INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
-    SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID,
-};
+use crate::phase7_alpha_admission::SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID;
 use crate::AppState;
 
 use super::*;

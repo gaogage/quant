@@ -27,59 +27,11 @@ pub use wfa_engine::{
 };
 
 
-use axum::{
-    extract::{Path, Query, State},
-    response::IntoResponse,
-    Json,
-};
-use chrono::{Duration, NaiveDate};
-use quant_api::discovery::phase7::{
-    build_layered_search_plan, CandidateMetrics, CandidateTargets, CandidateType,
-    LayeredSearchConfig, LayeredSearchPlan, LocalResourcePlan,
-};
+use quant_api::discovery::phase7::LayeredSearchConfig;
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
-use quant_common::time_utils::fmt_rfc3339_local;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
-use sqlx::{Postgres, QueryBuilder};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
-use std::time::Instant;
-use tracing::error;
-use uuid::Uuid;
+use serde_json::Value;
 
-use crate::phase7_alpha_admission::{
-    validate_analyst_revision_entrypoint_admission, validate_analyst_revision_trial_admission,
-    validate_equity_pledge_entrypoint_admission, validate_equity_pledge_trial_admission,
-    validate_futures_price_chain_entrypoint_admission,
-    validate_industry_prosperity_entrypoint_admission,
-    validate_industry_prosperity_trial_admission, validate_margin_detail_entrypoint_admission,
-    validate_margin_detail_trial_admission, validate_shareholder_structure_entrypoint_admission,
-    validate_shareholder_structure_trial_admission, FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID,
-    INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE, MARGIN_DETAIL_COVERAGE_GATE_ID,
-};
-use crate::routes::backtest::{
-    execute_factor_backtest_with_caches, execute_prediction_backtest,
-    prewarm_factor_signal_cache_for_requests, CostModelReq, EffectiveCoverageReq,
-    ExecutionRulesReq, FactorBacktestRunOutput, MarketRegimeBacktestReq, RunFactorBacktestReq,
-    RunPredictionBacktestReq,
-};
-use crate::routes::ml::{
-    build_prediction_set_readiness_report, create_walk_forward_nonlinear_quantile_ranker_inner,
-    daily_count_distribution, prediction_readiness_passed, readiness_expected_open_day_count,
-    train_nonlinear_quantile_ranker_inner, DailyCountDistribution, LinearFactorRef,
-    ReadinessThresholds, TrainNonlinearQuantileRankerRequest,
-    WalkForwardNonlinearQuantileRankerRequest,
-};
-use crate::AppState;
-use quant_backtest::runner::{
-    BacktestDataCache, BacktestDataCacheSnapshot, BacktestDataCacheStats,
-};
-use quant_backtest::signal_generator::{
-    compare_return_risk_cache_economics, signal_cache_stats_delta, SignalDataCache,
-    SignalDataCacheSnapshot, SignalDataCacheStats,
-};
 
 
 // Re-export submodule types so intra-crate references via `crate::routes::optimization::Foo`

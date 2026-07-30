@@ -27,5 +27,5 @@ pub(crate) use mvo_weights::{compute_lw_mvo_weights, compute_vol_target_leverage
 pub use mvo_weights::MvoWeightCache;
 pub use regime::{detect_regime_exposure, detect_regime_exposure_cached};
 pub(crate) use alerts::{send_quality_alert, send_dingtalk_alert, send_dingtalk_alert_titled};
-pub use trade_block::{TradeBlock, preload_trade_block_map};
+pub use trade_block::preload_trade_block_map;
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
