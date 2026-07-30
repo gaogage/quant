@@ -2624,6 +2624,28 @@ pub async fn generate_paper_signals_for_all(
                 continue;
             }
         };
+        // R1 实盘状态门禁：校验策略已回测过（equity_curve_task_id 对应回测曲线存在），
+        // 未回测的策略拒绝上实盘。校验通过后推进到 Strategy<Production>，
+        // 下游 deref 成 &ResolvedStrategy 透传（保持兼容，零调用点改动）。
+        let rs = match rs.promote_to_production(db).await {
+            Ok(prod) => prod,
+            Err(e) => {
+                error!(
+                    "[paper] {} 实盘门禁拦截: {} (未回测策略不能上实盘,跳过)",
+                    account_id, e
+                );
+                // 严重:未回测策略挂到 active 账号,说明配置错误。告警但不阻塞其他账号。
+                send_dingtalk_alert(
+                    db,
+                    &format!(
+                        "⚠️ 实盘门禁拦截: 账号 {} 挂载的策略 {} 未通过回测校验，已跳过调仓。\n{}",
+                        account_id, strategy_version_id, e
+                    ),
+                )
+                .await;
+                continue;
+            }
+        };
         // 桥接出平铺 StrategyConfig 视图:run-factor body 取参(combo_name/top_n 等)继续用 sc。
         // 传给 sync_positions_from_backtest 时传 &rs(不再传 &sc)。
         let sc = resolved_to_legacy_sc(&rs)?;

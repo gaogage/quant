@@ -86,10 +86,36 @@ impl Strategy<Validated> {
 
     /// 回测后推进到 `Backtested` 态（回测产出绩效，可上模拟盘）。
     ///
+    /// R1 实盘状态门禁：校验策略已回测过（equity_curve_task_id 对应的回测曲线存在），
+    /// 通过后推进状态。未回测的策略无法进入 Backtested 态，进而无法上 PaperLive/Production。
+    pub async fn promote_to_production(self, db: &PgPool) -> Result<Strategy<Production>, String> {
+        // 校验：每个有 equity_curve_task_id 的 asset 必须有回测曲线数据
+        for asset in &self.inner.assets {
+            if let Some(ref tid) = asset.security.equity_curve_task_id {
+                let cnt: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM backtest_equity_curve WHERE task_id = $1",
+                )
+                .bind(tid)
+                .fetch_one(db)
+                .await
+                .map_err(|e| format!("verify backtest {}: {}", tid, e))?;
+                if cnt == 0 {
+                    return Err(format!(
+                        "策略 {} 的 asset({:?}) 回测曲线为空(task_id={})，未回测的策略不能上实盘",
+                        self.inner.strategy_id, asset.asset_class, tid
+                    ));
+                }
+            }
+        }
+        // 校验通过，沿合法路径推进：Validated → Backtested → PaperLive → Production
+        Ok(self.into_backtested().into_paper_live().into_production())
+    }
+
+    /// 回测后推进到 `Backtested` 态（回测产出绩效，可上模拟盘）。
+    ///
     /// 骨架：当前调用点通过 deref coercion 透传 `&Strategy<Validated>` 给
     /// 接受 `&ResolvedStrategy` 的函数（如 `run_daily_simulation`），未强制
     /// 状态推进。实盘路径状态校验（要求 `Strategy<Production>`）留后续。
-    #[allow(dead_code)]
     pub fn into_backtested(self) -> Strategy<Backtested> {
         Strategy {
             inner: self.inner,
@@ -100,7 +126,6 @@ impl Strategy<Validated> {
 
 impl Strategy<Backtested> {
     /// 推进到 `PaperLive` 态（模拟盘实时跟踪）。
-    #[allow(dead_code)]
     pub fn into_paper_live(self) -> Strategy<PaperLive> {
         Strategy {
             inner: self.inner,
@@ -111,7 +136,6 @@ impl Strategy<Backtested> {
 
 impl Strategy<PaperLive> {
     /// 推进到 `Production` 态（实盘真实资金，最高限制）。
-    #[allow(dead_code)]
     pub fn into_production(self) -> Strategy<Production> {
         Strategy {
             inner: self.inner,
