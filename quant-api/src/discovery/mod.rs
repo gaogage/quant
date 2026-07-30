@@ -1,7 +1,10 @@
-//! BC2 因子研究 / alpha 发现：phase7 搜索规划与 alpha 准入领域。
+//! BC4 策略发现 / strategy_discovery 领域内核：phase7 搜索规划与 alpha 准入。
 //!
 //! 由 quant-common 共享内核迁入（DDD 重构 Step 1），仅 quant-api 引用。
-//! 当前以单文件 `phase7.rs` 承载，后续按主题拆为 profiles / seed_trials /
-//! search_plan / alpha_sources / gates / screen 子模块（Step 1.2 子 MR）。
+//! R8 批次1 重命名 phase7 -> strategy_discovery，过渡法拆出 3 个叶子子模块：
+//! - profiles：搜索空间配置类型层
+//! - alpha_admission：alpha 源准入分级
+//! - candidate_screening：候选筛选门禁
+//! mod.rs 主体保留 LayeredSearchConfig / seeds / tests（后续批次拆分）。
 
-pub mod phase7;
+pub mod strategy_discovery;

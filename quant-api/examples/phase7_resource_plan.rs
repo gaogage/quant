@@ -1,4 +1,4 @@
-use quant_api::discovery::phase7::LocalResourcePlan;
+use quant_api::discovery::strategy_discovery::LocalResourcePlan;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = LocalResourcePlan::local_mac();

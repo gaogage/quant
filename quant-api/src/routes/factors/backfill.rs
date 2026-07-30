@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
 
-use quant_api::discovery::phase7::phase7_alpha_blend_profiles;
+use quant_api::discovery::strategy_discovery::phase7_alpha_blend_profiles;
 
 use crate::phase7_alpha_admission::{
     validate_analyst_revision_entrypoint_admission, validate_equity_pledge_entrypoint_admission,

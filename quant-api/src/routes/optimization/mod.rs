@@ -27,7 +27,7 @@ pub use wfa_engine::{
 };
 
 
-use quant_api::discovery::phase7::LayeredSearchConfig;
+use quant_api::discovery::strategy_discovery::LayeredSearchConfig;
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1521,7 +1521,7 @@ mod tests {
     // cargo fix 曾误删 bin target 未用、但测试模块通过 `use super::*` 引用的上层 use 语句；
     // 以下仅在测试构建下补回，避免业务代码引入 unused import 警告。
     use chrono::{Duration, NaiveDate};
-    use quant_api::discovery::phase7::{
+    use quant_api::discovery::strategy_discovery::{
         CandidateMetrics, CandidateType, LocalResourcePlan,
     };
     use quant_backtest::runner::{BacktestDataCache, BacktestDataCacheStats};
@@ -5546,7 +5546,7 @@ mod tests {
             max_trials: Some(7),
             search_profile: None,
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5574,7 +5574,7 @@ mod tests {
             max_trials: Some(40),
             search_profile: None,
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5614,7 +5614,7 @@ mod tests {
         let layered_req = phase7_discovery_layered_request(&req);
         let bundle = build_phase7_layered_plan_bundle(
             &layered_req,
-            quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32),
+            quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32),
         );
 
         assert_eq!(
@@ -5673,7 +5673,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_t".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5706,7 +5706,7 @@ mod tests {
             max_trials: Some(5),
             search_profile: Some("phase7_v19_current".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5746,7 +5746,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_u".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5780,7 +5780,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_u2".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5814,7 +5814,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_v".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5848,7 +5848,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_w".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5883,7 +5883,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_ag".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5928,7 +5928,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_ah".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -5972,7 +5972,7 @@ mod tests {
             max_trials: Some(5),
             search_profile: Some("phase7_ak".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6022,7 +6022,7 @@ mod tests {
             max_trials: Some(9),
             search_profile: Some("phase7_al".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6072,7 +6072,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_am".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6109,7 +6109,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_an".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6141,7 +6141,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_ao".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6178,7 +6178,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_ap".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6215,7 +6215,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_aq".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6255,7 +6255,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_ar".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6291,7 +6291,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_as".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6329,7 +6329,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_at".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6367,7 +6367,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_av".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6403,7 +6403,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_aw".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6439,7 +6439,7 @@ mod tests {
             max_trials: Some(5),
             search_profile: Some("phase7_ax".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6475,7 +6475,7 @@ mod tests {
             max_trials: Some(5),
             search_profile: Some("phase7_ay".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6515,7 +6515,7 @@ mod tests {
             max_trials: Some(5),
             search_profile: Some("phase7_az".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6555,7 +6555,7 @@ mod tests {
             max_trials: Some(5),
             search_profile: Some("phase7_ba".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6596,7 +6596,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_bb".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6641,7 +6641,7 @@ mod tests {
             max_trials: Some(5),
             search_profile: Some("phase7_bc".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6687,7 +6687,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_bd".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6736,7 +6736,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_bf".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6786,7 +6786,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_bg".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6837,7 +6837,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_bh".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6886,7 +6886,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_bi".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6930,7 +6930,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_bn".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -6979,7 +6979,7 @@ mod tests {
             max_trials: Some(16),
             search_profile: Some("phase7_bo".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7019,7 +7019,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_bp".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7061,7 +7061,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_bq".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7102,7 +7102,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_br".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7141,7 +7141,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_bs".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7182,7 +7182,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_bt".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7221,7 +7221,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_bu".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7260,7 +7260,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_bv".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7300,7 +7300,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_bw".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7338,7 +7338,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_bx".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7376,7 +7376,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_by".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7414,7 +7414,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_bz".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7451,7 +7451,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_ca".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7487,7 +7487,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_cb".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7523,7 +7523,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_cc".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7559,7 +7559,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_cd".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7599,7 +7599,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_ce".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7639,7 +7639,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_cf".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7679,7 +7679,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_cg".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7720,7 +7720,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_ch".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7763,7 +7763,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_ci".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7804,7 +7804,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_ck".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7842,7 +7842,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_cj".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7885,7 +7885,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cl".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7923,7 +7923,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_cm".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -7961,7 +7961,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cn".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8009,7 +8009,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_co".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8056,7 +8056,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_cq".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8092,7 +8092,7 @@ mod tests {
             max_trials: Some(16),
             search_profile: Some("phase7_cr".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8141,7 +8141,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cs".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8185,7 +8185,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_ct".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8230,7 +8230,7 @@ mod tests {
             max_trials: Some(15),
             search_profile: Some("phase7_cu".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8284,7 +8284,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cz".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8330,7 +8330,7 @@ mod tests {
             max_trials: Some(16),
             search_profile: Some("phase7_da".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8378,7 +8378,7 @@ mod tests {
             max_trials: Some(20),
             search_profile: Some("phase7_db".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8430,7 +8430,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_dj".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8474,7 +8474,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_dn".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8514,7 +8514,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_dq".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8548,7 +8548,7 @@ mod tests {
             max_trials: Some(18),
             search_profile: Some("phase7_dr".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8583,7 +8583,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ds".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8614,7 +8614,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_dt".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8646,7 +8646,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_du".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -8679,7 +8679,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_dv".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -9932,7 +9932,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_dx".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -9963,7 +9963,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_dy".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -9994,7 +9994,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_dz".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10026,7 +10026,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ea".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10060,7 +10060,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_eb".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10101,7 +10101,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ec".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10143,7 +10143,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ed".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10176,7 +10176,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ee".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10211,7 +10211,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ef".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10246,7 +10246,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_eg".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10284,7 +10284,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_eh".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10321,7 +10321,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ei".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10358,7 +10358,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ej".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10395,7 +10395,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ek".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10432,7 +10432,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_el".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10469,7 +10469,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_em".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10506,7 +10506,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_en".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10544,7 +10544,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_eo".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10581,7 +10581,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ep".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10628,7 +10628,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_eq".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10674,7 +10674,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_er".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10724,7 +10724,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_es".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10770,7 +10770,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_et".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10816,7 +10816,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_eu".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10884,7 +10884,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ey".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -10950,7 +10950,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ez".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11017,7 +11017,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_fa".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11077,7 +11077,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_fb".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11131,7 +11131,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_fc".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11182,7 +11182,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_fg".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11244,7 +11244,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fh".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11299,7 +11299,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_fj".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11406,7 +11406,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_ft".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11440,7 +11440,7 @@ mod tests {
         assert!(first_six_families.contains("value_recovery"));
         assert!(bundle.plan.trials.iter().take(12).all(|trial| {
             let combo_name = trial.parameters["combo_name"].as_str().unwrap_or_default();
-            quant_api::discovery::phase7::is_phase7_base_trainable_alpha(combo_name)
+            quant_api::discovery::strategy_discovery::is_phase7_base_trainable_alpha(combo_name)
         }));
         assert!(!bundle.plan.trials.iter().any(|trial| {
             trial.parameters["combo_name"] == "phase7_event_surprise_v1"
@@ -11469,7 +11469,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_sleeves".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11532,7 +11532,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_event_surprise_sleeve_gate".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11588,7 +11588,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_event_post_return_overlay".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11641,7 +11641,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_supply_float_sleeve".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11693,7 +11693,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_unlock_pressure_sleeve".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11757,7 +11757,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_forecast_revision_sleeve".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11811,7 +11811,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_shareholder_structure_sleeve".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11876,7 +11876,7 @@ mod tests {
             max_trials: Some(30),
             search_profile: Some("phase7_v19_execution_repair".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -11935,7 +11935,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_v19_ml_alpha_rebuild".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle =
             build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
@@ -12028,7 +12028,7 @@ mod tests {
             max_trials: Some(9),
             search_profile: Some("phase7_v19_ml_simple_excess".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle =
             build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
@@ -12115,7 +12115,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_v19_ml_simple_excess_low_impact".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle =
             build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
@@ -12215,7 +12215,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_v19_ml_h120_low_impact".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle =
             build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
@@ -12323,7 +12323,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_v19_ml_rae_h120_residual_capacity".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle =
             build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
@@ -12423,7 +12423,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_v19_ml_event_sentiment".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle =
             build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
@@ -12564,7 +12564,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fl".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12621,7 +12621,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_fm".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12666,7 +12666,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_fn".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12725,7 +12725,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_fo".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12789,7 +12789,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_fp".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12850,7 +12850,7 @@ mod tests {
             max_trials: Some(3),
             search_profile: Some("phase7_fp".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12886,7 +12886,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fr".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12952,7 +12952,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fr".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -12988,7 +12988,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fw".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13044,7 +13044,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fz".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13127,7 +13127,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fw".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13161,7 +13161,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fx".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13215,7 +13215,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_ga".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13275,7 +13275,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_gb".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13489,7 +13489,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_fs".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13548,7 +13548,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ev".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13601,7 +13601,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ew".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13657,7 +13657,7 @@ mod tests {
             max_trials: Some(24),
             search_profile: Some("phase7_ex".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13719,7 +13719,7 @@ mod tests {
             max_trials: Some(16),
             search_profile: Some("phase7_cv".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13768,7 +13768,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cw".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13813,7 +13813,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cx".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -13856,7 +13856,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cy".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14640,7 +14640,7 @@ mod tests {
             max_trials: Some(12),
             search_profile: Some("phase7_cp".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14691,7 +14691,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_bj".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14737,7 +14737,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_bk".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14780,7 +14780,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_bl".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14818,7 +14818,7 @@ mod tests {
             max_trials: Some(8),
             search_profile: Some("phase7_bm".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14855,7 +14855,7 @@ mod tests {
             max_trials: Some(4),
             search_profile: Some("phase7_ai".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14893,7 +14893,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_aj".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14935,7 +14935,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_ab".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -14979,7 +14979,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_ac".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -15015,7 +15015,7 @@ mod tests {
             max_trials: Some(6),
             search_profile: Some("phase7_ad".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -15051,7 +15051,7 @@ mod tests {
             max_trials: Some(10),
             search_profile: Some("phase7_ae".to_string()),
         };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
+        let resource_plan = quant_api::discovery::strategy_discovery::LocalResourcePlan::for_machine(10, 32);
 
         let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
 
@@ -16259,7 +16259,7 @@ mod tests {
     ///   cargo test -p quant-api --lib phase7_search_config_roundtrip
     #[test]
     fn phase7_search_config_roundtrip_preserves_complex_profile() {
-        use quant_api::discovery::phase7::LayeredSearchConfig;
+        use quant_api::discovery::strategy_discovery::LayeredSearchConfig;
 
         let original = LayeredSearchConfig::professional_risk_breakthrough_default();
 
