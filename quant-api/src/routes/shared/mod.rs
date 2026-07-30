@@ -19,6 +19,7 @@ mod regime;
 mod alerts;
 mod trade_block;
 mod etf_prices;
+mod nav_snapshot;
 
 // pub(crate) 项用 pub(crate) use re-export（不能 pub use，否则 E0364）
 pub(crate) use strategy_config::resolved_to_legacy_sc;
@@ -29,3 +30,4 @@ pub use regime::{detect_regime_exposure, detect_regime_exposure_cached};
 pub(crate) use alerts::{send_quality_alert, send_dingtalk_alert, send_dingtalk_alert_titled};
 pub use trade_block::preload_trade_block_map;
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
+pub use nav_snapshot::{NavSnapshot, upsert_nav_snapshot};

@@ -265,25 +265,16 @@ pub async fn run_daily_simulation(
             0.0
         };
         // 3e. 写 paper_nav_snapshot
-        let sid = format!("ns-{}", uuid::Uuid::new_v4());
         let cum = if init_cap_f > 0.0 {
             nav / init_cap_f - 1.0
         } else {
             0.0
         };
-        sqlx::query(
-            "INSERT INTO paper_nav_snapshot (nav_snapshot_id,paper_account_id,snapshot_date,nav,cash,market_value,position_count,daily_return,cumulative_return,max_drawdown)
-             VALUES ($1,$2,$3,$4,0,$4,0,$5,$6,0) ON CONFLICT DO NOTHING",
-        )
-        .bind(&sid)
-        .bind(account_id)
-        .bind(d)
-        .bind(Decimal::from_f64_retain(nav).unwrap_or(init_cap))
-        .bind(Decimal::from_f64_retain(net).unwrap_or(Decimal::ZERO))
-        .bind(Decimal::from_f64_retain(cum).unwrap_or(Decimal::ZERO))
-        .execute(db)
-        .await
-        .ok();
+        // R5: 统一走 upsert_nav_snapshot（原裸 SQL 5 处重复之一）
+        let mut snap = crate::routes::shared::NavSnapshot::new(account_id, d, nav);
+        snap.daily_return = Some(net);
+        snap.cumulative_return = Some(cum);
+        let _ = crate::routes::shared::upsert_nav_snapshot(db, &snap).await;
         prev_nav = nav;
         out.push(DailyNav {
             date: d,

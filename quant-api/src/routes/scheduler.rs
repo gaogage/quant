@@ -3177,35 +3177,19 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
         }
 
         // 4. 写当日 snapshot(实盘路径此前从不写，此处首次补齐)。
+        // R5: 统一走 upsert_nav_snapshot（原裸 SQL 5 处重复之一）。
         // 注意不显式传 strategy_version_id：该字段有 FK -> strategy_version 表，
         // 而 v23/v24 等复合策略版本号不在该表中（该表仅存 phase7-professional-v1 等底层版本）。
         // 显式传入不存在的值会触发 FK 约束，静默失败。
-        let snap_id = format!("ns-{}", uuid::Uuid::new_v4());
-        let snap_result = sqlx::query(
-            "INSERT INTO paper_nav_snapshot
-                (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value,
-                 position_count, daily_return, cumulative_return, max_drawdown, trade_count)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             ON CONFLICT (paper_account_id, snapshot_date) DO UPDATE SET
-                nav = EXCLUDED.nav, cash = EXCLUDED.cash, market_value = EXCLUDED.market_value,
-                position_count = EXCLUDED.position_count, daily_return = EXCLUDED.daily_return,
-                cumulative_return = EXCLUDED.cumulative_return, max_drawdown = EXCLUDED.max_drawdown,
-                trade_count = EXCLUDED.trade_count",
-        )
-        .bind(&snap_id)
-        .bind(account_id)
-        .bind(date)
-        .bind(nav)
-        .bind(cash.to_string().parse::<f64>().unwrap_or(0.0))
-        .bind(market_value.to_string().parse::<f64>().unwrap_or(0.0))
-        .bind(position_count as i32)
-        .bind(daily_return)
-        .bind(cumulative_return)
-        .bind(*max_dd)
-        .bind(today_trades as i32)
-        .execute(db)
-        .await;
-        if let Err(e) = snap_result {
+        let mut snap = crate::routes::shared::NavSnapshot::new(account_id, date, *nav);
+        snap.cash = cash.to_string().parse::<f64>().unwrap_or(0.0);
+        snap.market_value = market_value.to_string().parse::<f64>().unwrap_or(0.0);
+        snap.position_count = position_count as i32;
+        snap.daily_return = Some(daily_return);
+        snap.cumulative_return = Some(cumulative_return);
+        snap.max_drawdown = Some(*max_dd);
+        snap.trade_count = Some(today_trades as i32);
+        if let Err(e) = crate::routes::shared::upsert_nav_snapshot(db, &snap).await {
             warn!("[report] {} snapshot 写入失败: {}", name, e);
         }
 
@@ -3345,31 +3329,16 @@ async fn snapshot_positions_for_all_accounts(db: &PgPool, date: NaiveDate) {
         .await
         .unwrap_or(0);
 
+        // R5: 统一走 upsert_nav_snapshot（原裸 SQL 5 处重复之一）。
         // strategy_version_id 不显式传(同 push_daily_performance_report 的 FK 踩坑说明)。
-        let snap_id = format!("ns-{}", uuid::Uuid::new_v4());
-        let snap_result = sqlx::query(
-            "INSERT INTO paper_nav_snapshot
-                (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value,
-                 position_count, daily_return, cumulative_return, trade_count)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (paper_account_id, snapshot_date) DO UPDATE SET
-                nav = EXCLUDED.nav, cash = EXCLUDED.cash, market_value = EXCLUDED.market_value,
-                position_count = EXCLUDED.position_count, daily_return = EXCLUDED.daily_return,
-                cumulative_return = EXCLUDED.cumulative_return, trade_count = EXCLUDED.trade_count",
-        )
-        .bind(&snap_id)
-        .bind(account_id)
-        .bind(date)
-        .bind(nav)
-        .bind(cash.to_string().parse::<f64>().unwrap_or(0.0))
-        .bind(market_value.to_string().parse::<f64>().unwrap_or(0.0))
-        .bind(position_count as i32)
-        .bind(daily_return)
-        .bind(cumulative_return)
-        .bind(today_trades as i32)
-        .execute(db)
-        .await;
-        if let Err(e) = snap_result {
+        let mut snap = crate::routes::shared::NavSnapshot::new(account_id, date, *nav);
+        snap.cash = cash.to_string().parse::<f64>().unwrap_or(0.0);
+        snap.market_value = market_value.to_string().parse::<f64>().unwrap_or(0.0);
+        snap.position_count = position_count as i32;
+        snap.daily_return = Some(daily_return);
+        snap.cumulative_return = Some(cumulative_return);
+        snap.trade_count = Some(today_trades as i32);
+        if let Err(e) = crate::routes::shared::upsert_nav_snapshot(db, &snap).await {
             warn!("[scheduler] {} 调仓后快照写入失败: {}", account_id, e);
         }
     }

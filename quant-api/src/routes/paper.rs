@@ -293,24 +293,17 @@ async fn generate_paper_signals_inner(
             .map_err(|e| format!("Failed to upsert position: {}", e))?;
         }
 
-        // Update NAV snapshot
-        let nav_id = format!("nav-{}", Uuid::new_v4());
-        sqlx::query(
-            "INSERT INTO paper_nav_snapshot
-               (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash,
-                market_value, position_count, prediction_set_id, signal_count, created_at)
-             VALUES ($1, $2, $3, 1000000, 0, 0, $4, $5, $6, now())
-             ON CONFLICT (paper_account_id, snapshot_date) DO NOTHING",
-        )
-        .bind(&nav_id)
-        .bind(&paper_account_id)
-        .bind(score_day)
-        .bind(total_signals as i32)
-        .bind(&prediction_set_id)
-        .bind(total_signals as i32)
-        .execute(db)
-        .await
-        .map_err(|e| format!("Failed to insert NAV: {}", e))?;
+        // R5: 统一走 upsert_nav_snapshot（原裸 SQL 5 处重复之一，初始化快照）
+        let mut snap = crate::routes::shared::NavSnapshot::new(
+            paper_account_id.as_str(),
+            score_day,
+            1_000_000.0,
+        );
+        snap.prediction_set_id = Some(prediction_set_id.clone());
+        snap.signal_count = Some(total_signals as i32);
+        crate::routes::shared::upsert_nav_snapshot(db, &snap)
+            .await
+            .map_err(|e| format!("Failed to insert NAV: {}", e))?;
         nav_updates += 1;
     }
 
@@ -838,26 +831,23 @@ async fn simulate_paper_nav_inner(
             None => 0.0,
         };
 
-        // Write NAV snapshot every 5 days
+        // R5: 统一走 upsert_nav_snapshot（原裸 SQL 5 处重复之一，回测完整快照）
         if day_idx % 5 == 0 || day_idx == trading_days.len() - 1 {
-            sqlx::query(
-                "INSERT INTO paper_nav_snapshot
-                   (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value,
-                    position_count, daily_return, cumulative_return, benchmark_return, excess_return,
-                    max_drawdown, prediction_set_id, signal_count, trade_count, created_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
-                 ON CONFLICT (paper_account_id, snapshot_date) DO UPDATE
-                 SET nav=EXCLUDED.nav, cash=EXCLUDED.cash, market_value=EXCLUDED.market_value,
-                     position_count=EXCLUDED.position_count, daily_return=EXCLUDED.daily_return,
-                     cumulative_return=EXCLUDED.cumulative_return, benchmark_return=EXCLUDED.benchmark_return,
-                     excess_return=EXCLUDED.excess_return, max_drawdown=EXCLUDED.max_drawdown",
-            )
-            .bind(format!("nav-{}", uuid::Uuid::new_v4()))
-            .bind(&account_id).bind(today).bind(nav).bind(cash).bind(mkt_val)
-            .bind(positions.len() as i32).bind(daily_ret).bind(cum_ret)
-            .bind(bench_cum).bind(cum_ret - bench_cum).bind(max_dd)
-            .bind(&pred_id).bind(top_n as i32).bind(total_trades as i32)
-            .execute(db).await.map_err(|e| format!("nav insert: {}", e))?;
+            let mut snap = crate::routes::shared::NavSnapshot::new(&account_id, today, nav);
+            snap.cash = cash;
+            snap.market_value = mkt_val;
+            snap.position_count = positions.len() as i32;
+            snap.daily_return = Some(daily_ret);
+            snap.cumulative_return = Some(cum_ret);
+            snap.benchmark_return = Some(bench_cum);
+            snap.excess_return = Some(cum_ret - bench_cum);
+            snap.max_drawdown = Some(max_dd);
+            snap.prediction_set_id = Some(pred_id.clone());
+            snap.signal_count = Some(top_n as i32);
+            snap.trade_count = Some(total_trades as i32);
+            crate::routes::shared::upsert_nav_snapshot(db, &snap)
+                .await
+                .map_err(|e| format!("nav insert: {}", e))?;
         }
 
         prev_nav = nav;
