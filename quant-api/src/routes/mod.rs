@@ -19,6 +19,7 @@ pub mod optimization;
 pub mod paper;
 pub mod portfolio;
 pub mod rebalance;
+pub mod report;
 pub mod scheduler;
 pub mod shared;
 pub mod strategies;

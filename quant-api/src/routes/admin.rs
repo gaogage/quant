@@ -275,7 +275,7 @@ pub struct PerformanceReportRequest {
 
 /// POST /api/v1/admin/performance-report — 手动触发实盘绩效日报(遍历所有 active 模拟盘)
 ///
-/// 正常由 16:00 EOD scheduler 自动触发(scheduler.rs push_daily_performance_report)，
+/// 正常由 16:00 EOD scheduler 自动触发(report.rs push_daily_performance_report)，
 /// 此端点用于手动补发/重发(如当日 EOD 时段服务重启错过自动触发)。
 pub async fn trigger_performance_report(
     State(state): State<Arc<AppState>>,
@@ -292,7 +292,7 @@ pub async fn trigger_performance_report(
         .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok())
         .unwrap_or_else(|| chrono::Local::now().date_naive());
 
-    match crate::routes::scheduler::push_daily_performance_report(&state.db, date).await {
+    match crate::routes::report::push_daily_performance_report(&state.db, date).await {
         Ok(_) => Json(serde_json::json!({
             "code": 0,
             "message": format!("绩效日报已生成并推送 {}", date.format("%Y-%m-%d"))
@@ -1354,7 +1354,7 @@ pub async fn manual_rebalance(
 
             // 调仓成功后推送持仓摘要钉钉通知(复用公开版本)
             let _ =
-                crate::routes::scheduler::push_dingtalk_for_all_accounts_public(&state.db, today)
+                crate::routes::report::push_dingtalk_for_all_accounts_public(&state.db, today)
                     .await;
 
             if new_orders > 0 {
