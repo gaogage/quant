@@ -248,17 +248,9 @@ pub(crate) fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train
         }
     }
     if let Some(prediction_set_id) = internal_train_window_ml_prediction_set_id {
-        if search_profile == "professional_train_window_ml_stress_fill_discovery"
-            || search_profile == "professional_ensemble_discovery"
-            || search_profile == "professional_simple_nlqr_discovery"
-            || search_profile == "professional_v19_train_window_ml_alpha_rebuild"
-            || search_profile == "professional_v19_train_window_ml_simple_excess_rebuild"
-            || search_profile == "professional_v19_train_window_ml_simple_excess_low_impact_rebuild"
-            || search_profile == "professional_v19_train_window_ml_h120_low_impact_rebuild"
-            || search_profile
-                == "professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild"
-            || search_profile == "professional_v19_train_window_ml_event_sentiment_rebuild"
-        {
+        // 查 category 派生：等价于原 9 个 canonical 名硬编码列表。
+        // search_profile 此处已是 phase7_search_config 返回的 canonical 名。
+        if is_train_window_ml_stress_fill_profile(Some(search_profile.as_str())) {
             apply_internal_train_window_ml_prediction_set_to_seed_trials(
                 &mut config.seed_trials,
                 prediction_set_id,

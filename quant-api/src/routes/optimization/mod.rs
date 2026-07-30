@@ -16316,5 +16316,130 @@ mod tests {
             "round-trip 后配置必须完全相等(含 Decimal 精度/Vec 顺序)"
         );
     }
+
+    /// 别名单一真相源等价性测试：遍历 PROFILE_CATALOG 所有别名，
+    /// 验证 gate policy / is_* 谓词 / accepts_override 查 category 派生一致。
+    /// 新增 profile 时此测试自动覆盖，防止 phase7_en 类别名遗漏回归。
+    #[test]
+    fn profile_catalog_alias_drives_all_dispatch_points_consistently() {
+        use crate::routes::optimization::profile_registry::{
+            PROFILE_CATALOG, default_oos_train_selection_gate_policy,
+            default_oos_train_selection_gate_policy_for_search_profile,
+            is_ensemble_profile, is_simple_nlqr_profile,
+            is_train_window_ml_stress_fill_profile, is_v19_train_window_ml_alpha_rebuild_profile,
+            profile_accepts_prediction_set_override, resolve_gate_category,
+            resolve_profile_category, SearchProfileCategory, GateCategory,
+        };
+
+        let base = default_oos_train_selection_gate_policy();
+
+        for entry in PROFILE_CATALOG {
+            // canonical 名本身 + 每个别名都应解析到本条目的类别
+            let probe_names: Vec<&str> = std::iter::once(entry.canonical)
+                .chain(entry.aliases.iter().copied())
+                .collect();
+            for &name in &probe_names {
+                // gate_category：canonical/别名一致
+                let gate = resolve_gate_category(Some(name));
+                assert_eq!(
+                    gate, entry.gate_category,
+                    "别名 `{name}` gate_category 应为 {:?} 实得 {:?}",
+                    entry.gate_category, gate
+                );
+                // is_* category：canonical/别名一致
+                let cat = resolve_profile_category(Some(name));
+                assert_eq!(
+                    cat, entry.category,
+                    "别名 `{name}` category 应为 {:?} 实得 {:?}",
+                    entry.category, cat
+                );
+
+                // gate policy：Base → 与 base 完全相同；非 Base → 与 base 不同（有 override）
+                let policy = default_oos_train_selection_gate_policy_for_search_profile(Some(name));
+                match entry.gate_category {
+                    GateCategory::Base => {
+                        assert_eq!(
+                            policy, base,
+                            "别名 `{name}` gate_category=Base 应返回 base policy"
+                        );
+                    }
+                    _ => {
+                        assert_ne!(
+                            policy, base,
+                            "别名 `{name}` gate_category={:?} 应有 override（≠ base）",
+                            entry.gate_category
+                        );
+                    }
+                }
+
+                // is_* 谓词一致性：查 category 派生的结果应与谓词返回值一致
+                let stress_fill = is_train_window_ml_stress_fill_profile(Some(name));
+                assert_eq!(
+                    stress_fill,
+                    matches!(
+                        cat,
+                        SearchProfileCategory::TrainWindowMlStressFill
+                            | SearchProfileCategory::Ensemble
+                            | SearchProfileCategory::SimpleNlqr
+                            | SearchProfileCategory::V19TrainWindowMlAlphaRebuild
+                            | SearchProfileCategory::V19TrainWindowMlSimpleExcess
+                            | SearchProfileCategory::V19TrainWindowMlSimpleExcessLowImpact
+                            | SearchProfileCategory::V19TrainWindowMlH120LowImpact
+                            | SearchProfileCategory::V19TrainWindowMlRaeH120Residual
+                            | SearchProfileCategory::V19TrainWindowMlEventSentiment
+                    ),
+                    "别名 `{name}` is_train_window_ml_stress_fill 不一致"
+                );
+                assert_eq!(
+                    is_ensemble_profile(Some(name)),
+                    matches!(cat, SearchProfileCategory::Ensemble),
+                    "别名 `{name}` is_ensemble 不一致"
+                );
+                assert_eq!(
+                    is_simple_nlqr_profile(Some(name)),
+                    matches!(cat, SearchProfileCategory::SimpleNlqr),
+                    "别名 `{name}` is_simple_nlqr 不一致"
+                );
+                // accepts_override：非执行型类别才接受
+                let expects_override = !matches!(
+                    cat,
+                    SearchProfileCategory::TrainWindowNonlinearRanking
+                        | SearchProfileCategory::TrainWindowStressFillTargetExposure
+                        | SearchProfileCategory::TrainWindowMlStressFill
+                        | SearchProfileCategory::V19SleeveAdmission
+                        | SearchProfileCategory::V19ExecutionRepair
+                        | SearchProfileCategory::V19TrainWindowMlAlphaRebuild
+                        | SearchProfileCategory::V19TrainWindowMlSimpleExcess
+                        | SearchProfileCategory::V19TrainWindowMlSimpleExcessLowImpact
+                        | SearchProfileCategory::V19TrainWindowMlH120LowImpact
+                        | SearchProfileCategory::V19TrainWindowMlRaeH120Residual
+                        | SearchProfileCategory::V19TrainWindowMlEventSentiment
+                        | SearchProfileCategory::V19CurrentBaseline
+                );
+                assert_eq!(
+                    profile_accepts_prediction_set_override(name),
+                    expects_override,
+                    "别名 `{name}` accepts_override 不一致"
+                );
+            }
+
+            // 额外校验：v19 alpha_rebuild 谓词历史命名陷阱（匹配全部 6 个 v19 变体）
+            let v19_alpha_rebuild = is_v19_train_window_ml_alpha_rebuild_profile(Some(entry.canonical));
+            assert_eq!(
+                v19_alpha_rebuild,
+                matches!(
+                    entry.category,
+                    SearchProfileCategory::V19TrainWindowMlAlphaRebuild
+                        | SearchProfileCategory::V19TrainWindowMlSimpleExcess
+                        | SearchProfileCategory::V19TrainWindowMlSimpleExcessLowImpact
+                        | SearchProfileCategory::V19TrainWindowMlH120LowImpact
+                        | SearchProfileCategory::V19TrainWindowMlRaeH120Residual
+                        | SearchProfileCategory::V19TrainWindowMlEventSentiment
+                ),
+                "canonical `{}` is_v19_alpha_rebuild 应匹配全部 6 个 v19 变体",
+                entry.canonical
+            );
+        }
+    }
 }
 
