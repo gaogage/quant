@@ -236,6 +236,7 @@ pub(crate) fn default_oos_train_selection_gate_policy_for_search_profile(
         | "execution_event_anchor_stress_bridge"
         | "event_anchor_stress_bridge"
         | "phase7_execution_event_anchor_stress_bridge"
+        | "phase7_en"
         | "professional_execution_participation_aware_event_anchor"
         | "execution_participation_aware_event_anchor"
         | "participation_aware_event_anchor"

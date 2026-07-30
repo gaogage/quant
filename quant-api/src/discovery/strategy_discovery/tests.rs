@@ -8985,7 +8985,12 @@ fn truncated_layered_search_samples_across_major_axes() {
         .filter_map(|trial| trial.parameters["top_n"].as_u64())
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(plan.requested_trials, 5_267_275_776);
+    // requested_trials = 笛卡尔积(search_space_size) + seed_trials.len()。
+    // local_professional_default 的 combo_versions = 15 硬编码 + phase7_alpha_blend_profiles()
+    // 返回的 34 个 blend profile = 49；其余 32 轴乘积 = 188_116_992，
+    // 49 × 188_116_992 = 9_217_732_608（seed_trials 为 0 不影响）。
+    // 新增 blend profile 时此值需同步更新。
+    assert_eq!(plan.requested_trials, 9_217_732_608);
     assert_eq!(plan.planned_trials, 8);
     assert!(plan
         .trials
