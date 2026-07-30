@@ -25,6 +25,7 @@ mod capacity_budget;
 mod combo_reuse;
 mod generation;
 mod market_feature;
+mod matrix_view;
 mod pit_alpha;
 mod portfolio_construction;
 mod signal_data_cache;

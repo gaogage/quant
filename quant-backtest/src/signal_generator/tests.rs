@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::engine::{BacktestConfig, BacktestEngine, BacktestOutput, MarketDay};
+use crate::signal_generator::matrix_view::ReturnHistoryMatrixView;
 use crate::metrics::BacktestMetrics;
 
 #[test]
@@ -1918,8 +1919,13 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
             select_uncorrelated_candidates(score_day, &candidates, &return_history, &config, 4)
         );
         assert_eq!(
-            build_kelly_raw_weights_from_matrix(score_day, &symbols, &kelly_matrix, &config),
-            build_kelly_raw_weights(score_day, &symbols, &return_history, &config)
+            build_kelly_raw_weights(score_day, &symbols, &kelly_matrix, &config),
+            build_kelly_raw_weights(
+                score_day,
+                &symbols,
+                &ReturnHistoryMatrixView::new(&return_history, config.kelly_lookback_days),
+                &config
+            )
         );
         assert_eq!(
             build_risk_budget_raw_weights_from_matrix(
@@ -2053,8 +2059,13 @@ fn relative_strength_and_kelly_can_use_stats_matrix_without_raw_returns() {
         relative_strength_rank_scores(&candidates, &return_history, score_day, 4)
     );
     assert_eq!(
-        build_kelly_raw_weights_from_stats_matrix(score_day, &symbols, &stats_matrix, &config),
-        build_kelly_raw_weights(score_day, &symbols, &return_history, &config)
+        build_kelly_raw_weights(score_day, &symbols, &stats_matrix, &config),
+        build_kelly_raw_weights(
+            score_day,
+            &symbols,
+            &ReturnHistoryMatrixView::new(&return_history, config.kelly_lookback_days),
+            &config
+        )
     );
 }
 
@@ -2452,8 +2463,8 @@ fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
         )
     );
     assert_eq!(
-        build_kelly_raw_weights_from_stats_matrix(score_day, &symbols, &restored, &config),
-        build_kelly_raw_weights_from_matrix(score_day, &symbols, &raw_matrix, &config)
+        build_kelly_raw_weights(score_day, &symbols, &restored, &config),
+        build_kelly_raw_weights(score_day, &symbols, &raw_matrix, &config)
     );
     assert_eq!(
         build_risk_budget_raw_weights_from_stats_matrix(

@@ -2766,13 +2766,15 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
     let raw_weights = match config.portfolio_method {
         PortfolioConstructionMethod::Heuristic => {
             if config.kelly_fraction > 0.0 {
-                kelly_matrix_ref
-                    .map(|matrix| {
-                        build_kelly_raw_weights_from_matrix(score_day, &selected, matrix, config)
-                    })
-                    .unwrap_or_else(|| {
-                        build_kelly_raw_weights(score_day, &selected, return_history, config)
-                    })
+                if let Some(matrix) = kelly_matrix_ref {
+                    build_kelly_raw_weights(score_day, &selected, matrix, config)
+                } else {
+                    let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                        return_history,
+                        config.kelly_lookback_days,
+                    );
+                    build_kelly_raw_weights(score_day, &selected, &view, config)
+                }
             } else {
                 vec![1.0; selected.len()]
             }
@@ -3000,7 +3002,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
                 let Some(matrix) = kelly_matrix_ref else {
                     return HashMap::new();
                 };
-                build_kelly_raw_weights_from_stats_matrix(score_day, &selected, matrix, config)
+                build_kelly_raw_weights(score_day, &selected, matrix, config)
             } else {
                 vec![1.0; selected.len()]
             }
@@ -4052,60 +4054,12 @@ pub(crate) fn average_abs_correlation_to_reference(
     }
 }
 
-pub(crate) fn build_kelly_raw_weights(
+// R9: 三联体合并为单一泛型函数。原 build_kelly_raw_weights / _from_matrix /
+// _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+pub(crate) fn build_kelly_raw_weights<M: super::matrix_view::MatrixView>(
     score_day: NaiveDate,
     symbols: &[String],
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let returns = trailing_returns(
-            return_history,
-            symbol,
-            score_day,
-            config.kelly_lookback_days,
-        );
-        let kelly = fractional_kelly_weight(&returns, config.kelly_fraction).unwrap_or(0.0);
-        raw_weights.push(kelly.max(0.0));
-    }
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-// Phase 7-ER staged helper: mirrors build_kelly_raw_weights while reading from a
-// score-date matrix built with kelly_lookback_days.
-#[allow(dead_code)]
-pub(crate) fn build_kelly_raw_weights_from_matrix(
-    score_day: NaiveDate,
-    symbols: &[String],
-    matrix: &ScoreDateReturnRiskMatrix,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let kelly = matrix
-            .fractional_kelly_weight(score_day, symbol, config.kelly_fraction)
-            .unwrap_or(0.0);
-        raw_weights.push(kelly.max(0.0));
-    }
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-// Phase 7-ER staged helper: mirrors build_kelly_raw_weights while applying the
-// caller's Kelly fraction to precomputed mean/variance stats.
-#[allow(dead_code)]
-pub(crate) fn build_kelly_raw_weights_from_stats_matrix(
-    score_day: NaiveDate,
-    symbols: &[String],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     config: &PortfolioConstructionConfig,
 ) -> Vec<f64> {
     let mut raw_weights = Vec::with_capacity(symbols.len());
