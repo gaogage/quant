@@ -85,3 +85,127 @@ pub enum DataVersionRegistryError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
+
+// ============================================================
+// PG 实现（R11：激活 Step 2 零 impl 的 trait 骨架）
+// ============================================================
+
+use sqlx::PgPool;
+
+/// PostgreSQL 实现的数据版本注册中心。
+///
+/// 集中 data_version 的注册/查询/状态解析，替代散落在 repository.rs /
+/// sync.rs / scheduler.rs 的 INSERT/SELECT 样板。
+pub struct PgDataVersionRegistry<'a> {
+    pool: &'a PgPool,
+}
+
+impl<'a> PgDataVersionRegistry<'a> {
+    pub fn new(pool: &'a PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// 查询最新的 EOD 数据版本 ID（原 scheduler::get_latest_data_version 集中化）。
+    ///
+    /// `dv-eod-%` 前缀的版本按 end_date 降序取首条；无则回退默认基线版本。
+    /// 返回裸 String 以兼容现有调用方（批次 2 可升级为 DataVersionId）。
+    pub async fn latest_eod_version_id(&self) -> String {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT data_version_id FROM data_version
+             WHERE data_version_id LIKE 'dv-eod-%'
+             ORDER BY end_date DESC LIMIT 1",
+        )
+        .fetch_optional(self.pool)
+        .await
+        .ok()
+        .flatten();
+        row.map(|(d,)| d)
+            .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string())
+    }
+
+    /// 注册完整数据版本（原 repository::create_data_version 集中化）。
+    ///
+    /// 幂等：同 data_version_id 已存在则 ON CONFLICT DO NOTHING。
+    /// 供 sync.rs 的 19 个 sync_* 函数与路由层调用方收敛为单一出口。
+    pub async fn create_version(
+        &self,
+        dv_id: &str,
+        name: &str,
+        source: &str,
+        tables: &[&str],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<(), DataVersionRegistryError> {
+        sqlx::query(
+            r#"INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash)
+               VALUES ($1, $2, $3, $4, $5, $6, '')
+               ON CONFLICT (data_version_id) DO NOTHING"#,
+        )
+        .bind(dv_id)
+        .bind(name)
+        .bind(source)
+        .bind(start_date)
+        .bind(end_date)
+        .bind(tables)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
+    /// 注册一个新数据版本（简化契约：由实现生成 dv_id）。
+    ///
+    /// 当前等价 create_version 的简化入口：dv_id 格式 `dv-eod-{date}`，
+    /// name=description，tables 留空。完整字段版本用 create_version。
+    async fn register_version(
+        &self,
+        data_date: NaiveDate,
+        source: &str,
+        description: Option<&str>,
+    ) -> Result<DataVersionId, DataVersionRegistryError> {
+        let dv_id = format!("dv-eod-{}", data_date.format("%Y%m%d"));
+        let name = description.unwrap_or(source);
+        self.create_version(
+            &dv_id,
+            name,
+            source,
+            &[],
+            data_date,
+            data_date,
+        )
+        .await?;
+        Ok(DataVersionId::new(dv_id))
+    }
+
+    /// 查询版本状态（调仓前 PIT 校验）。
+    ///
+    /// 当前 data_version 表无显式 state 列，存在即视为 Active。
+    /// 后续可加 state 列支持 Deprecated。
+    async fn resolve_state(
+        &self,
+        version_id: &DataVersionId,
+    ) -> Result<DataVersionState, DataVersionRegistryError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM data_version WHERE data_version_id = $1",
+        )
+        .bind(version_id.as_str())
+        .fetch_optional(self.pool)
+        .await?;
+        row.map(|_| DataVersionState::Active)
+            .ok_or_else(|| DataVersionRegistryError::NotFound(version_id.as_str().to_string()))
+    }
+
+    /// 标记版本废弃（数据发现问题后阻断新引用）。
+    ///
+    /// 当前表无 state 列，此方法为预留骨架（Step 5 加列后实现）。
+    async fn deprecate(
+        &self,
+        _version_id: &DataVersionId,
+    ) -> Result<(), DataVersionRegistryError> {
+        // TODO(R11 后续): data_version 表加 state 列后实现 UPDATE。
+        // 当前 noop，保留 trait 契约完整性。
+        Ok(())
+    }
+}
+

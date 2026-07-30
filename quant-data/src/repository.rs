@@ -1614,20 +1614,15 @@ pub async fn create_data_version(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash)
-           VALUES ($1, $2, $3, $4, $5, $6, '')
-           ON CONFLICT (data_version_id) DO NOTHING"#,
-    )
-    .bind(dv_id)
-    .bind(name)
-    .bind(source)
-    .bind(start_date)
-    .bind(end_date)
-    .bind(tables)
-    .execute(pool)
-    .await?;
-    Ok(())
+    // R11: 转调 PgDataVersionRegistry 集中化（20 处调用方零改动，单一出口）。
+    use crate::versioning::PgDataVersionRegistry;
+    PgDataVersionRegistry::new(pool)
+        .create_version(dv_id, name, source, tables, start_date, end_date)
+        .await
+        .map_err(|e| match e {
+            crate::versioning::DataVersionRegistryError::Database(sqlx_err) => sqlx_err,
+            other => sqlx::Error::Protocol(format!("{other}").into()),
+        })
 }
 
 // ─── data_sync_task ──────────────────────────────────────────────

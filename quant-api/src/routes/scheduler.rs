@@ -141,17 +141,9 @@ async fn trigger_v24_backfill_routes(
 
 /// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
 pub(crate) async fn get_latest_data_version(db: &PgPool) -> String {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT data_version_id FROM data_version
-         WHERE data_version_id LIKE 'dv-eod-%'
-         ORDER BY end_date DESC LIMIT 1",
-    )
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
-    row.map(|(d,)| d)
-        .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string())
+    // R11: 转调 PgDataVersionRegistry 集中化（原内联 SQL 收敛到 versioning 模块）。
+    use quant_data::versioning::PgDataVersionRegistry;
+    PgDataVersionRegistry::new(db).latest_eod_version_id().await
 }
 
 struct DailyState {
