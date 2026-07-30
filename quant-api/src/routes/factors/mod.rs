@@ -295,6 +295,7 @@ pub use backfill::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
 
     #[test]
     fn register_factor_definition_request_defaults_and_trims_fields() {

@@ -1525,6 +1525,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // cargo fix 曾误删 bin target 未用、但测试模块通过 `use super::*` 引用的上层 use 语句；
+    // 以下仅在测试构建下补回，避免业务代码引入 unused import 警告。
+    use chrono::{Duration, NaiveDate};
+    use quant_api::discovery::phase7::{
+        CandidateMetrics, CandidateType, LocalResourcePlan,
+    };
+    use quant_backtest::runner::{BacktestDataCache, BacktestDataCacheStats};
+    use quant_backtest::signal_generator::{
+        signal_cache_stats_delta, SignalDataCache, SignalDataCacheStats,
+    };
+    use rust_decimal::Decimal;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use crate::phase7_alpha_admission::{
+        FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID, INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE,
+    };
+    use crate::routes::backtest::FactorBacktestRunOutput;
+    use crate::routes::ml::{daily_count_distribution, ReadinessThresholds};
+
     #[test]
     fn alpha_source_diagnostics_defaults_are_safe_and_bounded() {
         let req = AlphaSourceDiagnosticsRequest {
