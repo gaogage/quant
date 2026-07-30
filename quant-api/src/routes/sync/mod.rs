@@ -105,7 +105,8 @@ pub(crate) fn stale_sync_task_cleanup_action(status: &str) -> &'static str {
 
 
 pub(crate) fn generated_data_version_id() -> String {
-    chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string()
+    // R11/R12: 转调 versioning 集中化（data_version ID 生成逻辑单一出口）。
+    quant_data::versioning::generate_version_id().to_string()
 }
 
 

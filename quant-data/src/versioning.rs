@@ -153,6 +153,14 @@ impl<'a> PgDataVersionRegistry<'a> {
     }
 }
 
+/// 生成时间戳格式的 data_version_id（原 sync/mod.rs::generated_data_version_id 集中化）。
+///
+/// 格式 `dv-{YYYYMMDD}-{HHMMSS}{ms}`，供 market_data 等同步路由生成唯一版本 ID。
+/// 返回 DataVersionId 新类型，调用方需 .to_string() 兼容现有 String 接口。
+pub fn generate_version_id() -> DataVersionId {
+    DataVersionId::new(chrono::Utc::now().format("dv-%Y%m%d-%H%M%S%3f").to_string())
+}
+
 impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
     /// 注册一个新数据版本（简化契约：由实现生成 dv_id）。
     ///
