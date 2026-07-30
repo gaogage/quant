@@ -804,6 +804,8 @@ pub fn ewma_covariance(returns: &Array2<f64>, lambda: f64) -> Array2<f64> {
         weights.push(w);
         w_sum += w;
     }
+    // 归一化权重平方和（用于有限样本 bias correction）
+    let w_sq_sum: f64 = weights.iter().map(|w| (w / w_sum).powi(2)).sum();
     for t in 0..n_periods {
         let row = centered.row(t);
         let w = weights[t] / w_sum;
@@ -813,8 +815,8 @@ pub fn ewma_covariance(returns: &Array2<f64>, lambda: f64) -> Array2<f64> {
             }
         }
     }
-    // Bias correction
-    let scale = 1.0 / (1.0 - w_sum * w_sum / (w_sum * w_sum));
+    // Bias correction: scale = 1 / (1 - Σw̃²)，w̃ 为归一化权重
+    let scale = 1.0 / (1.0 - w_sq_sum);
     cov * scale
 }
 
