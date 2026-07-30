@@ -1338,7 +1338,7 @@ async fn check_and_trigger_wfa(
         .json(&serde_json::json!({
             "data_version_id": &get_latest_data_version(db).await,
             "strategy_version_id": "phase7-professional-v1",
-            "search_profile": "professional_simple_heuristic_discovery_default",
+            "search_profile": "professional_simple_heuristic_discovery",
             "start_date": "20160201",
             "end_date": today.format("%Y%m%d").to_string(),
             "oos_top_n": 2,

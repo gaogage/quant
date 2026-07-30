@@ -525,13 +525,6 @@ pub(crate) fn phase7_search_config(search_profile: Option<&str>) -> (String, Lay
             "professional_event_strength_boost".to_string(),
             LayeredSearchConfig::professional_event_strength_boost_default(),
         ),
-        "professional_legacy_alpha_revalidation"
-        | "legacy_alpha_revalidation"
-        | "phase7_legacy_alpha_revalidation"
-        | "phase7_be" => (
-            "professional_legacy_alpha_revalidation".to_string(),
-            LayeredSearchConfig::professional_legacy_alpha_revalidation_default(),
-        ),
         "professional_current_anchor_risk_shape"
         | "current_anchor_risk_shape"
         | "event_window_anchor_risk_shape"
@@ -6723,58 +6716,6 @@ mod tests {
         assert!(bundle.plan.trials.iter().any(|trial| {
             trial.parameters["event_gate_profile"] == "event_confirm_boost_light_p50_3pct"
                 && trial.parameters["event_gate_combo_name"] == "phase7_event_earnings_v1"
-        }));
-    }
-
-    #[test]
-    fn phase7_layered_request_accepts_legacy_alpha_revalidation_profile() {
-        let req = Phase7LayeredOptimizationRequest {
-            strategy_version_id: "phase7-professional-v1".to_string(),
-            data_version_id: "full-market-2016-v1".to_string(),
-            objective: json!({"type": "professional_candidate", "benchmark": "000300.SH"}),
-            constraints: None,
-            walk_forward: None,
-            backtest_template: Some(json!({
-                "start_date": "20160201",
-                "end_date": "20260515",
-                "initial_capital": 1000000.0
-            })),
-            prediction_set_ids: None,
-            max_trials: Some(8),
-            search_profile: Some("phase7_be".to_string()),
-        };
-        let resource_plan = quant_api::discovery::phase7::LocalResourcePlan::for_machine(10, 32);
-
-        let bundle = build_phase7_layered_plan_bundle(&req, resource_plan);
-
-        assert_eq!(
-            bundle.search_space["search_profile"],
-            "professional_legacy_alpha_revalidation"
-        );
-        assert_eq!(bundle.plan.planned_trials, 8);
-        assert!(bundle.plan.trials.iter().any(|trial| {
-            trial.parameters["market_regime"]
-                == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
-                && trial.parameters["combo_name"] == "phase7_financial_quality_v1"
-        }));
-        assert!(bundle.plan.trials.iter().any(|trial| {
-            trial.parameters["legacy_revalidation_profile"]
-                == "full_icir_v3_full_history_legacy_exact"
-                && trial.parameters["combo_name"] == "full_icir_16f_v3"
-                && trial.parameters["start_date"] == "20160201"
-                && trial.parameters["end_date"] == "20260511"
-                && trial.parameters["portfolio_method"] == "heuristic"
-        }));
-        assert!(bundle.plan.trials.iter().any(|trial| {
-            trial.parameters["legacy_revalidation_profile"]
-                == "full_icir_v3_full_history_risk_budget"
-                && trial.parameters["combo_name"] == "full_icir_16f_v3"
-                && trial.parameters["portfolio_method"] == "risk_budget"
-        }));
-        assert!(bundle.plan.trials.iter().any(|trial| {
-            trial.parameters["legacy_revalidation_profile"]
-                == "full_icir_v3_recent_window_diagnostic"
-                && trial.parameters["start_date"] == "20230512"
         }));
     }
 
