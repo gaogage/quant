@@ -24,6 +24,7 @@ pub mod report;
 pub mod scheduler;
 pub mod shared;
 pub mod strategies;
+pub mod strategy_query;
 pub mod strategy;
 pub mod sync;
 pub mod trading;
