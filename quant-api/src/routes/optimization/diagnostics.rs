@@ -2097,7 +2097,7 @@ pub(crate) async fn build_alpha_source_diagnostics_report(
 
 
 #[derive(Debug, Clone)]
-struct MainBusinessRawSummary {
+pub(crate) struct MainBusinessRawSummary {
     raw_rows: i64,
     raw_symbols: i64,
     report_periods: i64,
@@ -2112,7 +2112,7 @@ struct MainBusinessRawSummary {
 
 
 #[derive(Debug, Clone)]
-struct MainBusinessDailyCoverageRow {
+pub(crate) struct MainBusinessDailyCoverageRow {
     trade_date: NaiveDate,
     eligible_symbols: i64,
     covered_symbols: i64,
@@ -2131,7 +2131,7 @@ impl MainBusinessDailyCoverageRow {
 
 
 #[derive(Debug, Clone)]
-struct MainBusinessScoreRow {
+pub(crate) struct MainBusinessScoreRow {
     trade_date: NaiveDate,
     symbol: String,
     score: f64,
@@ -3036,7 +3036,7 @@ pub(crate) fn validate_alpha_source_diagnostics_admission(
 
 
 #[derive(Debug)]
-struct AlphaSourceDiagnosticsSummary {
+pub(crate) struct AlphaSourceDiagnosticsSummary {
     usable_rows: i64,
     usable_symbols: i64,
     null_score_rows: i64,
@@ -3110,7 +3110,7 @@ impl AlphaSourceBucketReturn {
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceScoreRow {
+pub(crate) struct AlphaSourceScoreRow {
     trade_date: NaiveDate,
     symbol: String,
     score: f64,
@@ -3281,7 +3281,7 @@ impl AlphaSourceRegimeSplitSummary {
 
 
 #[derive(Debug, Clone)]
-struct AlphaSourceTurnoverCapacitySummary {
+pub(crate) struct AlphaSourceTurnoverCapacitySummary {
     horizon_days: i64,
     sampled_days: i64,
     avg_high_score_bucket_symbols: f64,
@@ -5231,7 +5231,7 @@ pub(crate) async fn build_feature_profile_readiness_report(
 
 
 #[derive(Debug)]
-struct FeatureProfileFactorReadinessRow {
+pub(crate) struct FeatureProfileFactorReadinessRow {
     factor_code: String,
     factor_version: String,
     usable_rows: i64,

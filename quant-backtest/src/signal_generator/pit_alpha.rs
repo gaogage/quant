@@ -5887,7 +5887,7 @@ impl ReturnRiskStatsPairwiseScopePlan {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-struct ReturnRiskSingleSymbolStats {
+pub(crate) struct ReturnRiskSingleSymbolStats {
     return_count: usize,
     total_return: Option<f64>,
     sample_volatility: Option<f64>,

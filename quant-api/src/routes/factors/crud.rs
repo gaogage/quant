@@ -6,7 +6,6 @@ use axum::{
     Json,
 };
 use chrono::NaiveDate;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::json;

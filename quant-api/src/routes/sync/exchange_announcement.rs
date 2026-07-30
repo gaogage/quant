@@ -11,7 +11,6 @@ use sqlx::Row;
 use std::env;
 use std::{
     collections::BTreeSet,
-    hash::Hasher,
     path::Path,
     sync::Arc,
     time::Duration as StdDuration,

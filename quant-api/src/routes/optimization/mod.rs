@@ -39,7 +39,7 @@ use serde_json::Value;
 pub use diagnostics::*;
 pub use experiment_run::*;
 pub use param_search::*;
-pub use profile_registry::*;
+pub(crate) use profile_registry::*;
 pub use robustness::*;
 pub use wfa_engine::*;
 

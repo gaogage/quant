@@ -76,6 +76,8 @@ pub struct RawSeries<T> {
 
 impl<T> RawSeries<T> {
     /// crate 内部构造：DB 加载后组装。
+    // Step 2 骨架方法，待 R3/R4 接入计算管线后启用。
+    #[allow(dead_code)]
     pub(crate) fn new(values: Vec<T>) -> Self {
         Self { values }
     }

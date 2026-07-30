@@ -1,8 +1,6 @@
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row;
 use std::{
-    hash::Hasher,
     sync::Arc,
 };
 

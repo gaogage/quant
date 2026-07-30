@@ -7,7 +7,6 @@ use axum::{
 use chrono::Duration;
 use serde_json::json;
 use std::{
-    hash::Hasher,
     sync::Arc,
 };
 use tracing::info;

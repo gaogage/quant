@@ -96,7 +96,7 @@ pub(crate) struct CompletedTrialSnapshot {
 
 
 #[derive(Debug, Clone, Copy)]
-struct EliteMetricProfile {
+pub(crate) struct EliteMetricProfile {
     annual_return: f64,
     excess_return: f64,
     sharpe: f64,

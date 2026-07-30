@@ -31,11 +31,11 @@ mod signal_data_cache;
 
 pub use cache_keys::*;
 pub use capacity_budget::*;
-pub use combo_reuse::*;
+pub(crate) use combo_reuse::*;
 pub use generation::*;
 pub use market_feature::*;
 pub use pit_alpha::*;
-pub use portfolio_construction::*;
+pub(crate) use portfolio_construction::*;
 pub use signal_data_cache::*;
 
 #[cfg(test)]

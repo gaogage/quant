@@ -7,10 +7,8 @@ use axum::{
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::Row;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    hash::Hasher,
     sync::Arc,
 };
 use uuid::Uuid;
@@ -2548,6 +2546,9 @@ async fn build_shareholder_structure_coverage_audit(
 
 
 
+// 测试辅助函数：被 #[cfg(test)] 的 futures_price_chain_product_symbol_from_daily_ts_code 调用，
+// 非测试编译时无调用方，标记为允许死代码。
+#[allow(dead_code)]
 pub(crate) fn futures_price_chain_normalize_raw_product_symbol(raw: &str) -> Option<String> {
     let mut product = raw.trim().to_ascii_uppercase();
     if product.is_empty() {

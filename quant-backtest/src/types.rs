@@ -95,6 +95,8 @@ impl RawBar {
     }
 
     /// crate 内部构造（DB 行直接组装，未校验）。
+    // Step 2 骨架方法，待 R3/R4 接入计算管线后启用。
+    #[allow(dead_code)]
     pub(crate) fn new(
         symbol: impl Into<String>,
         trade_date: NaiveDate,

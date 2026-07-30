@@ -7,9 +7,7 @@ use axum::{
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row;
 use std::{
-    hash::Hasher,
     sync::Arc,
 };
 use uuid::Uuid;

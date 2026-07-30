@@ -7,7 +7,6 @@ use axum::{
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::{
@@ -1133,6 +1132,8 @@ fn exchange_announcement_event_type_from_title_and_spans(
 
 
 
+// 测试辅助函数：仅在 sync/tests.rs 的单元测试中调用，非测试编译时标记为允许死代码。
+#[allow(dead_code)]
 fn exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
     category: &str,
     title: &str,

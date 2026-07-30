@@ -156,7 +156,7 @@ pub(crate) struct CostCapacityPerturbationSummary {
 
 
 #[derive(Debug, Clone)]
-struct PredictionConfidenceStressFillQualityScoreBreakdown {
+pub(crate) struct PredictionConfidenceStressFillQualityScoreBreakdown {
     total_score: Decimal,
     base_score: Decimal,
     stress_fill_objective_score: Decimal,
@@ -4640,7 +4640,7 @@ pub(crate) async fn build_return_risk_cache_economics_report(
 
 
 #[derive(Debug, Clone)]
-struct ExperimentRunMetrics {
+pub(crate) struct ExperimentRunMetrics {
     metrics: Value,
     status: String,
 }
