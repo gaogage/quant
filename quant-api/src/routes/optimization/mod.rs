@@ -319,6 +319,39 @@ pub(crate) fn normalize_limit(value: Option<i64>) -> i64 {
 }
 
 
+/// R8 批次3b: 从 `search_profile_config` 表解析 search_profile 别名，返回规范 profile 名。
+///
+/// 三层降级（同 factor_backfill_route 模式）：
+/// 1. DB 命中（aliases jsonb 包含 input，且 enabled=true）→ 返回 profile_name（规范名）
+/// 2. DB 空/异常/未命中 → 返回 input 原值（fallback 到 phase7_search_config 硬编码 match）
+///
+/// 配置化的是"profile 名规范化"——DB 只决定别名→规范名映射，
+/// 具体走哪个 `LayeredSearchConfig::*_default()` 仍由 phase7_search_config 的硬编码 match 决定。
+/// 新增 profile 的别名/优先级/启停可 DB 驱动；新增 default 方法仍需写代码。
+pub(crate) async fn resolve_search_profile_name(
+    db: &sqlx::PgPool,
+    search_profile: Option<&str>,
+) -> String {
+    let input = search_profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("local_professional");
+    match sqlx::query_scalar::<_, String>(
+        "SELECT profile_name FROM search_profile_config
+         WHERE enabled = true AND $1 = ANY(aliases::text[])
+         ORDER BY priority ASC LIMIT 1",
+    )
+    .bind(input)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some(canonical)) => canonical,
+        Ok(None) => input.to_string(),
+        Err(_) => input.to_string(),
+    }
+}
+
+
 pub(crate) fn phase7_search_config(search_profile: Option<&str>) -> (String, LayeredSearchConfig) {
     match search_profile
         .map(str::trim)
@@ -11943,6 +11976,7 @@ mod tests {
                 resource_plan,
                 500,
                 Some("p7v19ml-train-window-001"),
+                None,
             );
 
         assert_eq!(
@@ -12036,6 +12070,7 @@ mod tests {
                 resource_plan,
                 500,
                 Some("p7v19sx-train-window-001"),
+                None,
             );
 
         assert_eq!(
@@ -12123,6 +12158,7 @@ mod tests {
                 resource_plan,
                 500,
                 Some("p7v19sxli-train-window-001"),
+                None,
             );
 
         assert_eq!(
@@ -12223,6 +12259,7 @@ mod tests {
                 resource_plan,
                 500,
                 Some("p7v19h120-train-window-001"),
+                None,
             );
 
         assert_eq!(
@@ -12331,6 +12368,7 @@ mod tests {
                 resource_plan,
                 500,
                 Some("p7v19rae-train-window-001"),
+                None,
             );
 
         assert_eq!(
@@ -12431,6 +12469,7 @@ mod tests {
                 resource_plan,
                 500,
                 Some("p7v19evt-train-window-001"),
+                None,
             );
 
         assert_eq!(

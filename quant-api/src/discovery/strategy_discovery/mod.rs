@@ -45,6 +45,7 @@ use candidate_screening::decimal_string;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::seed_generators::*;
     use rust_decimal::Decimal;
     use serde_json::json;
     use serde_json::Value;

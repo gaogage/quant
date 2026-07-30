@@ -219,6 +219,7 @@ fn build_phase7_layered_plan_bundle_with_trial_cap(
         resource_plan,
         max_trials_cap,
         None,
+        None,
     )
 }
 
@@ -228,12 +229,15 @@ pub(crate) fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train
     mut resource_plan: LocalResourcePlan,
     max_trials_cap: usize,
     internal_train_window_ml_prediction_set_id: Option<&str>,
+    canonical_search_profile: Option<&str>,
 ) -> Phase7LayeredPlanBundle {
     if let Some(max_trials) = req.max_trials {
         resource_plan.max_trials = max_trials.clamp(1, max_trials_cap.max(1));
     }
 
-    let (search_profile, mut config) = phase7_search_config(req.search_profile.as_deref());
+    // R8 批次3b: 优先用调用方 async 解析的 DB 规范 profile 名，None 时 fallback 到 req 原值。
+    let effective_profile = canonical_search_profile.or(req.search_profile.as_deref());
+    let (search_profile, mut config) = phase7_search_config(effective_profile);
     if profile_accepts_prediction_set_override(&search_profile) {
         if let Some(prediction_set_ids) = req.prediction_set_ids.as_ref() {
             config.prediction_set_ids = normalize_prediction_set_ids(prediction_set_ids);
@@ -340,12 +344,15 @@ pub(crate) async fn insert_phase7_layered_optimization_with_trial_cap_and_intern
     max_trials_cap: usize,
     internal_train_window_ml_prediction_set_id: Option<&str>,
 ) -> Result<(String, Phase7LayeredPlanBundle), String> {
+    // R8 批次3b: 先解析 DB 规范 profile 名（async），传入同步 build 函数。
+    let canonical_profile = resolve_search_profile_name(db, req.search_profile.as_deref()).await;
     let bundle =
         build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
             req,
             resource_plan,
             max_trials_cap,
             internal_train_window_ml_prediction_set_id,
+            Some(&canonical_profile),
         );
     let task_id = format!("opt-phase7-{}", Uuid::new_v4());
     let mut tx = db
@@ -809,6 +816,21 @@ pub(crate) fn should_use_fixed_params_oos_mode(
     search_config.seed_trials.len() == 1
 }
 
+/// R8 批次3b: should_use_fixed_params_oos_mode 的 DB-aware 版本。
+/// 调用方（async 上下文）先用 resolve_search_profile_name 解析规范名，
+/// 再传入此函数，避免同步函数内 await。
+pub(crate) fn should_use_fixed_params_oos_mode_with_profile(
+    fixed_params_enabled: bool,
+    has_train_window_ml_prediction_sets: bool,
+    canonical_profile: &str,
+) -> bool {
+    if !fixed_params_enabled || has_train_window_ml_prediction_sets {
+        return false;
+    }
+    let (_profile_name, search_config) = phase7_search_config(Some(canonical_profile));
+    search_config.seed_trials.len() == 1
+}
+
 
 pub(crate) async fn execute_oos_discovery_window(
     db: &sqlx::PgPool,
@@ -860,13 +882,16 @@ pub(crate) async fn execute_oos_discovery_window(
         .map(|v| v.to_lowercase() == "true" || v == "1")
         .unwrap_or(false);
 
-    if should_use_fixed_params_oos_mode(
+    // R8 批次3b: 先解析 DB 规范 profile 名（async），后续同步调用复用。
+    let canonical_profile = resolve_search_profile_name(db, req.search_profile.as_deref()).await;
+
+    if should_use_fixed_params_oos_mode_with_profile(
         fixed_params_enabled,
         train_window_ml_prediction_sets.is_some(),
-        req.search_profile.as_deref(),
+        &canonical_profile,
     ) {
         // Resolve the search config to get the first seed trial's parameters
-        let (_profile_name, search_config) = phase7_search_config(req.search_profile.as_deref());
+        let (_profile_name, search_config) = phase7_search_config(Some(&canonical_profile));
         let seed_params = search_config
             .seed_trials
             .first()
