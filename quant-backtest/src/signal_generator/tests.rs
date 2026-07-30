@@ -1889,11 +1889,15 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
 
     for score_day in score_days {
         assert_eq!(
-            relative_strength_rank_scores_from_matrix(&candidates, &risk_matrix, score_day),
-            relative_strength_rank_scores(&candidates, &return_history, score_day, 5)
+            relative_strength_rank_scores(&candidates, &risk_matrix, score_day),
+            relative_strength_rank_scores(
+                &candidates,
+                &ReturnHistoryMatrixView::new(&return_history, 5),
+                score_day
+            )
         );
         assert_eq!(
-            filter_candidate_risk_pool_from_matrix(
+            filter_candidate_risk_pool(
                 score_day,
                 &candidates,
                 &risk_matrix,
@@ -1903,20 +1907,26 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
             filter_candidate_risk_pool(
                 score_day,
                 &candidates,
-                &return_history,
+                &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
                 &average_amounts,
                 &config,
             )
         );
         assert_eq!(
-            select_uncorrelated_candidates_from_matrix(
+            select_uncorrelated_candidates(
                 score_day,
                 &candidates,
                 &correlation_matrix,
                 &config,
                 4,
             ),
-            select_uncorrelated_candidates(score_day, &candidates, &return_history, &config, 4)
+            select_uncorrelated_candidates(
+                score_day,
+                &candidates,
+                &ReturnHistoryMatrixView::new(&return_history, config.correlation_lookback_days),
+                &config,
+                4
+            )
         );
         assert_eq!(
             build_kelly_raw_weights(score_day, &symbols, &kelly_matrix, &config),
@@ -1928,7 +1938,7 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
             )
         );
         assert_eq!(
-            build_risk_budget_raw_weights_from_matrix(
+            build_risk_budget_raw_weights(
                 score_day,
                 &symbols,
                 &risk_matrix,
@@ -1938,13 +1948,13 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
             build_risk_budget_raw_weights(
                 score_day,
                 &symbols,
-                &return_history,
+                &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
                 &average_amounts,
                 &config,
             )
         );
         assert_eq!(
-            build_min_variance_raw_weights_from_matrix(
+            build_min_variance_raw_weights(
                 score_day,
                 &symbols,
                 &risk_matrix,
@@ -1954,7 +1964,7 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
             build_min_variance_raw_weights(
                 score_day,
                 &symbols,
-                &return_history,
+                &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
                 &average_amounts,
                 &config,
             )
@@ -2055,8 +2065,12 @@ fn relative_strength_and_kelly_can_use_stats_matrix_without_raw_returns() {
         build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 4);
 
     assert_eq!(
-        relative_strength_rank_scores_from_stats_matrix(&candidates, &stats_matrix, score_day),
-        relative_strength_rank_scores(&candidates, &return_history, score_day, 4)
+        relative_strength_rank_scores(&candidates, &stats_matrix, score_day),
+        relative_strength_rank_scores(
+            &candidates,
+            &ReturnHistoryMatrixView::new(&return_history, 4),
+            score_day
+        )
     );
     assert_eq!(
         build_kelly_raw_weights(score_day, &symbols, &stats_matrix, &config),
@@ -2190,17 +2204,23 @@ fn stats_matrix_correlation_consumers_match_raw_portfolio_helpers() {
         build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 5);
 
     assert_eq!(
-        select_uncorrelated_candidates_from_stats_matrix(
+        select_uncorrelated_candidates(
             score_day,
             &candidates,
             &stats_matrix,
             &config,
             4,
         ),
-        select_uncorrelated_candidates(score_day, &candidates, &return_history, &config, 4)
+        select_uncorrelated_candidates(
+            score_day,
+            &candidates,
+            &ReturnHistoryMatrixView::new(&return_history, config.correlation_lookback_days),
+            &config,
+            4
+        )
     );
     assert_eq!(
-        filter_candidate_risk_pool_from_stats_matrix(
+        filter_candidate_risk_pool(
             score_day,
             &candidates,
             &stats_matrix,
@@ -2210,13 +2230,13 @@ fn stats_matrix_correlation_consumers_match_raw_portfolio_helpers() {
         filter_candidate_risk_pool(
             score_day,
             &candidates,
-            &return_history,
+            &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
             &average_amounts,
             &config,
         )
     );
     assert_eq!(
-        build_risk_budget_raw_weights_from_stats_matrix(
+        build_risk_budget_raw_weights(
             score_day,
             &symbols,
             &stats_matrix,
@@ -2226,13 +2246,13 @@ fn stats_matrix_correlation_consumers_match_raw_portfolio_helpers() {
         build_risk_budget_raw_weights(
             score_day,
             &symbols,
-            &return_history,
+            &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
             &average_amounts,
             &config,
         )
     );
     assert_eq!(
-        build_min_variance_raw_weights_from_stats_matrix(
+        build_min_variance_raw_weights(
             score_day,
             &symbols,
             &stats_matrix,
@@ -2242,7 +2262,7 @@ fn stats_matrix_correlation_consumers_match_raw_portfolio_helpers() {
         build_min_variance_raw_weights(
             score_day,
             &symbols,
-            &return_history,
+            &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
             &average_amounts,
             &config,
         )
@@ -2427,18 +2447,18 @@ fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
     .expect("stats matrix should restore from DB-shaped rows");
 
     assert_eq!(
-        relative_strength_rank_scores_from_stats_matrix(&candidates, &restored, score_day),
-        relative_strength_rank_scores_from_matrix(&candidates, &raw_matrix, score_day)
+        relative_strength_rank_scores(&candidates, &restored, score_day),
+        relative_strength_rank_scores(&candidates, &raw_matrix, score_day)
     );
     assert_eq!(
-        filter_candidate_risk_pool_from_stats_matrix(
+        filter_candidate_risk_pool(
             score_day,
             &candidates,
             &restored,
             &average_amounts,
             &config,
         ),
-        filter_candidate_risk_pool_from_matrix(
+        filter_candidate_risk_pool(
             score_day,
             &candidates,
             &raw_matrix,
@@ -2447,14 +2467,14 @@ fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
         )
     );
     assert_eq!(
-        select_uncorrelated_candidates_from_stats_matrix(
+        select_uncorrelated_candidates(
             score_day,
             &candidates,
             &restored,
             &config,
             5,
         ),
-        select_uncorrelated_candidates_from_matrix(
+        select_uncorrelated_candidates(
             score_day,
             &candidates,
             &raw_matrix,
@@ -2467,14 +2487,14 @@ fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
         build_kelly_raw_weights(score_day, &symbols, &raw_matrix, &config)
     );
     assert_eq!(
-        build_risk_budget_raw_weights_from_stats_matrix(
+        build_risk_budget_raw_weights(
             score_day,
             &symbols,
             &restored,
             &average_amounts,
             &config,
         ),
-        build_risk_budget_raw_weights_from_matrix(
+        build_risk_budget_raw_weights(
             score_day,
             &symbols,
             &raw_matrix,
@@ -2483,14 +2503,14 @@ fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
         )
     );
     assert_eq!(
-        build_min_variance_raw_weights_from_stats_matrix(
+        build_min_variance_raw_weights(
             score_day,
             &symbols,
             &restored,
             &average_amounts,
             &config,
         ),
-        build_min_variance_raw_weights_from_matrix(
+        build_min_variance_raw_weights(
             score_day,
             &symbols,
             &raw_matrix,
@@ -3930,11 +3950,12 @@ fn stress_fill_confidence_exposure_profile_gates_confidence_by_capacity_headroom
         ..Default::default()
     };
 
+    let view = ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days);
     let raw_weights = build_stress_fill_aware_risk_budget_raw_weights(
         score_day,
         &symbols,
         &candidates,
-        &return_history,
+        &view,
         &average_amounts,
         &config,
     );

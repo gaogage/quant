@@ -12,8 +12,8 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 
 use super::pit_alpha::{
-    average_abs_correlation_to_reference, fractional_kelly_weight,
-    pearson_correlation, sample_volatility, trailing_returns, ScoreDateReturnRiskMatrix,
+    average_abs_correlation_to_reference, fractional_kelly_weight, pearson_correlation,
+    sample_volatility, trailing_returns, trailing_total_return, ScoreDateReturnRiskMatrix,
     ScoreDateReturnRiskStatsMatrix,
 };
 
@@ -21,8 +21,6 @@ use super::pit_alpha::{
 ///
 /// 方法签名对齐矩阵类型的现有方法（score_day + symbol 入参）。
 /// HashMap 适配器用冻结的 lookback_days 替代 config.*_lookback_days。
-// 批次 1 仅 kelly 用 fractional_kelly_weight；其余方法批次 2/3 接入后启用，暂 allow dead_code。
-#[allow(dead_code)]
 pub(crate) trait MatrixView {
     /// 某 symbol 在 score_day 的累计收益率。
     fn total_return(&self, score_day: NaiveDate, symbol: &str) -> Option<f64>;
@@ -223,11 +221,7 @@ impl<'a> ReturnHistoryMatrixView<'a> {
 impl<'a> MatrixView for ReturnHistoryMatrixView<'a> {
     fn total_return(&self, score_day: NaiveDate, symbol: &str) -> Option<f64> {
         let returns = trailing_returns(self.return_history, symbol, score_day, self.lookback_days);
-        if returns.is_empty() {
-            None
-        } else {
-            Some(returns.iter().fold(1.0_f64, |acc, r| acc * (1.0 + r)))
-        }
+        trailing_total_return(&returns)
     }
     fn sample_volatility(&self, score_day: NaiveDate, symbol: &str) -> Option<f64> {
         let returns = trailing_returns(self.return_history, symbol, score_day, self.lookback_days);

@@ -2706,7 +2706,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
     let risk_filtered_candidates = risk_matrix
         .as_ref()
         .map(|matrix| {
-            filter_candidate_risk_pool_from_matrix(
+            filter_candidate_risk_pool(
                 score_day,
                 &ranked_candidates,
                 matrix,
@@ -2715,10 +2715,14 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
             )
         })
         .unwrap_or_else(|| {
+            let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                return_history,
+                config.risk_budget_lookback_days,
+            );
             filter_candidate_risk_pool(
                 score_day,
                 &ranked_candidates,
-                return_history,
+                &view,
                 average_amounts,
                 config,
             )
@@ -2732,7 +2736,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
         cash_utilization_selection_limit(&risk_filtered_candidates, average_amounts, config);
     let selected = correlation_matrix_ref
         .map(|matrix| {
-            select_uncorrelated_candidates_from_matrix(
+            select_uncorrelated_candidates(
                 score_day,
                 &risk_filtered_candidates,
                 matrix,
@@ -2741,10 +2745,14 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
             )
         })
         .unwrap_or_else(|| {
+            let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                return_history,
+                config.correlation_lookback_days,
+            );
             select_uncorrelated_candidates(
                 score_day,
                 &risk_filtered_candidates,
-                return_history,
+                &view,
                 config,
                 selection_limit,
             )
@@ -2782,7 +2790,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
         PortfolioConstructionMethod::RiskBudget => risk_matrix
             .as_ref()
             .map(|matrix| {
-                build_risk_budget_raw_weights_from_matrix(
+                build_risk_budget_raw_weights(
                     score_day,
                     &selected,
                     matrix,
@@ -2791,10 +2799,14 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
                 )
             })
             .unwrap_or_else(|| {
+                let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                    return_history,
+                    config.risk_budget_lookback_days,
+                );
                 build_risk_budget_raw_weights(
                     score_day,
                     &selected,
-                    return_history,
+                    &view,
                     average_amounts,
                     config,
                 )
@@ -2802,7 +2814,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
         PortfolioConstructionMethod::StressFillAwareRiskBudget => risk_matrix
             .as_ref()
             .map(|matrix| {
-                build_stress_fill_aware_risk_budget_raw_weights_from_matrix(
+                build_stress_fill_aware_risk_budget_raw_weights(
                     score_day,
                     &selected,
                     &risk_filtered_candidates,
@@ -2812,11 +2824,15 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
                 )
             })
             .unwrap_or_else(|| {
+                let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                    return_history,
+                    config.risk_budget_lookback_days,
+                );
                 build_stress_fill_aware_risk_budget_raw_weights(
                     score_day,
                     &selected,
                     &risk_filtered_candidates,
-                    return_history,
+                    &view,
                     average_amounts,
                     config,
                 )
@@ -2824,7 +2840,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
         PortfolioConstructionMethod::MinVariance => risk_matrix
             .as_ref()
             .map(|matrix| {
-                build_min_variance_raw_weights_from_matrix(
+                build_min_variance_raw_weights(
                     score_day,
                     &selected,
                     matrix,
@@ -2833,10 +2849,14 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
                 )
             })
             .unwrap_or_else(|| {
+                let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                    return_history,
+                    config.risk_budget_lookback_days,
+                );
                 build_min_variance_raw_weights(
                     score_day,
                     &selected,
-                    return_history,
+                    &view,
                     average_amounts,
                     config,
                 )
@@ -2846,7 +2866,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, average_amounts, config);
     apply_capacity_risk_budget(&mut weights, average_amounts, config);
     if let Some(matrix) = risk_matrix.as_ref() {
-        apply_style_risk_budget_from_matrix(
+        apply_style_risk_budget(
             &mut weights,
             matrix,
             average_amounts,
@@ -2854,9 +2874,13 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
             config,
         );
     } else {
+        let view = super::matrix_view::ReturnHistoryMatrixView::new(
+            return_history,
+            config.risk_budget_lookback_days,
+        );
         apply_style_risk_budget(
             &mut weights,
-            return_history,
+            &view,
             average_amounts,
             score_day,
             config,
@@ -2864,9 +2888,13 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
     }
     apply_industry_cap(&mut weights, industry_by_symbol, config);
     if let Some(matrix) = risk_matrix.as_ref() {
-        apply_risk_contribution_control_from_matrix(&mut weights, matrix, score_day, config);
+        apply_risk_contribution_control(&mut weights, matrix, score_day, config);
     } else {
-        apply_risk_contribution_control(&mut weights, return_history, score_day, config);
+        let view = super::matrix_view::ReturnHistoryMatrixView::new(
+            return_history,
+            config.risk_budget_lookback_days,
+        );
+        apply_risk_contribution_control(&mut weights, &view, score_day, config);
     }
     weights
 }
@@ -2950,7 +2978,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
         candidates.to_vec()
     };
     let risk_filtered_candidates = if let Some(matrix) = risk_matrix.as_deref() {
-        filter_candidate_risk_pool_from_stats_matrix(
+        filter_candidate_risk_pool(
             score_day,
             &ranked_candidates,
             matrix,
@@ -2968,7 +2996,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
             .flatten()
     });
     let selected = if let Some(matrix) = correlation_matrix_ref {
-        select_uncorrelated_candidates_from_stats_matrix(
+        select_uncorrelated_candidates(
             score_day,
             &risk_filtered_candidates,
             matrix,
@@ -3011,7 +3039,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
             let Some(matrix) = risk_matrix.as_deref() else {
                 return HashMap::new();
             };
-            build_risk_budget_raw_weights_from_stats_matrix(
+            build_risk_budget_raw_weights(
                 score_day,
                 &selected,
                 matrix,
@@ -3023,7 +3051,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
             let Some(matrix) = risk_matrix.as_deref() else {
                 return HashMap::new();
             };
-            build_stress_fill_aware_risk_budget_raw_weights_from_stats_matrix(
+            build_stress_fill_aware_risk_budget_raw_weights(
                 score_day,
                 &selected,
                 &risk_filtered_candidates,
@@ -3036,7 +3064,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
             let Some(matrix) = risk_matrix.as_deref() else {
                 return HashMap::new();
             };
-            build_min_variance_raw_weights_from_stats_matrix(
+            build_min_variance_raw_weights(
                 score_day,
                 &selected,
                 matrix,
@@ -3049,7 +3077,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, average_amounts, config);
     apply_capacity_risk_budget(&mut weights, average_amounts, config);
     if let Some(matrix) = risk_matrix.as_deref() {
-        apply_style_risk_budget_from_stats_matrix(
+        apply_style_risk_budget(
             &mut weights,
             matrix,
             average_amounts,
@@ -3059,7 +3087,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
     }
     apply_industry_cap(&mut weights, industry_by_symbol, config);
     if let Some(matrix) = risk_matrix.as_deref() {
-        apply_risk_contribution_control_from_stats_matrix(&mut weights, matrix, score_day, config);
+        apply_risk_contribution_control(&mut weights, matrix, score_day, config);
     }
     weights
 }
@@ -3101,8 +3129,10 @@ fn rank_candidates_for_capacity(
     }
 
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
-    let relative_strength_ranks =
-        relative_strength_rank_scores(candidates, return_history, score_day, lookback_days);
+    let relative_strength_ranks = {
+        let view = super::matrix_view::ReturnHistoryMatrixView::new(return_history, lookback_days);
+        relative_strength_rank_scores(candidates, &view, score_day)
+    };
     let volatility_ranks =
         volatility_rank_scores(candidates, return_history, score_day, lookback_days);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
@@ -3170,7 +3200,7 @@ fn rank_candidates_for_capacity_from_matrix(
 
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
     let relative_strength_ranks =
-        relative_strength_rank_scores_from_matrix(candidates, matrix, score_day);
+        relative_strength_rank_scores(candidates, matrix, score_day);
     let volatility_ranks =
         volatility_rank_scores(candidates, return_history, score_day, lookback_days);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
@@ -3237,7 +3267,7 @@ fn rank_candidates_for_capacity_from_stats_matrix(
 
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
     let relative_strength_ranks =
-        relative_strength_rank_scores_from_stats_matrix(candidates, matrix, score_day);
+        relative_strength_rank_scores(candidates, matrix, score_day);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
     let alpha_weight = params.alpha_rank_weight.max(0.0);
     let liquidity_weight = params.liquidity_rank_weight.max(0.0);
@@ -3278,79 +3308,12 @@ fn candidate_ranking_uses_relative_strength(profile: CandidateRankingProfile) ->
         .unwrap_or(false)
 }
 
-pub(crate) fn relative_strength_rank_scores(
+// R9: 三联体合并为单一泛型函数。原 relative_strength_rank_scores /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+pub(crate) fn relative_strength_rank_scores<M: super::matrix_view::MatrixView>(
     candidates: &[(String, f64)],
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    score_day: NaiveDate,
-    lookback_days: usize,
-) -> HashMap<String, f64> {
-    let mut ranked_returns = candidates
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, (symbol, _))| {
-            let returns = trailing_returns(return_history, symbol, score_day, lookback_days);
-            trailing_total_return(&returns).map(|total_return| (idx, symbol.clone(), total_return))
-        })
-        .collect::<Vec<_>>();
-    if ranked_returns.is_empty() {
-        return HashMap::new();
-    }
-    ranked_returns.sort_by(|left, right| {
-        right
-            .2
-            .partial_cmp(&left.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    let denominator = ranked_returns.len().saturating_sub(1).max(1) as f64;
-    ranked_returns
-        .into_iter()
-        .enumerate()
-        .map(|(rank, (_, symbol, _))| (symbol, 1.0 - (rank as f64 / denominator)))
-        .collect()
-}
-
-// Phase 7-ER staged helper: mirrors relative_strength_rank_scores while reading
-// from a score-date matrix built with the caller's intended lookback.
-#[allow(dead_code)]
-pub(crate) fn relative_strength_rank_scores_from_matrix(
-    candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskMatrix,
-    score_day: NaiveDate,
-) -> HashMap<String, f64> {
-    let mut ranked_returns = candidates
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, (symbol, _))| {
-            matrix
-                .total_return(score_day, symbol)
-                .map(|total_return| (idx, symbol.clone(), total_return))
-        })
-        .collect::<Vec<_>>();
-    if ranked_returns.is_empty() {
-        return HashMap::new();
-    }
-    ranked_returns.sort_by(|left, right| {
-        right
-            .2
-            .partial_cmp(&left.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    let denominator = ranked_returns.len().saturating_sub(1).max(1) as f64;
-    ranked_returns
-        .into_iter()
-        .enumerate()
-        .map(|(rank, (_, symbol, _))| (symbol, 1.0 - (rank as f64 / denominator)))
-        .collect()
-}
-
-// Phase 7-ER staged helper: same ranking contract as the raw/matrix paths, but
-// reads precomputed single-symbol stats instead of the trailing return vector.
-#[allow(dead_code)]
-pub(crate) fn relative_strength_rank_scores_from_stats_matrix(
-    candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     score_day: NaiveDate,
 ) -> HashMap<String, f64> {
     let mut ranked_returns = candidates
@@ -3547,85 +3510,13 @@ fn regime_adjusted_weights(
     )
 }
 
-pub(crate) fn select_uncorrelated_candidates(
+// R9: 三联体合并为单一泛型函数。原 select_uncorrelated_candidates /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 correlation_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+pub(crate) fn select_uncorrelated_candidates<M: super::matrix_view::MatrixView>(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    config: &PortfolioConstructionConfig,
-    selection_limit: usize,
-) -> Vec<String> {
-    let mut selected: Vec<String> = Vec::new();
-    let selection_limit = selection_limit.max(config.top_n).min(candidates.len());
-    for (symbol, _) in candidates {
-        if selected.len() >= selection_limit {
-            break;
-        }
-        if let Some(limit) = config.max_pairwise_correlation {
-            let candidate_returns = trailing_returns(
-                return_history,
-                symbol,
-                score_day,
-                config.correlation_lookback_days,
-            );
-            let too_correlated = selected.iter().any(|selected_symbol| {
-                let selected_returns = trailing_returns(
-                    return_history,
-                    selected_symbol,
-                    score_day,
-                    config.correlation_lookback_days,
-                );
-                pearson_correlation(&candidate_returns, &selected_returns)
-                    .map(|corr| corr.abs() > limit)
-                    .unwrap_or(false)
-            });
-            if too_correlated {
-                continue;
-            }
-        }
-        selected.push(symbol.clone());
-    }
-    selected
-}
-
-// Phase 7-ER staged helper: mirrors select_uncorrelated_candidates while reading
-// correlations from a score-date matrix built with correlation_lookback_days.
-#[allow(dead_code)]
-pub(crate) fn select_uncorrelated_candidates_from_matrix(
-    score_day: NaiveDate,
-    candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskMatrix,
-    config: &PortfolioConstructionConfig,
-    selection_limit: usize,
-) -> Vec<String> {
-    let mut selected: Vec<String> = Vec::new();
-    let selection_limit = selection_limit.max(config.top_n).min(candidates.len());
-    for (symbol, _) in candidates {
-        if selected.len() >= selection_limit {
-            break;
-        }
-        if let Some(limit) = config.max_pairwise_correlation {
-            let too_correlated = selected.iter().any(|selected_symbol| {
-                matrix
-                    .pearson_correlation(score_day, symbol, selected_symbol)
-                    .map(|corr| corr.abs() > limit)
-                    .unwrap_or(false)
-            });
-            if too_correlated {
-                continue;
-            }
-        }
-        selected.push(symbol.clone());
-    }
-    selected
-}
-
-// Phase 7-ER staged helper: mirrors select_uncorrelated_candidates while reading
-// pairwise correlations from a precomputed stats matrix.
-#[allow(dead_code)]
-pub(crate) fn select_uncorrelated_candidates_from_stats_matrix(
-    score_day: NaiveDate,
-    candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     config: &PortfolioConstructionConfig,
     selection_limit: usize,
 ) -> Vec<String> {
@@ -3705,223 +3596,13 @@ fn cash_utilization_selection_limit(
     hard_limit
 }
 
-pub(crate) fn filter_candidate_risk_pool(
+// R9: 三联体合并为单一泛型函数。原 filter_candidate_risk_pool /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+pub(crate) fn filter_candidate_risk_pool<M: super::matrix_view::MatrixView>(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<(String, f64)> {
-    let Some(params) = config.candidate_risk_filter_profile.params() else {
-        return candidates.to_vec();
-    };
-    if candidates.len() <= config.top_n || candidates.is_empty() {
-        return candidates.to_vec();
-    }
-
-    let volatility_scores = candidates
-        .iter()
-        .filter_map(|(symbol, _)| {
-            let returns = trailing_returns(
-                return_history,
-                symbol,
-                score_day,
-                config.risk_budget_lookback_days,
-            );
-            sample_volatility(&returns).map(|volatility| (symbol.as_str(), volatility))
-        })
-        .collect::<Vec<_>>();
-
-    let Some(volatility_threshold) = quantile_value(
-        volatility_scores.iter().map(|(_, volatility)| *volatility),
-        params.max_volatility_quantile,
-    ) else {
-        return candidates.to_vec();
-    };
-
-    let low_volatility_symbols = volatility_scores
-        .iter()
-        .filter(|(_, volatility)| *volatility <= volatility_threshold)
-        .map(|(symbol, _)| *symbol)
-        .collect::<HashSet<_>>();
-
-    let mut filtered = candidates
-        .iter()
-        .filter(|(symbol, _)| {
-            if volatility_scores
-                .iter()
-                .any(|(known, _)| *known == symbol.as_str())
-            {
-                low_volatility_symbols.contains(symbol.as_str())
-            } else {
-                true
-            }
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if let Some(max_average_corr) = params.max_average_abs_correlation {
-        let reference_limit = params
-            .correlation_reference_limit
-            .max(config.top_n.saturating_mul(4))
-            .max(20);
-        let reference_symbols = filtered
-            .iter()
-            .take(reference_limit)
-            .map(|(symbol, _)| symbol.clone())
-            .collect::<Vec<_>>();
-        filtered.retain(|(symbol, _)| {
-            average_abs_correlation_to_reference(
-                symbol,
-                &reference_symbols,
-                return_history,
-                score_day,
-                config.risk_budget_lookback_days,
-            )
-            .map(|corr| corr <= max_average_corr)
-            .unwrap_or(true)
-        });
-    }
-
-    if let Some(min_liquidity_quantile) = params.min_liquidity_quantile {
-        if let Some(liquidity_threshold) = quantile_value(
-            filtered
-                .iter()
-                .filter_map(|(symbol, _)| average_amounts.get(symbol).copied()),
-            min_liquidity_quantile,
-        ) {
-            let liquidity_filtered = filtered
-                .iter()
-                .filter(|(symbol, _)| {
-                    average_amounts
-                        .get(symbol)
-                        .map(|amount| *amount >= liquidity_threshold)
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if liquidity_filtered.len() >= config.top_n {
-                filtered = liquidity_filtered;
-            }
-        }
-    }
-
-    if filtered.len() >= config.top_n {
-        filtered
-    } else {
-        candidates.to_vec()
-    }
-}
-
-// Phase 7-ER staged helper: mirrors filter_candidate_risk_pool while reading
-// volatility/correlation from a score-date matrix built with risk_budget_lookback_days.
-#[allow(dead_code)]
-pub(crate) fn filter_candidate_risk_pool_from_matrix(
-    score_day: NaiveDate,
-    candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskMatrix,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<(String, f64)> {
-    let Some(params) = config.candidate_risk_filter_profile.params() else {
-        return candidates.to_vec();
-    };
-    if candidates.len() <= config.top_n || candidates.is_empty() {
-        return candidates.to_vec();
-    }
-
-    let volatility_scores = candidates
-        .iter()
-        .filter_map(|(symbol, _)| {
-            matrix
-                .sample_volatility(score_day, symbol)
-                .map(|volatility| (symbol.as_str(), volatility))
-        })
-        .collect::<Vec<_>>();
-
-    let Some(volatility_threshold) = quantile_value(
-        volatility_scores.iter().map(|(_, volatility)| *volatility),
-        params.max_volatility_quantile,
-    ) else {
-        return candidates.to_vec();
-    };
-
-    let low_volatility_symbols = volatility_scores
-        .iter()
-        .filter(|(_, volatility)| *volatility <= volatility_threshold)
-        .map(|(symbol, _)| *symbol)
-        .collect::<HashSet<_>>();
-
-    let mut filtered = candidates
-        .iter()
-        .filter(|(symbol, _)| {
-            if volatility_scores
-                .iter()
-                .any(|(known, _)| *known == symbol.as_str())
-            {
-                low_volatility_symbols.contains(symbol.as_str())
-            } else {
-                true
-            }
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if let Some(max_average_corr) = params.max_average_abs_correlation {
-        let reference_limit = params
-            .correlation_reference_limit
-            .max(config.top_n.saturating_mul(4))
-            .max(20);
-        let reference_symbols = filtered
-            .iter()
-            .take(reference_limit)
-            .map(|(symbol, _)| symbol.clone())
-            .collect::<Vec<_>>();
-        filtered.retain(|(symbol, _)| {
-            matrix
-                .average_abs_correlation_to_reference(score_day, symbol, &reference_symbols)
-                .map(|corr| corr <= max_average_corr)
-                .unwrap_or(true)
-        });
-    }
-
-    if let Some(min_liquidity_quantile) = params.min_liquidity_quantile {
-        if let Some(liquidity_threshold) = quantile_value(
-            filtered
-                .iter()
-                .filter_map(|(symbol, _)| average_amounts.get(symbol).copied()),
-            min_liquidity_quantile,
-        ) {
-            let liquidity_filtered = filtered
-                .iter()
-                .filter(|(symbol, _)| {
-                    average_amounts
-                        .get(symbol)
-                        .map(|amount| *amount >= liquidity_threshold)
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if liquidity_filtered.len() >= config.top_n {
-                filtered = liquidity_filtered;
-            }
-        }
-    }
-
-    if filtered.len() >= config.top_n {
-        filtered
-    } else {
-        candidates.to_vec()
-    }
-}
-
-// Phase 7-ER staged helper: mirrors filter_candidate_risk_pool while reading
-// volatility and average correlation from a precomputed stats matrix.
-#[allow(dead_code)]
-pub(crate) fn filter_candidate_risk_pool_from_stats_matrix(
-    score_day: NaiveDate,
-    candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> Vec<(String, f64)> {
@@ -4076,86 +3757,13 @@ pub(crate) fn build_kelly_raw_weights<M: super::matrix_view::MatrixView>(
     }
 }
 
-pub(crate) fn build_risk_budget_raw_weights(
+// R9: 三联体合并为单一泛型函数。原 build_risk_budget_raw_weights /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+pub(crate) fn build_risk_budget_raw_weights<M: super::matrix_view::MatrixView>(
     score_day: NaiveDate,
     symbols: &[String],
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let max_amount = symbols
-        .iter()
-        .filter_map(|symbol| average_amounts.get(symbol).copied())
-        .filter(|amount| amount.is_finite() && *amount > 0.0)
-        .fold(0.0_f64, f64::max);
-
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let returns = trailing_returns(
-            return_history,
-            symbol,
-            score_day,
-            config.risk_budget_lookback_days,
-        );
-        let volatility = sample_volatility(&returns).unwrap_or(0.20);
-        let concentration_penalty =
-            covariance_concentration_penalty(symbol, symbols, return_history, score_day, config);
-        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
-        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
-        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
-        let raw = capacity_multiplier / risk_denominator;
-        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
-    }
-
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-// Phase 7-ER staged helper: mirrors build_risk_budget_raw_weights while reading
-// from a score-date matrix built with risk_budget_lookback_days.
-#[allow(dead_code)]
-pub(crate) fn build_risk_budget_raw_weights_from_matrix(
-    score_day: NaiveDate,
-    symbols: &[String],
-    matrix: &ScoreDateReturnRiskMatrix,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let max_amount = symbols
-        .iter()
-        .filter_map(|symbol| average_amounts.get(symbol).copied())
-        .filter(|amount| amount.is_finite() && *amount > 0.0)
-        .fold(0.0_f64, f64::max);
-
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20);
-        let concentration_penalty =
-            matrix.covariance_concentration_penalty(score_day, symbol, symbols);
-        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
-        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
-        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
-        let raw = capacity_multiplier / risk_denominator;
-        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
-    }
-
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-// Phase 7-ER staged helper: mirrors build_risk_budget_raw_weights while reading
-// volatility and concentration penalty from a precomputed stats matrix.
-#[allow(dead_code)]
-pub(crate) fn build_risk_budget_raw_weights_from_stats_matrix(
-    score_day: NaiveDate,
-    symbols: &[String],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> Vec<f64> {
@@ -4315,56 +3923,16 @@ fn stress_fill_confidence_multiplier(
     }
 }
 
-pub(crate) fn build_stress_fill_aware_risk_budget_raw_weights(
+// R9: 三联体合并为单一泛型函数。原 build_stress_fill_aware_risk_budget_raw_weights /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+pub(crate) fn build_stress_fill_aware_risk_budget_raw_weights<
+    M: super::matrix_view::MatrixView,
+>(
     score_day: NaiveDate,
     symbols: &[String],
     ranked_candidates: &[(String, f64)],
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let max_amount = symbols
-        .iter()
-        .filter_map(|symbol| average_amounts.get(symbol).copied())
-        .filter(|amount| amount.is_finite() && *amount > 0.0)
-        .fold(0.0_f64, f64::max);
-    let alpha_ranks = alpha_rank_lookup(ranked_candidates);
-    let confidence_scores = stress_fill_confidence_lookup_for_config(ranked_candidates, config);
-
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let returns = trailing_returns(
-            return_history,
-            symbol,
-            score_day,
-            config.risk_budget_lookback_days,
-        );
-        let volatility = sample_volatility(&returns).unwrap_or(0.20);
-        let concentration_penalty =
-            covariance_concentration_penalty(symbol, symbols, return_history, score_day, config);
-        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
-        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
-        let alpha_multiplier = stress_fill_alpha_multiplier(symbol, &alpha_ranks);
-        let confidence_multiplier =
-            stress_fill_confidence_multiplier(symbol, &confidence_scores, average_amounts, config);
-        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
-        let raw = alpha_multiplier * confidence_multiplier * capacity_multiplier / risk_denominator;
-        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
-    }
-
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-#[allow(dead_code)]
-fn build_stress_fill_aware_risk_budget_raw_weights_from_matrix(
-    score_day: NaiveDate,
-    symbols: &[String],
-    ranked_candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskMatrix,
+    matrix: &M,
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> Vec<f64> {
@@ -4398,130 +3966,13 @@ fn build_stress_fill_aware_risk_budget_raw_weights_from_matrix(
     }
 }
 
-#[allow(dead_code)]
-fn build_stress_fill_aware_risk_budget_raw_weights_from_stats_matrix(
+// R9: 三联体合并为单一泛型函数。原 build_min_variance_raw_weights /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+pub(crate) fn build_min_variance_raw_weights<M: super::matrix_view::MatrixView>(
     score_day: NaiveDate,
     symbols: &[String],
-    ranked_candidates: &[(String, f64)],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let max_amount = symbols
-        .iter()
-        .filter_map(|symbol| average_amounts.get(symbol).copied())
-        .filter(|amount| amount.is_finite() && *amount > 0.0)
-        .fold(0.0_f64, f64::max);
-    let alpha_ranks = alpha_rank_lookup(ranked_candidates);
-    let confidence_scores = stress_fill_confidence_lookup_for_config(ranked_candidates, config);
-
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20);
-        let concentration_penalty =
-            matrix.covariance_concentration_penalty(score_day, symbol, symbols);
-        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
-        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
-        let alpha_multiplier = stress_fill_alpha_multiplier(symbol, &alpha_ranks);
-        let confidence_multiplier =
-            stress_fill_confidence_multiplier(symbol, &confidence_scores, average_amounts, config);
-        let risk_denominator = volatility.max(0.01) * concentration_penalty.max(1.0);
-        let raw = alpha_multiplier * confidence_multiplier * capacity_multiplier / risk_denominator;
-        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
-    }
-
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-pub(crate) fn build_min_variance_raw_weights(
-    score_day: NaiveDate,
-    symbols: &[String],
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let max_amount = symbols
-        .iter()
-        .filter_map(|symbol| average_amounts.get(symbol).copied())
-        .filter(|amount| amount.is_finite() && *amount > 0.0)
-        .fold(0.0_f64, f64::max);
-
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let returns = trailing_returns(
-            return_history,
-            symbol,
-            score_day,
-            config.risk_budget_lookback_days,
-        );
-        let volatility = sample_volatility(&returns).unwrap_or(0.20).max(0.01);
-        let concentration_penalty =
-            covariance_concentration_penalty(symbol, symbols, return_history, score_day, config);
-        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
-        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
-        let variance = volatility * volatility;
-        let covariance_penalty = concentration_penalty.max(1.0).powi(2);
-        let raw = capacity_multiplier / (variance.max(0.0001) * covariance_penalty);
-        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
-    }
-
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-// Phase 7-ER staged helper: mirrors build_min_variance_raw_weights while reading
-// from a score-date matrix built with risk_budget_lookback_days.
-#[allow(dead_code)]
-pub(crate) fn build_min_variance_raw_weights_from_matrix(
-    score_day: NaiveDate,
-    symbols: &[String],
-    matrix: &ScoreDateReturnRiskMatrix,
-    average_amounts: &HashMap<String, f64>,
-    config: &PortfolioConstructionConfig,
-) -> Vec<f64> {
-    let max_amount = symbols
-        .iter()
-        .filter_map(|symbol| average_amounts.get(symbol).copied())
-        .filter(|amount| amount.is_finite() && *amount > 0.0)
-        .fold(0.0_f64, f64::max);
-
-    let mut raw_weights = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let volatility = matrix
-            .sample_volatility(score_day, symbol)
-            .unwrap_or(0.20)
-            .max(0.01);
-        let concentration_penalty =
-            matrix.covariance_concentration_penalty(score_day, symbol, symbols);
-        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
-        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
-        let variance = volatility * volatility;
-        let covariance_penalty = concentration_penalty.max(1.0).powi(2);
-        let raw = capacity_multiplier / (variance.max(0.0001) * covariance_penalty);
-        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
-    }
-
-    if raw_weights.iter().all(|weight| *weight <= 0.0) {
-        vec![1.0; symbols.len()]
-    } else {
-        raw_weights
-    }
-}
-
-// Phase 7-ER staged helper: mirrors build_min_variance_raw_weights while reading
-// volatility and concentration penalty from a precomputed stats matrix.
-#[allow(dead_code)]
-pub(crate) fn build_min_variance_raw_weights_from_stats_matrix(
-    score_day: NaiveDate,
-    symbols: &[String],
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
 ) -> Vec<f64> {
@@ -5167,112 +4618,12 @@ fn apply_industry_cap(
     weights.retain(|_, weight| !weight.is_zero());
 }
 
-fn apply_style_risk_budget(
+// R9: 三联体合并为单一泛型函数。原 apply_style_risk_budget /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+fn apply_style_risk_budget<M: super::matrix_view::MatrixView>(
     weights: &mut HashMap<String, Decimal>,
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    average_amounts: &HashMap<String, f64>,
-    score_day: NaiveDate,
-    config: &PortfolioConstructionConfig,
-) {
-    let Some(params) = config.style_risk_budget_profile.params() else {
-        return;
-    };
-    if weights.is_empty() {
-        return;
-    }
-
-    let volatility_scores = weights
-        .keys()
-        .filter_map(|symbol| {
-            let returns = trailing_returns(
-                return_history,
-                symbol,
-                score_day,
-                config.risk_budget_lookback_days,
-            );
-            sample_volatility(&returns).map(|volatility| (symbol.clone(), volatility))
-        })
-        .collect::<Vec<_>>();
-    let high_volatility_symbols =
-        high_style_bucket_symbols(&volatility_scores, params.high_volatility_quantile);
-    cap_style_bucket(
-        weights,
-        &high_volatility_symbols,
-        params.high_volatility_max_weight_pct,
-    );
-
-    let liquidity_scores = weights
-        .keys()
-        .filter_map(|symbol| {
-            average_amounts
-                .get(symbol)
-                .copied()
-                .filter(|amount| amount.is_finite() && *amount > 0.0)
-                .map(|amount| (symbol.clone(), amount))
-        })
-        .collect::<Vec<_>>();
-    let low_liquidity_symbols =
-        low_style_bucket_symbols(&liquidity_scores, params.low_liquidity_quantile);
-    cap_style_bucket(
-        weights,
-        &low_liquidity_symbols,
-        params.low_liquidity_max_weight_pct,
-    );
-}
-
-fn apply_style_risk_budget_from_matrix(
-    weights: &mut HashMap<String, Decimal>,
-    matrix: &ScoreDateReturnRiskMatrix,
-    average_amounts: &HashMap<String, f64>,
-    score_day: NaiveDate,
-    config: &PortfolioConstructionConfig,
-) {
-    let Some(params) = config.style_risk_budget_profile.params() else {
-        return;
-    };
-    if weights.is_empty() {
-        return;
-    }
-
-    let volatility_scores = weights
-        .keys()
-        .filter_map(|symbol| {
-            matrix
-                .sample_volatility(score_day, symbol)
-                .map(|volatility| (symbol.clone(), volatility))
-        })
-        .collect::<Vec<_>>();
-    let high_volatility_symbols =
-        high_style_bucket_symbols(&volatility_scores, params.high_volatility_quantile);
-    cap_style_bucket(
-        weights,
-        &high_volatility_symbols,
-        params.high_volatility_max_weight_pct,
-    );
-
-    let liquidity_scores = weights
-        .keys()
-        .filter_map(|symbol| {
-            average_amounts
-                .get(symbol)
-                .copied()
-                .filter(|amount| amount.is_finite() && *amount > 0.0)
-                .map(|amount| (symbol.clone(), amount))
-        })
-        .collect::<Vec<_>>();
-    let low_liquidity_symbols =
-        low_style_bucket_symbols(&liquidity_scores, params.low_liquidity_quantile);
-    cap_style_bucket(
-        weights,
-        &low_liquidity_symbols,
-        params.low_liquidity_max_weight_pct,
-    );
-}
-
-#[allow(dead_code)]
-fn apply_style_risk_budget_from_stats_matrix(
-    weights: &mut HashMap<String, Decimal>,
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     average_amounts: &HashMap<String, f64>,
     score_day: NaiveDate,
     config: &PortfolioConstructionConfig,
@@ -5401,151 +4752,12 @@ fn cap_style_bucket(
     weights.retain(|_, weight| !weight.is_zero());
 }
 
-fn apply_risk_contribution_control(
+// R9: 三联体合并为单一泛型函数。原 apply_risk_contribution_control /
+// _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
+// base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
+fn apply_risk_contribution_control<M: super::matrix_view::MatrixView>(
     weights: &mut HashMap<String, Decimal>,
-    return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
-    score_day: NaiveDate,
-    config: &PortfolioConstructionConfig,
-) {
-    let Some(params) = config.risk_contribution_control_profile.params() else {
-        return;
-    };
-    if weights.len() < 2 {
-        return;
-    }
-
-    let cap = params.max_single_name_contribution_pct.clamp(0.01, 1.0);
-    if cap >= 1.0 {
-        return;
-    }
-
-    for _ in 0..params.iterations.max(1) {
-        let symbols = weights.keys().cloned().collect::<Vec<_>>();
-        let contributions = symbols
-            .iter()
-            .filter_map(|symbol| {
-                let weight = weights.get(symbol)?.to_f64()?;
-                if !weight.is_finite() || weight <= 0.0 {
-                    return None;
-                }
-                let volatility = sample_volatility(&trailing_returns(
-                    return_history,
-                    symbol,
-                    score_day,
-                    config.risk_budget_lookback_days,
-                ))
-                .unwrap_or(0.20)
-                .max(0.01);
-                let concentration_penalty = covariance_concentration_penalty(
-                    symbol,
-                    &symbols,
-                    return_history,
-                    score_day,
-                    config,
-                );
-                let risk_score = weight * volatility * concentration_penalty.max(1.0);
-                if risk_score.is_finite() && risk_score > 0.0 {
-                    Some((symbol.clone(), risk_score))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        let total_risk = contributions.iter().map(|(_, risk)| *risk).sum::<f64>();
-        if total_risk <= 0.0 {
-            return;
-        }
-
-        let mut changed = false;
-        for (symbol, risk_score) in contributions {
-            let contribution_pct = risk_score / total_risk;
-            if contribution_pct <= cap {
-                continue;
-            }
-            if let Some(weight) = weights.get_mut(&symbol) {
-                let scale = Decimal::from_f64((cap / contribution_pct).clamp(0.0, 1.0))
-                    .unwrap_or(Decimal::ONE);
-                *weight *= scale;
-                changed = true;
-            }
-        }
-        weights.retain(|_, weight| !weight.is_zero());
-        if !changed {
-            break;
-        }
-    }
-}
-
-fn apply_risk_contribution_control_from_matrix(
-    weights: &mut HashMap<String, Decimal>,
-    matrix: &ScoreDateReturnRiskMatrix,
-    score_day: NaiveDate,
-    config: &PortfolioConstructionConfig,
-) {
-    let Some(params) = config.risk_contribution_control_profile.params() else {
-        return;
-    };
-    if weights.len() < 2 {
-        return;
-    }
-
-    let cap = params.max_single_name_contribution_pct.clamp(0.01, 1.0);
-    if cap >= 1.0 {
-        return;
-    }
-
-    for _ in 0..params.iterations.max(1) {
-        let symbols = weights.keys().cloned().collect::<Vec<_>>();
-        let contributions = symbols
-            .iter()
-            .filter_map(|symbol| {
-                let weight = weights.get(symbol)?.to_f64()?;
-                if !weight.is_finite() || weight <= 0.0 {
-                    return None;
-                }
-                let volatility = matrix
-                    .sample_volatility(score_day, symbol)
-                    .unwrap_or(0.20)
-                    .max(0.01);
-                let concentration_penalty =
-                    matrix.covariance_concentration_penalty(score_day, symbol, &symbols);
-                let risk_score = weight * volatility * concentration_penalty.max(1.0);
-                if risk_score.is_finite() && risk_score > 0.0 {
-                    Some((symbol.clone(), risk_score))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        let total_risk = contributions.iter().map(|(_, risk)| *risk).sum::<f64>();
-        if total_risk <= 0.0 {
-            return;
-        }
-
-        let mut changed = false;
-        for (symbol, risk_score) in contributions {
-            let contribution_pct = risk_score / total_risk;
-            if contribution_pct <= cap {
-                continue;
-            }
-            if let Some(weight) = weights.get_mut(&symbol) {
-                let scale = Decimal::from_f64((cap / contribution_pct).clamp(0.0, 1.0))
-                    .unwrap_or(Decimal::ONE);
-                *weight *= scale;
-                changed = true;
-            }
-        }
-        weights.retain(|_, weight| !weight.is_zero());
-        if !changed {
-            break;
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn apply_risk_contribution_control_from_stats_matrix(
-    weights: &mut HashMap<String, Decimal>,
-    matrix: &ScoreDateReturnRiskStatsMatrix,
+    matrix: &M,
     score_day: NaiveDate,
     config: &PortfolioConstructionConfig,
 ) {
