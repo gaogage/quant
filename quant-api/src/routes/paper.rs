@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -435,15 +436,12 @@ async fn compute_paper_nav_inner(
         .collect();
 
     // Get initial capital
-    let row = sqlx::query_as::<_, (f64,)>(
-        "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(&account_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("DB: {}", e))?
-    .ok_or("account not found")?;
-    let initial_capital = row.0;
+    let capital = PgPaperAccountRepo::new(db)
+        .find_initial_capital(&account_id)
+        .await
+        .map_err(|e| format!("DB: {}", e))?
+        .ok_or("account not found")?;
+    let initial_capital = capital;
 
     let mut prev_nav = initial_capital;
     let mut peak_nav = initial_capital;
@@ -649,15 +647,12 @@ async fn simulate_paper_nav_inner(
     let commission = req.commission_pct.unwrap_or(0.0003);
 
     // Load account
-    let row = sqlx::query_as::<_, (f64,)>(
-        "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(&account_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("DB: {}", e))?
-    .ok_or("account not found")?;
-    let initial = row.0;
+    let capital = PgPaperAccountRepo::new(db)
+        .find_initial_capital(&account_id)
+        .await
+        .map_err(|e| format!("DB: {}", e))?
+        .ok_or("account not found")?;
+    let initial = capital;
 
     // Load prediction scores grouped by date
     let scores = sqlx::query_as::<_, (NaiveDate, String, f64)>(
@@ -938,15 +933,12 @@ async fn simulate_multi_window_inner(
     let benchmark = req.benchmark.unwrap_or_else(|| "000300.SH".into());
     let commission = req.commission_pct.unwrap_or(0.0003);
 
-    let row = sqlx::query_as::<_, (f64,)>(
-        "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(&account_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("DB: {}", e))?
-    .ok_or("account not found")?;
-    let initial = row.0;
+    let capital = PgPaperAccountRepo::new(db)
+        .find_initial_capital(&account_id)
+        .await
+        .map_err(|e| format!("DB: {}", e))?
+        .ok_or("account not found")?;
+    let initial = capital;
 
     let mut nav = initial;
     let mut peak_nav = initial;

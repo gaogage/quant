@@ -21,6 +21,7 @@ use chrono::{Datelike, NaiveDate};
 
 use crate::auth::middleware::UserContext;
 use crate::routes::mvo_engine::compute_metrics;
+use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
 use crate::AppState;
 
 /// 绩效唯一数据源 = 每日 NAV 累计（paper_nav_snapshot）。
@@ -322,15 +323,10 @@ async fn check_account_access(
     if user.role == "admin" {
         return Ok(());
     }
-    let owner = sqlx::query_as::<_, (Option<String>,)>(
-        "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(account_id)
-    .fetch_optional(db)
-    .await;
+    let owner = PgPaperAccountRepo::new(db).find_user_id(account_id).await;
     match owner {
-        Ok(Some((Some(oid),))) if oid == user.user_id => Ok(()),
-        Ok(Some((None,))) => Ok(()),
+        Ok(Some(oid)) if oid == user.user_id => Ok(()),
+        Ok(None) => Ok(()),
         _ => Err(Json(serde_json::json!({"code": 403, "message": "无权访问"})).into_response()),
     }
 }
@@ -878,15 +874,10 @@ pub async fn update_account(
     // 校验所有权（admin 可改任意账号）
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(&account_id)
-        .fetch_optional(&state.db)
-        .await;
+        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
         match owner {
-            Ok(Some((Some(oid),))) if oid == user.user_id => {}
-            Ok(Some((None,))) => {} // 无主账号允许修改
+            Ok(Some(oid)) if oid == user.user_id => {}
+            Ok(None) => {} // 无主账号允许修改
             _ => return Json(serde_json::json!({"code": 403, "message": "只能修改自己的账号"})),
         }
     }
@@ -935,15 +926,10 @@ pub async fn delete_account(
 ) -> impl IntoResponse {
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(&account_id)
-        .fetch_optional(&state.db)
-        .await;
+        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
         match owner {
-            Ok(Some((Some(oid),))) if oid == user.user_id => {}
-            Ok(Some((None,))) => {}
+            Ok(Some(oid)) if oid == user.user_id => {}
+            Ok(None) => {}
             _ => return Json(serde_json::json!({"code": 403, "message": "只能删除自己的账号"})),
         }
     }
@@ -974,15 +960,10 @@ pub async fn reset_account(
 ) -> impl IntoResponse {
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(&account_id)
-        .fetch_optional(&state.db)
-        .await;
+        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
         match owner {
-            Ok(Some((Some(oid),))) if oid == user.user_id => {}
-            Ok(Some((None,))) => {}
+            Ok(Some(oid)) if oid == user.user_id => {}
+            Ok(None) => {}
             _ => {
                 return Json(serde_json::json!({"code": 403, "message": "只能重置自己的账号"}))
                     .into_response()
@@ -1077,15 +1058,10 @@ pub async fn push_account_dingtalk(
     // 权限校验
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(&account_id)
-        .fetch_optional(&state.db)
-        .await;
+        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
         match owner {
-            Ok(Some((Some(oid),))) if oid == user.user_id => {}
-            Ok(Some((None,))) => {}
+            Ok(Some(oid)) if oid == user.user_id => {}
+            Ok(None) => {}
             _ => {
                 return Json(serde_json::json!({"code": 403, "message": "无权操作"}))
                     .into_response()
@@ -1147,10 +1123,8 @@ pub async fn push_account_dingtalk(
     let mdd = perf.and_then(|(m,)| m).unwrap_or(0.0); // DB 存的是小数（0.1238 = 12.38%），dingtalk.rs 会 ×100 显示为百分比
     let cum_ret = if nav > 0.0 {
         // 从 paper_account 获取 initial_capital 计算
-        let cap: Option<(f64,)> = sqlx::query_as(
-            "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1"
-        ).bind(&account_id).fetch_optional(&state.db).await.ok().flatten();
-        let init = cap.map(|(c,)| c).unwrap_or(nav);
+        let cap = PgPaperAccountRepo::new(&state.db).find_initial_capital(&account_id).await.ok().flatten();
+        let init = cap.unwrap_or(nav);
         if init > 0.0 {
             nav / init - 1.0
         } else {

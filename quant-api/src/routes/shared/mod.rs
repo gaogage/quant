@@ -20,6 +20,7 @@ mod alerts;
 mod trade_block;
 mod etf_prices;
 mod nav_snapshot;
+mod paper_account_repo;
 
 // pub(crate) 项用 pub(crate) use re-export（不能 pub use，否则 E0364）
 pub(crate) use strategy_config::resolved_to_legacy_sc;
@@ -31,3 +32,4 @@ pub(crate) use alerts::{send_quality_alert, send_dingtalk_alert, send_dingtalk_a
 pub use trade_block::preload_trade_block_map;
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
 pub use nav_snapshot::{NavSnapshot, upsert_nav_snapshot};
+pub use paper_account_repo::{PaperAccountRepository, PgPaperAccountRepo};
