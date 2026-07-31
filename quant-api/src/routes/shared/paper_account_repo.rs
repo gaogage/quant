@@ -17,57 +17,15 @@ use sqlx::PgPool;
 /// Paper 仓储统一错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum PaperRepositoryError {
-    #[error("paper account not found: {0}")]
-    NotFound(String),
-
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
 
-/// Paper 账号领域实体（聚合 paper_account 表常用字段）。
-///
-/// 字段按 schema 完整定义，调用方按需取用。Option 字段对应可空列。
-#[derive(Debug, Clone)]
-pub struct PaperAccount {
-    pub account_id: String,
-    pub name: String,
-    pub base_currency: String,
-    pub initial_capital: f64,
-    pub cash: f64,
-    pub status: String,
-    pub account_type: String,
-    pub strategy_version_id: Option<String>,
-    pub signal_source: String,
-    pub current_nav: Option<f64>,
-    pub peak_nav: Option<f64>,
-    pub max_drawdown_pct: Option<f64>,
-    pub total_trades: i32,
-    pub last_signal_date: Option<chrono::NaiveDate>,
-    pub leverage_enabled: bool,
-    pub leverage_multiplier: f64,
-    pub leverage_mode: String,
-    pub margin_amount: f64,
-    pub reserve_amount: f64,
-    pub liquidation_threshold: Option<f64>,
-    pub warning_threshold: Option<f64>,
-    pub user_id: Option<String>,
-    pub dingtalk_webhook_url: Option<String>,
-}
-
-/// 杠杆配置（重复组 F：portfolio.rs:1777 + rebalance.rs:709）。
-#[derive(Debug, Clone)]
-pub struct LeverageConfig {
-    pub enabled: bool,
-    pub multiplier: f64,
-    pub mode: String,
-    pub liquidation_threshold: Option<f64>,
-    pub warning_threshold: Option<f64>,
-}
-
-/// 创建账号输入（重复组 G：统一 paper.rs:1255 + accounts.rs:848 字段集）。
+/// 创建账号输入（重复组 G：统一 paper.rs:1231 + accounts.rs:848 字段集）。
 #[derive(Debug, Clone)]
 pub struct CreateAccountInput {
     pub name: String,
+    pub base_currency: String,
     pub account_type: String,
     pub initial_capital: f64,
     pub leverage_enabled: bool,
@@ -90,6 +48,34 @@ pub trait PaperAccountRepository {
     /// 查初始资金（重复组 A：4 处 SQL 完全相同，`initial_capital::double precision`）。
     fn find_initial_capital(&self, id: &str)
         -> impl std::future::Future<Output = Result<Option<f64>, PaperRepositoryError>> + Send;
+
+    /// 更新 NAV 摘要（重复组 C：paper.rs:858/1220 两处 SQL 完全相同）。
+    ///
+    /// `UPDATE paper_account SET current_nav=$1, peak_nav=$2, max_drawdown_pct=$3,
+    ///  total_trades=$4, updated_at=now() WHERE paper_account_id=$5`
+    ///
+    /// 注：paper.rs:586（无 total_trades）与 rebalance.rs:537（含 last_signal_date）是变体，
+    /// 字段集不同，保留原处不合并。
+    fn update_nav(
+        &self,
+        id: &str,
+        current_nav: f64,
+        peak_nav: f64,
+        max_drawdown_pct: f64,
+        total_trades: i32,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
+
+    /// 创建账号（重复组 G：统一 paper.rs:1231 + accounts.rs:848 字段集，消除 schema 漂移）。
+    ///
+    /// 两处原 INSERT 字段集不一致：
+    /// - paper.rs:1231：base_currency/dingtalk_webhook_url（无 leverage/user_id）
+    /// - accounts.rs:848：leverage_enabled/mode/multiplier/signal_source/user_id（无 base_currency/webhook）
+    ///
+    /// 统一为并集 SQL，未传字段用表默认值（base_currency 默认 CNY，leverage 默认 false/1.0/fixed，
+    /// signal_source 默认 factor，user_id/webhook 允许 NULL）。
+    /// 返回新生成的 account_id（`pa-{uuid}` 前缀）。
+    fn create(&self, id: &str, input: &CreateAccountInput)
+        -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
 }
 
 /// PostgreSQL 实现的 paper 账号仓储。
@@ -133,6 +119,58 @@ impl<'a> PaperAccountRepository for PgPaperAccountRepo<'a> {
             .fetch_optional(self.pool)
             .await?;
             Ok(row.map(|(c,)| c))
+        }
+    }
+
+    fn update_nav(
+        &self,
+        id: &str,
+        current_nav: f64,
+        peak_nav: f64,
+        max_drawdown_pct: f64,
+        total_trades: i32,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+        async move {
+            sqlx::query(
+                "UPDATE paper_account SET current_nav=$1, peak_nav=$2, max_drawdown_pct=$3,
+                 total_trades=$4, updated_at=now() WHERE paper_account_id=$5",
+            )
+            .bind(current_nav)
+            .bind(peak_nav)
+            .bind(max_drawdown_pct)
+            .bind(total_trades)
+            .bind(id)
+            .execute(self.pool)
+            .await?;
+            Ok(())
+        }
+    }
+
+    fn create(&self, id: &str, input: &CreateAccountInput) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+        async move {
+            // 字段并集：统一 paper.rs（base_currency/webhook）+ accounts.rs（leverage/signal_source/user_id）。
+            // cash = initial_capital（两处原语义一致）。status 固定 'active'。
+            sqlx::query(
+                "INSERT INTO paper_account
+                   (paper_account_id, name, base_currency, account_type, initial_capital, cash,
+                    leverage_enabled, leverage_mode, leverage_multiplier, signal_source,
+                    status, user_id, dingtalk_webhook_url)
+                 VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, 'active', $10, $11)",
+            )
+            .bind(id)
+            .bind(&input.name)
+            .bind(&input.base_currency)
+            .bind(&input.account_type)
+            .bind(input.initial_capital)
+            .bind(input.leverage_enabled)
+            .bind(&input.leverage_mode)
+            .bind(input.leverage_multiplier)
+            .bind(&input.signal_source)
+            .bind(&input.user_id)
+            .bind(&input.dingtalk_webhook_url)
+            .execute(self.pool)
+            .await?;
+            Ok(())
         }
     }
 }

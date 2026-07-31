@@ -32,4 +32,4 @@ pub(crate) use alerts::{send_quality_alert, send_dingtalk_alert, send_dingtalk_a
 pub use trade_block::preload_trade_block_map;
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
 pub use nav_snapshot::{NavSnapshot, upsert_nav_snapshot};
-pub use paper_account_repo::{PaperAccountRepository, PgPaperAccountRepo};
+pub use paper_account_repo::{CreateAccountInput, PaperAccountRepository, PgPaperAccountRepo};

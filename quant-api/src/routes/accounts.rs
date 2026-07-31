@@ -833,30 +833,20 @@ pub async fn create_account(
     Json(req): Json<CreateAccountRequest>,
 ) -> impl IntoResponse {
     let aid = format!("pa-{}", Uuid::new_v4().simple()); // paper_account 前缀
-    let at = req.account_type.as_deref().unwrap_or("simulated");
-    let cap = req.initial_capital.unwrap_or(1_000_000.0);
-    let le = req.leverage_enabled.unwrap_or(false);
-    let lm = req.leverage_mode.as_deref().unwrap_or("fixed");
-    let lmp = req.leverage_multiplier.unwrap_or(1.0);
-    let ss = req.signal_source.as_deref().unwrap_or("factor");
+    let input = crate::routes::shared::CreateAccountInput {
+        name: req.name.clone(),
+        base_currency: "CNY".to_string(),
+        account_type: req.account_type.as_deref().unwrap_or("simulated").to_string(),
+        initial_capital: req.initial_capital.unwrap_or(1_000_000.0),
+        leverage_enabled: req.leverage_enabled.unwrap_or(false),
+        leverage_mode: req.leverage_mode.as_deref().unwrap_or("fixed").to_string(),
+        leverage_multiplier: req.leverage_multiplier.unwrap_or(1.0),
+        signal_source: req.signal_source.as_deref().unwrap_or("factor").to_string(),
+        user_id: Some(user.user_id.clone()),
+        dingtalk_webhook_url: None,
+    };
 
-    match sqlx::query(
-        "INSERT INTO paper_account (paper_account_id, name, account_type, initial_capital, cash,
-         leverage_enabled, leverage_mode, leverage_multiplier, signal_source, status, user_id)
-         VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, 'active', $9)",
-    )
-    .bind(&aid)
-    .bind(&req.name)
-    .bind(at)
-    .bind(cap)
-    .bind(le)
-    .bind(lm)
-    .bind(lmp)
-    .bind(ss)
-    .bind(&user.user_id)
-    .execute(&state.db)
-    .await
-    {
+    match PgPaperAccountRepo::new(&state.db).create(&aid, &input).await {
         Ok(_) => Json(serde_json::json!({"code": 0, "data": {"account_id": aid}})),
         Err(e) => Json(serde_json::json!({"code": 1, "message": format!("创建失败: {}", e)})),
     }

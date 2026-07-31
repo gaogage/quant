@@ -5,7 +5,7 @@ use axum::{
 };
 use chrono::NaiveDate;
 use chrono::{DateTime, Utc};
-use rust_decimal::prelude::{FromPrimitive, Zero};
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive, Zero};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -849,18 +849,10 @@ async fn simulate_paper_nav_inner(
     }
 
     // Update account
-    sqlx::query(
-        "UPDATE paper_account SET current_nav=$1, peak_nav=$2, max_drawdown_pct=$3,
-         total_trades=$4, updated_at=now() WHERE paper_account_id=$5",
-    )
-    .bind(prev_nav)
-    .bind(peak_nav)
-    .bind(max_dd)
-    .bind(total_trades as i32)
-    .bind(&account_id)
-    .execute(db)
-    .await
-    .map_err(|e| format!("account update: {}", e))?;
+    PgPaperAccountRepo::new(db)
+        .update_nav(&account_id, prev_nav, peak_nav, max_dd, total_trades as i32)
+        .await
+        .map_err(|e| format!("account update: {}", e))?;
 
     let sharpe = nav_history
         .iter()
@@ -1208,18 +1200,10 @@ async fn simulate_multi_window_inner(
     let bench_final = bench_map.get(&global_end).copied().unwrap_or(0.0);
 
     // Update account
-    sqlx::query(
-        "UPDATE paper_account SET current_nav=$1, peak_nav=$2, max_drawdown_pct=$3,
-         total_trades=$4, updated_at=now() WHERE paper_account_id=$5",
-    )
-    .bind(nav)
-    .bind(peak_nav)
-    .bind(max_dd)
-    .bind(total_trades as i32)
-    .bind(&account_id)
-    .execute(db)
-    .await
-    .map_err(|e| format!("account update: {}", e))?;
+    PgPaperAccountRepo::new(db)
+        .update_nav(&account_id, nav, peak_nav, max_dd, total_trades as i32)
+        .await
+        .map_err(|e| format!("account update: {}", e))?;
 
     Ok(json!({
         "paper_account_id": account_id,
@@ -1243,20 +1227,22 @@ async fn create_paper_account_inner(
 ) -> Result<Value, String> {
     let req = normalize_account_request(req)?;
     let account_id = format!("pa-{}", Uuid::new_v4());
-    sqlx::query(
-        "INSERT INTO paper_account
-           (paper_account_id, name, base_currency, initial_capital, cash, status, account_type, dingtalk_webhook_url)
-         VALUES ($1, $2, $3, $4, $4, 'active', $5, $6)",
-    )
-    .bind(&account_id)
-    .bind(&req.name)
-    .bind(&req.base_currency)
-    .bind(req.initial_capital)
-    .bind(&req.account_type)
-    .bind(&req.dingtalk_webhook_url)
-    .execute(db)
-    .await
-    .map_err(|error| format!("Failed to create paper_account: {}", error))?;
+    let input = crate::routes::shared::CreateAccountInput {
+        name: req.name.clone(),
+        base_currency: req.base_currency.clone(),
+        account_type: req.account_type.clone(),
+        initial_capital: req.initial_capital.to_f64().unwrap_or(0.0),
+        leverage_enabled: false,
+        leverage_mode: "fixed".to_string(),
+        leverage_multiplier: 1.0,
+        signal_source: "factor".to_string(),
+        user_id: None,
+        dingtalk_webhook_url: req.dingtalk_webhook_url.clone(),
+    };
+    PgPaperAccountRepo::new(db)
+        .create(&account_id, &input)
+        .await
+        .map_err(|error| format!("Failed to create paper_account: {}", error))?;
 
     write_audit_event(
         db,
