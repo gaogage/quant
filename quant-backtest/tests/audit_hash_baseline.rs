@@ -71,12 +71,51 @@ async fn audit_hash_baseline_is_stable() {
     );
 }
 
+/// 验证 config/data_version hash 确定性 + 金标准守卫（audit 扩覆盖）。
+#[tokio::test]
+#[ignore = "需 DB,验证 config/data_version hash 确定性"]
+async fn audit_hash_config_and_data_version_are_stable() {
+    let report = run_db_perf_baseline(DbPerfBaselineConfig::default())
+        .await
+        .expect("DB 回测基线应成功运行");
+    let report2 = run_db_perf_baseline(DbPerfBaselineConfig::default())
+        .await
+        .expect("第二次 DB 回测基线应成功运行");
+
+    // config/data_version hash 必须是 64 位十六进制
+    assert_eq!(report.config_sha256.len(), 64);
+    assert_eq!(report.data_version_sha256.len(), 64);
+    assert!(report
+        .config_sha256
+        .chars()
+        .all(|c| c.is_ascii_hexdigit()));
+    assert!(report
+        .data_version_sha256
+        .chars()
+        .all(|c| c.is_ascii_hexdigit()));
+
+    // 确定性：相同配置两次回测的 config/data_version hash 必须一致
+    assert_eq!(
+        report.config_sha256, report2.config_sha256,
+        "相同配置两次回测的 config hash 必须一致"
+    );
+    assert_eq!(
+        report.data_version_sha256, report2.data_version_sha256,
+        "相同配置两次回测的 data_version hash 必须一致"
+    );
+
+    eprintln!(
+        "audit hash 扩展: config_sha256={} data_version_sha256={}",
+        report.config_sha256, report.data_version_sha256
+    );
+}
+
 /// 纯单元测试:验证 hash 函数对固定输入产出固定输出(不连 DB)。
 /// 这是守卫的"地基"--若 hash 函数本身不确定,DB 基线无从谈起。
 #[test]
 fn audit_hash_functions_are_deterministic_offline() {
-    use quant_backtest::db_perf_baseline::{hash_equity_curve, hash_signals};
-    use quant_backtest::engine::StrategySignal;
+    use quant_backtest::db_perf_baseline::{hash_config, hash_data_version, hash_equity_curve, hash_signals};
+    use quant_backtest::engine::{BacktestConfig, StrategySignal};
     use rust_decimal::Decimal;
     use std::collections::HashMap;
 
@@ -100,4 +139,17 @@ fn audit_hash_functions_are_deterministic_offline() {
     let s2 = hash_signals(&signals);
     assert_eq!(s1, s2, "相同信号必须产出相同 hash");
     assert_eq!(s1.len(), 64);
+
+    // config hash 确定性：相同 config 序列化产出相同 hash
+    let cfg = BacktestConfig::default();
+    let c1 = hash_config(&cfg);
+    let c2 = hash_config(&cfg);
+    assert_eq!(c1, c2, "相同 config 必须产出相同 hash");
+    assert_eq!(c1.len(), 64);
+
+    // data_version hash 确定性
+    let dv1 = hash_data_version("dv-test-001");
+    let dv2 = hash_data_version("dv-test-001");
+    assert_eq!(dv1, dv2, "相同 data_version 必须产出相同 hash");
+    assert_ne!(dv1, hash_data_version("dv-test-002"), "不同 dv 应产出不同 hash");
 }

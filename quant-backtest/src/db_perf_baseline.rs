@@ -72,6 +72,12 @@ pub struct DbPerfBaselineReport {
     pub equity_curve_sha256: String,
     /// 信号序列 (date, symbol, weight) 的 SHA-256，weight 保留 8 位小数。
     pub signal_hash_sha256: String,
+    /// BacktestConfig 序列化 JSON 的 SHA-256，捕获 config 字段静默变更。
+    /// audit 守卫扩展：防止"同 equity 不同 config"的隐性回归。
+    pub config_sha256: String,
+    /// 回测所用 data_version_id 的 SHA-256，显式记录数据版本。
+    /// data_version 变更使 hash 变化，提示基线需重建而非误判回归。
+    pub data_version_sha256: String,
 }
 
 pub fn parse_db_perf_args<I, S>(args: I) -> Result<DbPerfBaselineConfig, String>
@@ -159,6 +165,9 @@ pub async fn run_db_perf_baseline(
     };
 
     let started_at = Instant::now();
+    // 在 run 消费 backtest_config 前先算 config/data_version hash（audit 守卫扩展）。
+    let config_sha256 = hash_config(&backtest_config);
+    let data_version_sha256 = hash_data_version(&backtest_config.data_version_id);
     let output = runner.run(&task_id, backtest_config, &signals).await?;
     let elapsed_ms = started_at.elapsed().as_millis();
 
@@ -193,6 +202,8 @@ pub async fn run_db_perf_baseline(
         turnover: output.metrics.turnover,
         equity_curve_sha256,
         signal_hash_sha256,
+        config_sha256,
+        data_version_sha256,
     })
 }
 
@@ -237,6 +248,31 @@ pub fn hash_signals(signals: &HashMap<NaiveDate, StrategySignal>) -> String {
         }
         hasher.update(b"\n");
     }
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// 哈希 BacktestConfig 的序列化 JSON，捕获 config 字段静默变更。
+///
+/// audit 守卫扩展（第一梯队1）：原仅 equity_curve + signal，现补 config。
+/// config 含 initial_capital/fee_config/execution_timing/max_position_pct 等，
+/// 任一字段变更都会使 hash 变化，防止"同 equity 不同 config"的隐性回归。
+pub fn hash_config(config: &crate::engine::BacktestConfig) -> String {
+    // 序列化为 canonical JSON（BTreeMap 排序键），消除字段顺序差异。
+    let json = serde_json::to_string(config).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// 哈希回测所用的 data_version_id，显式记录参与回测的数据版本。
+///
+/// audit 守卫扩展：data_version 变更（如 EOD 重新同步）会使 hash 变化，
+/// 提示基线需重新建立而非误判为回归。
+pub fn hash_data_version(data_version_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data_version_id.as_bytes());
     let digest = hasher.finalize();
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
