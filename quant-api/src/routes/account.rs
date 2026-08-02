@@ -188,7 +188,8 @@ pub async fn load_account(
     use sqlx::Row;
     let row = sqlx::query(
         "SELECT leverage_enabled, leverage_multiplier, leverage_mode,
-                COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5),
+                COALESCE(liquidation_threshold, 1.3) AS liquidation_threshold,
+                COALESCE(warning_threshold, 1.5) AS warning_threshold,
                 strategy_version_id, name
          FROM paper_account WHERE paper_account_id = $1",
     )
@@ -213,8 +214,12 @@ pub async fn load_account(
         let config = LeverageConfig {
             multiplier: row.get::<f64, _>("leverage_multiplier"),
             mode: row.get::<Option<String>, _>("leverage_mode").unwrap_or_else(|| "fixed".into()),
-            liquidation_threshold: row.get("liquidation_threshold"),
-            warning_threshold: row.get("warning_threshold"),
+            liquidation_threshold: row
+                .try_get::<f64, _>("liquidation_threshold")
+                .unwrap_or(1.3),
+            warning_threshold: row
+                .try_get::<f64, _>("warning_threshold")
+                .unwrap_or(1.5),
         };
         Ok(LoadedAccount::Margin(Account::<MarginAccount>::new_margin(
             account_id,
