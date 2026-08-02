@@ -115,7 +115,7 @@ pub struct RunBacktestReq {
     pub execution_rules: Option<ExecutionRulesReq>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct CostModelReq {
     pub commission_rate: Option<f64>,
     pub min_commission: Option<f64>,
@@ -123,6 +123,10 @@ pub struct CostModelReq {
     pub slippage_bps: Option<f64>,
     pub cost_multiplier: Option<f64>,
     pub impact_cost_coefficient: Option<f64>,
+    /// 冲击成本指数（平方根=0.5，线性=1.0），默认走 base.impact_cost_exponent
+    pub impact_cost_exponent: Option<f64>,
+    /// 过户费率（沪市双边，默认万0.1），默认走 base.transfer_fee_rate
+    pub transfer_fee_rate: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -502,6 +506,14 @@ fn apply_cost_model(base: FeeConfig, req: Option<&CostModelReq>) -> Result<FeeCo
         impact_cost_coefficient: match req.impact_cost_coefficient {
             Some(value) => decimal_from_f64(value, "cost_model.impact_cost_coefficient")?,
             None => base.impact_cost_coefficient,
+        },
+        impact_cost_exponent: match req.impact_cost_exponent {
+            Some(value) => decimal_from_f64(value, "cost_model.impact_cost_exponent")?,
+            None => base.impact_cost_exponent,
+        },
+        transfer_fee_rate: match req.transfer_fee_rate {
+            Some(value) => decimal_from_f64(value, "cost_model.transfer_fee_rate")?,
+            None => base.transfer_fee_rate,
         },
     })
 }
@@ -1599,7 +1611,9 @@ fn cost_model_snapshot(req: &Option<CostModelReq>) -> Value {
             "tax_rate": model.tax_rate,
             "slippage_bps": model.slippage_bps,
             "cost_multiplier": model.cost_multiplier,
-            "impact_cost_coefficient": model.impact_cost_coefficient
+            "impact_cost_coefficient": model.impact_cost_coefficient,
+            "impact_cost_exponent": model.impact_cost_exponent,
+            "transfer_fee_rate": model.transfer_fee_rate
         }),
         None => Value::Null,
     }
@@ -3142,6 +3156,7 @@ mod tests {
                 slippage_bps: Some(0.0002),
                 cost_multiplier: Some(1.5),
                 impact_cost_coefficient: Some(0.02),
+                ..Default::default()
             }),
             execution_rules: Some(ExecutionRulesReq {
                 execution_timing: Some("next_open".into()),
@@ -3240,6 +3255,7 @@ mod tests {
             slippage_bps: Some(0.0002),
             cost_multiplier: Some(1.5),
             impact_cost_coefficient: Some(0.02),
+            ..Default::default()
         });
         req.execution_rules = Some(ExecutionRulesReq {
             execution_timing: Some("next_open".to_string()),

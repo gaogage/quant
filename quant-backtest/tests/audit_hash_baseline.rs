@@ -15,7 +15,10 @@ use quant_backtest::db_perf_baseline::{run_db_perf_baseline, DbPerfBaselineConfi
 /// 回测基线 hash 金标准(首次跑后人工填入,作为守卫基准)。
 /// 详见 scripts/audit_hash_baseline.json(机器可读金标准)。
 /// 变更需 MR 说明原因 + review 确认。
-const BASELINE_EQUITY_HASH: &str = "f53cf2b3fc201130323fec8bba416931230910a627fdc651037582831cc10cf3";
+///
+/// 2026-08-02 更新：非线性冲击成本（平方根模型 coeff=0.05）+ 沪市过户费（万0.1），
+/// 成本模型改变使 equity_curve 变化，signal 不变（成本不影响信号生成）。
+const BASELINE_EQUITY_HASH: &str = "adc6e3be529eeb89bc8ad822172e299788079159f9ca516ce04ce176a61277f7";
 const BASELINE_SIGNAL_HASH: &str = "d1ee0c46975b02bded46ca5dc44b39d4ae19fbdd90b4909f7aa3a3de83d6c95b";
 
 /// 跑一个最小规模 DB 回测,验证 hash 产出链路通畅 + 确定性。
