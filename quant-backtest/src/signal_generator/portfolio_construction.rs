@@ -123,7 +123,9 @@ fn capped_portfolio_top_n(top_n: usize, method: PortfolioConstructionMethod) -> 
     match method {
         PortfolioConstructionMethod::RiskBudget
         | PortfolioConstructionMethod::StressFillAwareRiskBudget
-        | PortfolioConstructionMethod::MinVariance => top_n.min(50),
+        | PortfolioConstructionMethod::MinVariance
+        | PortfolioConstructionMethod::RiskParity
+        | PortfolioConstructionMethod::MaxDiversification => top_n.min(50),
         PortfolioConstructionMethod::Heuristic => top_n,
     }
 }

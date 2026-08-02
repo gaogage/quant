@@ -58,6 +58,10 @@ pub enum PortfolioConstructionMethod {
     RiskBudget,
     StressFillAwareRiskBudget,
     MinVariance,
+    /// 风险平价：权重 ∝ 1/σ（风险贡献均等，不含集中度惩罚）
+    RiskParity,
+    /// 最大分散化：权重 ∝ σ * (1 - avg_abs_corr)（高波动+低相关优先）
+    MaxDiversification,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

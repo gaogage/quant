@@ -2861,6 +2861,54 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
                     config,
                 )
             }),
+        PortfolioConstructionMethod::RiskParity => risk_matrix
+            .as_ref()
+            .map(|matrix| {
+                build_risk_parity_raw_weights(
+                    score_day,
+                    &selected,
+                    matrix,
+                    average_amounts,
+                    config,
+                )
+            })
+            .unwrap_or_else(|| {
+                let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                    return_history,
+                    config.risk_budget_lookback_days,
+                );
+                build_risk_parity_raw_weights(
+                    score_day,
+                    &selected,
+                    &view,
+                    average_amounts,
+                    config,
+                )
+            }),
+        PortfolioConstructionMethod::MaxDiversification => risk_matrix
+            .as_ref()
+            .map(|matrix| {
+                build_max_diversification_raw_weights(
+                    score_day,
+                    &selected,
+                    matrix,
+                    average_amounts,
+                    config,
+                )
+            })
+            .unwrap_or_else(|| {
+                let view = super::matrix_view::ReturnHistoryMatrixView::new(
+                    return_history,
+                    config.risk_budget_lookback_days,
+                );
+                build_max_diversification_raw_weights(
+                    score_day,
+                    &selected,
+                    &view,
+                    average_amounts,
+                    config,
+                )
+            }),
     };
 
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, average_amounts, config);
@@ -3065,6 +3113,30 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
                 return HashMap::new();
             };
             build_min_variance_raw_weights(
+                score_day,
+                &selected,
+                matrix,
+                average_amounts,
+                config,
+            )
+        }
+        PortfolioConstructionMethod::RiskParity => {
+            let Some(matrix) = risk_matrix.as_deref() else {
+                return HashMap::new();
+            };
+            build_risk_parity_raw_weights(
+                score_day,
+                &selected,
+                matrix,
+                average_amounts,
+                config,
+            )
+        }
+        PortfolioConstructionMethod::MaxDiversification => {
+            let Some(matrix) = risk_matrix.as_deref() else {
+                return HashMap::new();
+            };
+            build_max_diversification_raw_weights(
                 score_day,
                 &selected,
                 matrix,
@@ -3995,6 +4067,80 @@ pub(crate) fn build_min_variance_raw_weights<M: super::matrix_view::MatrixView>(
         let variance = volatility * volatility;
         let covariance_penalty = concentration_penalty.max(1.0).powi(2);
         let raw = capacity_multiplier / (variance.max(0.0001) * covariance_penalty);
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+/// 风险平价（RiskParity）：权重 ∝ 1/σ，使各资产风险贡献均等。
+///
+/// 与 RiskBudget 区别：RiskBudget 含协方差集中度惩罚（cov_penalty），RiskParity 是
+/// 经典 1/σ（无集中度惩罚，纯风险贡献均等）。适合低相关分散组合。
+pub(crate) fn build_risk_parity_raw_weights<M: super::matrix_view::MatrixView>(
+    score_day: NaiveDate,
+    symbols: &[String],
+    matrix: &M,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20).max(0.01);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        // 经典风险平价：权重 ∝ 1/σ（风险贡献均等）
+        let raw = capacity_multiplier / volatility;
+        raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
+    }
+
+    if raw_weights.iter().all(|weight| *weight <= 0.0) {
+        vec![1.0; symbols.len()]
+    } else {
+        raw_weights
+    }
+}
+
+/// 最大分散化（MaxDiversification）：权重 ∝ σ * (1 - avg_abs_corr)，
+/// 高波动且与组合低相关的资产优先，最大化组合分散化比率。
+///
+/// 分散化比率 = 组合加权波动 / 加权平均波动，MaxDiv 优化目标即最大化此比率。
+pub(crate) fn build_max_diversification_raw_weights<M: super::matrix_view::MatrixView>(
+    score_day: NaiveDate,
+    symbols: &[String],
+    matrix: &M,
+    average_amounts: &HashMap<String, f64>,
+    config: &PortfolioConstructionConfig,
+) -> Vec<f64> {
+    let max_amount = symbols
+        .iter()
+        .filter_map(|symbol| average_amounts.get(symbol).copied())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    let mut raw_weights = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20).max(0.01);
+        // 平均绝对相关（相对组合内其他资产）：高相关降低分散化价值
+        let avg_abs_corr = matrix
+            .average_abs_correlation_to_reference(score_day, symbol, symbols)
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.99);
+        let capacity_score = capacity_score(symbol, average_amounts, max_amount);
+        let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
+        // 分散化权重：高波动（σ）+ 低相关（1-corr）优先
+        let diversification_score = volatility * (1.0 - avg_abs_corr);
+        let raw = capacity_multiplier * diversification_score;
         raw_weights.push(if raw.is_finite() { raw.max(0.0) } else { 0.0 });
     }
 

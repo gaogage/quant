@@ -1969,6 +1969,38 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
                 &config,
             )
         );
+        assert_eq!(
+            build_risk_parity_raw_weights(
+                score_day,
+                &symbols,
+                &risk_matrix,
+                &average_amounts,
+                &config,
+            ),
+            build_risk_parity_raw_weights(
+                score_day,
+                &symbols,
+                &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
+                &average_amounts,
+                &config,
+            )
+        );
+        assert_eq!(
+            build_max_diversification_raw_weights(
+                score_day,
+                &symbols,
+                &risk_matrix,
+                &average_amounts,
+                &config,
+            ),
+            build_max_diversification_raw_weights(
+                score_day,
+                &symbols,
+                &ReturnHistoryMatrixView::new(&return_history, config.risk_budget_lookback_days),
+                &average_amounts,
+                &config,
+            )
+        );
     }
 }
 
