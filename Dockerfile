@@ -68,7 +68,7 @@ COPY --from=build-frontend /app/quant-ui/dist /app/ui-dist
 # OrbStack 容器图标（quant web favicon：深色底 + 上升折线 + 数据点，量化主题）
 COPY quant-ui/icon.svg /app/ui-dist/icon.svg
 
-LABEL dev.orbstack.icon="http://localhost:8080/icon.svg"
+LABEL dev.orbstack.icon="http://quant.orb.local/icon.svg"
 
 ENV PORT=8080 \
     QUANT_UI_DIST=/app/ui-dist \

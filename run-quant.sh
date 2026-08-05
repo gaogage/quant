@@ -15,7 +15,9 @@
 # 个人制作或改动的镜像一律推 ACR 并用 ACR 镜像运行（不走本地 quant-api:latest）。
 # 本地临时调试可用 IMAGE=quant-api:latest 覆盖为本地构建镜像（跳过 pull）。
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+# 解析软链接真实路径（~/.local/bin/run-quant -> quant/run-quant.sh），确保 ./build-push.sh 相对路径生效
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+cd "$SCRIPT_DIR"
 
 BUILD=0
 TARGET="local"
