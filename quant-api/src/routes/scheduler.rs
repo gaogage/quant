@@ -1,7 +1,7 @@
 //! 内置调度器 — v15 日频量化交易。
 //!
 //! 14:45 (收盘前): 获取当日行情 → 回测 → MVO → 调仓 → 立即推送钉钉
-//! 16:00 (收盘后): 同步日终行情数据到历史表 → 清理过期回测数据
+//! 20:00 (盘后数据就绪): 同步日终行情数据到历史表 → 清理过期回测数据
 //!
 //! 日频交易不需要盘中实时行情，每天只在收盘前交易一次。
 //! MVO 策略: Ledoit-Wolf + Grid Search 季度调仓 (自动发现权重)
@@ -184,7 +184,9 @@ fn scheduled_task_time_minutes(expr: &str) -> Result<u32, String> {
 }
 
 fn is_eod_sync_window(hour: u32, minute: u32) -> bool {
-    hour == 16 && minute < 10
+    // 20:00 窗口：Tushare 日线数据通常 17:00-18:00 后才完整发布，
+    // 16:00 拉会返回 0 行（8/5 实测），延后到 20:00 确保数据就绪。
+    hour == 20 && minute < 10
 }
 
 fn pre_trade_factor_combo(sc: &StrategyConfig) -> &str {
@@ -369,11 +371,13 @@ mod tests {
 
     #[test]
     fn eod_sync_window_does_not_replay_after_startup_late_in_day() {
-        assert!(is_eod_sync_window(16, 0));
-        assert!(is_eod_sync_window(16, 9));
-        assert!(!is_eod_sync_window(16, 10));
-        assert!(!is_eod_sync_window(16, 39));
-        assert!(!is_eod_sync_window(17, 0));
+        // EOD 延后到 20:00：Tushare 日线 16:00 未发布，20:00 数据已就绪
+        assert!(is_eod_sync_window(20, 0));
+        assert!(is_eod_sync_window(20, 9));
+        assert!(!is_eod_sync_window(20, 10));
+        assert!(!is_eod_sync_window(20, 39));
+        assert!(!is_eod_sync_window(16, 0));
+        assert!(!is_eod_sync_window(21, 0));
     }
 
     #[test]
@@ -607,11 +611,11 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         match strategy_config.as_ref() {
             Some(sc) => info!(
-                "[scheduler] {} 已启动 ({}): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步",
+                "[scheduler] {} 已启动 ({}): 14:40调仓 | 20:00 EOD | 9:00 T+1数据补同步",
                 sc.strategy_id, sc.name
             ),
             None => info!(
-                "[scheduler] 已启动 (无 active 复合策略): 14:40调仓 | 16:00 EOD | 9:00 T+1数据补同步"
+                "[scheduler] 已启动 (无 active 复合策略): 14:40调仓 | 20:00 EOD | 9:00 T+1数据补同步"
             ),
         }
 
@@ -800,6 +804,12 @@ async fn run_tick(
                             Ok(_) => info!("[scheduler] 钉钉推送完成"),
                             Err(e) => warn!("[scheduler] 钉钉推送失败: {}", e),
                         }
+
+                        // 推送今日交易明细钉钉通知（每账户买卖明细+理由）
+                        match crate::routes::report::push_dingtalk_trade_detail_notification(db, today).await {
+                            Ok(_) => info!("[scheduler] 交易明细推送完成"),
+                            Err(e) => warn!("[scheduler] 交易明细推送失败: {}", e),
+                        }
                     }
                 }
                 Err(e) => {
@@ -815,7 +825,7 @@ async fn run_tick(
         }
     }
 
-    // ── 16:00 (收盘后): 交易日EOD + 非交易日也执行数据同步 ──
+    // ── 20:00 (盘后数据就绪): 交易日EOD + 非交易日也执行数据同步 ──
     if is_eod_sync_window(hour, minute) {
         let should_sync = {
             let st = state.lock().await;
@@ -827,7 +837,7 @@ async fn run_tick(
                 let mut st = state.lock().await;
                 st.eod_synced_today = true;
             }
-            info!("[scheduler] 16:00 日终数据同步...");
+            info!("[scheduler] 20:00 日终数据同步...");
             if let Err(e) = crate::routes::sync::sync_eod_data(db, tushare, today).await {
                 warn!("[scheduler] 日终数据同步失败: {}", e);
             }

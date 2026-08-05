@@ -1,6 +1,6 @@
 //! EOD 日终同步模块（DDD R10c/Step 6c-5：从 scheduler 上帝模块迁出）。
 //!
-//! 原属 scheduler.rs 的 `sync_eod_data`，职责是 16:00 收盘后全量行情同步：
+//! 原属 scheduler.rs 的 `sync_eod_data`，职责是 20:00 盘后全量行情同步：
 //! 事件数据（停牌/涨跌停）→ 当日日线/ETF/指数 → daily_basic/moneyflow/block_trade →
 //! 复权因子+兜底 → composite 曲线刷新 → ML 预测覆盖检查 → 数据质量校验。
 //!
@@ -20,7 +20,7 @@ use crate::routes::scheduler::{
     sync_limit_with_retry,
 };
 
-/// 16:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → ML 预测 → 质量检查。
+/// 20:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → ML 预测 → 质量检查。
 pub async fn sync_eod_data(
     db: &PgPool,
     tushare: &TushareClient,
@@ -214,7 +214,7 @@ pub async fn sync_eod_data(
     }
 
     info!(
-        "[scheduler] 16:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权) ({})",
+        "[scheduler] 20:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权) ({})",
         date_str
     );
 

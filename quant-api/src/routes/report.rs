@@ -225,18 +225,50 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
                 None => continue,
             },
         };
+        // 当日涨跌箭头+颜色标记（突出显示当日表现）
+        let (daily_arrow, daily_color, daily_sign) = if daily_return >= 0.0 {
+            ("📈", "🟢", "+")
+        } else {
+            ("📉", "🔴", "")
+        };
+
+        // 当日交易明细摘要（买卖前 5 笔，超 10 笔折叠）
+        let trades = fetch_today_trades(db, account_id, date).await.unwrap_or_default();
+        let trade_detail = if trades.is_empty() {
+            String::new()
+        } else {
+            let buys: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "buy").collect();
+            let sells: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "sell").collect();
+            let mut detail = String::new();
+            if !buys.is_empty() {
+                let shown: Vec<String> = buys.iter().take(5).map(|t| format!("{} {}", t.symbol, t.name)).collect();
+                let suffix = if buys.len() > 5 { format!(" 等 {} 笔", buys.len()) } else { String::new() };
+                detail.push_str(&format!("  买: {}{}\n", shown.join(" | "), suffix));
+            }
+            if !sells.is_empty() {
+                let shown: Vec<String> = sells.iter().take(5).map(|t| format!("{} {}", t.symbol, t.name)).collect();
+                let suffix = if sells.len() > 5 { format!(" 等 {} 笔", sells.len()) } else { String::new() };
+                detail.push_str(&format!("  卖: {}{}\n", shown.join(" | "), suffix));
+            }
+            detail
+        };
+
         let text = format!(
-            "## 📈 实盘绩效日报 — {}  \n\n\
+            "## {} 实盘绩效日报 — {}  \n\n\
              **日期**: {}  \n\n\
-             **当日收益**: {:.2}% | **累计收益**: {:.2}%  \n\
+             **当日收益**: {}{}{:.2}% | **累计收益**: {:.2}%  \n\
              **当前 NAV**: ¥{:.2} | **历史峰值**: ¥{:.2} | **最大回撤**: {:.2}%  \n\
              **当日调仓**: 买入 {} 笔(¥{:.0}) / 卖出 {} 笔(¥{:.0})  \n\
              **累计成交**: {} 笔  \n\
+             {}\
              {}\n\n\
              > 自动生成于 {}",
+            daily_arrow,
             name,
             date.format("%Y-%m-%d"),
-            daily_return * 100.0,
+            daily_color,
+            daily_sign,
+            daily_return.abs() * 100.0,
             cumulative_return * 100.0,
             nav,
             peak_nav,
@@ -246,12 +278,13 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
             sell_n,
             sell_amt,
             total_trades,
+            trade_detail,
             match backtest_deviation {
                 Some(dev) if dev.abs() > 0.02 => {
                     format!("**⚠️ 回测偏离**: {:.2}%（超 2% 阈值）  \n", dev * 100.0)
                 }
                 Some(dev) => format!("**回测偏离**: {:.2}%（正常范围）  \n", dev * 100.0),
-                None => "**回测偏离**: 数据未就绪（composite 曲线缺当日，待 T+1 补齐）  \n".to_string(),
+                None => "**回测偏离**: 当日行情同步中，次日 9:00 T+1 补齐  \n".to_string(),
             },
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         );
@@ -494,6 +527,141 @@ async fn push_dingtalk_for_all_accounts(db: &PgPool, date: NaiveDate) -> Result<
             warn!("[dingtalk] {} 发送失败: {}", name, e);
         } else {
             info!("[dingtalk] {} 推送成功", name);
+        }
+    }
+    Ok(())
+}
+
+/// 当日交易明细行（共用数据结构，日报与交易明细通知复用）。
+struct TradeRow {
+    symbol: String,
+    side: String,
+    quantity: f64,
+    amount: f64,
+    reason: String,
+    name: String,
+}
+
+/// 查询某账户当日已成交订单明细（symbol/side/数量/金额/理由/名称）。
+/// 名称解析复用持仓摘要的 CASE 映射 + market_stock LEFT JOIN。
+async fn fetch_today_trades(
+    db: &PgPool,
+    account_id: &str,
+    date: NaiveDate,
+) -> Result<Vec<TradeRow>, String> {
+    let rows: Vec<(String, String, f64, f64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT po.symbol, po.side,
+                po.quantity::double precision,
+                po.target_value::double precision,
+                po.reason,
+                COALESCE(ms.name,
+                  CASE po.symbol
+                    WHEN '518880.SH' THEN '黄金ETF'
+                    WHEN '511010.SH' THEN '国债ETF'
+                    WHEN '513500.SH' THEN '标普500ETF'
+                    WHEN '513100.SH' THEN '纳指ETF'
+                    WHEN '159980.SZ' THEN '有色ETF'
+                    WHEN '159985.SZ' THEN '豆粕ETF'
+                    WHEN '501018.SH' THEN '原油LOF'
+                    WHEN '511880.SH' THEN '货币基金'
+                    ELSE NULL END,
+                  po.symbol)
+         FROM paper_order po
+         LEFT JOIN market_stock ms ON ms.symbol = po.symbol
+         WHERE po.paper_account_id = $1 AND DATE(po.created_at) = $2 AND po.status = 'filled'
+         ORDER BY po.side, po.target_value DESC",
+    )
+    .bind(account_id)
+    .bind(date)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("fetch_today_trades: {}", e))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(symbol, side, quantity, amount, reason, name)| TradeRow {
+            symbol,
+            side,
+            quantity,
+            amount,
+            reason: reason.unwrap_or_default(),
+            name: name.unwrap_or_else(|| String::new()),
+        })
+        .collect())
+}
+
+/// 调仓后推送「今日交易明细」钉钉通知（每账户独立，含买卖明细+理由）。
+pub async fn push_dingtalk_trade_detail_notification(
+    db: &PgPool,
+    date: NaiveDate,
+) -> Result<(), String> {
+    use super::dingtalk;
+
+    let accounts = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT paper_account_id, name, dingtalk_webhook_url
+         FROM paper_account
+         WHERE status = 'active' AND account_type = 'simulated' AND user_id IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("trade detail acct: {}", e))?;
+
+    for (account_id, name, webhook) in &accounts {
+        let trades = fetch_today_trades(db, account_id, date).await.unwrap_or_default();
+        if trades.is_empty() {
+            continue; // 无成交跳过（不推送空通知）
+        }
+
+        let webhook_url = match webhook {
+            Some(u) if !u.is_empty() => u.clone(),
+            _ => match dingtalk::build_dingtalk_webhook_url() {
+                Some(u) => u,
+                None => continue,
+            },
+        };
+
+        let buys: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "buy").collect();
+        let sells: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "sell").collect();
+        let total = trades.len();
+
+        let mut lines = Vec::new();
+        if !buys.is_empty() {
+            lines.push("### 🟢 买入".to_string());
+            for t in &buys {
+                lines.push(format!(
+                    "| {} | {} | {:.0} | ¥{:.0} | {} |",
+                    t.symbol, t.name, t.quantity, t.amount, t.reason
+                ));
+            }
+        }
+        if !sells.is_empty() {
+            lines.push("### 🔴 卖出".to_string());
+            for t in &sells {
+                lines.push(format!(
+                    "| {} | {} | {:.0} | ¥{:.0} | {} |",
+                    t.symbol, t.name, t.quantity, t.amount, t.reason
+                ));
+            }
+        }
+
+        let text = format!(
+            "## 📋 今日交易明细 - {}  \n\n\
+             **日期**: {}  |  **总成交**: {} 笔  \n\n\
+             | 标的 | 名称 | 数量 | 金额 | 理由 |\n\
+             |------|------|------|------|------|\n\
+             {}\n\n\
+             > 调仓于 14:40 执行",
+            name,
+            date.format("%Y-%m-%d"),
+            total,
+            lines.join("\n"),
+        );
+
+        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "今日交易明细", &text).await
+        {
+            warn!("[dingtalk] {} 交易明细推送失败: {}", name, e);
+        } else {
+            info!("[dingtalk] {} 交易明细推送成功", name);
         }
     }
     Ok(())
