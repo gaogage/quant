@@ -948,6 +948,10 @@ async fn main() {
             "/api/v1/admin/performance-report",
             post(routes::admin::trigger_performance_report),
         )
+        .route(
+            "/api/v1/admin/trade-detail-notification",
+            post(routes::admin::trigger_trade_detail_notification),
+        )
         .route("/api/v1/admin/sync/status", get(routes::admin::sync_status))
         .route(
             "/api/v1/admin/sync/repair",

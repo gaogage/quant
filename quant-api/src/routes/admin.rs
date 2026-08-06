@@ -306,6 +306,38 @@ pub async fn trigger_performance_report(
     }
 }
 
+/// POST /api/v1/admin/trade-detail-notification — 手动触发今日交易明细通知
+///
+/// 正常由 14:40 调仓后 scheduler 自动触发，此端点用于手动补发/测试排版。
+pub async fn trigger_trade_detail_notification(
+    State(state): State<Arc<AppState>>,
+    admin: UserContext,
+    Json(req): Json<PerformanceReportRequest>,
+) -> axum::response::Response {
+    if let Err(e) = require_admin(&admin) {
+        return e;
+    }
+
+    let date = req
+        .date
+        .as_deref()
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok())
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+
+    match crate::routes::report::push_dingtalk_trade_detail_notification(&state.db, date).await {
+        Ok(_) => Json(serde_json::json!({
+            "code": 0,
+            "message": format!("交易明细通知已推送 {}", date.format("%Y-%m-%d"))
+        }))
+        .into_response(),
+        Err(e) => Json(serde_json::json!({
+            "code": 1,
+            "message": format!("交易明细通知失败: {}", e)
+        }))
+        .into_response(),
+    }
+}
+
 /// GET /api/v1/admin/sync/status — check data freshness
 pub async fn sync_status(
     State(state): State<Arc<AppState>>,

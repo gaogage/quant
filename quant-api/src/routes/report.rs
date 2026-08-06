@@ -226,10 +226,11 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
             },
         };
         // 当日涨跌箭头+颜色标记（突出显示当日表现）
+        // 中国股市习惯：涨红跌绿（与欧美相反）
         let (daily_arrow, daily_color, daily_sign) = if daily_return >= 0.0 {
-            ("📈", "🟢", "+")
+            ("📈", "🔴", "+")
         } else {
-            ("📉", "🔴", "")
+            ("📉", "🟢", "")
         };
 
         // 当日交易明细摘要（买卖前 5 笔，超 10 笔折叠）
@@ -624,37 +625,34 @@ pub async fn push_dingtalk_trade_detail_notification(
         let sells: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "sell").collect();
         let total = trades.len();
 
-        let mut lines = Vec::new();
-        if !buys.is_empty() {
-            lines.push("### 🟢 买入".to_string());
-            for t in &buys {
-                lines.push(format!(
-                    "| {} | {} | {:.0} | ¥{:.0} | {} |",
-                    t.symbol, t.name, t.quantity, t.amount, t.reason
-                ));
-            }
+        // 统一表格：按方向分组（买入在前），每行含交易方向列，表格对齐
+        let mut rows = Vec::new();
+        for t in &buys {
+            rows.push(format!(
+                "| 买入 | {} | {} | {:.0} | ¥{:.0} | {} |",
+                t.symbol, t.name, t.quantity, t.amount, t.reason
+            ));
         }
-        if !sells.is_empty() {
-            lines.push("### 🔴 卖出".to_string());
-            for t in &sells {
-                lines.push(format!(
-                    "| {} | {} | {:.0} | ¥{:.0} | {} |",
-                    t.symbol, t.name, t.quantity, t.amount, t.reason
-                ));
-            }
+        for t in &sells {
+            rows.push(format!(
+                "| 卖出 | {} | {} | {:.0} | ¥{:.0} | {} |",
+                t.symbol, t.name, t.quantity, t.amount, t.reason
+            ));
         }
 
         let text = format!(
             "## 📋 今日交易明细 - {}  \n\n\
-             **日期**: {}  |  **总成交**: {} 笔  \n\n\
-             | 标的 | 名称 | 数量 | 金额 | 理由 |\n\
-             |------|------|------|------|------|\n\
+             **日期**: {}  |  **总成交**: {} 笔（买入 {} / 卖出 {}）  \n\n\
+             | 方向 | 标的 | 名称 | 数量 | 金额 | 理由 |\n\
+             |:----:|:-----|:-----|-----:|-----:|:-----|\n\
              {}\n\n\
              > 调仓于 14:40 执行",
             name,
             date.format("%Y-%m-%d"),
             total,
-            lines.join("\n"),
+            buys.len(),
+            sells.len(),
+            rows.join("\n"),
         );
 
         if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "今日交易明细", &text).await
