@@ -838,20 +838,15 @@ async fn run_tick(
                 st.eod_synced_today = true;
             }
             info!("[scheduler] 20:00 日终数据同步...");
-            if let Err(e) = crate::routes::sync::sync_eod_data(db, tushare, today).await {
+            if let Err(e) = crate::routes::sync::sync_eod_data(db, tushare, today, is_trade).await {
                 warn!("[scheduler] 日终数据同步失败: {}", e);
             }
 
-            // P2-1: EOD 数据就绪后生成实盘绩效日报（写 paper_nav_snapshot 当日点 + 钉钉推送）。
-            // 仅交易日才有当日调仓/NAV 变化，非交易日跳过（避免推送重复的静态快照）。
+            // 日报推送已在 sync_eod_data 内部提前完成（composite 合成后立即推，
+            // 不等复权因子全量同步）。这里仅标记 report_pushed 状态。
             if is_trade {
-                {
-                    let mut st = state.lock().await;
-                    st.report_pushed = true;
-                }
-                if let Err(e) = crate::routes::report::push_daily_performance_report(db, today).await {
-                    warn!("[scheduler] 实盘绩效日报生成失败: {}", e);
-                }
+                let mut st = state.lock().await;
+                st.report_pushed = true;
             }
         }
     }

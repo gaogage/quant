@@ -20,11 +20,12 @@ use crate::routes::scheduler::{
     sync_limit_with_retry,
 };
 
-/// 20:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → ML 预测 → 质量检查。
+/// 20:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → composite → 日报 → 复权全量 → ML → 质量检查。
 pub async fn sync_eod_data(
     db: &PgPool,
     tushare: &TushareClient,
     date: NaiveDate,
+    is_trade: bool,
 ) -> Result<(), String> {
     let date_str = date.format("%Y%m%d").to_string();
     // etf_symbols 取所有 active 复合策略的并集（不再硬编码 v19，覆盖多策略 ETF）。
@@ -175,31 +176,12 @@ pub async fn sync_eod_data(
         info!("[scheduler] EOD 大宗交易同步: {} 条", bt_n);
     }
 
-    // ── 复权因子 + 兜底:关键路径,必须执行,不受前序步骤失败/超时影响 ──
-    // (这是 P0 修复核心:7/20-7/21 daily_basic 卡死导致此处未执行,adj 视图退化,回测崩坏)
-    let adj_n = quant_data::sync::sync_adj_factor(
-        db,
-        tushare,
-        &all_stocks,
-        &date_str,
-        &date_str,
-        &format!("dv-adj-eod-{}", date_str),
-    )
-    .await
-    .unwrap_or(0);
-    if adj_n > 0 {
-        info!("[scheduler] EOD 复权因子同步: {} 条", adj_n);
-    }
-
-    // 复权因子完整性兜底:adj_factor 表是「每日全量快照」设计(正常≈bar行数,实测5192≈5190)。
-    // 但 sync_adj_factor 按 symbol 逐只拉 Tushare(8并发,5201只),限流 200/分钟下部分超时会致
-    // 当日只成功一部分(如 7/10 仅 1196/5189)。视图 market_stock_daily_bar_adj 用 LEFT JOIN +
-    // COALESCE(adj_factor,1.0),缺失股票复权价退化为 raw 价,与前后日断层(10倍级),回测当日
-    // 收益率/涨跌停全错乱。故 EOD 必须校验覆盖率并自动补全,而非仅告警。
-    //
-    // 补全原理:非除权日 adj_factor 恒等于前一交易日值(复权因子仅在除权除息日跳变)。
-    // 对当日有 bar 但缺 adj_factor 的股票,用最近前一交易日的 adj_factor 前向填充 INSERT。
-    // 这是数学正确的兜底——除权日当日 Tushare 必返回新值(不会缺),缺失的必是非除权日。
+    // ── 复权因子兜底（快，纯 DB 前向填充）+ composite 合成 + 日报推送 ──
+    // 关键优化：先 backfill（LATERAL 前值填充，几秒完成）→ composite 合成 → 立即推日报，
+    // 让日报在 20:00 后几分钟内送达（不等 sync_adj_factor 逐只拉 7210 只 API，那要 2+ 小时）。
+    // 数学正确性：非除权日 adj_factor 恒等于前一交易日值（复权因子仅在除权除息日跳变），
+    // backfill 前值填充 == 真实值。除权日当日 sync_adj_factor 会拿到新值，但日报已推——
+    // 除权日偏离会略偏，但除权日稀少，且 sync_adj_factor 后台跑完会用真实值覆盖 backfill 值。
     let dv_adj_id = format!("dv-adj-eod-{}", date_str);
     crate::routes::sync::market_data::backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
@@ -214,9 +196,36 @@ pub async fn sync_eod_data(
     }
 
     info!(
-        "[scheduler] 20:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权) ({})",
+        "[scheduler] 20:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权兜底) ({})",
         date_str
     );
+
+    // 日报提前推送：composite 合成后立即推，不等 sync_adj_factor 全量同步。
+    // 日报只需 NAV 快照（14:40 已写）+ composite 曲线（已合成），不依赖复权因子全量完成。
+    if is_trade {
+        info!("[scheduler] EOD composite 就绪，提前推送绩效日报...");
+        if let Err(e) = crate::routes::report::push_daily_performance_report(db, date).await {
+            warn!("[scheduler] 实盘绩效日报生成失败: {}", e);
+        }
+    }
+
+    // ── 复权因子全量同步（慢，逐只拉 Tushare 7210 只）+ ML + 数据质量 ──
+    // 这些是后台收尾任务，不阻塞日报。sync_adj_factor 会用真实值覆盖 backfill 的前值填充。
+    let adj_n = quant_data::sync::sync_adj_factor(
+        db,
+        tushare,
+        &all_stocks,
+        &date_str,
+        &date_str,
+        &format!("dv-adj-eod-{}", date_str),
+    )
+    .await
+    .unwrap_or(0);
+    if adj_n > 0 {
+        info!("[scheduler] EOD 复权因子同步: {} 条", adj_n);
+    }
+    // backfill 再次兜底（sync_adj_factor 部分失败时补全剩余）
+    crate::routes::sync::market_data::backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
     // ── ML预测数据检查+补齐 ──
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
