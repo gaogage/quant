@@ -893,16 +893,40 @@ impl TushareClient {
     /// 获取复权因子
     pub async fn adj_factor(
         &self,
-        ts_code: &str,
+        ts_code: Option<&str>,
+        trade_date: Option<&str>,
         start_date: Option<&str>,
         end_date: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
-        let mut params = vec![("ts_code", ts_code)];
+        let mut owned: Vec<String> = Vec::new();
+        if let Some(l) = limit {
+            owned.push(l.to_string());
+        }
+        if let Some(o) = offset {
+            owned.push(o.to_string());
+        }
+
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(td) = trade_date {
+            params.push(("trade_date", td));
+        }
         if let Some(sd) = start_date {
             params.push(("start_date", sd));
         }
         if let Some(ed) = end_date {
             params.push(("end_date", ed));
+        }
+        if limit.is_some() {
+            params.push(("limit", owned[0].as_str()));
+        }
+        if offset.is_some() {
+            let idx = if limit.is_some() { 1 } else { 0 };
+            params.push(("offset", owned[idx].as_str()));
         }
         self.call_api::<Vec<serde_json::Value>>("adj_factor", params, &[])
             .await

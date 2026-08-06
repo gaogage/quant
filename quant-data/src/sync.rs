@@ -3774,10 +3774,86 @@ pub async fn sync_adj_factor(
     )
     .await?;
 
-    let total = symbols.len();
     let ok = Arc::new(AtomicUsize::new(0));
     let fail = Arc::new(AtomicUsize::new(0));
     let cancelled = Arc::new(AtomicBool::new(false));
+
+    // 批量路径：按 trade_date 拉全市场（1 次 API 调用/日，几秒完成）。
+    // EOD 单日同步用此路径（传空 symbols 触发）。历史回填/单只补数走下方逐只路径。
+    if symbols.is_empty() {
+        let trade_dates = load_moneyflow_full_market_trade_dates(pool, s, e).await?;
+        let total_days = trade_dates.len();
+        let page_limit = 6000usize;
+        let mut total_rows = 0usize;
+        let mut day_ok = 0usize;
+        let mut day_fail = 0usize;
+
+        for (di, trade_day) in trade_dates.iter().enumerate() {
+            let td = trade_day.format("%Y%m%d").to_string();
+            let mut offset = 0usize;
+            loop {
+                match client
+                    .adj_factor(None, Some(&td), None, None, Some(page_limit), Some(offset))
+                    .await
+                {
+                    Ok(resp) => {
+                        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                        let row_count = maps.len();
+                        // 批量路径：从响应取 ts_code（逐只路径用传入的 sym，此处必须从响应取）
+                        let factors: Vec<MarketAdjustmentFactor> = maps
+                            .iter()
+                            .filter_map(|item| {
+                                let ts_code = get_str(item, "ts_code");
+                                if ts_code.is_empty() {
+                                    return None;
+                                }
+                                Some(MarketAdjustmentFactor {
+                                    symbol: ts_code.to_string(),
+                                    trade_date: to_date(&get_str(item, "trade_date"))?,
+                                    adj_factor: to_decimal(get_f64(item, "adj_factor")),
+                                })
+                            })
+                            .collect();
+                        if !factors.is_empty() {
+                            total_rows += factors.len();
+                            if let Err(e) =
+                                repository::upsert_adj_factors_batch(pool, &factors, &dv_id, "tushare")
+                                    .await
+                            {
+                                warn!("{} 复权因子批量 upsert 失败: {}", td, e);
+                            }
+                        }
+                        if row_count < page_limit {
+                            break;
+                        }
+                        offset += page_limit;
+                    }
+                    Err(e) => {
+                        warn!("{} 复权因子批量拉取失败: {}", td, e);
+                        day_fail += 1;
+                        break;
+                    }
+                }
+            }
+            day_ok += 1;
+            if di > 0 && di % 10 == 0 {
+                info!("复权因子批量进度: {}/{} 天", di, total_days);
+            }
+        }
+        info!("[sync] adj_factor 批量同步完成: {} 天, {} 条", total_days, total_rows);
+        repository::update_sync_task(
+            pool,
+            &task_id,
+            if day_fail > 0 { "partial" } else { "completed" },
+            total_days as i32,
+            day_ok as i32,
+            day_fail as i32,
+        )
+        .await?;
+        return Ok(total_rows);
+    }
+
+    let total = symbols.len();
 
     // 8 并发拉取(Governor 200/分钟自动限流,不会超 Tushare 配额)。
     // 取消用 AtomicBool(for_each_concurrent 无法直接 break,检测到后其他分支 return)。
@@ -3820,7 +3896,7 @@ pub async fn sync_adj_factor(
                     .await;
                     info!("复权因子进度: {}/{}", i, total);
                 }
-                match client.adj_factor(&sym, Some(&start), Some(&end)).await {
+                match client.adj_factor(Some(sym), None, Some(&start), Some(&end), None, None).await {
                     Ok(resp) => {
                         if let Some(data) = resp.data {
                             let maps = data.to_maps();

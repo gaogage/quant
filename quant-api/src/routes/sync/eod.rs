@@ -99,14 +99,14 @@ pub async fn sync_eod_data(
     )
     .await;
 
-    // 日线基础指标(已知慢点,超时隔离)
+    // 日线基础指标(批量拉取：传空走 trade_date 全市场路径，1 次 API 调用几秒完成)
     {
         let basic_timeout = tokio::time::timeout(
             tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS),
             quant_data::sync::sync_daily_basic(
                 db,
                 tushare,
-                &all_stocks,
+                &[],
                 &date_str,
                 &date_str,
                 &format!("dv-basic-eod-{}", date_str),
@@ -127,13 +127,13 @@ pub async fn sync_eod_data(
     }
 
     // 资金流(market_stock_moneyflow): v24 mf_* 因子依赖。
-    // 不在原 EOD 列表内,缺失会导致 moneyflow backfill completed 但无产出(静默降级)。
+    // 批量拉取：传空走 trade_date 全市场路径，1 次 API 调用几秒完成。
     let mf_n = {
         let mf_dv = format!("mf-eod-{}", date_str);
         let mf_fut = quant_data::sync::sync_moneyflow(
             db,
             tushare,
-            &all_stocks,
+            &[],
             &date_str,
             &date_str,
             &mf_dv,
@@ -209,12 +209,12 @@ pub async fn sync_eod_data(
         }
     }
 
-    // ── 复权因子全量同步（慢，逐只拉 Tushare 7210 只）+ ML + 数据质量 ──
-    // 这些是后台收尾任务，不阻塞日报。sync_adj_factor 会用真实值覆盖 backfill 的前值填充。
+    // ── 复权因子全量同步（批量拉取：传空走 trade_date 全市场路径，1 次 API 调用几秒完成）
+    // + ML + 数据质量。这些是后台收尾任务，不阻塞日报。sync_adj_factor 会用真实值覆盖 backfill 的前值填充。
     let adj_n = quant_data::sync::sync_adj_factor(
         db,
         tushare,
-        &all_stocks,
+        &[],
         &date_str,
         &date_str,
         &format!("dv-adj-eod-{}", date_str),
