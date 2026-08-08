@@ -1,4 +1,4 @@
-//! 简易图表组件 — 基于 HTML Canvas 绘制
+//! 简易图表组件 - 基于 HTML Canvas 绘制
 
 use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
@@ -261,6 +261,7 @@ pub fn NavComparisonChart(
 /// 账号累计收益 vs 沪深300 基准累计收益双线对比图。
 /// 两条曲线已各自归一化为累计收益率（%），共用同一日期-收益坐标系。
 /// dates/acct_ret 为账号序列，bench_dates/bench_ret 为基准序列（日期可能不完全重合，独立按索引画）。
+/// 鼠标 hover 显示 tooltip（日期/本策略收益/沪深300收益）。
 #[component]
 pub fn ReturnVsBenchmarkChart(
     dates: Vec<String>,
@@ -276,6 +277,10 @@ pub fn ReturnVsBenchmarkChart(
     let bench_n = bench_dates.len();
     let dates_for_label = dates.clone();
 
+    // tooltip 状态：鼠标 hover 时显示（日期, 本策略收益, 沪深300收益）
+    let tooltip = use_signal(|| Option::<(String, f64, Option<f64>)>::None);
+    let tooltip_data = (*tooltip.read()).clone();
+
     use_effect(move || {
         if n < 2 { return; }
         let window = web_sys::window().unwrap();
@@ -283,94 +288,133 @@ pub fn ReturnVsBenchmarkChart(
         let canvas_el = document.get_element_by_id(&cid);
         if canvas_el.is_none() { return; }
         let canvas: web_sys::HtmlCanvasElement = canvas_el.unwrap().dyn_into().unwrap();
-        let ctx = canvas.get_context("2d").unwrap().unwrap();
-        let ctx: web_sys::CanvasRenderingContext2d = ctx.dyn_into().unwrap();
 
         let w = canvas.width() as f64;
         let h = canvas.height() as f64;
         if w < 10.0 || h < 10.0 { return; }
 
-        let all_vals: Vec<f64> = acct.iter().chain(bench.iter()).copied().collect();
-        let min_v = all_vals.iter().cloned().fold(0.0_f64, f64::min);
-        let max_v = all_vals.iter().cloned().fold(0.0_f64, f64::max);
-        let range = (max_v - min_v).max(1.0_f64);
-        let top_v = max_v + range * 0.1;
-        let bot_v = min_v - range * 0.1;
-        let v_range = (top_v - bot_v).max(1.0_f64);
+        // 先绘图（用 canvas 引用，绘完释放，再 move canvas 进事件闭包）
+        {
+            let ctx = canvas.get_context("2d").unwrap().unwrap();
+            let ctx: web_sys::CanvasRenderingContext2d = ctx.dyn_into().unwrap();
 
-        let to_x = |i: usize, len: usize| -> f64 { 40.0 + (i as f64 / (len.max(2) - 1) as f64) * (w - 60.0) };
-        let to_y = |v: f64| -> f64 { h - 20.0 - ((v - bot_v) / v_range) * (h - 40.0) };
+            let all_vals: Vec<f64> = acct.iter().chain(bench.iter()).copied().collect();
+            let min_v = all_vals.iter().cloned().fold(0.0_f64, f64::min);
+            let max_v = all_vals.iter().cloned().fold(0.0_f64, f64::max);
+            let range = (max_v - min_v).max(1.0_f64);
+            let top_v = max_v + range * 0.1;
+            let bot_v = min_v - range * 0.1;
+            let v_range = (top_v - bot_v).max(1.0_f64);
 
-        ctx.clear_rect(0.0, 0.0, w, h);
+            let to_x = |i: usize, len: usize| -> f64 { 40.0 + (i as f64 / (len.max(2) - 1) as f64) * (w - 60.0) };
+            let to_y = |v: f64| -> f64 { h - 20.0 - ((v - bot_v) / v_range) * (h - 40.0) };
 
-        // 零线
-        let zero_y = to_y(0.0);
-        ctx.set_stroke_style_str("#9ca3af");
-        ctx.set_line_width(0.5);
-        ctx.begin_path();
-        ctx.move_to(40.0, zero_y);
-        ctx.line_to(w - 20.0, zero_y);
-        ctx.stroke();
+            ctx.clear_rect(0.0, 0.0, w, h);
 
-        // 网格线
-        ctx.set_stroke_style_str("#e5e7eb");
-        ctx.set_line_width(0.3);
-        for i in 0..=4 {
-            let y = 20.0 + (i as f64 / 4.0) * (h - 40.0);
-            ctx.begin_path();
-            ctx.move_to(40.0, y);
-            ctx.line_to(w - 20.0, y);
-            ctx.stroke();
-        }
-
-        // Y 轴标签
-        ctx.set_font("10px monospace");
-        ctx.set_fill_style_str("#9ca3af");
-        ctx.set_text_align("right");
-        ctx.set_text_baseline("middle");
-        for i in 0..=3 {
-            let v = bot_v + (i as f64 / 3.0) * v_range;
-            let y = to_y(v);
-            let _ = ctx.fill_text_with_max_width(&format!("{:.1}%", v), 35.0, y, 40.0);
-        }
-
-        // 基准线（沪深300，灰色细线）
-        if bench_n >= 2 {
+            // 零线
+            let zero_y = to_y(0.0);
             ctx.set_stroke_style_str("#9ca3af");
-            ctx.set_line_width(1.5);
+            ctx.set_line_width(0.5);
             ctx.begin_path();
-            for (i, &v) in bench.iter().enumerate() {
-                let x = to_x(i, bench_n);
+            ctx.move_to(40.0, zero_y);
+            ctx.line_to(w - 20.0, zero_y);
+            ctx.stroke();
+
+            // 网格线
+            ctx.set_stroke_style_str("#e5e7eb");
+            ctx.set_line_width(0.3);
+            for i in 0..=4 {
+                let y = 20.0 + (i as f64 / 4.0) * (h - 40.0);
+                ctx.begin_path();
+                ctx.move_to(40.0, y);
+                ctx.line_to(w - 20.0, y);
+                ctx.stroke();
+            }
+
+            // Y 轴标签
+            ctx.set_font("10px monospace");
+            ctx.set_fill_style_str("#9ca3af");
+            ctx.set_text_align("right");
+            ctx.set_text_baseline("middle");
+            for i in 0..=3 {
+                let v = bot_v + (i as f64 / 3.0) * v_range;
+                let y = to_y(v);
+                let _ = ctx.fill_text_with_max_width(&format!("{:.1}%", v), 35.0, y, 40.0);
+            }
+
+            // 基准线（沪深300，灰色细线）
+            if bench_n >= 2 {
+                ctx.set_stroke_style_str("#9ca3af");
+                ctx.set_line_width(1.5);
+                ctx.begin_path();
+                for (i, &v) in bench.iter().enumerate() {
+                    let x = to_x(i, bench_n);
+                    let y = to_y(v);
+                    if i == 0 { ctx.move_to(x, y); } else { ctx.line_to(x, y); }
+                }
+                ctx.stroke();
+            }
+
+            // 账号线（蓝色粗线）
+            ctx.set_stroke_style_str("#3b82f6");
+            ctx.set_line_width(2.5);
+            ctx.begin_path();
+            for (i, &v) in acct.iter().enumerate() {
+                let x = to_x(i, n);
                 let y = to_y(v);
                 if i == 0 { ctx.move_to(x, y); } else { ctx.line_to(x, y); }
             }
             ctx.stroke();
-        }
 
-        // 账号线（蓝色粗线）
-        ctx.set_stroke_style_str("#3b82f6");
-        ctx.set_line_width(2.5);
-        ctx.begin_path();
-        for (i, &v) in acct.iter().enumerate() {
-            let x = to_x(i, n);
-            let y = to_y(v);
-            if i == 0 { ctx.move_to(x, y); } else { ctx.line_to(x, y); }
-        }
-        ctx.stroke();
-
-        // X 轴日期标签（首/中/末）
-        ctx.set_font("9px monospace");
-        ctx.set_fill_style_str("#9ca3af");
-        ctx.set_text_align("center");
-        ctx.set_text_baseline("top");
-        let label_idxs = [0usize, n / 2, n - 1];
-        for &i in &label_idxs {
-            if let Some(d) = dates_for_label.get(i) {
-                let x = to_x(i, n);
-                let short = if d.len() >= 10 { &d[5..10] } else { d.as_str() };
-                let _ = ctx.fill_text_with_max_width(short, x, h - 18.0, 50.0);
+            // X 轴日期标签（首/中/末）
+            ctx.set_font("9px monospace");
+            ctx.set_fill_style_str("#9ca3af");
+            ctx.set_text_align("center");
+            ctx.set_text_baseline("top");
+            let label_idxs = [0usize, n / 2, n - 1];
+            for &i in &label_idxs {
+                if let Some(d) = dates_for_label.get(i) {
+                    let x = to_x(i, n);
+                    let short = if d.len() >= 10 { &d[5..10] } else { d.as_str() };
+                    let _ = ctx.fill_text_with_max_width(short, x, h - 18.0, 50.0);
+                }
             }
-        }
+        } // ctx 在此 drop，canvas 可 move 进闭包
+
+        // hover 事件：mousemove 更新 tooltip signal（tooltip 由 Dioxus div 渲染）
+        let acct_c = acct.clone();
+        let bench_c = bench.clone();
+        let dates_c = dates_for_label.clone();
+        let bench_dates_c = bench_dates.clone();
+        let mut tt = tooltip.clone();
+        let nn = n;
+
+        let canvas_for_events = canvas.clone();
+        let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::MouseEvent| {
+            let rect = canvas.get_bounding_client_rect();
+            let mx = event.client_x() as f64 - rect.left();
+            if mx < 40.0 || mx > w - 20.0 || nn < 2 {
+                tt.set(None);
+                return;
+            }
+            let frac = (mx - 40.0) / (w - 60.0);
+            let idx = ((frac * (nn - 1) as f64).round() as usize).min(nn - 1);
+
+            let date = dates_c.get(idx).cloned().unwrap_or_default();
+            let acct_v = acct_c.get(idx).copied().unwrap_or(0.0);
+            let bench_v = bench_dates_c.iter().position(|d| d == &date).and_then(|bi| bench_c.get(bi).copied());
+
+            tt.set(Some((date, acct_v, bench_v)));
+        }) as Box<dyn FnMut(web_sys::MouseEvent)>);
+
+        canvas_for_events.add_event_listener_with_callback("mousemove", closure.as_ref().unchecked_ref()).unwrap();
+        let mut tt2 = tooltip.clone();
+        let leave_closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            tt2.set(None);
+        }) as Box<dyn FnMut()>);
+        canvas_for_events.add_event_listener_with_callback("mouseleave", leave_closure.as_ref().unchecked_ref()).unwrap();
+        closure.forget();
+        leave_closure.forget();
     });
 
     rsx! {
@@ -380,6 +424,17 @@ pub fn ReturnVsBenchmarkChart(
                 width: "700",
                 height: "220",
                 class: "w-full h-auto border border-gray-200 dark:border-gray-700 rounded-lg"
+            }
+            // hover tooltip（Dioxus div 渲染，右上角显示数值）
+            if let Some((date, acct_v, bench_v)) = tooltip_data.as_ref() {
+                div {
+                    class: "absolute top-2 right-2 px-2 py-1 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded shadow text-xs text-gray-700 dark:text-gray-300 pointer-events-none z-10",
+                    div { class: "font-mono text-gray-500 mb-0.5", "{date}" }
+                    div { class: "text-blue-600 dark:text-blue-400", "本策略: {acct_v:.2}%" }
+                    if let Some(bv) = bench_v {
+                        div { class: "text-gray-500", "沪深300: {bv:.2}%" }
+                    }
+                }
             }
             div { class: "flex gap-4 mt-2 text-xs text-gray-500 dark:text-gray-400",
                 span { class: "flex items-center gap-1",

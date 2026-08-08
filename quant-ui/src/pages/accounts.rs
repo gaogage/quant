@@ -1140,13 +1140,54 @@ fn AccountReturnChart(account_id: String) -> Element {
 
     rsx! {
         div { class: "space-y-2",
-            div { class: "flex items-center gap-2 text-xs",
+            div { class: "flex flex-wrap items-center gap-2 text-xs",
+                // 快捷范围选择（年维度）
+                button {
+                    class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
+                    onclick: move |_| {
+                        let now = js_sys::Date::new_0();
+                        let s = js_date_str(now.get_full_year() as i32 - 1, now.get_month() as i32, now.get_date() as i32);
+                        let e = js_date_str(now.get_full_year() as i32, now.get_month() as i32, now.get_date() as i32);
+                        start_date.set(s);
+                        end_date.set(e);
+                        let t = *load_trigger.read();
+                        load_trigger.set(t.wrapping_add(1));
+                    },
+                    "近1年"
+                }
+                button {
+                    class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
+                    onclick: move |_| {
+                        let now = js_sys::Date::new_0();
+                        let s = js_date_str(now.get_full_year() as i32 - 3, now.get_month() as i32, now.get_date() as i32);
+                        let e = js_date_str(now.get_full_year() as i32, now.get_month() as i32, now.get_date() as i32);
+                        start_date.set(s);
+                        end_date.set(e);
+                        let t = *load_trigger.read();
+                        load_trigger.set(t.wrapping_add(1));
+                    },
+                    "近3年"
+                }
+                button {
+                    class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
+                    onclick: move |_| {
+                        start_date.set("2020-01-01".to_string());
+                        end_date.set(js_date_str(cur_year, cur_month, cur_day));
+                        let t = *load_trigger.read();
+                        load_trigger.set(t.wrapping_add(1));
+                    },
+                    "全部"
+                }
+                span { class: "text-gray-300 dark:text-gray-600", "|" }
+                // 精确日期输入（oninput 实时同步 value，onchange 失焦触发加载，避免输入年份被截断）
                 input {
                     r#type: "date",
                     class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
                     value: "{start_input}",
-                    onchange: move |e: FormEvent| {
+                    oninput: move |e: FormEvent| {
                         start_date.set(e.value().to_string());
+                    },
+                    onchange: move |_| {
                         let t = *load_trigger.read();
                         load_trigger.set(t.wrapping_add(1));
                     },
@@ -1156,8 +1197,10 @@ fn AccountReturnChart(account_id: String) -> Element {
                     r#type: "date",
                     class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
                     value: "{end_input}",
-                    onchange: move |e: FormEvent| {
+                    oninput: move |e: FormEvent| {
                         end_date.set(e.value().to_string());
+                    },
+                    onchange: move |_| {
                         let t = *load_trigger.read();
                         load_trigger.set(t.wrapping_add(1));
                     },
