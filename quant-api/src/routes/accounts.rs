@@ -564,9 +564,17 @@ pub async fn nav_history(
     // 基准曲线（沪深300）：以 NAV 序列首日~末日为区间，索引收盘价归一化为累计收益率
     let benchmark = query_benchmark_curve(&state.db, &nav_rows).await;
 
+    // 账号曲线归一化基准：选中时间段首日 NAV。
+    // cumulative_return 是自初始资金的绝对累计收益（如 54.98%），
+    // relative_return 是相对选中时间段首日的累计收益（首日=0%），与基准曲线对齐，
+    // 供 accounts 页面「收益率曲线 vs 沪深300」图用（两条曲线起点都归零）。
+    let first_nav = nav_rows.first().map(|(_, nav, _, _, _)| *nav).filter(|v| *v > 0.0);
     let nav_data: Vec<serde_json::Value> = nav_rows
         .into_iter()
         .map(|(d, nav, dr, cr, mdd)| {
+            let relative_return = first_nav
+                .map(|base| ((nav / base - 1.0) * 10000.0).round() / 100.0)
+                .unwrap_or(0.0);
             // 收益率类字段转百分比数值（前端图表直接当 % 画，如 54.98 表示 54.98%），
             // 保留 2 位小数（0.01% 精度），避免乘 100 round 再除 100 丢精度致曲线呈阶梯/平台。
             serde_json::json!({
@@ -574,6 +582,7 @@ pub async fn nav_history(
                 "nav": (nav * 100.0).round() / 100.0,
                 "daily_return": (dr * 10000.0).round() / 100.0,
                 "cumulative_return": (cr * 10000.0).round() / 100.0,
+                "relative_return": relative_return,
                 "max_drawdown": (mdd * 10000.0).round() / 100.0,
             })
         })

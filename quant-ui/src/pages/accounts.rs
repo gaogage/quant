@@ -1133,7 +1133,8 @@ fn AccountReturnChart(account_id: String) -> Element {
     let end_input = end_date.read().clone();
 
     let dates: Vec<String> = nav_points.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
-    let acct_ret: Vec<f64> = nav_points.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
+    // relative_return：相对选中时间段首日归零（首日=0%），与基准曲线起点对齐
+    let acct_ret: Vec<f64> = nav_points.iter().map(|p| p["relative_return"].as_f64().unwrap_or(0.0)).collect();
     let bench_dates: Vec<String> = bench_curve.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
     let bench_ret: Vec<f64> = bench_curve.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
 
