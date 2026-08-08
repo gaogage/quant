@@ -567,12 +567,14 @@ pub async fn nav_history(
     let nav_data: Vec<serde_json::Value> = nav_rows
         .into_iter()
         .map(|(d, nav, dr, cr, mdd)| {
+            // 收益率类字段转百分比数值（前端图表直接当 % 画，如 54.98 表示 54.98%），
+            // 保留 2 位小数（0.01% 精度），避免乘 100 round 再除 100 丢精度致曲线呈阶梯/平台。
             serde_json::json!({
                 "date": d.format("%Y-%m-%d").to_string(),
                 "nav": (nav * 100.0).round() / 100.0,
-                "daily_return": (dr * 100.0).round() / 100.0,
-                "cumulative_return": (cr * 100.0).round() / 100.0,
-                "max_drawdown": (mdd * 100.0).round() / 100.0,
+                "daily_return": (dr * 10000.0).round() / 100.0,
+                "cumulative_return": (cr * 10000.0).round() / 100.0,
+                "max_drawdown": (mdd * 10000.0).round() / 100.0,
             })
         })
         .collect();
