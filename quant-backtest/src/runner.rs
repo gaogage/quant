@@ -353,16 +353,22 @@ impl BacktestDataCache {
             {
                 self.stats.daily_bar_symbol_hits += 1;
                 merge_daily_bar_records(&mut cached, records.as_ref());
-            } else if let Some(records) = self
-                .cached_daily_bar_records_from_covering_window(data_version_id, &symbol, start, end)
-            {
+            } else if let Some(records) = self.cached_daily_bar_records_from_covering_window(
+                data_version_id,
+                &symbol,
+                start,
+                end,
+            ) {
                 self.stats.daily_bar_symbol_hits += 1;
                 self.stats.daily_bar_covering_window_hits += 1;
                 merge_daily_bar_records(&mut cached, &records);
                 reusable_records.push((symbol, records));
-            } else if let Some(records) = self
-                .cached_daily_bar_records_from_market_data_snapshot(data_version_id, &symbol, start, end)
-            {
+            } else if let Some(records) = self.cached_daily_bar_records_from_market_data_snapshot(
+                data_version_id,
+                &symbol,
+                start,
+                end,
+            ) {
                 self.stats.daily_bar_symbol_hits += 1;
                 self.stats.daily_bar_snapshot_hits += 1;
                 merge_daily_bar_records(&mut cached, &records);
@@ -571,7 +577,13 @@ impl BacktestDataCache {
     fn insert_trading_profiles(
         &mut self,
         requested_symbols: &[String],
-        rows: Vec<(String, Option<String>, Option<String>, Option<bool>, Option<String>)>,
+        rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<bool>,
+            Option<String>,
+        )>,
     ) -> HashMap<String, TradingProfile> {
         let requested_symbols = normalized_symbol_key(requested_symbols);
         let mut by_symbol: HashMap<String, Option<TradingProfile>> = requested_symbols
@@ -1368,6 +1380,88 @@ impl BacktestRunner {
         }
 
         // Positions — batch insert (1000 per batch)
+        //
+        // [价格空间] backtest_position 落库口径用真实价（market_stock_daily_bar.close），
+        // 而非 BC3 引擎内部的后复权价。BC3 equity_curve/绩效仍用后复权（分红再投资假设，
+        // 无除权跳跃，audit 不变）；但仓位明细输出给下游实盘/mvo_simulate 时必须与真实
+        // 资金管理口径一致，否则下游 select_positions 反推的成交价会落在后复权空间，与
+        // 实盘持仓真实价混用（2026-08-10 NAV +21.6% 根因）。
+        // [价格空间] backtest_position 落库口径用真实价。两层数据源：
+        // 1) market_stock_daily_bar.close（当日真实价，EOD 20:00 入库）
+        // 2) fallback: pos.close_price(后复权) / adj_factor 反算真实价
+        //
+        // 14:40 盘中调仓时当日 bar 尚未入库（EOD 20:00 才同步），raw_close_map 查不到
+        // 当日真实价。若此时回退 pos.close_price（后复权）会污染 backtest_position，
+        // 下游 select_positions 反推成交价落在后复权空间，与实盘持仓真实价混用
+        // （2026-08-11 NAV +125.98% 根因：8/10 修复的 fallback 漏洞每个交易日必现）。
+        //
+        // adj_factor 取 trade_date <= position_date 的最近值（复权因子在除权日跳变后
+        // 保持稳定，向前取最近即可）。已验证：adj_close / adj_factor = raw_close
+        // （002014.SZ 8/10: 158.6543 / 14.5421 = 10.9100 ✓）。
+        let (raw_close_map, adj_factor_map): (
+            HashMap<(NaiveDate, String), Decimal>,
+            HashMap<(NaiveDate, String), Decimal>,
+        ) = {
+            let symbols: Vec<String> = output
+                .daily_positions
+                .iter()
+                .map(|p| p.symbol.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            if symbols.is_empty() {
+                (HashMap::new(), HashMap::new())
+            } else {
+                let mut dates: Vec<NaiveDate> =
+                    output.daily_positions.iter().map(|p| p.date).collect();
+                dates.sort();
+                let (min_d, max_d) = (*dates.first().unwrap(), *dates.last().unwrap());
+                let raw_close_map: HashMap<(NaiveDate, String), Decimal> =
+                    sqlx::query_as::<_, (NaiveDate, String, Decimal)>(
+                        "SELECT trade_date, symbol, close::numeric FROM market_stock_daily_bar
+                         WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3",
+                    )
+                    .bind(&symbols)
+                    .bind(min_d)
+                    .bind(max_d)
+                    .fetch_all(&self.pool)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(d, s, c)| ((d, s), c))
+                    .collect();
+                // adj_factor: 为每个 (symbol, position_date) 取 trade_date <= position_date 的最近值。
+                // LATERAL 走 (symbol, trade_date) 索引，每个仓位一行。复权因子在除权日跳变后
+                // 保持稳定，向前取最近即可用于反算真实价。
+                let position_dates: Vec<NaiveDate> = output
+                    .daily_positions
+                    .iter()
+                    .map(|p| p.date)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                let adj_factor_map: HashMap<(NaiveDate, String), Decimal> =
+                    sqlx::query_as::<_, (NaiveDate, String, Decimal)>(
+                        "SELECT t.target_date, t.symbol, sub.adj_factor::numeric
+                         FROM (SELECT symbol, target_date FROM unnest($1::date[]) WITH ORDINALITY AS d(target_date)
+                               CROSS JOIN unnest($2::text[]) AS sym(symbol)) t
+                         LEFT JOIN LATERAL (
+                             SELECT adj_factor FROM market_adjustment_factor
+                             WHERE symbol = t.symbol AND trade_date <= t.target_date
+                             ORDER BY trade_date DESC LIMIT 1
+                         ) sub ON true",
+                    )
+                    .bind(&position_dates)
+                    .bind(&symbols)
+                    .fetch_all(&self.pool)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(d, s, f)| ((d, s), f))
+                    .collect();
+                (raw_close_map, adj_factor_map)
+            }
+        };
         for chunk in output.daily_positions.chunks(1000) {
             let mut query_builder = String::from(
                 "INSERT INTO backtest_position (task_id, symbol, position_date,
@@ -1391,8 +1485,29 @@ impl BacktestRunner {
                 params.push(pos.quantity.to_string());
                 params.push(pos.available_quantity.to_string());
                 params.push(pos.avg_cost.to_string());
-                params.push(pos.close_price.to_string());
-                params.push(pos.market_value.to_string());
+                // close_price / market_value 用真实价（与实盘口径一致）。
+                // 三层取价：① raw_close（当日真实价，EOD 入库）② 后复权/adj_factor 反算 ③ 兜底后复权
+                // 14:40 盘中调仓当日 bar 未入库时走 ②，用 pos.close_price(后复权) / adj_factor
+                // 反算真实价，避免回退后复权污染下游成交价（2026-08-11 fallback 漏洞修复）。
+                let (cp, mv) = match raw_close_map.get(&(pos.date, pos.symbol.clone())) {
+                    Some(rc) if !rc.is_zero() => (*rc, pos.quantity * *rc),
+                    _ => {
+                        // fallback: 后复权价 / adj_factor = 真实价
+                        let adj_factor = adj_factor_map
+                            .get(&(pos.date, pos.symbol.clone()))
+                            .copied()
+                            .filter(|f| !f.is_zero());
+                        match adj_factor {
+                            Some(f) => {
+                                let raw = pos.close_price / f;
+                                (raw, pos.quantity * raw)
+                            }
+                            None => (pos.close_price, pos.market_value),
+                        }
+                    }
+                };
+                params.push(cp.to_string());
+                params.push(mv.to_string());
                 params.push(pos.weight.to_string());
                 params.push(pos.unrealized_pnl.to_string());
                 params.push(

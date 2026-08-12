@@ -5,8 +5,8 @@
 //!
 //! 原位置：scheduler.rs:157-246。
 
-use sqlx::PgPool;
 use quant_data::tushare::client::TushareClient;
+use sqlx::PgPool;
 use tracing::{info, warn};
 
 /// 盘中调仓时获取 ETF 当日实时价格（通过 Tushare fund_daily API）
@@ -23,7 +23,7 @@ pub(crate) async fn fetch_intraday_etf_prices(
     // 1. 先尝试从 DB 获取当日数据（可能已被其他同步流程更新）
     for sym in etf_symbols {
         let row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
-            "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 AND trade_date = $2",
+            "SELECT close FROM market_stock_daily_bar WHERE symbol = $1 AND trade_date = $2",
         )
         .bind(sym)
         .bind(today)
@@ -89,7 +89,7 @@ pub(crate) async fn fetch_intraday_etf_prices(
     for sym in etf_symbols {
         if !prices.contains_key(sym) {
             let row: Option<(Option<rust_decimal::Decimal>,)> = sqlx::query_as(
-                "SELECT close FROM market_stock_daily_bar_adj WHERE symbol = $1 ORDER BY trade_date DESC LIMIT 1"
+                "SELECT close FROM market_stock_daily_bar WHERE symbol = $1 ORDER BY trade_date DESC LIMIT 1"
             ).bind(sym).fetch_optional(db).await.ok().flatten();
             if let Some((Some(p),)) = row {
                 let price = p.to_string().parse::<f64>().unwrap_or(0.0);

@@ -67,9 +67,9 @@ pub async fn select_positions(
 // rebalance_account 与 mark_to_market 由 Task 5 在此追加
 
 use crate::routes::shared::{
-    compute_lw_mvo_weights, compute_vol_target_leverage,
-    detect_regime_exposure, fetch_intraday_etf_prices, resolved_to_legacy_sc,
-    send_quality_alert, MvoWeightCache, StrategyConfig,
+    compute_lw_mvo_weights, compute_vol_target_leverage, detect_regime_exposure,
+    fetch_intraday_etf_prices, resolved_to_legacy_sc, send_quality_alert, MvoWeightCache,
+    StrategyConfig,
 };
 use crate::routes::strategy::ResolvedStrategy;
 use crate::routes::trading::{execute_simulated_trade, try_auto_repay, update_current_nav};
@@ -144,10 +144,16 @@ async fn check_maintenance_gate(
     if maint < liq_thr {
         // 平仓线:强平(正常由每日检查处理,此处兜底)
         let _ = force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(sc)).await;
-        warn!("[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买", date, account_id, maint, liq_thr);
+        warn!(
+            "[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买",
+            date, account_id, maint, liq_thr
+        );
         true
     } else if maint < warn_thr {
-        warn!("[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买", date, account_id, maint, warn_thr);
+        warn!(
+            "[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买",
+            date, account_id, maint, warn_thr
+        );
         true
     } else {
         false
@@ -225,9 +231,15 @@ pub async fn rebalance_account(
     // Step 5d:杠杆计算提取为 compute_leverage_mult,cash 路径 leverage_enabled=false
     // 时函数内返回 ONE(编译期可通过 Account<CashAccount> 不调此函数进一步强化,留后续)。
     let leverage_mult = compute_leverage_mult(
-        db, account_id, &sc, regime,
-        leverage_enabled, leverage_multiplier, leverage_mode,
-    ).await;
+        db,
+        account_id,
+        &sc,
+        regime,
+        leverage_enabled,
+        leverage_multiplier,
+        leverage_mode,
+    )
+    .await;
 
     // 5. 维保门控(实盘口径):仅 margin 路径。维保<警戒线禁买(跳过建仓段),
     // 平仓由每日盯市 check_maintenance_after_mark 处理。
@@ -288,20 +300,26 @@ pub async fn rebalance_account(
         }
         let (side, qty) = if delta > Decimal::ZERO {
             // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
-            ("buy", quant_common::trading_rules::round_down_to_lot(
-                delta,
-                quant_common::trading_rules::LOT_SIZE,
-            ))
+            (
+                "buy",
+                quant_common::trading_rules::round_down_to_lot(
+                    delta,
+                    quant_common::trading_rules::LOT_SIZE,
+                ),
+            )
         } else {
             // 卖出:
             // - 全仓清仓(target_qty == 0):允许零头一次性清光
             // - 部分减仓:卖出量向下取整到100股(1手),保证剩余持仓仍为100整数倍
             let sell_qty = -delta;
             if target_qty > Decimal::ZERO {
-                ("sell", quant_common::trading_rules::round_down_to_lot(
-                    sell_qty,
-                    quant_common::trading_rules::LOT_SIZE,
-                ))
+                (
+                    "sell",
+                    quant_common::trading_rules::round_down_to_lot(
+                        sell_qty,
+                        quant_common::trading_rules::LOT_SIZE,
+                    ),
+                )
             } else {
                 ("sell", sell_qty)
             }
@@ -317,13 +335,31 @@ pub async fn rebalance_account(
                 let dir = block.limit_type.map(|c| c.to_string()).unwrap_or_default();
                 warn!(
                     "[rebalance] 跳过 A股{}: {} {}({})",
-                    side, p.symbol, block.reason, if dir.is_empty() { "方向未知" } else { dir.as_str() }
+                    side,
+                    p.symbol,
+                    block.reason,
+                    if dir.is_empty() {
+                        "方向未知"
+                    } else {
+                        dir.as_str()
+                    }
                 );
-                send_quality_alert(db, &[format!(
-                    "{}: {} {} {}{}",
-                    account_id, p.symbol, side, block.reason,
-                    if dir.is_empty() { String::new() } else { format!("({})", dir) }
-                )]).await;
+                send_quality_alert(
+                    db,
+                    &[format!(
+                        "{}: {} {} {}{}",
+                        account_id,
+                        p.symbol,
+                        side,
+                        block.reason,
+                        if dir.is_empty() {
+                            String::new()
+                        } else {
+                            format!("({})", dir)
+                        }
+                    )],
+                )
+                .await;
                 continue;
             }
         }
@@ -343,6 +379,7 @@ pub async fn rebalance_account(
             target_value,
             reason: Some(format!("调仓 A股 regime={:.0}%", regime * 100.0)),
             strategy_version_id: Some(sc.strategy_id.clone()),
+            trade_date: Some(date),
         };
         if execute_simulated_trade(db, &trade).await.is_ok() {
             // 实际成交价(含滑点)用于更新持仓
@@ -353,7 +390,17 @@ pub async fn rebalance_account(
                 Decimal::ONE + slip_d
             };
             let fill_price = price * mult;
-            apply_fill_to_position(db, account_id, &p.symbol, side, qty, fill_price, leverage_enabled, date).await;
+            apply_fill_to_position(
+                db,
+                account_id,
+                &p.symbol,
+                side,
+                qty,
+                fill_price,
+                leverage_enabled,
+                date,
+            )
+            .await;
             n += 1;
         }
     }
@@ -374,7 +421,13 @@ pub async fn rebalance_account(
                     let dir = block.limit_type.map(|c| c.to_string()).unwrap_or_default();
                     warn!(
                         "[rebalance] 清仓跳过 A股sell: {} {}({})",
-                        sym, block.reason, if dir.is_empty() { "方向未知" } else { dir.as_str() }
+                        sym,
+                        block.reason,
+                        if dir.is_empty() {
+                            "方向未知"
+                        } else {
+                            dir.as_str()
+                        }
                     );
                     continue;
                 }
@@ -395,12 +448,23 @@ pub async fn rebalance_account(
                 target_value: *qty * Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
                 reason: Some("清仓(A股不在目标集)".into()),
                 strategy_version_id: Some(sc.strategy_id.clone()),
+                trade_date: Some(date),
             };
             if execute_simulated_trade(db, &trade).await.is_ok() {
                 let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
                 let fill_price = Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO)
                     * (Decimal::ONE - slip_d);
-                apply_fill_to_position(db, account_id, sym, "sell", *qty, fill_price, leverage_enabled, date).await;
+                apply_fill_to_position(
+                    db,
+                    account_id,
+                    sym,
+                    "sell",
+                    *qty,
+                    fill_price,
+                    leverage_enabled,
+                    date,
+                )
+                .await;
                 n += 1;
             }
         }
@@ -425,10 +489,7 @@ pub async fn rebalance_account(
         HashMap::new()
     };
     let intraday_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::Intraday) {
-        let syms: Vec<String> = etf_allocations
-            .iter()
-            .map(|(s, _)| s.to_string())
-            .collect();
+        let syms: Vec<String> = etf_allocations.iter().map(|(s, _)| s.to_string()).collect();
         fetch_intraday_etf_prices(tushare, &syms, date, db).await
     } else {
         HashMap::new()
@@ -443,16 +504,27 @@ pub async fn rebalance_account(
         // ETF 目标市值也应用 leverage_mult(与 A 股段 scale 口径一致)。
         // 杠杆是账号级配置,放大整个组合(A股+ETF),而非只放大 A 股 11%。
         // 修复前:alloc_amount = current_nav × alloc_pct(不放大)→ 杠杆只对 A股生效,总 nav 几乎不变。
-        let alloc_amount =
-            current_nav * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO) * leverage_mult;
+        let alloc_amount = current_nav
+            * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO)
+            * leverage_mult;
         if alloc_amount <= Decimal::ZERO {
             continue;
         }
         // P2-C:EodClose 模式优先用预加载的 etf_eod_prices,Intraday 模式用 intraday_prices
         let price_val = if matches!(price_source, PriceSource::EodClose) {
-            etf_eod_prices.get(etf_symbol.as_str()).copied().unwrap_or(0.0)
+            etf_eod_prices
+                .get(etf_symbol.as_str())
+                .copied()
+                .unwrap_or(0.0)
         } else {
-            fetch_etf_price(db, etf_symbol.as_str(), date, price_source, &intraday_prices).await
+            fetch_etf_price(
+                db,
+                etf_symbol.as_str(),
+                date,
+                price_source,
+                &intraday_prices,
+            )
+            .await
         };
         let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ONE);
         if price <= Decimal::ZERO {
@@ -469,18 +541,24 @@ pub async fn rebalance_account(
         }
         let (side, qty) = if delta > Decimal::ZERO {
             // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
-            ("buy", quant_common::trading_rules::round_down_to_lot(
-                delta,
-                quant_common::trading_rules::LOT_SIZE,
-            ))
+            (
+                "buy",
+                quant_common::trading_rules::round_down_to_lot(
+                    delta,
+                    quant_common::trading_rules::LOT_SIZE,
+                ),
+            )
         } else {
             // 卖出(ETF):全仓清仓允许零头,部分减仓向下取整到100份
             let sell_qty = -delta;
             if target_qty > Decimal::ZERO {
-                ("sell", quant_common::trading_rules::round_down_to_lot(
-                    sell_qty,
-                    quant_common::trading_rules::LOT_SIZE,
-                ))
+                (
+                    "sell",
+                    quant_common::trading_rules::round_down_to_lot(
+                        sell_qty,
+                        quant_common::trading_rules::LOT_SIZE,
+                    ),
+                )
             } else {
                 ("sell", sell_qty)
             }
@@ -502,6 +580,7 @@ pub async fn rebalance_account(
             target_value,
             reason: Some(format!("调仓 ETF w={:.1}%", *alloc_pct * 100.0)),
             strategy_version_id: Some(sc.strategy_id.clone()),
+            trade_date: Some(date),
         };
         if execute_simulated_trade(db, &trade).await.is_ok() {
             let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
@@ -511,20 +590,39 @@ pub async fn rebalance_account(
                 Decimal::ONE + slip_d
             };
             let fill_price = price * mult;
-            apply_fill_to_position(db, account_id, etf_symbol.as_str(), side, qty, fill_price, leverage_enabled, date).await;
+            apply_fill_to_position(
+                db,
+                account_id,
+                etf_symbol.as_str(),
+                side,
+                qty,
+                fill_price,
+                leverage_enabled,
+                date,
+            )
+            .await;
             n += 1;
         }
     }
 
     // 建仓 0 笔 + A股选股空 + 账号当前无持仓 → 报错(不产出假绩效)
     if n == 0 && positions.is_empty() && current_positions.is_empty() {
-        let msg = format!("建仓 0 笔:策略 {} 当日已发行标的均无建仓,可能权益曲线/ETF价格数据缺失", rs.strategy_id);
+        let msg = format!(
+            "建仓 0 笔:策略 {} 当日已发行标的均无建仓,可能权益曲线/ETF价格数据缺失",
+            rs.strategy_id
+        );
         warn!("[rebalance] {}", msg);
         crate::routes::shared::send_quality_alert(db, &[msg.clone()]).await;
         return Err(msg);
     }
 
-    // 9. NAV 重算:统一走 trading::update_current_nav(正确口径:持仓市值+cash-margin)
+    // 9. 盯市 + NAV 重算。
+    // [价格空间] 调仓成交后用真实收盘价刷新所有持仓 market_price/market_value，使
+    // update_current_nav 基于真实市值。此前实盘路径从不 mark_to_market（只 mvo_simulate
+    // 回测路径调），持仓市值冻结在建仓日的后复权价，是 2026-08-10 NAV +21.6% 根因之一。
+    // 14:40 调仓时当日 bar 未入库（EOD 20:00 同步），取最近可得收盘价（前一日），可接受。
+    mark_to_market(db, account_id, date).await?;
+    // NAV 重算:统一走 trading::update_current_nav(正确口径:持仓市值+cash-margin)
     // update_current_nav 现同步更新 peak_nav / max_drawdown_pct（P0-3 修复）
     update_current_nav(db, account_id).await?;
     try_auto_repay(db, account_id).await.ok();
@@ -610,9 +708,13 @@ async fn force_liquidation(
         }
         // 取持仓中市值最大的一只卖出(足以还款的比例)。
         // 排除当日跌停股('D'禁卖,卖出无对手盘)—跌停卖不出,选下一只可卖的非跌停股。
-        let pos: Option<(String, rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal)> =
-            sqlx::query_as(
-                "SELECT p.symbol, p.quantity, p.market_price, p.market_value
+        let pos: Option<(
+            String,
+            rust_decimal::Decimal,
+            rust_decimal::Decimal,
+            rust_decimal::Decimal,
+        )> = sqlx::query_as(
+            "SELECT p.symbol, p.quantity, p.market_price, p.market_value
                  FROM paper_position p
                  WHERE p.paper_account_id=$1 AND p.quantity>0
                    AND NOT EXISTS (
@@ -620,23 +722,25 @@ async fn force_liquidation(
                      WHERE l.symbol = p.symbol AND l.trade_date = $2 AND l.limit_type = 'D'
                    )
                  ORDER BY p.market_value DESC LIMIT 1",
-            )
-            .bind(account_id)
-            .bind(date)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| format!("liq pos: {}", e))?;
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("liq pos: {}", e))?;
         let (sym, qty, price, _mv_sym) = match pos {
             Some(p) => p,
             None => break, // 无持仓可平
         };
         // 卖出数量 = need_repay / price(含滑点卖出价),不超过持仓
-        let slip_d = rust_decimal::Decimal::from_f64_retain(slippage).unwrap_or(rust_decimal::Decimal::ZERO);
+        let slip_d =
+            rust_decimal::Decimal::from_f64_retain(slippage).unwrap_or(rust_decimal::Decimal::ZERO);
         let sell_price = price * (rust_decimal::Decimal::ONE - slip_d);
         if sell_price <= rust_decimal::Decimal::ZERO {
             break;
         }
-        let need_repay_d = rust_decimal::Decimal::from_f64_retain(need_repay).unwrap_or(rust_decimal::Decimal::ZERO);
+        let need_repay_d = rust_decimal::Decimal::from_f64_retain(need_repay)
+            .unwrap_or(rust_decimal::Decimal::ZERO);
         let mut sell_qty = need_repay_d / sell_price;
         // A股/ETF 最小交易单位 100，向下取整（部分卖出）；全仓清仓允许零头
         if sell_qty > qty {
@@ -662,9 +766,13 @@ async fn force_liquidation(
             target_value: sell_qty * price,
             reason: Some(format!("强平(维保{:.2}<平仓线)", maint)),
             strategy_version_id: None,
+            trade_date: Some(date),
         };
         if execute_simulated_trade(db, &trade).await.is_ok() {
-            apply_fill_to_position(db, account_id, &sym, "sell", sell_qty, sell_price, true, date).await;
+            apply_fill_to_position(
+                db, account_id, &sym, "sell", sell_qty, sell_price, true, date,
+            )
+            .await;
             // 卖出后 cash += sell_qty*sell_price,主动还款降低 margin
             let repay_amount = sell_qty * sell_price;
             let _ = sqlx::query(
@@ -702,17 +810,16 @@ pub async fn check_maintenance_after_mark(
     slippage: f64,
 ) -> Result<(usize, bool), String> {
     // 读维保阈值 + 杠杆配置(合并为 1 条 SELECT,原 2 条查同一行 paper_account)
-    let (liq_thr, warn_thr, leverage_enabled, _): (f64, f64, bool, Option<f64>) =
-        sqlx::query_as(
-            "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5),
+    let (liq_thr, warn_thr, leverage_enabled, _): (f64, f64, bool, Option<f64>) = sqlx::query_as(
+        "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5),
                     leverage_enabled, leverage_multiplier
              FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| format!("thr/lev: {}", e))?
-        .unwrap_or((1.3, 1.5, false, None));
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("thr/lev: {}", e))?
+    .unwrap_or((1.3, 1.5, false, None));
     if !leverage_enabled {
         return Ok((0, false)); // 无杠杆不检查维保
     }
@@ -733,16 +840,18 @@ pub async fn check_maintenance_after_mark(
 /// 每日盯市:用当日收盘价重算持仓 market_price/market_value,使 update_current_nav 反映真实市值。
 /// 回放逐日复利的必要步骤(否则 NAV 停在建仓日不动)。
 pub async fn mark_to_market(db: &PgPool, account_id: &str, date: NaiveDate) -> Result<(), String> {
-    // LATERAL 子查询:每个持仓 symbol 单独取最新复权价(走 symbol,trade_date 索引),
-    // 避免 DISTINCT ON 全表扫描视图(market_stock_daily_bar_adj JOIN adj_factor 1400万行)。
-    // 原 DISTINCT ON 写法单次 ~1.6s,1578 天累计 ~42 分钟(mvo_simulate 卡顿根因)。
+    // [价格空间] 用真实收盘价(market_stock_daily_bar)盯市，不用后复权价(_adj 视图)。
+    // 实盘/mvo_simulate 的资金管理(NAV=cash+市值-margin)必须基于真实价，与实际成交价口径
+    // 一致。后复权价仅用于 BC3 引擎内部的绩效计算(portfolio.rs mark_to_market)，与此无关。
+    // 2026-08-10 NAV +21.6% 根因之一：实盘从不 mark_to_market，持仓市值冻结在后复权建仓价。
+    // LATERAL 子查询:每个持仓 symbol 单独取最新真实收盘价(走 symbol,trade_date 索引)。
     sqlx::query(
         "UPDATE paper_position pp SET
              market_price = sub.close, market_value = pp.quantity * sub.close
          FROM paper_position p2
          LEFT JOIN LATERAL (
              SELECT close::numeric AS close
-             FROM market_stock_daily_bar_adj
+             FROM market_stock_daily_bar
              WHERE symbol = p2.symbol AND trade_date <= $1
              ORDER BY trade_date DESC LIMIT 1
          ) sub ON true
@@ -807,7 +916,10 @@ async fn apply_fill_cash(
         .await
         .unwrap_or(0.0);
         if cash <= 0.0 {
-            warn!("[rebalance] {} 无杠杆账户 cash=0,跳过买入 {}", account_id, sym);
+            warn!(
+                "[rebalance] {} 无杠杆账户 cash=0,跳过买入 {}",
+                account_id, sym
+            );
             return;
         }
         let max_qty_by_cash = Decimal::from_f64_retain(cash)
@@ -915,16 +1027,14 @@ async fn apply_fill_common_sell(
     date: NaiveDate,
 ) {
     // 防御性兜底:A股/ETF 卖出量取整到100整数倍(全仓清仓已在 caller 处理)
-    let qty = quant_common::trading_rules::round_down_to_lot(
-        qty,
-        quant_common::trading_rules::LOT_SIZE,
-    );
+    let qty =
+        quant_common::trading_rules::round_down_to_lot(qty, quant_common::trading_rules::LOT_SIZE);
     if qty <= Decimal::ZERO {
         return; // 取整后为 0，不执行卖出
     }
     let fill_amount = qty * fill_price; // 重算以匹配取整后的 qty
-    // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
-    // last_trade_date IS NULL(历史数据未标记)兜底允许卖出,避免误拦正常持仓。
+                                        // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
+                                        // last_trade_date IS NULL(历史数据未标记)兜底允许卖出,避免误拦正常持仓。
     let t1_blocked: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM paper_position
           WHERE paper_account_id=$1 AND symbol=$2 AND quantity>0
@@ -956,11 +1066,10 @@ async fn apply_fill_common_sell(
     .execute(db)
     .await;
     // qty 归零的行删除(保持持仓表干净)
-    let _ =
-        sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
-            .bind(account_id)
-            .execute(db)
-            .await;
+    let _ = sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
+        .bind(account_id)
+        .execute(db)
+        .await;
     // 资金回流:cash += fill_amount(末尾 try_auto_repay 会把超出 reserve 的部分还给 margin)
     let _ = sqlx::query(
         "UPDATE paper_account SET cash = COALESCE(cash,0) + $2 WHERE paper_account_id = $1",
@@ -986,7 +1095,10 @@ fn build_etf_allocations(
         .enumerate()
         .map(|(i, sym)| {
             // mvo_weights[0]=A股, mvo_weights[1..]=已发行 ETF 权重(顺序与 etf_symbols 一致)
-            (sym.clone(), mvo_weights.get(i + 1).copied().unwrap_or(0.0) * regime)
+            (
+                sym.clone(),
+                mvo_weights.get(i + 1).copied().unwrap_or(0.0) * regime,
+            )
         })
         .collect();
     // 现金段:regime < 1 时补银华日利
@@ -1015,10 +1127,11 @@ async fn fetch_etf_price(
     fetch_eod_price(db, symbol, date).await
 }
 
-/// 取某 symbol 不晚于 date 的最近收盘价(EodClose 口径)
+/// 取某 symbol 不晚于 date 的最近真实收盘价(下游 mvo_simulate/实盘口径)。
+/// [价格空间] 用 market_stock_daily_bar(真实价)，不用 _adj(后复权，仅 BC3 绩效用)。
 async fn fetch_eod_price(db: &PgPool, symbol: &str, date: NaiveDate) -> f64 {
     sqlx::query_scalar::<_, f64>(
-        "SELECT close::double precision FROM market_stock_daily_bar_adj
+        "SELECT close::double precision FROM market_stock_daily_bar
          WHERE symbol=$1 AND trade_date<=$2 ORDER BY trade_date DESC LIMIT 1",
     )
     .bind(symbol)
@@ -1044,7 +1157,7 @@ async fn preload_etf_eod_prices(
     }
     let rows: Vec<(String, f64)> = sqlx::query_as(
         "SELECT DISTINCT ON (symbol) symbol, close::double precision
-         FROM market_stock_daily_bar_adj
+         FROM market_stock_daily_bar
          WHERE symbol = ANY($1) AND trade_date <= $2 AND close > 0
          ORDER BY symbol, trade_date DESC",
     )
