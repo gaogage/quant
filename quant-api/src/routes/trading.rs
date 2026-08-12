@@ -34,6 +34,8 @@ pub struct PlannedTrade {
     pub target_value: Decimal,
     pub reason: Option<String>,
     pub strategy_version_id: Option<String>,
+    /// 业务交易日(历史重放用)。None 时用 now()——正常实盘调仓不传。
+    pub trade_date: Option<chrono::NaiveDate>,
 }
 
 // ── 实际交易 ──────────────────────────────────────────
@@ -54,28 +56,55 @@ pub struct ActualTrade {
 
 pub async fn create_planned_trade(db: &PgPool, trade: &PlannedTrade) -> Result<String, String> {
     let order_id = format!("po-{}", short_id());
-    sqlx::query(
-        "INSERT INTO paper_order (order_id, paper_account_id, strategy_version_id,
-         symbol, side, order_type, quantity, limit_price, status, reason,
-         target_price, price_upper_limit, price_lower_limit, slippage_pct, target_value)
-         VALUES ($1,$2,$3,$4,$5,'market',$6,$7,'pending',$8,$9,$10,$11,$12,$13)",
-    )
-    .bind(&order_id)
-    .bind(&trade.account_id)
-    .bind(trade.strategy_version_id.as_deref())
-    .bind(&trade.symbol)
-    .bind(&trade.side)
-    .bind(trade.target_quantity)
-    .bind(trade.target_price)
-    .bind(trade.reason.as_deref())
-    .bind(trade.target_price)
-    .bind(trade.price_upper_limit)
-    .bind(trade.price_lower_limit)
-    .bind(Decimal::from_f64_retain(trade.slippage_pct).unwrap_or(Decimal::ZERO))
-    .bind(trade.target_value)
-    .execute(db)
-    .await
-    .map_err(|e| format!("create_planned_trade: {}", e))?;
+    // trade_date 显式写 created_at(历史重放用业务日期)；None 时用 DB 默认 now()
+    if let Some(d) = trade.trade_date {
+        sqlx::query(
+            "INSERT INTO paper_order (order_id, paper_account_id, strategy_version_id,
+             symbol, side, order_type, quantity, limit_price, status, reason,
+             target_price, price_upper_limit, price_lower_limit, slippage_pct, target_value, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,'market',$6,$7,'pending',$8,$9,$10,$11,$12,$13,$14,$14)",
+        )
+        .bind(&order_id)
+        .bind(&trade.account_id)
+        .bind(trade.strategy_version_id.as_deref())
+        .bind(&trade.symbol)
+        .bind(&trade.side)
+        .bind(trade.target_quantity)
+        .bind(trade.target_price)
+        .bind(trade.reason.as_deref())
+        .bind(trade.target_price)
+        .bind(trade.price_upper_limit)
+        .bind(trade.price_lower_limit)
+        .bind(Decimal::from_f64_retain(trade.slippage_pct).unwrap_or(Decimal::ZERO))
+        .bind(trade.target_value)
+        .bind(d)
+        .execute(db)
+        .await
+        .map_err(|e| format!("create_planned_trade: {}", e))?;
+    } else {
+        sqlx::query(
+            "INSERT INTO paper_order (order_id, paper_account_id, strategy_version_id,
+             symbol, side, order_type, quantity, limit_price, status, reason,
+             target_price, price_upper_limit, price_lower_limit, slippage_pct, target_value)
+             VALUES ($1,$2,$3,$4,$5,'market',$6,$7,'pending',$8,$9,$10,$11,$12,$13)",
+        )
+        .bind(&order_id)
+        .bind(&trade.account_id)
+        .bind(trade.strategy_version_id.as_deref())
+        .bind(&trade.symbol)
+        .bind(&trade.side)
+        .bind(trade.target_quantity)
+        .bind(trade.target_price)
+        .bind(trade.reason.as_deref())
+        .bind(trade.target_price)
+        .bind(trade.price_upper_limit)
+        .bind(trade.price_lower_limit)
+        .bind(Decimal::from_f64_retain(trade.slippage_pct).unwrap_or(Decimal::ZERO))
+        .bind(trade.target_value)
+        .execute(db)
+        .await
+        .map_err(|e| format!("create_planned_trade: {}", e))?;
+    }
 
     Ok(order_id)
 }
@@ -89,12 +118,13 @@ pub async fn execute_actual_trade(
     fill: &ActualTrade,
 ) -> Result<String, String> {
     let fill_id = format!("pf-{}", short_id());
+    // fill_time 从 paper_order.created_at 取(历史重放时 order.created_at 是业务日期)
     sqlx::query(
         "INSERT INTO paper_fill (fill_id, order_id, paper_account_id, symbol,
          fill_time, side, quantity, price, amount, commission, tax, slippage,
          planned_order_id, fill_status)
-         SELECT $1, $2, $3, symbol, now(), side, $4, $5, $6, $7, $8, $9, $10, $11
-         FROM paper_order WHERE order_id = $2",
+         SELECT $1, $2, $3, symbol, o.created_at, side, $4, $5, $6, $7, $8, $9, $10, $11
+         FROM paper_order o WHERE order_id = $2",
     )
     .bind(&fill_id)
     .bind(order_id)

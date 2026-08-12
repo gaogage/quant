@@ -18,8 +18,8 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::routes::shared::{
-    MvoWeightCache, StrategyConfig, compute_lw_mvo_weights,
-    resolved_to_legacy_sc, send_dingtalk_alert, send_dingtalk_alert_titled, send_quality_alert,
+    compute_lw_mvo_weights, resolved_to_legacy_sc, send_dingtalk_alert, send_dingtalk_alert_titled,
+    send_quality_alert, MvoWeightCache, StrategyConfig,
 };
 use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 
@@ -30,8 +30,8 @@ const BACKFILL_WINDOW_DAYS: chrono::Duration = chrono::Duration::days(7);
 /// 新增因子类别时只需在此处添加一行，factor_backfill 任务和 T+1 补偿同步共用。
 /// (route_path_segment, label)：route_path_segment 拼接到 `/api/v1/quant/factors/{seg}/background`。
 /// P4-1: DB 驱动的回填路由 — 当 `factor_backfill_route` 表启用路由为空时作为 fallback。
-	/// 新增因子类别只需在 DB 表 INSERT 一行即可（无需改代码 + 重新编译部署）。
-	const V24_BACKFILL_ROUTES_FALLBACK: &[(&str, &str)] = &[
+/// 新增因子类别只需在 DB 表 INSERT 一行即可（无需改代码 + 重新编译部署）。
+const V24_BACKFILL_ROUTES_FALLBACK: &[(&str, &str)] = &[
     ("phase7-price-volume-backfill", "量价+amihud"),
     ("p42b-defensive-low-vol-quality-backfill", "防御低波质量"),
     ("phase7-financial-quality-backfill", "财务质量"),
@@ -39,7 +39,10 @@ const BACKFILL_WINDOW_DAYS: chrono::Duration = chrono::Duration::days(7);
     ("phase7-growth-recovery-backfill", "质量增长恢复"),
     ("phase7-moneyflow-backfill", "资金流"),
     ("phase7-moneyflow-congestion-backfill", "资金流拥挤度"),
-    ("phase7-forecast-revision-surprise-backfill", "分析师预测修正"),
+    (
+        "phase7-forecast-revision-surprise-backfill",
+        "分析师预测修正",
+    ),
     ("phase7-market-residual-risk-backfill", "市场残差风险"),
     ("phase7-block-trade-supply-demand-backfill", "大宗交易"),
     ("phase7-repurchase-supply-shock-backfill", "回购"),
@@ -61,45 +64,40 @@ fn self_api_base() -> String {
 /// P4-1: 路由清单从 `factor_backfill_route` 表读取（按 priority 升序，仅 enabled=true）。
 /// 表为空时回退到 `V24_BACKFILL_ROUTES_FALLBACK` 常量，保证 DB 异常时链路不中断。
 /// 新增因子类别只需 INSERT 一行到 factor_backfill_route，无需改代码。
-async fn trigger_v24_backfill_routes(
-    db: &PgPool,
-    start_date: &str,
-    end_date: &str,
-) {
+async fn trigger_v24_backfill_routes(db: &PgPool, start_date: &str, end_date: &str) {
     let api_base = self_api_base();
     let client = reqwest::Client::new();
 
     // P4-1: 优先从 DB 读取路由清单，表空时回退硬编码常量。
-    let routes: Vec<(String, String)> =
-        match sqlx::query_as::<_, (String, String)>(
-            "SELECT route_name, label FROM factor_backfill_route
+    let routes: Vec<(String, String)> = match sqlx::query_as::<_, (String, String)>(
+        "SELECT route_name, label FROM factor_backfill_route
              WHERE enabled = true ORDER BY priority ASC, route_name ASC",
-        )
-        .fetch_all(db)
-        .await
-        {
-            Ok(rows) if !rows.is_empty() => rows,
-            Ok(_) => {
-                warn!(
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) if !rows.is_empty() => rows,
+        Ok(_) => {
+            warn!(
                     "[scheduler] factor_backfill: factor_backfill_route 表无启用路由，回退到硬编码常量 ({} 条)",
                     V24_BACKFILL_ROUTES_FALLBACK.len()
                 );
-                V24_BACKFILL_ROUTES_FALLBACK
-                    .iter()
-                    .map(|(r, l)| (r.to_string(), l.to_string()))
-                    .collect()
-            }
-            Err(e) => {
-                warn!(
+            V24_BACKFILL_ROUTES_FALLBACK
+                .iter()
+                .map(|(r, l)| (r.to_string(), l.to_string()))
+                .collect()
+        }
+        Err(e) => {
+            warn!(
                     "[scheduler] factor_backfill: 读取 factor_backfill_route 失败 ({}), 回退到硬编码常量",
                     e
                 );
-                V24_BACKFILL_ROUTES_FALLBACK
-                    .iter()
-                    .map(|(r, l)| (r.to_string(), l.to_string()))
-                    .collect()
-            }
-        };
+            V24_BACKFILL_ROUTES_FALLBACK
+                .iter()
+                .map(|(r, l)| (r.to_string(), l.to_string()))
+                .collect()
+        }
+    };
 
     info!(
         "[scheduler] factor_backfill: 触发 {} 类因子回填 {}~{}",
@@ -152,7 +150,7 @@ struct DailyState {
     eod_synced_today: bool, // 今日是否已完成日终数据同步 (16:00)
     yesterday_synced: bool, // 昨日日线是否已完成 T+1 同步 (次日9:00)
     cleanup_done: bool,
-    report_pushed: bool,    // 今日是否已推送实盘绩效日报 (16:00 EOD 后)
+    report_pushed: bool, // 今日是否已推送实盘绩效日报 (16:00 EOD 后)
 }
 
 fn normalize_cron_expr(expr: &str) -> String {
@@ -394,14 +392,12 @@ mod tests {
     // ── daily_to_monthly_returns 测试 ──
 
     // ── detect_regime_exposure_cached 测试 ──
-
 }
 /// 不再依赖单一策略（v19）的 etf_symbols，确保多策略并行时所有策略 ETF 都被同步。
 // R6: 策略配置查询函数已迁到 strategy_query.rs，此处 re-export 转发保持调用方零改动。
 pub(crate) use crate::routes::strategy_query::{
-    combo_horizon_from_name, load_active_combo_materialize_configs,
-    load_active_etf_symbols_union, load_active_factor_combos,
-    load_first_active_strategy_config, load_strategy_config,
+    combo_horizon_from_name, load_active_combo_materialize_configs, load_active_etf_symbols_union,
+    load_active_factor_combos, load_first_active_strategy_config, load_strategy_config,
 };
 
 async fn run_scheduled_tasks(db: &PgPool) {
@@ -473,7 +469,9 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     continue;
                 };
                 let sync_date_str = sync_date.format("%Y%m%d").to_string();
-                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS).format("%Y%m%d").to_string();
+                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS)
+                    .format("%Y%m%d")
+                    .to_string();
                 trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
             }
             "pit_combo_refresh" => {
@@ -513,7 +511,7 @@ async fn run_scheduled_tasks(db: &PgPool) {
                         refresh_start,
                         refresh_end,
                         *include_fund,
-                        None,  // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
+                        None, // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
                         whitelist.as_deref(),
                     )
                     .await
@@ -624,8 +622,15 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
 
         loop {
             interval.tick().await;
-            if let Err(e) =
-                run_tick(&db, &tushare, &state, &mvo_cache, port, strategy_config.as_ref().as_ref()).await
+            if let Err(e) = run_tick(
+                &db,
+                &tushare,
+                &state,
+                &mvo_cache,
+                port,
+                strategy_config.as_ref().as_ref(),
+            )
+            .await
             {
                 error!("[scheduler] 任务失败: {}", e);
             }
@@ -721,15 +726,16 @@ async fn run_tick(
 
             // 生成信号 + 调仓 (P2-3:调仓成功/失败均推送钉钉 + 调仓后写快照)
             // 记录调仓前订单数，用于检测是否产生了新交易
-            let orders_before: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1",
-            )
-            .bind(today)
-            .fetch_one(db)
-            .await
-            .unwrap_or(0);
+            let orders_before: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1")
+                    .bind(today)
+                    .fetch_one(db)
+                    .await
+                    .unwrap_or(0);
 
-            match generate_paper_signals_for_all(db, mvo_cache, port, today, sc, tushare).await {
+            match generate_paper_signals_for_all(db, mvo_cache, port, today, sc, tushare, false)
+                .await
+            {
                 Ok(_) => {
                     // 收集各账号当日交易统计（复用 admin.rs manual_rebalance 的模式）
                     let orders_after: i64 = sqlx::query_scalar(
@@ -800,13 +806,21 @@ async fn run_tick(
 
                         // 推送持仓摘要钉钉通知(asset class 分布 + 持仓明细)
                         info!("[scheduler] 调仓完成, 推送钉钉持仓摘要...");
-                        match crate::routes::report::push_dingtalk_for_all_accounts_public(db, today).await {
+                        match crate::routes::report::push_dingtalk_for_all_accounts_public(
+                            db, today,
+                        )
+                        .await
+                        {
                             Ok(_) => info!("[scheduler] 钉钉推送完成"),
                             Err(e) => warn!("[scheduler] 钉钉推送失败: {}", e),
                         }
 
                         // 推送今日交易明细钉钉通知（每账户买卖明细+理由）
-                        match crate::routes::report::push_dingtalk_trade_detail_notification(db, today).await {
+                        match crate::routes::report::push_dingtalk_trade_detail_notification(
+                            db, today,
+                        )
+                        .await
+                        {
                             Ok(_) => info!("[scheduler] 交易明细推送完成"),
                             Err(e) => warn!("[scheduler] 交易明细推送失败: {}", e),
                         }
@@ -961,7 +975,9 @@ async fn run_tick(
             // Step 4: 日线就绪后才触发因子回填（覆盖v24全部因子类别）
             if retries < max_retries {
                 info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
-                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS).format("%Y%m%d").to_string();
+                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS)
+                    .format("%Y%m%d")
+                    .to_string();
                 trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
                 // 遍历所有 active 复合策略的 combo 做增量物化（不再依赖单一 v19 的 sc）。
                 let active_combos: Vec<(String, String)> = sqlx::query_as(
@@ -997,7 +1013,9 @@ async fn run_tick(
                         .flatten();
                         raw.and_then(|v| {
                             v.as_array().map(|arr| {
-                                arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
                             })
                         })
                     };
@@ -1009,7 +1027,7 @@ async fn run_tick(
                         sync_date - chrono::Duration::days(7),
                         sync_date,
                         inc_fund,
-                        None,  // min_abs_ic_ir: T+1 保鲜不加阈值(白名单已筛)
+                        None, // min_abs_ic_ir: T+1 保鲜不加阈值(白名单已筛)
                         whitelist.as_deref(),
                     )
                     .await
@@ -1450,7 +1468,11 @@ pub async fn validate_pre_trade_data(
                         .await
                         .is_none()
                     {
-                        info!("[pre-trade] 因子({})回填完成 (等待{}s)", factor_combo, (retry + 1) * 3);
+                        info!(
+                            "[pre-trade] 因子({})回填完成 (等待{}s)",
+                            factor_combo,
+                            (retry + 1) * 3
+                        );
                         break;
                     }
                 }
@@ -1532,7 +1554,7 @@ async fn check_factor_freshness(
     }
 }
 
-async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
+pub(crate) async fn is_trading_day(db: &PgPool, date: NaiveDate) -> Result<bool, String> {
     let row = sqlx::query_as::<_, (Option<bool>,)>(
         "SELECT is_open FROM market_trade_calendar WHERE trade_date = $1 LIMIT 1",
     )
@@ -1656,7 +1678,11 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
 }
 
 /// 涨跌停数据同步 (直接调用, 带重试)
-pub(crate) async fn sync_limit_with_retry(db: &PgPool, tushare: &TushareClient, date_str: &str) -> bool {
+pub(crate) async fn sync_limit_with_retry(
+    db: &PgPool,
+    tushare: &TushareClient,
+    date_str: &str,
+) -> bool {
     let d = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d").unwrap();
     let _ = sqlx::query("DELETE FROM market_stock_limit WHERE trade_date = $1")
         .bind(d)
@@ -1931,20 +1957,21 @@ pub async fn generate_paper_signals_for_all(
     date: NaiveDate,
     _sc: &StrategyConfig,
     tushare: &TushareClient,
+    skip_data_gate: bool,
 ) -> Result<(), String> {
     let accounts = sqlx::query_as::<_, (String,)>(
         "SELECT paper_account_id FROM paper_account
          WHERE status = 'active' AND account_type = 'simulated'",
     )
-    .fetch_all(db).await
+    .fetch_all(db)
+    .await
     .map_err(|e| format!("account query: {}", e))?;
 
     if accounts.is_empty() {
         return Ok(());
     }
 
-    for (account_id,) in &accounts
-    {
+    for (account_id,) in &accounts {
         // R2 类型门禁：load_account 按 leverage_enabled 分派 Cash/Margin，
         // Cash 账号编译期保证无 leverage_config（杜绝无杠杆账户误融资）。
         let loaded = match crate::routes::account::load_account(db, account_id).await {
@@ -1966,15 +1993,14 @@ pub async fn generate_paper_signals_for_all(
         // leverage_params: Cash 编译期返回 (false,1.0,"fixed"),Margin 取 LeverageConfig
         let (leverage_enabled, leverage_multiplier, leverage_mode) = loaded.leverage_params();
         let leverage_mode = leverage_mode.as_str();
-        let rs = match crate::routes::strategy::load_resolved_strategy(db, &strategy_version_id)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("[paper] {} 策略加载失败,跳过: {}", account_id, e);
-                continue;
-            }
-        };
+        let rs =
+            match crate::routes::strategy::load_resolved_strategy(db, &strategy_version_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("[paper] {} 策略加载失败,跳过: {}", account_id, e);
+                    continue;
+                }
+            };
         // R1 实盘状态门禁：校验策略已回测过（equity_curve_task_id 对应回测曲线存在），
         // 未回测的策略拒绝上实盘。校验通过后推进到 Strategy<Production>，
         // 下游 deref 成 &ResolvedStrategy 透传（保持兼容，零调用点改动）。
@@ -2027,18 +2053,22 @@ pub async fn generate_paper_signals_for_all(
             continue;
         }
 
-        if let Err(e) = check_paper_account_data_readiness(
-            db,
-            account_id,
-            None,
-            DataReadinessGate::BlockRequiredYellow,
-            "paper_intraday_trading",
-        )
-        .await
-        {
-            warn!("[paper] {} 数据门禁失败，跳过本次交易: {}", name, e);
-            send_quality_alert(db, &[format!("{}: {}", name, e)]).await;
-            continue;
+        if !skip_data_gate {
+            if let Err(e) = check_paper_account_data_readiness(
+                db,
+                account_id,
+                None,
+                DataReadinessGate::BlockRequiredYellow,
+                "paper_intraday_trading",
+            )
+            .await
+            {
+                warn!("[paper] {} 数据门禁失败，跳过本次交易: {}", name, e);
+                send_quality_alert(db, &[format!("{}: {}", name, e)]).await;
+                continue;
+            }
+        } else {
+            info!("[paper] {} 跳过数据门禁(历史重放模式)", name);
         }
 
         let start = (date - chrono::Duration::days(30))
@@ -2356,5 +2386,3 @@ pub async fn compute_mvo_weights_for_date(
     let cache = tokio::sync::Mutex::new(None::<MvoWeightCache>);
     compute_lw_mvo_weights(db, date, &cache, sc).await
 }
-
-

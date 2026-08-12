@@ -813,17 +813,22 @@ async fn load_admin_strategy_config(
 /// 看板本质是抽样检查数据新鲜度,取任一 active 复合策略代表即可。
 /// 若无 active 策略,返回带默认 ETF 的空配置(后续检查会因 combo/curve 为空而提示未就绪)。
 async fn load_first_active_admin_strategy_config(db: &sqlx::PgPool) -> AdminSyncStrategyConfig {
-    let row: Option<(String, String, String, Option<String>, Option<serde_json::Value>)> =
-        sqlx::query_as(
-            "SELECT strategy_id, combo_name, equity_curve_task_id, prediction_set_id, etf_symbols
+    let row: Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<serde_json::Value>,
+    )> = sqlx::query_as(
+        "SELECT strategy_id, combo_name, equity_curve_task_id, prediction_set_id, etf_symbols
              FROM strategy_config
              WHERE status='active' AND strategy_type='composite'
              ORDER BY strategy_id LIMIT 1",
-        )
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
     match row {
         Some((strategy_id, combo_name, equity_curve_task_id, prediction_set_id, etf_symbols)) => {
             AdminSyncStrategyConfig {
@@ -879,13 +884,19 @@ pub async fn repair_sync(
     let dv_id = uuid::Uuid::new_v4().simple().to_string();
     // 策略 ID 必传(不再 fallback 到 "v19",配置化原则)。
     // 与 portfolio.rs run_mvo_simulate 链路一致:请求未传则报错。
-    let strategy_id = match req.strategy_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let strategy_id = match req
+        .strategy_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(sid) => sid,
         None => {
             return Json(serde_json::json!({
                 "code": 1,
                 "message": "repair 必传 strategy_id(不再默认 v19)"
-            })).into_response();
+            }))
+            .into_response();
         }
     };
     let cfg = load_admin_strategy_config(&state.db, strategy_id).await;
@@ -1299,6 +1310,9 @@ pub async fn rebuild_full_universe(
 pub struct ManualRebalanceRequest {
     /// 调仓日期(YYYYMMDD),不传则用今日
     pub date: Option<String>,
+    /// 跳过数据门禁(历史重放用,正常调仓不要传)
+    #[serde(default)]
+    pub skip_data_gate: bool,
 }
 
 /// POST /api/v1/admin/rebalance — 手动触发调仓(遍历所有 active 模拟盘)
@@ -1320,6 +1334,28 @@ pub async fn manual_rebalance(
         .as_deref()
         .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y%m%d").ok())
         .unwrap_or_else(|| chrono::Local::now().date_naive());
+
+    // 非交易日禁止调仓。7/18(周六)手动建仓事故根因:manual_rebalance 原无交易日检查,
+    // 452 笔错误 fill 污染全链路。交易日历是业务事实,与 skip_data_gate(数据新鲜度门禁)
+    // 是两个维度——历史重放也只应在交易日进行,不因 skip_data_gate 绕过此校验。
+    match crate::routes::scheduler::is_trading_day(&state.db, today).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Json(serde_json::json!({
+                "code": 1,
+                "message": format!("{} 非交易日,禁止调仓", today.format("%Y-%m-%d"))
+            }))
+            .into_response();
+        }
+        Err(e) => {
+            return Json(serde_json::json!({
+                "code": 1,
+                "message": format!("交易日历校验失败: {}", e)
+            }))
+            .into_response();
+        }
+    }
+
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".into())
         .parse()
@@ -1338,15 +1374,22 @@ pub async fn manual_rebalance(
     };
 
     // 前置数据校验+自动修复(复用 14:40 链路),数据未就绪则拒绝调仓
-    let errors =
-        crate::routes::scheduler::validate_pre_trade_data(&state.db, &state.tushare, today, &sc)
-            .await;
-    if !errors.is_empty() {
-        return Json(serde_json::json!({
-            "code": 1,
-            "message": format!("数据未就绪,调仓拒绝:\n{}", errors.join("\n"))
-        }))
-        .into_response();
+    // skip_data_gate=true 时跳过(历史重放用:数据已就绪,只是门禁按 today 判定滞后)
+    if !req.skip_data_gate {
+        let errors = crate::routes::scheduler::validate_pre_trade_data(
+            &state.db,
+            &state.tushare,
+            today,
+            &sc,
+        )
+        .await;
+        if !errors.is_empty() {
+            return Json(serde_json::json!({
+                "code": 1,
+                "message": format!("数据未就绪,调仓拒绝:\n{}", errors.join("\n"))
+            }))
+            .into_response();
+        }
     }
 
     // 构造空 mvo_cache(首次计算时填充,先例 compute_mvo_weights_for_date)
@@ -1355,13 +1398,12 @@ pub async fn manual_rebalance(
     ));
 
     // 记录调仓前订单数(用于检测账号是否被数据门禁跳过)
-    let orders_before: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1",
-    )
-    .bind(today)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    let orders_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1")
+            .bind(today)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     match crate::routes::scheduler::generate_paper_signals_for_all(
         &state.db,
@@ -1370,24 +1412,26 @@ pub async fn manual_rebalance(
         today,
         &sc,
         &state.tushare,
+        req.skip_data_gate,
     )
     .await
     {
         Ok(_) => {
             // 检测是否有新订单(账号可能因数据门禁被跳过,此时无新订单)
-            let orders_after: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1",
-            )
-            .bind(today)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+            let orders_after: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM paper_order WHERE DATE(created_at) = $1")
+                    .bind(today)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap_or(0);
             let new_orders = orders_after - orders_before;
 
+            // 调仓后写 nav 快照(对齐 scheduler 14:40 链路,防止 manual_rebalance 后快照缺失)
+            crate::routes::report::snapshot_positions_for_all_accounts(&state.db, today).await;
+
             // 调仓成功后推送持仓摘要钉钉通知(复用公开版本)
-            let _ =
-                crate::routes::report::push_dingtalk_for_all_accounts_public(&state.db, today)
-                    .await;
+            let _ = crate::routes::report::push_dingtalk_for_all_accounts_public(&state.db, today)
+                .await;
 
             if new_orders > 0 {
                 Json(serde_json::json!({
