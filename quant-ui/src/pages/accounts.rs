@@ -1053,11 +1053,16 @@ pub fn AccountsContent() -> Element {
                                                 }
                                             }
                                         }
-                                    }
 
-                                    // P3-3: 调仓历史 — 按交易日卡片展示(买/卖笔数+金额)
-                                    div { class: "mt-4",
-                                        RebalanceHistoryPanel { account_id: aid.clone() }
+                                        // 日收益：逐日收益金额/收益率/涨跌，分页展示
+                                        div { class: "mt-4",
+                                            DailyReturnPanel { account_id: aid.clone() }
+                                        }
+                                        // P3-3: 调仓历史 — 按交易日卡片展示(买/卖笔数+金额)
+                                        // 与绩效指标同属展开详情区域，折叠时一并隐藏。
+                                        div { class: "mt-4",
+                                            RebalanceHistoryPanel { account_id: aid.clone() }
+                                        }
                                     }
                                 }
                             }
@@ -1224,6 +1229,7 @@ fn RebalanceHistoryPanel(account_id: String) -> Element {
     let mut data = use_signal(|| Vec::<Value>::new());
     let mut loading = use_signal(|| true);
     let mut expanded_date = use_signal(String::new);
+    let mut page = use_signal(|| 0usize);
 
     let aid = account_id.clone();
     use_effect(move || {
@@ -1254,14 +1260,33 @@ fn RebalanceHistoryPanel(account_id: String) -> Element {
         };
     }
     let total_days = items.len();
+    let page_size = 10usize;
+    let total_pages = total_days.div_ceil(page_size).max(1);
+    let cur = (*page.read()).min(total_pages - 1);
+    let start = cur * page_size;
+    let end = (start + page_size).min(total_days);
 
     rsx! {
         div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4",
             h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-3",
                 {format!("📋 调仓历史 ({})", total_days)}
             }
-            div { class: "space-y-2 max-h-80 overflow-y-auto",
-                for item in items.iter() {
+            if total_pages > 1 {
+                div { class: "flex items-center justify-between mb-2 text-xs",
+                    button { class: "px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 disabled:opacity-30",
+                        disabled: cur == 0,
+                        onclick: move |_| page.set(cur.saturating_sub(1)),
+                        "上一页" }
+                    span { class: "text-gray-500 dark:text-gray-400",
+                        {format!("{}/{} 页", cur + 1, total_pages)} }
+                    button { class: "px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 disabled:opacity-30",
+                        disabled: cur + 1 >= total_pages,
+                        onclick: move |_| page.set((cur + 1).min(total_pages - 1)),
+                        "下一页" }
+                }
+            }
+            div { class: "space-y-2",
+                for item in items[start..end].iter() {
                     {
                         let date = item["date"].as_str().unwrap_or("-").to_string();
                         let buy_n = item["buy_count"].as_i64().unwrap_or(0);
@@ -1343,6 +1368,114 @@ fn RebalanceHistoryPanel(account_id: String) -> Element {
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 日收益面板：逐日收益金额/收益率/涨跌，分页每页10行。参考调仓历史展现。
+/// 收益金额 = 当日 NAV - 前日 NAV。涨跌色：中国习惯涨红跌绿。
+#[component]
+fn DailyReturnPanel(account_id: String) -> Element {
+    let mut data = use_signal(|| Vec::<(String, f64, f64, f64)>::new()); // (date, nav, pnl, daily_ret%)
+    let mut loading = use_signal(|| true);
+    let mut page = use_signal(|| 0usize);
+
+    let aid = account_id.clone();
+    use_effect(move || {
+        let id = aid.clone();
+        spawn(async move {
+            if let Ok(v) = api::get_nav_history(&id).await {
+                if let Some(arr) = v["data"]["nav_history"].as_array() {
+                    let mut rows: Vec<(String, f64, f64, f64)> = arr.iter().map(|item| (
+                        item["date"].as_str().unwrap_or("-").to_string(),
+                        item["nav"].as_f64().unwrap_or(0.0),
+                        0.0,
+                        item["daily_return"].as_f64().unwrap_or(0.0),
+                    )).collect();
+                    rows.reverse(); // 最近在前
+                    let n = rows.len();
+                    for i in 0..n {
+                        let next_nav = if i + 1 < n { rows[i + 1].1 } else { rows[i].1 };
+                        rows[i].2 = rows[i].1 - next_nav; // pnl = 当日 nav - 前日 nav
+                    }
+                    data.set(rows);
+                }
+            }
+            loading.set(false);
+        });
+    });
+
+    if *loading.read() {
+        return rsx! { div { class: "text-xs text-gray-400 py-2", "加载日收益…" } };
+    }
+
+    let items = data.read();
+    if items.is_empty() {
+        return rsx! {
+            div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4",
+                div { class: "text-xs text-gray-400 dark:text-gray-500 text-center py-2", "暂无收益记录" }
+            }
+        };
+    }
+
+    let total = items.len();
+    let page_size = 10usize;
+    let total_pages = total.div_ceil(page_size).max(1);
+    let cur = (*page.read()).min(total_pages - 1);
+    let start = cur * page_size;
+    let end = (start + page_size).min(total);
+
+    rsx! {
+        div { class: "bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4",
+            h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-3",
+                {format!("📈 日收益 ({})", total)}
+            }
+            if total_pages > 1 {
+                div { class: "flex items-center justify-between mb-2 text-xs",
+                    button { class: "px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 disabled:opacity-30",
+                        disabled: cur == 0,
+                        onclick: move |_| page.set(cur.saturating_sub(1)),
+                        "上一页" }
+                    span { class: "text-gray-500 dark:text-gray-400",
+                        {format!("{}/{} 页", cur + 1, total_pages)} }
+                    button { class: "px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 disabled:opacity-30",
+                        disabled: cur + 1 >= total_pages,
+                        onclick: move |_| page.set((cur + 1).min(total_pages - 1)),
+                        "下一页" }
+                }
+            }
+            div { class: "space-y-1",
+                for item in items[start..end].iter() {
+                    {
+                        let date = item.0.clone();
+                        let nav = item.1;
+                        let pnl = item.2;
+                        let dr = item.3;
+                        let (color, sign, arrow) = if pnl >= 0.0 {
+                            ("text-red-600 dark:text-red-400", "+", "📈")
+                        } else {
+                            ("text-green-600 dark:text-green-400", "", "📉")
+                        };
+                        rsx! {
+                            div { class: "flex items-center justify-between border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 bg-white dark:bg-gray-900",
+                                div { class: "flex items-center gap-2",
+                                    span { class: "text-xs", "{arrow}" }
+                                    div {
+                                        div { class: "text-xs font-mono text-gray-900 dark:text-white", "{date}" }
+                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mt-0.5", "NAV ¥{nav:.0}" }
+                                    }
+                                }
+                                div { class: "text-right",
+                                    div { class: "text-sm font-mono font-semibold {color}",
+                                        "{sign}¥{pnl.abs():.0}" }
+                                    div { class: "text-xs {color}",
+                                        "{sign}{dr:.2}%" }
                                 }
                             }
                         }

@@ -392,7 +392,13 @@ pub fn ReturnVsBenchmarkChart(
         let canvas_for_events = canvas.clone();
         let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::MouseEvent| {
             let rect = canvas.get_bounding_client_rect();
-            let mx = event.client_x() as f64 - rect.left();
+            // canvas 内部绘图分辨率(w，固定 700)与 CSS 实际渲染宽度(rect.width()，因
+            // w-full 响应式布局而缩放，如 587px)不一致。鼠标事件坐标是 CSS 像素，
+            // 必须按 内部宽度/CSS宽度 缩放后才能套用为内部坐标系设计的 to_x 反算公式，
+            // 否则索引系统性偏移(偏移量随位置线性增大)，hover 到的点与视觉位置不一致。
+            let css_w = rect.width();
+            let scale_x = if css_w > 0.0 { w / css_w } else { 1.0 };
+            let mx = (event.client_x() as f64 - rect.left()) * scale_x;
             if mx < 40.0 || mx > w - 20.0 || nn < 2 {
                 tt.set(None);
                 return;
