@@ -401,6 +401,9 @@ fn V24PerformanceSection(accounts: Vec<Value>) -> Element {
 
     let dates: Vec<String> = nav_points.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
     let live_ret: Vec<f64> = nav_points.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
+    // hover tooltip 数据：当日净值与当日收益
+    let live_nav: Vec<f64> = nav_points.iter().map(|p| p["nav"].as_f64().unwrap_or(0.0)).collect();
+    let live_daily: Vec<f64> = nav_points.iter().map(|p| p["daily_return"].as_f64().unwrap_or(0.0)).collect();
     let bt_dates: Vec<String> = bt_points.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
     let bt_ret: Vec<f64> = bt_points.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
 
@@ -434,6 +437,8 @@ fn V24PerformanceSection(accounts: Vec<Value>) -> Element {
             NavComparisonChart {
                 dates: dates,
                 live_ret: live_ret,
+                live_nav: live_nav,
+                live_daily: live_daily,
                 bt_dates: bt_dates,
                 bt_ret: bt_ret,
                 canvas_id: "v24-nav-chart".to_string(),

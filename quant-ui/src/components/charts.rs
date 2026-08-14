@@ -126,10 +126,28 @@ pub fn CumulativeLineChart(
 /// P3-1: 实盘 NAV 累计收益 vs 回测同期累计收益 双线对比图。
 /// dates 与 live_ret 一一对应（实盘 paper_nav_snapshot 序列）；
 /// bt_dates 与 bt_ret 一一对应（回测 backtest_equity_curve 序列，日期范围可能不完全重合，独立画）。
+/// live_nav/live_daily 与 dates 一一对应（当日净值与当日收益），仅用于 hover tooltip。
+/// 鼠标 hover 显示竖线 + 双线交点标记 + 跟随 tooltip（日期/净值/当日收益/累计收益/回测同期/偏离）。
+#[derive(Clone)]
+struct NavHoverInfo {
+    date: String,
+    x_css: f64,
+    live_y_css: f64,
+    bt_y_css: Option<f64>,
+    css_w: f64,
+    css_h: f64,
+    nav: f64,
+    daily: f64,
+    live_cum: f64,
+    bt_cum: Option<f64>,
+}
+
 #[component]
 pub fn NavComparisonChart(
     dates: Vec<String>,
     live_ret: Vec<f64>,
+    live_nav: Vec<f64>,
+    live_daily: Vec<f64>,
     bt_dates: Vec<String>,
     bt_ret: Vec<f64>,
     canvas_id: String,
@@ -137,9 +155,15 @@ pub fn NavComparisonChart(
     let cid = canvas_id.clone();
     let n = dates.len();
     let live = live_ret.clone();
+    let navs = live_nav.clone();
+    let dailies = live_daily.clone();
     let bt = bt_ret.clone();
     let bt_n = bt_dates.len();
     let dates_for_label = dates.clone();
+
+    // hover 状态：竖线/交点/tooltip 均由 Dioxus div 渲染
+    let tooltip = use_signal(|| Option::<NavHoverInfo>::None);
+    let tooltip_data = (*tooltip.read()).clone();
 
     use_effect(move || {
         if n < 2 { return; }
@@ -236,6 +260,74 @@ pub fn NavComparisonChart(
                 let _ = ctx.fill_text_with_max_width(short, x, h - 18.0, 50.0);
             }
         }
+
+        // hover 事件：mousemove 反算最近数据点，更新 tooltip signal（Dioxus div 渲染竖线/交点/面板）
+        let live_c = live.clone();
+        let navs_c = navs.clone();
+        let dailies_c = dailies.clone();
+        let bt_c = bt.clone();
+        let bt_dates_c = bt_dates.clone();
+        let dates_c = dates_for_label.clone();
+        let mut tt = tooltip.clone();
+        let nn = n;
+        let btn = bt_n;
+
+        let canvas_for_events = canvas.clone();
+        let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::MouseEvent| {
+            let rect = canvas.get_bounding_client_rect();
+            let css_w = rect.width();
+            let css_h = rect.height();
+            if css_w <= 0.0 || css_h <= 0.0 { return; }
+            // canvas 内部绘图分辨率(固定 700x220)与 CSS 实际渲染尺寸(因 w-full 响应式缩放)不一致。
+            // 鼠标事件坐标是 CSS 像素，乘 scale 换算进内部坐标系后才能套用 to_x/to_y 反算，
+            // 反算出的内部坐标再除以 scale 回到 CSS 像素供 DOM 定位。
+            let scale_x = w / css_w;
+            let scale_y = h / css_h;
+            let mx = (event.client_x() as f64 - rect.left()) * scale_x;
+            if mx < 40.0 || mx > w - 20.0 || nn < 2 {
+                tt.set(None);
+                return;
+            }
+            let frac = (mx - 40.0) / (w - 60.0);
+            let idx = ((frac * (nn - 1) as f64).round() as usize).min(nn - 1);
+
+            // 重建内部坐标系映射（w/h/bot_v/v_range 均为 Copy 捕获）
+            let to_x = |i: usize, len: usize| -> f64 { 40.0 + (i as f64 / (len.max(2) - 1) as f64) * (w - 60.0) };
+            let to_y = |v: f64| -> f64 { h - 20.0 - ((v - bot_v) / v_range) * (h - 40.0) };
+
+            let date = dates_c.get(idx).cloned().unwrap_or_default();
+            let live_v = live_c.get(idx).copied().unwrap_or(0.0);
+            // 回测线按日期对齐取同期点（两条序列日期范围可能不完全重合）
+            let bt_point = bt_dates_c.iter().position(|d| d == &date)
+                .filter(|&bi| bi < btn)
+                .map(|bi| (bi, bt_c.get(bi).copied().unwrap_or(0.0)));
+
+            let x_css = to_x(idx, nn) / scale_x;
+            let live_y_css = to_y(live_v) / scale_y;
+            let bt_y_css = bt_point.map(|(bi, bv)| to_y(bv) / scale_y);
+
+            tt.set(Some(NavHoverInfo {
+                date,
+                x_css,
+                live_y_css,
+                bt_y_css,
+                css_w,
+                css_h,
+                nav: navs_c.get(idx).copied().unwrap_or(0.0),
+                daily: dailies_c.get(idx).copied().unwrap_or(0.0),
+                live_cum: live_v,
+                bt_cum: bt_point.map(|(_, bv)| bv),
+            }));
+        }) as Box<dyn FnMut(web_sys::MouseEvent)>);
+
+        canvas_for_events.add_event_listener_with_callback("mousemove", closure.as_ref().unchecked_ref()).unwrap();
+        let mut tt2 = tooltip.clone();
+        let leave_closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            tt2.set(None);
+        }) as Box<dyn FnMut()>);
+        canvas_for_events.add_event_listener_with_callback("mouseleave", leave_closure.as_ref().unchecked_ref()).unwrap();
+        closure.forget();
+        leave_closure.forget();
     });
 
     rsx! {
@@ -245,6 +337,40 @@ pub fn NavComparisonChart(
                 width: "700",
                 height: "220",
                 class: "w-full h-auto border border-gray-200 dark:border-gray-700 rounded-lg"
+            }
+            // hover 指示层：竖线 + 双线交点 + 跟随 tooltip（均不拦截鼠标事件）
+            if let Some(h) = tooltip_data.as_ref() {
+                div { style: "position:absolute;left:{h.x_css:.1}px;top:0;width:1px;height:{h.css_h:.0}px;background:rgba(59,130,246,0.35);pointer-events:none;" }
+                div { style: "position:absolute;left:{h.x_css - 5.0:.1}px;top:{h.live_y_css - 5.0:.1}px;width:10px;height:10px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.4);pointer-events:none;" }
+                if let Some(bt_y) = h.bt_y_css {
+                    div { style: "position:absolute;left:{h.x_css - 4.0:.1}px;top:{bt_y - 4.0:.1}px;width:9px;height:9px;border-radius:50%;background:#9ca3af;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.4);pointer-events:none;" }
+                }
+                {
+                    // tooltip 靠右边界时翻到左侧；纵向贴实盘交点上方，超界则下移
+                    let flip = h.x_css + 200.0 > h.css_w;
+                    let left = if flip { (h.x_css - 200.0 - 12.0).max(4.0) } else { h.x_css + 12.0 };
+                    let top = (h.live_y_css - 108.0).max(4.0).min((h.css_h - 112.0).max(4.0));
+                    let dev = h.bt_cum.map(|bv| h.live_cum - bv);
+                    let dev_line = dev.map(|d| {
+                        let cls = if d.abs() > 2.0 { "text-red-600" } else { "text-gray-500" };
+                        rsx! { div { class: "{cls}", "偏离: {d:+.2}%" } }
+                    });
+                    let bt_line = h.bt_cum.map(|bv| {
+                        rsx! { div { class: "text-gray-500", "回测同期: {bv:+.2}%" } }
+                    });
+                    rsx! {
+                        div {
+                            style: "position:absolute;left:{left:.0}px;top:{top:.0}px;width:188px;padding:6px 8px;background:rgba(255,255,255,0.97);border:1px solid #d1d5db;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,0.15);pointer-events:none;z-index:10;font-size:11px;line-height:1.6;",
+                            class: "text-gray-700",
+                            div { class: "font-mono text-gray-500 border-b border-gray-100 mb-1 pb-0.5", "{h.date}" }
+                            div { "净值: ¥{h.nav:.0}" }
+                            div { "当日收益: {h.daily:+.2}%" }
+                            div { class: "text-blue-600", "实盘累计: {h.live_cum:+.2}%" }
+                            {bt_line}
+                            {dev_line}
+                        }
+                    }
+                }
             }
             div { class: "flex gap-4 mt-2 text-xs text-gray-500 dark:text-gray-400",
                 span { class: "flex items-center gap-1",
