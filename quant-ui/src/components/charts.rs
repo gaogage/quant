@@ -387,11 +387,28 @@ pub fn NavComparisonChart(
 /// 账号累计收益 vs 沪深300 基准累计收益双线对比图。
 /// 两条曲线已各自归一化为累计收益率（%），共用同一日期-收益坐标系。
 /// dates/acct_ret 为账号序列，bench_dates/bench_ret 为基准序列（日期可能不完全重合，独立按索引画）。
-/// 鼠标 hover 显示 tooltip（日期/本策略收益/沪深300收益）。
+/// acct_nav/acct_daily 与 dates 一一对应（当日净值与当日收益），仅用于 hover tooltip。
+/// 鼠标 hover 显示竖线 + 双线交点标记 + 跟随 tooltip（日期/净值/当日收益/本策略/沪深300/超额）。
+#[derive(Clone)]
+struct BenchmarkHoverInfo {
+    date: String,
+    x_css: f64,
+    acct_y_css: f64,
+    bench_y_css: Option<f64>,
+    css_w: f64,
+    css_h: f64,
+    nav: f64,
+    daily: f64,
+    acct_cum: f64,
+    bench_cum: Option<f64>,
+}
+
 #[component]
 pub fn ReturnVsBenchmarkChart(
     dates: Vec<String>,
     acct_ret: Vec<f64>,
+    acct_nav: Vec<f64>,
+    acct_daily: Vec<f64>,
     bench_dates: Vec<String>,
     bench_ret: Vec<f64>,
     canvas_id: String,
@@ -399,12 +416,14 @@ pub fn ReturnVsBenchmarkChart(
     let cid = canvas_id.clone();
     let n = dates.len();
     let acct = acct_ret.clone();
+    let navs = acct_nav.clone();
+    let dailies = acct_daily.clone();
     let bench = bench_ret.clone();
     let bench_n = bench_dates.len();
     let dates_for_label = dates.clone();
 
-    // tooltip 状态：鼠标 hover 时显示（日期, 本策略收益, 沪深300收益）
-    let tooltip = use_signal(|| Option::<(String, f64, Option<f64>)>::None);
+    // tooltip 状态：竖线/交点/tooltip 均由 Dioxus div 渲染
+    let tooltip = use_signal(|| Option::<BenchmarkHoverInfo>::None);
     let tooltip_data = (*tooltip.read()).clone();
 
     use_effect(move || {
@@ -507,8 +526,10 @@ pub fn ReturnVsBenchmarkChart(
             }
         } // ctx 在此 drop，canvas 可 move 进闭包
 
-        // hover 事件：mousemove 更新 tooltip signal（tooltip 由 Dioxus div 渲染）
+        // hover 事件：mousemove 反算最近数据点，更新 tooltip signal（Dioxus div 渲染竖线/交点/面板）
         let acct_c = acct.clone();
+        let navs_c = navs.clone();
+        let dailies_c = dailies.clone();
         let bench_c = bench.clone();
         let dates_c = dates_for_label.clone();
         let bench_dates_c = bench_dates.clone();
@@ -518,12 +539,14 @@ pub fn ReturnVsBenchmarkChart(
         let canvas_for_events = canvas.clone();
         let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::MouseEvent| {
             let rect = canvas.get_bounding_client_rect();
-            // canvas 内部绘图分辨率(w，固定 700)与 CSS 实际渲染宽度(rect.width()，因
-            // w-full 响应式布局而缩放，如 587px)不一致。鼠标事件坐标是 CSS 像素，
-            // 必须按 内部宽度/CSS宽度 缩放后才能套用为内部坐标系设计的 to_x 反算公式，
-            // 否则索引系统性偏移(偏移量随位置线性增大)，hover 到的点与视觉位置不一致。
             let css_w = rect.width();
-            let scale_x = if css_w > 0.0 { w / css_w } else { 1.0 };
+            let css_h = rect.height();
+            if css_w <= 0.0 || css_h <= 0.0 { return; }
+            // canvas 内部绘图分辨率(固定 700x220)与 CSS 实际渲染尺寸(因 w-full 响应式缩放)不一致。
+            // 鼠标事件坐标是 CSS 像素，乘 scale 换算进内部坐标系后才能套用 to_x/to_y 反算，
+            // 反算出的内部坐标再除以 scale 回到 CSS 像素供 DOM 定位。
+            let scale_x = w / css_w;
+            let scale_y = h / css_h;
             let mx = (event.client_x() as f64 - rect.left()) * scale_x;
             if mx < 40.0 || mx > w - 20.0 || nn < 2 {
                 tt.set(None);
@@ -532,11 +555,39 @@ pub fn ReturnVsBenchmarkChart(
             let frac = (mx - 40.0) / (w - 60.0);
             let idx = ((frac * (nn - 1) as f64).round() as usize).min(nn - 1);
 
+            // 重建内部坐标系映射（绘图块内的 min/max 在此重算，w/h 为 Copy 捕获）
+            let all_vals: Vec<f64> = acct_c.iter().chain(bench_c.iter()).copied().collect();
+            let min_v = all_vals.iter().cloned().fold(0.0_f64, f64::min);
+            let max_v = all_vals.iter().cloned().fold(0.0_f64, f64::max);
+            let range = (max_v - min_v).max(1.0_f64);
+            let top_v = max_v + range * 0.1;
+            let bot_v = min_v - range * 0.1;
+            let v_range = (top_v - bot_v).max(1.0_f64);
+            let to_x = |i: usize, len: usize| -> f64 { 40.0 + (i as f64 / (len.max(2) - 1) as f64) * (w - 60.0) };
+            let to_y = |v: f64| -> f64 { h - 20.0 - ((v - bot_v) / v_range) * (h - 40.0) };
+
             let date = dates_c.get(idx).cloned().unwrap_or_default();
             let acct_v = acct_c.get(idx).copied().unwrap_or(0.0);
-            let bench_v = bench_dates_c.iter().position(|d| d == &date).and_then(|bi| bench_c.get(bi).copied());
+            // 基准线按日期对齐取同期点（两条序列日期范围可能不完全重合）
+            let bench_point = bench_dates_c.iter().position(|d| d == &date)
+                .and_then(|bi| bench_c.get(bi).copied());
 
-            tt.set(Some((date, acct_v, bench_v)));
+            let x_css = to_x(idx, nn) / scale_x;
+            let acct_y_css = to_y(acct_v) / scale_y;
+            let bench_y_css = bench_point.map(|bv| to_y(bv) / scale_y);
+
+            tt.set(Some(BenchmarkHoverInfo {
+                date,
+                x_css,
+                acct_y_css,
+                bench_y_css,
+                css_w,
+                css_h,
+                nav: navs_c.get(idx).copied().unwrap_or(0.0),
+                daily: dailies_c.get(idx).copied().unwrap_or(0.0),
+                acct_cum: acct_v,
+                bench_cum: bench_point,
+            }));
         }) as Box<dyn FnMut(web_sys::MouseEvent)>);
 
         canvas_for_events.add_event_listener_with_callback("mousemove", closure.as_ref().unchecked_ref()).unwrap();
@@ -557,14 +608,38 @@ pub fn ReturnVsBenchmarkChart(
                 height: "220",
                 class: "w-full h-auto border border-gray-200 dark:border-gray-700 rounded-lg"
             }
-            // hover tooltip（Dioxus div 渲染，右上角显示数值）
-            if let Some((date, acct_v, bench_v)) = tooltip_data.as_ref() {
-                div {
-                    class: "absolute top-2 right-2 px-2 py-1 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded shadow text-xs text-gray-700 dark:text-gray-300 pointer-events-none z-10",
-                    div { class: "font-mono text-gray-500 mb-0.5", "{date}" }
-                    div { class: "text-blue-600 dark:text-blue-400", "本策略: {acct_v:.2}%" }
-                    if let Some(bv) = bench_v {
-                        div { class: "text-gray-500", "沪深300: {bv:.2}%" }
+            // hover 指示层：竖线 + 双线交点 + 跟随 tooltip（均不拦截鼠标事件）
+            if let Some(h) = tooltip_data.as_ref() {
+                div { style: "position:absolute;left:{h.x_css:.1}px;top:0;width:1px;height:{h.css_h:.0}px;background:rgba(59,130,246,0.35);pointer-events:none;" }
+                div { style: "position:absolute;left:{h.x_css - 5.0:.1}px;top:{h.acct_y_css - 5.0:.1}px;width:10px;height:10px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.4);pointer-events:none;" }
+                if let Some(bench_y) = h.bench_y_css {
+                    div { style: "position:absolute;left:{h.x_css - 4.0:.1}px;top:{bench_y - 4.0:.1}px;width:9px;height:9px;border-radius:50%;background:#9ca3af;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,0.4);pointer-events:none;" }
+                }
+                {
+                    // tooltip 靠右边界时翻到左侧；纵向贴账号交点上方，超界则下移
+                    let flip = h.x_css + 200.0 > h.css_w;
+                    let left = if flip { (h.x_css - 200.0 - 12.0).max(4.0) } else { h.x_css + 12.0 };
+                    let top = (h.acct_y_css - 108.0).max(4.0).min((h.css_h - 112.0).max(4.0));
+                    let excess = h.bench_cum.map(|bv| h.acct_cum - bv);
+                    let bench_line = h.bench_cum.map(|bv| {
+                        rsx! { div { class: "text-gray-500", "沪深300: {bv:+.2}%" } }
+                    });
+                    let excess_line = excess.map(|e| {
+                        // 超额为正跑赢基准(绿)，为负跑输(红)
+                        let cls = if e >= 0.0 { "text-green-600" } else { "text-red-600" };
+                        rsx! { div { class: "{cls}", "超额: {e:+.2}%" } }
+                    });
+                    rsx! {
+                        div {
+                            style: "position:absolute;left:{left:.0}px;top:{top:.0}px;width:188px;padding:6px 8px;background:rgba(255,255,255,0.97);border:1px solid #d1d5db;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,0.15);pointer-events:none;z-index:10;font-size:11px;line-height:1.6;",
+                            class: "text-gray-700",
+                            div { class: "font-mono text-gray-500 border-b border-gray-100 mb-1 pb-0.5", "{h.date}" }
+                            div { "净值: ¥{h.nav:.0}" }
+                            div { "当日收益: {h.daily:+.2}%" }
+                            div { class: "text-blue-600", "本策略(区间): {h.acct_cum:+.2}%" }
+                            {bench_line}
+                            {excess_line}
+                        }
                     }
                 }
             }
