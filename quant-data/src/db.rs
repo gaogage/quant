@@ -18,7 +18,12 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .after_connect(move |conn, _meta| {
             let statement_timeout = statement_timeout.clone();
             Box::pin(async move {
-                sqlx::query(&statement_timeout).execute(conn).await?;
+                sqlx::query(&statement_timeout).execute(&mut *conn).await?;
+                // 项目时区规范:所有连接统一 Asia/Shanghai,保证 date/timestamp 写入
+                // timestamptz 列的解释口径一致(此前按 UTC 解释,fill_time 恒显示 08:00)。
+                sqlx::query("SET TIME ZONE 'Asia/Shanghai'")
+                    .execute(&mut *conn)
+                    .await?;
                 Ok(())
             })
         })

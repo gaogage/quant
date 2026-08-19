@@ -200,8 +200,44 @@ pub async fn sync_eod_data(
         date_str
     );
 
+    // ── EOD 日终盯市:用当日收盘价重估所有 active 模拟账户 ──
+    // 14:45 调仓时当日 bar 未入库,mark_to_market 只能取昨收,NAV/daily_return 滞后一天;
+    // 此处日线已同步(当日 close 已入库),re-mark + NAV 重算后再推日报,
+    // 使日报 daily_return = 当日日终净资产 vs 昨日日终净资产的真实当日涨跌。
+    // 14:45 写的 snapshot 会被 push_daily_performance_report 内的 upsert 覆盖为收盘口径。
+    if is_trade {
+        let accounts: Vec<String> = sqlx::query_scalar(
+            "SELECT paper_account_id FROM paper_account \
+             WHERE status = 'active' AND account_type = 'simulated'",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        for aid in &accounts {
+            if let Err(e) = crate::routes::rebalance::mark_to_market(
+                db,
+                aid,
+                date,
+                crate::routes::rebalance::PriceSource::EodClose,
+            )
+            .await
+            {
+                warn!("[scheduler] EOD re-mark 失败 {}: {}", aid, e);
+                continue;
+            }
+            if let Err(e) = crate::routes::trading::update_current_nav(db, aid).await {
+                warn!("[scheduler] EOD NAV 重算失败 {}: {}", aid, e);
+            }
+        }
+        info!(
+            "[scheduler] EOD 日终盯市完成({} 账户, 当日收盘价口径)",
+            accounts.len()
+        );
+    }
+
     // 日报提前推送：composite 合成后立即推，不等 sync_adj_factor 全量同步。
-    // 日报只需 NAV 快照（14:40 已写）+ composite 曲线（已合成），不依赖复权因子全量完成。
+    // 日报只需 NAV 快照（上方 EOD re-mark 已刷新为当日收盘口径）+ composite 曲线（已合成），
+    // 不依赖复权因子全量完成。
     if is_trade {
         info!("[scheduler] EOD composite 就绪，提前推送绩效日报...");
         if let Err(e) = crate::routes::report::push_daily_performance_report(db, date).await {
