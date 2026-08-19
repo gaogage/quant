@@ -17,6 +17,70 @@ use tracing::{info, warn};
 
 use crate::routes::shared::{NavSnapshot, send_quality_alert, upsert_nav_snapshot};
 
+/// T+1 补盯市后的快照重算(不推钉钉)。
+///
+/// 20:00 EOD 时 Tushare fund_daily 常无当日数据(实测 0 rows),ETF 持仓的日终
+/// 盯市被迫落在前日收盘;次日 9:00 T+1 补同步后 ETF 日线就绪,调用方先
+/// mark_to_market(date) + update_current_nav,再调本函数按当前 NAV 重写 date 的
+/// snapshot(nav/daily_return/cumulative_return),补齐真实日终口径。
+/// 幂等:ON CONFLICT 覆盖,重复调用无副作用。
+pub async fn refresh_eod_snapshot(db: &PgPool, date: NaiveDate) {
+    let accounts: Vec<(String, f64, f64, f64)> = sqlx::query_as(
+        "SELECT paper_account_id,
+                COALESCE(current_nav, initial_capital)::double precision,
+                COALESCE(initial_capital, 0)::double precision,
+                COALESCE(cash, 0)::double precision
+         FROM paper_account WHERE status = 'active' AND account_type = 'simulated'",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    for (account_id, nav, init_cap, cash) in &accounts {
+        let prev_nav: Option<(rust_decimal::Decimal,)> = sqlx::query_as(
+            "SELECT nav FROM paper_nav_snapshot
+             WHERE paper_account_id = $1 AND snapshot_date < $2
+             ORDER BY snapshot_date DESC LIMIT 1",
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let prev_nav_f = prev_nav
+            .map(|(d,)| d.to_string().parse::<f64>().unwrap_or(*nav))
+            .unwrap_or(*init_cap);
+
+        let pos: Option<(i64, rust_decimal::Decimal)> = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, COALESCE(SUM(market_value), 0)
+             FROM paper_position WHERE paper_account_id = $1 AND quantity > 0",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let (position_count, market_value) =
+            pos.unwrap_or((0, rust_decimal::Decimal::ZERO));
+
+        let mut snap = NavSnapshot::new(account_id.clone(), date, *nav);
+        snap.cash = *cash;
+        snap.market_value = market_value.to_string().parse::<f64>().unwrap_or(0.0);
+        snap.position_count = position_count as i32;
+        if prev_nav_f > 0.0 {
+            snap.daily_return = Some((*nav - prev_nav_f) / prev_nav_f);
+        }
+        if *init_cap > 0.0 {
+            snap.cumulative_return = Some((*nav - *init_cap) / *init_cap);
+        }
+        if let Err(e) = upsert_nav_snapshot(db, &snap).await {
+            warn!("[report] T+1 补盯市 snapshot 重算失败 {} {}: {}", account_id, date, e);
+        }
+    }
+    info!("[report] T+1 补盯市 snapshot 重算完成({} 账户, {})", accounts.len(), date);
+}
+
 pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Result<(), String> {
     use super::dingtalk;
 

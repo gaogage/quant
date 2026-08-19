@@ -306,6 +306,8 @@ mod tests {
             mvo_objective: "minvariance".into(),
             kelly_fraction: 0.25,
             score_candidate_pool_size: 200,
+            regime_policy: None,
+            regime_bear_return_threshold: -0.03,
         }
     }
 
@@ -448,6 +450,46 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     }
                 });
             }
+            "mvo_equity_curve_update" => {
+                // 每日 21:00(EOD 数据全就绪后)重跑 MVO 动态后复权无成本基准曲线。
+                // 策略参数不变则历史段幂等覆盖、追加最新交易日。全周期重跑 ~分钟级,spawn 不阻塞 tick。
+                let strategy_id = params
+                    .get("strategy_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("v24")
+                    .to_string();
+                let benchmark_account_id = params
+                    .get("benchmark_account_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("pa-v24-mvo-bench")
+                    .to_string();
+                let start_date = params
+                    .get("start_date")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("20160104")
+                    .to_string();
+                let end_date = chrono::Local::now().date_naive().format("%Y%m%d").to_string();
+                let leverage_multiplier = params
+                    .get("leverage_multiplier")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0);
+                let db_clone = db.clone();
+                tokio::spawn(async move {
+                    let req = crate::routes::historical_replay::MvoBenchmarkRequest {
+                        strategy_id,
+                        benchmark_account_id,
+                        start_date,
+                        end_date,
+                        leverage_multiplier,
+                    };
+                    match crate::routes::historical_replay::run_mvo_benchmark_sync(&db_clone, req)
+                        .await
+                    {
+                        Ok(d) => info!("[scheduler] MVO 基准曲线同步成功: {}", d),
+                        Err(e) => warn!("[scheduler] MVO 基准曲线同步失败: {}", e),
+                    }
+                });
+            }
             "factor_backfill" => {
                 // v24 因子全量回填:覆盖所有 active 策略依赖的全部因子类别
                 // （量价/财务/资金流/分析师/回购/大宗/流动性/市场风险）。
@@ -513,6 +555,7 @@ async fn run_scheduled_tasks(db: &PgPool) {
                         *include_fund,
                         None, // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
                         whitelist.as_deref(),
+                        false, // ind_neutral: scheduler 保鲜不做行业中性化(仅手动物化新 combo 时启用)
                     )
                     .await
                     {
@@ -972,6 +1015,37 @@ async fn run_tick(
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
 
+            // Step 3b: T+1 补盯市。20:00 EOD 时 fund_daily 常无当日数据(实测 0 rows),
+            // ETF 持仓的日终盯市被迫落在前日收盘。此处 ETF 日线已补齐,对 active 账户
+            // 补 mark_to_market(上一交易日收盘) + NAV 重算 + 重写该日 snapshot,
+            // 使 daily_return 补齐为真实日终口径(9:00 不重推钉钉,仅修正数据)。
+            let remak_accounts: Vec<String> = sqlx::query_scalar(
+                "SELECT paper_account_id FROM paper_account \
+                 WHERE status = 'active' AND account_type = 'simulated'",
+            )
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+            for aid in &remak_accounts {
+                if let Err(e) = crate::routes::rebalance::mark_to_market(
+                    db,
+                    aid,
+                    sync_date,
+                    crate::routes::rebalance::PriceSource::EodClose,
+                )
+                .await
+                {
+                    warn!("[scheduler] T+1 补盯市失败 {} {}: {}", aid, sync_date, e);
+                    continue;
+                }
+                if let Err(e) = crate::routes::trading::update_current_nav(db, aid).await {
+                    warn!("[scheduler] T+1 NAV 重算失败 {}: {}", aid, e);
+                }
+            }
+            if !remak_accounts.is_empty() {
+                crate::routes::report::refresh_eod_snapshot(db, sync_date).await;
+            }
+
             // Step 4: 日线就绪后才触发因子回填（覆盖v24全部因子类别）
             if retries < max_retries {
                 info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
@@ -1029,6 +1103,7 @@ async fn run_tick(
                         inc_fund,
                         None, // min_abs_ic_ir: T+1 保鲜不加阈值(白名单已筛)
                         whitelist.as_deref(),
+                        false, // ind_neutral: scheduler 保鲜不做行业中性化(仅手动物化新 combo 时启用)
                     )
                     .await
                     {
