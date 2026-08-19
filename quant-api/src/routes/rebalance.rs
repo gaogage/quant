@@ -19,13 +19,24 @@ use tracing::warn;
 
 use quant_data::tushare::client::TushareClient;
 
-/// 价格源(回放/实盘唯一差异)
+/// 价格源(回放/实盘/基准唯一差异)
 #[derive(Clone, Copy)]
 pub enum PriceSource {
-    /// 回放:日终收盘价(market_stock_daily_bar_adj)
+    /// 回放/实盘:日终真实收盘价(market_stock_daily_bar)
     EodClose,
     /// 实盘:盘中实时价(Tushare)
     Intraday,
+    /// MVO 动态基准:真实收盘价(与实盘同空间)+ 无交易成本(slippage=0)。
+    /// 与实盘同策略同逻辑同价格空间(MVO 动态、真实价)但无摩擦的基准曲线,偏离仅反映
+    /// 执行成本(slippage),应接近 0。后复权会因复权因子放大老股市值与真实资金不可比,故基准也用真实价。
+    EodCloseAdj,
+}
+
+/// 日线条材表:统一真实价(market_stock_daily_bar)。基准与实盘必须同真实价口径——
+/// 后复权(_adj)会因复权因子放大老股市值,与真实资金 NAV 不可比(2026-08-14 首版基准误用
+/// 后复权,NAV 虚高 443万 vs 实盘 192万)。EodCloseAdj 仅控制 slippage=0,不切价格空间。
+fn daily_bar_table(_ps: PriceSource) -> &'static str {
+    "market_stock_daily_bar"
 }
 
 /// 选股结果(当日某 A 股个股的截面持仓)
@@ -266,14 +277,24 @@ pub async fn rebalance_account(
     .map(|(s, q, c)| (s, (q, c)))
     .collect();
 
-    // 7. A 股目标持仓 → 增量调仓(买不足/卖多余)
-    let slippage = sc_slippage_pct(&sc);
+    // 7. A 股目标持仓 → 增量调仓(买不足/卖多余)。两遍执行:先卖后买。
+    // 无杠杆账户 cash 不足会静默跳过买入——先买后卖时,换仓日"卖旧买新"的买入段
+    // 在卖出资金回流前执行,全部被跳过(2026-08-19 实证:30 万级买入全废、32 万现金闲置)。
+    // 先卖后买让卖出资金当轮即可用于买入(与实盘 T+0 资金可用规则一致)。清仓段(7b)夹在两遍之间。
+    // EodCloseAdj 基准模式无交易成本(slippage=0);其余用策略配置 slippage。
+    // 一处分支覆盖全部 6 个 slippage 应用点(它们都读这个局部变量)。
+    let slippage = if matches!(price_source, PriceSource::EodCloseAdj) {
+        0.0
+    } else {
+        sc_slippage_pct(&sc)
+    };
     let mut n = 0usize;
     let mut target_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
     // P2-A:批量预加载当日 A 股停牌/涨跌停状态(替代循环内逐股查 2 次 DB)
     let block_symbols: Vec<String> = positions.iter().map(|p| p.symbol.clone()).collect();
     let trade_block_map =
         crate::routes::shared::preload_trade_block_map(db, date, &block_symbols).await;
+    for pass in 0..2 {
     for p in &positions {
         if warn_no_buy {
             // 警戒禁买:不建仓,仅记录目标集(清仓段仍可减仓)
@@ -326,6 +347,10 @@ pub async fn rebalance_account(
         };
         // 取整后 qty 为 0 则跳过（不足 1 手不产生交易）
         if qty <= Decimal::ZERO {
+            continue;
+        }
+        // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
+        if (pass == 0) != (side == "sell") {
             continue;
         }
         // A 股交易阻断(停牌/涨跌停)——按 side 区分(P2-A 批量预加载):
@@ -381,34 +406,44 @@ pub async fn rebalance_account(
             strategy_version_id: Some(sc.strategy_id.clone()),
             trade_date: Some(date),
         };
-        if execute_simulated_trade(db, &trade).await.is_ok() {
-            // 实际成交价(含滑点)用于更新持仓
-            let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
-            let mult = if side == "sell" {
-                Decimal::ONE - slip_d
-            } else {
-                Decimal::ONE + slip_d
-            };
-            let fill_price = price * mult;
-            apply_fill_to_position(
-                db,
-                account_id,
-                &p.symbol,
-                side,
-                qty,
-                fill_price,
-                leverage_enabled,
-                date,
-            )
-            .await;
-            n += 1;
+        match execute_simulated_trade(db, &trade).await {
+            Ok((order_id, _)) => {
+                // 实际成交价(含滑点)用于更新持仓
+                let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
+                let mult = if side == "sell" {
+                    Decimal::ONE - slip_d
+                } else {
+                    Decimal::ONE + slip_d
+                };
+                let fill_price = price * mult;
+                if apply_fill_to_position(
+                    db,
+                    account_id,
+                    &p.symbol,
+                    side,
+                    qty,
+                    fill_price,
+                    leverage_enabled,
+                    date,
+                )
+                .await
+                {
+                    n += 1;
+                } else {
+                    // 资金不足等被跳过:回写 skipped,避免 fill 记录与持仓脱节
+                    mark_fill_skipped(db, &order_id).await;
+                }
+            }
+            Err(e) => warn!("[rebalance] A股 {} {} 下单失败: {}", p.symbol, side, e),
         }
     }
 
     // 7b. 清仓:当前持仓中【不在 A 股目标集 且 属于 A 股】的 symbol。
+    // 在 pass 0(卖出遍)之后、pass 1(买入遍)之前执行,清仓资金当轮可用于买入。
     // ETF 不在此清——ETF 减仓由 ETF 段增量调仓处理(delta=target_qty-cur_qty)。
     // 若在此清 ETF,清仓段改 DB 但 current_positions 内存快照不更新,
     // ETF 段会读到旧 cur_qty 导致 delta 反向(应 buy 却 sell),持仓 quantity 错乱、nav 跳变。
+    if pass == 0 {
     for (sym, (qty, _)) in &current_positions {
         // 仅清 A股:排除策略配置的 ETF 列表(ETF 由 ETF 段管理)
         if sc.etf_symbols.iter().any(|e| e == sym) {
@@ -432,7 +467,7 @@ pub async fn rebalance_account(
                     continue;
                 }
             }
-            let price = fetch_eod_price(db, sym, date).await;
+            let price = fetch_eod_price(db, sym, date, price_source).await;
             if price <= 0.0 {
                 continue;
             }
@@ -450,25 +485,34 @@ pub async fn rebalance_account(
                 strategy_version_id: Some(sc.strategy_id.clone()),
                 trade_date: Some(date),
             };
-            if execute_simulated_trade(db, &trade).await.is_ok() {
-                let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
-                let fill_price = Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO)
-                    * (Decimal::ONE - slip_d);
-                apply_fill_to_position(
-                    db,
-                    account_id,
-                    sym,
-                    "sell",
-                    *qty,
-                    fill_price,
-                    leverage_enabled,
-                    date,
-                )
-                .await;
-                n += 1;
+            match execute_simulated_trade(db, &trade).await {
+                Ok((order_id, _)) => {
+                    let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
+                    let fill_price = Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO)
+                        * (Decimal::ONE - slip_d);
+                    if apply_fill_to_position(
+                        db,
+                        account_id,
+                        sym,
+                        "sell",
+                        *qty,
+                        fill_price,
+                        leverage_enabled,
+                        date,
+                    )
+                    .await
+                    {
+                        n += 1;
+                    } else {
+                        mark_fill_skipped(db, &order_id).await;
+                    }
+                }
+                Err(e) => warn!("[rebalance] 清仓 {} 下单失败: {}", sym, e),
             }
         }
     }
+    } // end if pass == 0(清仓段)
+    } // end for pass(A股两遍:先卖后买)
 
     // 8. ETF 建仓(按 price_source 取价:EodClose 从 DB / Intraday 从 tushare HashMap)
     // etf_symbols 必须与 mvo_weights 同源:只含当日已发行 ETF(compute_lw_mvo_weights 已过滤),
@@ -483,8 +527,8 @@ pub async fn rebalance_account(
     }
     let etf_allocations = build_etf_allocations(&mvo_weights, regime, &listed_etf_symbols);
     // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
-    let etf_eod_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::EodClose) {
-        preload_etf_eod_prices(db, &listed_etf_symbols, date).await
+    let etf_eod_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::EodClose | PriceSource::EodCloseAdj) {
+        preload_etf_eod_prices(db, &listed_etf_symbols, date, price_source).await
     } else {
         HashMap::new()
     };
@@ -494,6 +538,8 @@ pub async fn rebalance_account(
     } else {
         HashMap::new()
     };
+    // ETF 段同样两遍执行:先卖后买(卖出资金当轮可用于买入,与 A 股段口径一致)
+    for pass in 0..2 {
     for (etf_symbol, alloc_pct) in &etf_allocations {
         if warn_no_buy {
             continue; // 警戒禁买:不建仓 ETF(减仓由增量 delta 自然处理)
@@ -567,6 +613,10 @@ pub async fn rebalance_account(
         if qty <= Decimal::ZERO {
             continue;
         }
+        // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
+        if (pass == 0) != (side == "sell") {
+            continue;
+        }
         let target_value = qty * price;
         let trade = crate::routes::trading::PlannedTrade {
             account_id: account_id.to_string(),
@@ -582,28 +632,37 @@ pub async fn rebalance_account(
             strategy_version_id: Some(sc.strategy_id.clone()),
             trade_date: Some(date),
         };
-        if execute_simulated_trade(db, &trade).await.is_ok() {
-            let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
-            let mult = if side == "sell" {
-                Decimal::ONE - slip_d
-            } else {
-                Decimal::ONE + slip_d
-            };
-            let fill_price = price * mult;
-            apply_fill_to_position(
-                db,
-                account_id,
-                etf_symbol.as_str(),
-                side,
-                qty,
-                fill_price,
-                leverage_enabled,
-                date,
-            )
-            .await;
-            n += 1;
+        match execute_simulated_trade(db, &trade).await {
+            Ok((order_id, _)) => {
+                let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
+                let mult = if side == "sell" {
+                    Decimal::ONE - slip_d
+                } else {
+                    Decimal::ONE + slip_d
+                };
+                let fill_price = price * mult;
+                if apply_fill_to_position(
+                    db,
+                    account_id,
+                    etf_symbol.as_str(),
+                    side,
+                    qty,
+                    fill_price,
+                    leverage_enabled,
+                    date,
+                )
+                .await
+                {
+                    n += 1;
+                } else {
+                    // 资金不足等被跳过:回写 skipped,避免 fill 记录与持仓脱节
+                    mark_fill_skipped(db, &order_id).await;
+                }
+            }
+            Err(e) => warn!("[rebalance] ETF {} {} 下单失败: {}", etf_symbol, side, e),
         }
     }
+    } // end for pass(ETF 两遍:先卖后买)
 
     // 建仓 0 笔 + A股选股空 + 账号当前无持仓 → 报错(不产出假绩效)
     if n == 0 && positions.is_empty() && current_positions.is_empty() {
@@ -621,7 +680,7 @@ pub async fn rebalance_account(
     // update_current_nav 基于真实市值。此前实盘路径从不 mark_to_market（只 mvo_simulate
     // 回测路径调），持仓市值冻结在建仓日的后复权价，是 2026-08-10 NAV +21.6% 根因之一。
     // 14:40 调仓时当日 bar 未入库（EOD 20:00 同步），取最近可得收盘价（前一日），可接受。
-    mark_to_market(db, account_id, date).await?;
+    mark_to_market(db, account_id, date, price_source).await?;
     // NAV 重算:统一走 trading::update_current_nav(正确口径:持仓市值+cash-margin)
     // update_current_nav 现同步更新 peak_nav / max_drawdown_pct（P0-3 修复）
     update_current_nav(db, account_id).await?;
@@ -768,30 +827,35 @@ async fn force_liquidation(
             strategy_version_id: None,
             trade_date: Some(date),
         };
-        if execute_simulated_trade(db, &trade).await.is_ok() {
-            apply_fill_to_position(
-                db, account_id, &sym, "sell", sell_qty, sell_price, true, date,
-            )
-            .await;
-            // 卖出后 cash += sell_qty*sell_price,主动还款降低 margin
-            let repay_amount = sell_qty * sell_price;
-            let _ = sqlx::query(
-                "UPDATE paper_account SET cash = GREATEST(cash - $2, 0),
-                     margin_amount = GREATEST(margin_amount - $2, 0)
-                 WHERE paper_account_id = $1",
-            )
-            .bind(account_id)
-            .bind(repay_amount)
-            .execute(db)
-            .await;
-            update_current_nav(db, account_id).await?;
-            n += 1;
-            warn!(
-                "[FORCE_LIQ] date={} acct={} sym={} qty={} 维保{:.3}→平仓还款{:.0}",
-                date, account_id, sym, sell_qty, maint, repay_amount
-            );
-        } else {
-            break;
+        match execute_simulated_trade(db, &trade).await {
+            Ok((order_id, _)) => {
+                if !apply_fill_to_position(
+                    db, account_id, &sym, "sell", sell_qty, sell_price, true, date,
+                )
+                .await
+                {
+                    mark_fill_skipped(db, &order_id).await;
+                    break; // 强平卖出未生效(如 T+1 拦截),继续循环无意义
+                }
+                // 卖出后 cash += sell_qty*sell_price,主动还款降低 margin
+                let repay_amount = sell_qty * sell_price;
+                let _ = sqlx::query(
+                    "UPDATE paper_account SET cash = GREATEST(cash - $2, 0),
+                         margin_amount = GREATEST(margin_amount - $2, 0)
+                     WHERE paper_account_id = $1",
+                )
+                .bind(account_id)
+                .bind(repay_amount)
+                .execute(db)
+                .await;
+                update_current_nav(db, account_id).await?;
+                n += 1;
+                warn!(
+                    "[FORCE_LIQ] date={} acct={} sym={} qty={} 维保{:.3}→平仓还款{:.0}",
+                    date, account_id, sym, sell_qty, maint, repay_amount
+                );
+            }
+            Err(_) => break,
         }
         if n > 50 {
             warn!("[FORCE_LIQ] date={} 平仓超50笔,中止防死循环", date);
@@ -839,24 +903,29 @@ pub async fn check_maintenance_after_mark(
 
 /// 每日盯市:用当日收盘价重算持仓 market_price/market_value,使 update_current_nav 反映真实市值。
 /// 回放逐日复利的必要步骤(否则 NAV 停在建仓日不动)。
-pub async fn mark_to_market(db: &PgPool, account_id: &str, date: NaiveDate) -> Result<(), String> {
-    // [价格空间] 用真实收盘价(market_stock_daily_bar)盯市，不用后复权价(_adj 视图)。
-    // 实盘/mvo_simulate 的资金管理(NAV=cash+市值-margin)必须基于真实价，与实际成交价口径
-    // 一致。后复权价仅用于 BC3 引擎内部的绩效计算(portfolio.rs mark_to_market)，与此无关。
-    // 2026-08-10 NAV +21.6% 根因之一：实盘从不 mark_to_market，持仓市值冻结在后复权建仓价。
-    // LATERAL 子查询:每个持仓 symbol 单独取最新真实收盘价(走 symbol,trade_date 索引)。
-    sqlx::query(
+pub async fn mark_to_market(
+    db: &PgPool,
+    account_id: &str,
+    date: NaiveDate,
+    price_source: PriceSource,
+) -> Result<(), String> {
+    // [价格空间] 统一真实收盘价(market_stock_daily_bar)盯市——资金管理(NAV=cash+市值-margin)
+    // 必须基于真实价。基准(EodCloseAdj)也用真实价(与实盘同空间),仅 slippage=0;后复权会
+    // 放大老股市值与真实资金不可比。daily_bar_table 已统一真实价。
+    // 2026-08-10 NAV +21.6% 根因之一:实盘从不 mark_to_market,持仓市值冻结在后复权建仓价。
+    let table = daily_bar_table(price_source);
+    sqlx::query(&format!(
         "UPDATE paper_position pp SET
              market_price = sub.close, market_value = pp.quantity * sub.close
          FROM paper_position p2
          LEFT JOIN LATERAL (
              SELECT close::numeric AS close
-             FROM market_stock_daily_bar
+             FROM {table}
              WHERE symbol = p2.symbol AND trade_date <= $1
              ORDER BY trade_date DESC LIMIT 1
          ) sub ON true
          WHERE pp.paper_account_id = $2 AND p2.paper_account_id = $2 AND pp.symbol = p2.symbol",
-    )
+    ))
     .bind(date)
     .bind(account_id)
     .execute(db)
@@ -868,6 +937,9 @@ pub async fn mark_to_market(db: &PgPool, account_id: &str, date: NaiveDate) -> R
 /// 成交后更新持仓:买(qty+=,avg_cost 移动加权);卖(qty-=,qty→0 删行)。
 /// 同步流转 cash/margin:买扣 cash(不足自动融资 margin+=缺口);卖 cash+=fill_amount(末尾 try_auto_repay 归还多余融资)。
 /// 这是 NAV 复利成立的前提——否则 current_nav = 持仓市值+cash-margin 会因 cash 不动而虚高。
+/// 返回 false = 该笔未实际变更持仓/资金(资金不足跳过),调用方须标记 order/fill 为 skipped,
+/// 避免审计记录与持仓脱节(2026-08-19 实证:先买后卖顺序下 30 万级买入全部静默跳过,
+/// paper_fill 却记满 filled)。
 ///
 /// Step 5d 拆分：原 `apply_fill_to_position(leverage_enabled: bool)` 按 leverage_enabled
 /// 分派为 `apply_fill_cash`（无杠杆，编译期保证不融资）/ `apply_fill_margin`（含融资）。
@@ -885,17 +957,40 @@ async fn apply_fill_to_position(
     fill_price: Decimal,
     leverage_enabled: bool,
     date: NaiveDate,
-) {
+) -> bool {
     if leverage_enabled {
-        apply_fill_margin(db, account_id, sym, side, qty, fill_price, date).await;
+        apply_fill_margin(db, account_id, sym, side, qty, fill_price, date).await
     } else {
-        apply_fill_cash(db, account_id, sym, side, qty, fill_price, date).await;
+        apply_fill_cash(db, account_id, sym, side, qty, fill_price, date).await
+    }
+}
+
+/// 资金不足跳过的成交回写:order/fill 从 filled 改标记,保持审计记录与持仓一致。
+async fn mark_fill_skipped(db: &PgPool, order_id: &str) {
+    if let Err(e) = sqlx::query(
+        "UPDATE paper_order SET status = 'skipped_no_cash' WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .execute(db)
+    .await
+    {
+        warn!("[rebalance] 标记 skipped_no_cash 失败(order {}): {}", order_id, e);
+    }
+    if let Err(e) = sqlx::query(
+        "UPDATE paper_fill SET fill_status = 'skipped_no_cash' WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .execute(db)
+    .await
+    {
+        warn!("[rebalance] 标记 fill skipped_no_cash 失败(order {}): {}", order_id, e);
     }
 }
 
 /// 无杠杆账户成交：买入严格不融资（cash 不足缩减 qty），卖出走共享逻辑。
 ///
 /// 类型门禁：此函数无 margin 路径，编译期保证无杠杆账户不会产生融资。
+/// 返回 false = 资金不足被跳过(调用方应将 order/fill 标记 skipped,避免审计假 filled)。
 async fn apply_fill_cash(
     db: &PgPool,
     account_id: &str,
@@ -904,7 +999,7 @@ async fn apply_fill_cash(
     qty: Decimal,
     fill_price: Decimal,
     date: NaiveDate,
-) {
+) -> bool {
     if side == "buy" {
         let fill_amount = qty * fill_price;
         // cash 不足时缩减买入量,严格不融资
@@ -920,13 +1015,13 @@ async fn apply_fill_cash(
                 "[rebalance] {} 无杠杆账户 cash=0,跳过买入 {}",
                 account_id, sym
             );
-            return;
+            return false;
         }
         let max_qty_by_cash = Decimal::from_f64_retain(cash)
             .map(|c| c / fill_price)
             .unwrap_or(Decimal::ZERO);
         if max_qty_by_cash <= Decimal::ZERO {
-            return;
+            return false;
         }
         let (qty, fill_amount) = if qty <= max_qty_by_cash {
             (qty, fill_amount)
@@ -937,7 +1032,7 @@ async fn apply_fill_cash(
                 quant_common::trading_rules::LOT_SIZE,
             );
             if scaled <= Decimal::ZERO {
-                return;
+                return false;
             }
             warn!(
                 "[rebalance] {} 无杠杆账户 {} 买入缩减: 目标{} → {}(cash={:.2} 不足满仓+滑点,按100取整)",
@@ -945,9 +1040,9 @@ async fn apply_fill_cash(
             );
             (scaled, scaled * fill_price)
         };
-        apply_fill_common_buy(db, account_id, sym, qty, fill_price, fill_amount, date).await;
+        apply_fill_common_buy(db, account_id, sym, qty, fill_price, fill_amount, date).await
     } else {
-        apply_fill_common_sell(db, account_id, sym, qty, fill_price, date).await;
+        apply_fill_common_sell(db, account_id, sym, qty, fill_price, date).await
     }
 }
 
@@ -960,12 +1055,12 @@ async fn apply_fill_margin(
     qty: Decimal,
     fill_price: Decimal,
     date: NaiveDate,
-) {
+) -> bool {
     if side == "buy" {
         let fill_amount = qty * fill_price;
-        apply_fill_common_buy(db, account_id, sym, qty, fill_price, fill_amount, date).await;
+        apply_fill_common_buy(db, account_id, sym, qty, fill_price, fill_amount, date).await
     } else {
-        apply_fill_common_sell(db, account_id, sym, qty, fill_price, date).await;
+        apply_fill_common_sell(db, account_id, sym, qty, fill_price, date).await
     }
 }
 
@@ -981,9 +1076,10 @@ async fn apply_fill_common_buy(
     fill_price: Decimal,
     fill_amount: Decimal,
     date: NaiveDate,
-) {
+) -> bool {
     // 持仓:移动加权 avg_cost + 标记 last_trade_date(T+1:当日买入次日才能卖)
-    let _ = sqlx::query(
+    // SQL 失败不再静默吞错(let _ = 曾把错误全部吞掉,持仓静默不写入)。
+    if let Err(e) = sqlx::query(
         "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value, last_trade_date)
          VALUES ($1, $2, $3, $4, $5, $5, $4*$5, $6)
          ON CONFLICT (paper_account_id, symbol) DO UPDATE SET
@@ -1001,9 +1097,13 @@ async fn apply_fill_common_buy(
     .bind(fill_price)
     .bind(date)
     .execute(db)
-    .await;
+    .await
+    {
+        warn!("[rebalance] 持仓写入失败 {} {}: {}", account_id, sym, e);
+        return false;
+    }
     // 资金:扣 cash,不足自动融资(margin += 缺口)。单 SQL 保证原子。
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE paper_account SET
              cash = CASE WHEN COALESCE(cash,0) >= $2 THEN cash - $2 ELSE 0 END,
              margin_amount = COALESCE(margin_amount,0) + GREATEST($2 - COALESCE(cash,0), 0)
@@ -1012,7 +1112,12 @@ async fn apply_fill_common_buy(
     .bind(account_id)
     .bind(fill_amount)
     .execute(db)
-    .await;
+    .await
+    {
+        warn!("[rebalance] 资金扣减失败 {} {}: {}", account_id, sym, e);
+        return false;
+    }
+    true
 }
 
 /// 卖出共享逻辑：取整 + T+1 检查 + 持仓 UPDATE/DELETE + 资金回流。
@@ -1025,12 +1130,12 @@ async fn apply_fill_common_sell(
     qty: Decimal,
     fill_price: Decimal,
     date: NaiveDate,
-) {
+) -> bool {
     // 防御性兜底:A股/ETF 卖出量取整到100整数倍(全仓清仓已在 caller 处理)
     let qty =
         quant_common::trading_rules::round_down_to_lot(qty, quant_common::trading_rules::LOT_SIZE);
     if qty <= Decimal::ZERO {
-        return; // 取整后为 0，不执行卖出
+        return false; // 取整后为 0，不执行卖出
     }
     let fill_amount = qty * fill_price; // 重算以匹配取整后的 qty
                                         // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
@@ -1051,9 +1156,9 @@ async fn apply_fill_common_sell(
             "[rebalance] T+1 跳过卖出: {} {} 当日买入(last_trade_date={})不可卖",
             account_id, sym, date
         );
-        return;
+        return false;
     }
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE paper_position SET quantity = quantity - $3,
              market_value = (quantity - $3) * market_price,
              last_trade_date = $4
@@ -1064,20 +1169,33 @@ async fn apply_fill_common_sell(
     .bind(qty)
     .bind(date)
     .execute(db)
-    .await;
+    .await
+    {
+        warn!("[rebalance] 卖出持仓更新失败 {} {}: {}", account_id, sym, e);
+        return false;
+    }
     // qty 归零的行删除(保持持仓表干净)
-    let _ = sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
-        .bind(account_id)
-        .execute(db)
-        .await;
+    if let Err(e) =
+        sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
+            .bind(account_id)
+            .execute(db)
+            .await
+    {
+        warn!("[rebalance] 清零持仓删除失败 {}: {}", account_id, e);
+    }
     // 资金回流:cash += fill_amount(末尾 try_auto_repay 会把超出 reserve 的部分还给 margin)
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE paper_account SET cash = COALESCE(cash,0) + $2 WHERE paper_account_id = $1",
     )
     .bind(account_id)
     .bind(fill_amount)
     .execute(db)
-    .await;
+    .await
+    {
+        warn!("[rebalance] 卖出资金回流失败 {} {}: {}", account_id, sym, e);
+        return false;
+    }
+    true
 }
 
 /// 策略级滑点(从 strategy_config.slippage_pct 字段读,默认 0.002=20bp)
@@ -1123,17 +1241,24 @@ async fn fetch_etf_price(
             }
         }
     }
-    // EodClose 或 Intraday fallback:取不晚于 date 的最近收盘价
-    fetch_eod_price(db, symbol, date).await
+    // EodClose/EodCloseAdj 或 Intraday fallback:取不晚于 date 的最近收盘价
+    fetch_eod_price(db, symbol, date, price_source).await
 }
 
-/// 取某 symbol 不晚于 date 的最近真实收盘价(下游 mvo_simulate/实盘口径)。
-/// [价格空间] 用 market_stock_daily_bar(真实价)，不用 _adj(后复权，仅 BC3 绩效用)。
-async fn fetch_eod_price(db: &PgPool, symbol: &str, date: NaiveDate) -> f64 {
-    sqlx::query_scalar::<_, f64>(
-        "SELECT close::double precision FROM market_stock_daily_bar
+/// 取某 symbol 不晚于 date 的最近收盘价(下游 mvo_simulate/实盘/基准口径)。
+/// [价格空间] 统一 market_stock_daily_bar(真实价)。基准(EodCloseAdj)与实盘同真实价空间,
+/// 仅 slippage=0;后复权与真实资金不可比。daily_bar_table 已统一真实价。
+async fn fetch_eod_price(
+    db: &PgPool,
+    symbol: &str,
+    date: NaiveDate,
+    price_source: PriceSource,
+) -> f64 {
+    let table = daily_bar_table(price_source);
+    sqlx::query_scalar::<_, f64>(&format!(
+        "SELECT close::double precision FROM {table}
          WHERE symbol=$1 AND trade_date<=$2 ORDER BY trade_date DESC LIMIT 1",
-    )
+    ))
     .bind(symbol)
     .bind(date)
     .fetch_optional(db)
@@ -1151,16 +1276,18 @@ async fn preload_etf_eod_prices(
     db: &PgPool,
     symbols: &[String],
     date: NaiveDate,
+    price_source: PriceSource,
 ) -> HashMap<String, f64> {
     if symbols.is_empty() {
         return HashMap::new();
     }
-    let rows: Vec<(String, f64)> = sqlx::query_as(
+    let table = daily_bar_table(price_source);
+    let rows: Vec<(String, f64)> = sqlx::query_as(&format!(
         "SELECT DISTINCT ON (symbol) symbol, close::double precision
-         FROM market_stock_daily_bar
+         FROM {table}
          WHERE symbol = ANY($1) AND trade_date <= $2 AND close > 0
          ORDER BY symbol, trade_date DESC",
-    )
+    ))
     .bind(symbols)
     .bind(date)
     .fetch_all(db)
@@ -1255,6 +1382,8 @@ mod tests {
             mvo_objective: "minvariance".into(),
             kelly_fraction: 0.25,
             score_candidate_pool_size: 200,
+            regime_policy: None,
+            regime_bear_return_threshold: -0.03,
         };
         assert!((sc_slippage_pct(&sc) - 0.005).abs() < 1e-12);
     }

@@ -318,11 +318,17 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
             detail
         };
 
+        // 当前回撤 = (峰值 - 当前 NAV)/峰值,与全周期 max_dd 分开标注避免误读
+        let current_dd = if *peak_nav > 0.0 {
+            (peak_nav - nav) / peak_nav
+        } else {
+            0.0
+        };
         let text = format!(
             "## {} 实盘绩效日报 — {}  \n\n\
              **日期**: {}  \n\n\
              **当日收益**: {}{}{:.2}% | **累计收益**: {:.2}%  \n\
-             **当前 NAV**: ¥{:.2} | **历史峰值**: ¥{:.2} | **最大回撤**: {:.2}%  \n\
+             **当前 NAV**: ¥{:.2} | **历史峰值**: ¥{:.2} | **当前回撤**: {:.2}% | **历史最大回撤**: {:.2}%  \n\
              **当日调仓**: 买入 {} 笔(¥{:.0}) / 卖出 {} 笔(¥{:.0})  \n\
              **累计成交**: {} 笔  \n\
              {}\
@@ -337,6 +343,7 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
             cumulative_return * 100.0,
             nav,
             peak_nav,
+            current_dd * 100.0,
             max_dd * 100.0,
             buy_n,
             buy_amt,
