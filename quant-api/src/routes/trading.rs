@@ -20,17 +20,18 @@ fn short_id() -> String {
         .to_string()
 }
 
-/// 业务时间戳：trade_date == 今天(上海) 时为真实成交时刻 now()；
-/// 历史重放日期时为该日 00:00 上海时区。
-/// 此前直接绑 NaiveDate 到 timestamptz 列被按 UTC 00:00 解释，fill_time 恒显示 08:00，
+/// 业务时间戳：trade_date == 今天时为真实成交时刻 now()；
+/// 历史重放日期时为该日 00:00。均取部署环境本地时区(容器 TZ,如 Asia/Shanghai),
+/// 不写死时区偏移——换时区部署自动跟随。
+/// 此前直接绑 NaiveDate 到 timestamptz 列被按连接会话时区解释,fill_time 恒显示 08:00,
 /// 实盘审计无法还原 14:45 调仓的真实时刻。
-fn biz_timestamp(d: chrono::NaiveDate) -> chrono::DateTime<chrono::FixedOffset> {
+fn biz_timestamp(d: chrono::NaiveDate) -> chrono::DateTime<chrono::Local> {
     use chrono::TimeZone;
-    let sh = chrono::FixedOffset::east_opt(8 * 3600).expect("valid offset");
     if d == chrono::Local::now().date_naive() {
-        chrono::Local::now().with_timezone(&sh)
+        chrono::Local::now()
     } else {
-        sh.from_local_datetime(&d.and_hms_opt(0, 0, 0).expect("valid midnight"))
+        chrono::Local
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0).expect("valid midnight"))
             .single()
             .expect("unambiguous midnight")
     }
