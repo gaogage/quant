@@ -1,6 +1,6 @@
 //! EOD 日终同步模块（DDD R10c/Step 6c-5：从 scheduler 上帝模块迁出）。
 //!
-//! 原属 scheduler.rs 的 `sync_eod_data`，职责是 20:00 盘后全量行情同步：
+//! 原属 scheduler.rs 的 `sync_eod_data`，职责是 22:00 盘后全量行情同步：
 //! 事件数据（停牌/涨跌停）→ 当日日线/ETF/指数 → daily_basic/moneyflow/block_trade →
 //! 复权因子+兜底 → composite 曲线刷新 → ML 预测覆盖检查 → 数据质量校验。
 //!
@@ -20,7 +20,7 @@ use crate::routes::scheduler::{
     sync_limit_with_retry,
 };
 
-/// 20:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → composite → 日报 → 复权全量 → ML → 质量检查。
+/// 22:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → composite → 日报 → 复权全量 → ML → 质量检查。
 pub async fn sync_eod_data(
     db: &PgPool,
     tushare: &TushareClient,
@@ -88,6 +88,19 @@ pub async fn sync_eod_data(
         &format!("etf-eod-{}", date_str),
     )
     .await;
+    // fund_daily 当日缺失时用 akshare(东财)兜底:东财源收盘后约 15:30 即有当日数据,
+    // 而 Tushare fund_daily 就绪率不稳定(8/19 实测 20:00-22:00 均 0 rows)。
+    // 仅补当日缺失 symbol,已入库行不覆盖,幂等。
+    let filled = backfill_etf_daily_akshare(
+        db,
+        &etf_symbols,
+        date,
+        &format!("etf-eod-{}", date_str),
+    )
+    .await;
+    if filled > 0 {
+        info!("[scheduler] EOD akshare ETF 兜底: 补 {} 条当日日线", filled);
+    }
     let index_codes = vec!["000300.SH".to_string()];
     let _ = quant_data::sync::sync_index_daily(
         db,
@@ -178,7 +191,7 @@ pub async fn sync_eod_data(
 
     // ── 复权因子兜底（快，纯 DB 前向填充）+ composite 合成 + 日报推送 ──
     // 关键优化：先 backfill（LATERAL 前值填充，几秒完成）→ composite 合成 → 立即推日报，
-    // 让日报在 20:00 后几分钟内送达（不等 sync_adj_factor 逐只拉 7210 只 API，那要 2+ 小时）。
+    // 让日报在 22:00 后几分钟内送达（不等 sync_adj_factor 逐只拉 7210 只 API，那要 2+ 小时）。
     // 数学正确性：非除权日 adj_factor 恒等于前一交易日值（复权因子仅在除权除息日跳变），
     // backfill 前值填充 == 真实值。除权日当日 sync_adj_factor 会拿到新值，但日报已推——
     // 除权日偏离会略偏，但除权日稀少，且 sync_adj_factor 后台跑完会用真实值覆盖 backfill 值。
@@ -196,7 +209,7 @@ pub async fn sync_eod_data(
     }
 
     info!(
-        "[scheduler] 20:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权兜底) ({})",
+        "[scheduler] 22:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权兜底) ({})",
         date_str
     );
 
@@ -280,4 +293,149 @@ pub async fn sync_eod_data(
     crate::routes::data_quality::run_data_quality_check(db).await;
 
     Ok(())
+}
+
+/// fund_daily 当日缺失的 ETF 用 akshare(东财)补日线。
+///
+/// 数据链:Tushare fund_daily 就绪率不稳定(部分交易日全天无当日数据),
+/// 东财源收盘后约 15:30 即有。仅处理 `etf_symbols` 中当日无 bar 行的 symbol,
+/// INSERT ... ON CONFLICT DO NOTHING 不覆盖 Tushare 已写入数据,幂等。
+/// 返回实际补入行数。
+async fn backfill_etf_daily_akshare(
+    db: &PgPool,
+    etf_symbols: &[String],
+    date: NaiveDate,
+    dv_id: &str,
+) -> usize {
+    if etf_symbols.is_empty() {
+        return 0;
+    }
+    // 1. 当日已有 bar 的 symbol(排除,只补缺失)
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT symbol FROM market_stock_daily_bar WHERE trade_date = $1 AND symbol = ANY($2)",
+    )
+    .bind(date)
+    .bind(etf_symbols)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let missing: Vec<&String> = etf_symbols.iter().filter(|s| !existing.contains(s)).collect();
+    if missing.is_empty() {
+        return 0;
+    }
+    // akshare fund_etf_hist_em 用纯 6 位代码('513100.SH' → '513100')
+    let codes: Vec<String> = missing
+        .iter()
+        .map(|s| s.split('.').next().unwrap_or(s.as_str()).to_string())
+        .collect();
+    let date_str = date.format("%Y%m%d").to_string();
+
+    // 2. python 桥接:批量拉缺失 symbol 当日日线,stdout 输出 JSON 数组。
+    //    东财源有短时频率限制(连续请求会 RemoteDisconnected 限流),symbol 间 sleep
+    //    + 单 symbol 重试;失败不阻断(还有 9:00 T+1 补盯市最终兜底)。
+    const SCRIPT: &str = r#"
+import sys, json, time
+import akshare as ak
+codes = sys.argv[1].split(',')
+start, end = sys.argv[2], sys.argv[3]
+out = []
+for code in codes:
+    for attempt in range(3):
+        try:
+            df = ak.fund_etf_hist_em(symbol=code, period='daily',
+                                     start_date=start, end_date=end, adjust='')
+            for _, row in df.iterrows():
+                out.append({"code": code, "date": str(row["日期"]),
+                            "open": float(row["开盘"]), "high": float(row["最高"]),
+                            "low": float(row["最低"]), "close": float(row["收盘"]),
+                            "volume": float(row["成交量"]), "amount": float(row["成交额"])})
+            break
+        except Exception as error:
+            if attempt == 2:
+                print(json.dumps({"code": code, "error": str(error)}), file=sys.stderr)
+            else:
+                time.sleep(3)
+    time.sleep(1.5)
+print(json.dumps(out, ensure_ascii=False))
+"#;
+    let python = std::env::var("AKSHARE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let child = tokio::process::Command::new(&python)
+        .arg("-c")
+        .arg(SCRIPT)
+        .arg(codes.join(","))
+        .arg(&date_str)
+        .arg(&date_str)
+        .env("PYTHONUNBUFFERED", "1")
+        .output()
+        .await;
+    let output = match child {
+        Ok(o) if o.status.success() => {
+            // python 正常退出但 stderr 有单 symbol 失败(如东财限流),暴露出来便于排查
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                warn!("[scheduler] akshare ETF 兜底部分失败: {}", stderr);
+            }
+            o
+        }
+        Ok(o) => {
+            warn!(
+                "[scheduler] akshare ETF 兜底 python 失败: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return 0;
+        }
+        Err(e) => {
+            warn!("[scheduler] akshare ETF 兜底 python 启动失败: {}", e);
+            return 0;
+        }
+    };
+    let bars: Vec<serde_json::Value> =
+        match serde_json::from_slice(&output.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("[scheduler] akshare ETF 兜底输出解析失败: {}", e);
+                return 0;
+            }
+        };
+
+    // 3. code 前缀还原交易所后缀,upsert(只插缺失,冲突即跳过)
+    let suffix = |code: &str| -> String {
+        if code.starts_with('5') || code.starts_with('6') {
+            format!("{}.SH", code)
+        } else {
+            format!("{}.SZ", code)
+        }
+    };
+    let mut n = 0usize;
+    for bar in &bars {
+        let Some(code) = bar["code"].as_str() else { continue };
+        let Some(d) = bar["date"].as_str() else { continue };
+        let Ok(trade_date) = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d") else {
+            continue;
+        };
+        let symbol = suffix(code);
+        let g = |k: &str| bar[k].as_f64();
+        let res = sqlx::query(
+            "INSERT INTO market_stock_daily_bar
+                (symbol, trade_date, open, high, low, close, volume, amount, source, data_version_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'akshare_em',$9)
+             ON CONFLICT (symbol, trade_date) DO NOTHING",
+        )
+        .bind(&symbol)
+        .bind(trade_date)
+        .bind(g("open"))
+        .bind(g("high"))
+        .bind(g("low"))
+        .bind(g("close"))
+        .bind(g("volume"))
+        .bind(g("amount"))
+        .bind(dv_id)
+        .execute(db)
+        .await;
+        match res {
+            Ok(r) => n += r.rows_affected() as usize,
+            Err(e) => warn!("[scheduler] akshare ETF 兜底写入失败 {}: {}", symbol, e),
+        }
+    }
+    n
 }

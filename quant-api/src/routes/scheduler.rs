@@ -1,7 +1,7 @@
 //! 内置调度器 — v15 日频量化交易。
 //!
 //! 14:45 (收盘前): 获取当日行情 → 回测 → MVO → 调仓 → 立即推送钉钉
-//! 20:00 (盘后数据就绪): 同步日终行情数据到历史表 → 清理过期回测数据
+//! 22:00 (盘后数据就绪): 同步日终行情数据到历史表 → 清理过期回测数据
 //!
 //! 日频交易不需要盘中实时行情，每天只在收盘前交易一次。
 //! MVO 策略: Ledoit-Wolf + Grid Search 季度调仓 (自动发现权重)
@@ -182,9 +182,11 @@ fn scheduled_task_time_minutes(expr: &str) -> Result<u32, String> {
 }
 
 fn is_eod_sync_window(hour: u32, minute: u32) -> bool {
-    // 20:00 窗口：Tushare 日线数据通常 17:00-18:00 后才完整发布，
-    // 16:00 拉会返回 0 行（8/5 实测），延后到 20:00 确保数据就绪。
-    hour == 20 && minute < 10
+    // 22:00 窗口：Tushare fund_daily 当日就绪率不稳定(2026-08 实测约 5/7 交易日
+    // 20:00 前就绪,8/14/8/19 延迟到次日;8/19 当晚 22:00 仍 0 rows)。
+    // A 股日线通常 17:00-18:00 后完整,ETF 延后更不稳定——挪到 22:00 给晚到数据
+    // 多 2 小时窗口,再配 akshare(东财)兜底与 9:00 T+1 补盯市闭环。
+    hour == 22 && minute < 10
 }
 
 fn pre_trade_factor_combo(sc: &StrategyConfig) -> &str {
@@ -371,7 +373,7 @@ mod tests {
 
     #[test]
     fn eod_sync_window_does_not_replay_after_startup_late_in_day() {
-        // EOD 延后到 20:00：Tushare 日线 16:00 未发布，20:00 数据已就绪
+        // EOD 于 22:00：Tushare 日线 16:00 未发布，fund_daily 当日就绪率不稳定
         assert!(is_eod_sync_window(20, 0));
         assert!(is_eod_sync_window(20, 9));
         assert!(!is_eod_sync_window(20, 10));
@@ -652,11 +654,11 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         match strategy_config.as_ref() {
             Some(sc) => info!(
-                "[scheduler] {} 已启动 ({}): 14:40调仓 | 20:00 EOD | 9:00 T+1数据补同步",
+                "[scheduler] {} 已启动 ({}): 14:40调仓 | 22:00 EOD | 9:00 T+1数据补同步",
                 sc.strategy_id, sc.name
             ),
             None => info!(
-                "[scheduler] 已启动 (无 active 复合策略): 14:40调仓 | 20:00 EOD | 9:00 T+1数据补同步"
+                "[scheduler] 已启动 (无 active 复合策略): 14:40调仓 | 22:00 EOD | 9:00 T+1数据补同步"
             ),
         }
 
@@ -882,7 +884,7 @@ async fn run_tick(
         }
     }
 
-    // ── 20:00 (盘后数据就绪): 交易日EOD + 非交易日也执行数据同步 ──
+    // ── 22:00 (盘后数据就绪): 交易日EOD + 非交易日也执行数据同步 ──
     if is_eod_sync_window(hour, minute) {
         let should_sync = {
             let st = state.lock().await;
@@ -894,7 +896,7 @@ async fn run_tick(
                 let mut st = state.lock().await;
                 st.eod_synced_today = true;
             }
-            info!("[scheduler] 20:00 日终数据同步...");
+            info!("[scheduler] 22:00 日终数据同步...");
             if let Err(e) = crate::routes::sync::sync_eod_data(db, tushare, today, is_trade).await {
                 warn!("[scheduler] 日终数据同步失败: {}", e);
             }
@@ -1015,7 +1017,7 @@ async fn run_tick(
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
 
-            // Step 3b: T+1 补盯市。20:00 EOD 时 fund_daily 常无当日数据(实测 0 rows),
+            // Step 3b: T+1 补盯市。22:00 EOD 时 fund_daily 偶发无当日数据(akshare 兜底也失败时),
             // ETF 持仓的日终盯市被迫落在前日收盘。此处 ETF 日线已补齐,对 active 账户
             // 补 mark_to_market(上一交易日收盘) + NAV 重算 + 重写该日 snapshot,
             // 使 daily_return 补齐为真实日终口径(9:00 不重推钉钉,仅修正数据)。
