@@ -2191,10 +2191,12 @@ pub async fn generate_paper_signals_for_all(
             info!("[paper] {} 跳过数据门禁(历史重放模式)", name);
         }
 
-        // 90 天窗口:覆盖 10 日频调仓的多个信号周期,保证当日截面非空
-        // (30 天短窗口曾迫使 rebalance=daily:P0 修复——非日频在短窗口内当日无信号
-        // 截面 → 误清仓。窗口拉长后 sleeve 按蓝图 10 日频运行,年换手 ~250x → ~25x)。
-        let start = (date - chrono::Duration::days(90))
+        // 180 天窗口:覆盖 40 日频调仓 ≥2 个信号周期 + 信号前置数据需求
+        // (~50 交易日),保证当日截面非空(2026-08-20 实测:90 天窗口 + 40 日频
+        // signals=0 截面空;180 天窗口 signals=3、当日截面 11 只。
+        // 历史背景:30 天短窗口曾迫使 rebalance=daily,P0 修复——非日频在短窗口
+        // 当日无信号截面 → 误清仓)。
+        let start = (date - chrono::Duration::days(180))
             .format("%Y%m%d")
             .to_string();
         let end = date.format("%Y%m%d").to_string();
