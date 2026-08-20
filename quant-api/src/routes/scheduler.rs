@@ -2191,7 +2191,10 @@ pub async fn generate_paper_signals_for_all(
             info!("[paper] {} 跳过数据门禁(历史重放模式)", name);
         }
 
-        let start = (date - chrono::Duration::days(30))
+        // 90 天窗口:覆盖 10 日频调仓的多个信号周期,保证当日截面非空
+        // (30 天短窗口曾迫使 rebalance=daily:P0 修复——非日频在短窗口内当日无信号
+        // 截面 → 误清仓。窗口拉长后 sleeve 按蓝图 10 日频运行,年换手 ~250x → ~25x)。
+        let start = (date - chrono::Duration::days(90))
             .format("%Y%m%d")
             .to_string();
         let end = date.format("%Y%m%d").to_string();
@@ -2250,15 +2253,18 @@ pub async fn generate_paper_signals_for_all(
             .get("max_pairwise_correlation")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<f64>().ok());
-        // P0修复(2026-07-20): 默认必须是 daily。实盘每日按 30 天滚动窗口调 run-factor,
-        // 若沿用回测语义的 monthly(20 交易日)/biweekly 频率,调仓触发点大概率不落在"今天"这一
-        // 边界上,导致 signals_count=0 → backtest_position 当日截面为空 → 目标持仓空集 →
-        // rebalance_account 把所有 A 股持仓当"不在目标集"清仓,且不会买入任何新 A 股。
-        // 已实测验证:30天窗口+monthly=0信号;30天窗口+daily=7信号(含今日截面)。
+        // sleeve 调仓频率默认 40 交易日(2026-08-20 网格实验:indneutral_val_v1 组合 10/20/40 日频
+// 实测年化 8.3%/10.8%/10.4%,40 日频回撤 24.4% vs 20 日 31.4%,换手 69x vs 131x,
+// 风险调整后最优;原 v24 蓝图 task 参数为 rebalance="10")。
+        // 历史注:2026-07-20 P0 修复曾强制 daily——因当时 30 天短窗口 + 非日频会导致
+        // 当日无信号截面 → 误清仓。现窗口已拉长到 90 天,覆盖多个 10 日信号周期,
+        // 当日截面恒非空(2026-08-20 实测:90 天窗口 + 10 日频,当日截面 8 只、
+        // signals_count=6),daily 强制不再必要。日频换手 ~250x/年,摩擦成本吞掉
+        // sleeve 全部仓位价值(全周期含成本回测三组全灭),10 日频降至 ~25x。
         let rebalance_freq = wfa_params
             .get("rebalance")
             .and_then(|v| v.as_str())
-            .unwrap_or("daily");
+            .unwrap_or("40");
         // WFA 高级风控参数
         let vol_control = wfa_params
             .get("portfolio_volatility_control")

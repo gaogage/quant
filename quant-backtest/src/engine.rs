@@ -796,7 +796,10 @@ impl BacktestEngine {
             .get(symbol)
             .copied()
             .filter(|amount| !amount.is_zero())
-            .map(|amount| order_amount / amount)
+            // bar 表 amount 为 Tushare 千元单位,order_amount 为元——此前直接相除
+            // 参与率被放大 1000 倍(小盘股虚算至 300%+,冲击成本 9%/边,2026-08-20
+        // 定位:含成本回测全灭的根因)。统一换算到元再求比值。
+            .map(|amount| order_amount / (amount * Decimal::from(1000u32)))
             .unwrap_or_default()
     }
 
