@@ -67,6 +67,14 @@ pub struct StrategyConfig {
     pub slippage_pct: f64,
     #[serde(default = "default_mvo_objective")]
     pub mvo_objective: String,
+    // regime policy 选择（阶段1.2 配置化）。
+    // None/"trailing_12m" → 旧 trailing-12m 单档(deep_bear_threshold/exposure)。
+    // "bwgv2"/"bear_window_guard_v2" → bear_window_guard_v2 多档(126天+3信号，前瞻分级减仓)。
+    #[serde(default)]
+    pub regime_policy: Option<String>,
+    /// bwgv2 bear_return_threshold（regime_policy=bwgv2 时生效，默认 -0.03）。WFA 调优主杠杆。
+    #[serde(default = "default_bwgv2_bear_return")]
+    pub regime_bear_return_threshold: f64,
 }
 
 fn default_signal_source() -> String {
@@ -113,6 +121,9 @@ fn default_slippage_pct() -> f64 {
 }
 fn default_mvo_objective() -> String {
     "minvariance".into()
+}
+fn default_bwgv2_bear_return() -> f64 {
+    -0.03
 }
 
 impl Default for StrategyConfig {
@@ -169,6 +180,8 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         leverage_regime_threshold: mvo.leverage_regime_threshold,
         slippage_pct: mvo.slippage_pct,
         mvo_objective: mvo.mvo_objective.clone(),
+        regime_policy: mvo.regime_policy.clone(),
+        regime_bear_return_threshold: mvo.regime_bear_return_threshold,
     })
 }
 
@@ -217,6 +230,8 @@ mod tests {
                 mvo_objective: "minvariance".into(),
                 kelly_fraction: 0.25,
                 score_candidate_pool_size: 200,
+                regime_policy: None,
+                regime_bear_return_threshold: -0.03,
             }),
             assets: vec![
                 AssetStrategy {
@@ -431,6 +446,8 @@ mod tests {
                 mvo_objective: "minvariance".into(),
                 kelly_fraction: 0.25,
                 score_candidate_pool_size: 200,
+                regime_policy: None,
+                regime_bear_return_threshold: -0.03,
             }),
             assets: vec![
                 AssetStrategy {

@@ -180,6 +180,10 @@ pub struct MvoParams {
     // v16 ML blend 策略参数(P1-4 配置化,原硬编码 0.25/200)。
     pub kelly_fraction: f64,
     pub score_candidate_pool_size: i64,
+    /// regime policy 选择(阶段1.2 配置化)。None=trailing-12m(旧)，Some("bwgv2")=bear_window_guard_v2。
+    pub regime_policy: Option<String>,
+    /// bwgv2 bear_return_threshold(阶段1.2 配置化 WFA 调优，默认 -0.03)。其余 bwgv2 阈值用 Bwgv2Config::default()。
+    pub regime_bear_return_threshold: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +266,8 @@ struct CompositeRow {
     mvo_objective: Option<String>,
     kelly_fraction: Option<f64>,
     score_candidate_pool_size: Option<i32>,
+    regime_policy: Option<String>,
+    regime_bear_return_threshold: Option<f64>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -320,7 +326,7 @@ pub async fn load_resolved_strategy(
                 deep_bear_threshold, deep_bear_exposure,
                 dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step,
                 leverage_regime_threshold, slippage_pct, mvo_objective,
-                kelly_fraction, score_candidate_pool_size
+                kelly_fraction, score_candidate_pool_size, regime_policy, regime_bear_return_threshold
          FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)
@@ -381,6 +387,8 @@ pub async fn load_resolved_strategy(
                 mvo_objective: main.mvo_objective.unwrap_or_else(|| "minvariance".into()),
                 kelly_fraction: main.kelly_fraction.unwrap_or(0.25),
                 score_candidate_pool_size: main.score_candidate_pool_size.unwrap_or(200) as i64,
+                regime_policy: main.regime_policy.clone(),
+                regime_bear_return_threshold: main.regime_bear_return_threshold.unwrap_or(-0.03),
             };
             Ok(Strategy::validated(ResolvedStrategy {
                 strategy_id: main.strategy_id,
@@ -503,6 +511,8 @@ mod tests {
                 mvo_objective: "minvariance".into(),
                 kelly_fraction: 0.25,
                 score_candidate_pool_size: 200,
+                regime_policy: None,
+                regime_bear_return_threshold: -0.03,
             }),
             assets: vec![],
             etf_symbols: vec![

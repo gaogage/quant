@@ -816,6 +816,10 @@ async fn main() {
             "/api/v1/quant/paper/historical-replay",
             post(routes::historical_replay::historical_replay),
         )
+        .route(
+            "/api/v1/quant/paper/mvo-benchmark-sync",
+            post(routes::historical_replay::mvo_benchmark_sync),
+        )
         // 回撤归因
         .route(
             "/api/v1/quant/attribution/drawdown",

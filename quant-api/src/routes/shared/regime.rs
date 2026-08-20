@@ -92,6 +92,100 @@ pub fn detect_regime_exposure_cached(
     }
 }
 
+/// bear_window_guard_v2 regime policy（从 quant-backtest capacity_budget.rs:1877 移植）。
+///
+/// 126 天 lookback，3 信号（return + volatility + drawdown），5 档分级：
+/// - HighVolatility（vol≥0.28）→ 0.58
+/// - Bear（ret≤-0.03 OR dd≥0.14）→ 0.72
+/// - Bull/Sideways/Mixed → 1.00（满仓）
+///
+/// 比 trailing-12m 更前瞻：短窗口（126 vs 252）+ drawdown 早触发 + 分级减仓（非一刀切 0.6）。
+/// 阈值来源：capacity_budget.rs:1917-1929 quality_bear_window_guard_v2。
+/// 数据源同 trailing-12m（CSI300 close），口径一致，无后复权差异。
+/// bwgv2 阈值配置（阶段1.2 配置化，可经 strategy_config 调优，WFA 网格搜索）。
+/// 默认值对齐 capacity_budget.rs:1917-1929 quality_bear_window_guard_v2。
+#[derive(Debug, Clone)]
+pub struct Bwgv2Config {
+    pub lookback_days: usize,
+    pub high_vol_threshold: f64,
+    pub bear_return_threshold: f64,
+    pub bear_drawdown_threshold: f64,
+}
+impl Default for Bwgv2Config {
+    fn default() -> Self {
+        Self {
+            lookback_days: 126,
+            high_vol_threshold: 0.28,
+            bear_return_threshold: -0.03,
+            bear_drawdown_threshold: 0.14,
+        }
+    }
+}
+
+pub fn detect_regime_exposure_bwgv2(
+    csi300_map: &std::collections::HashMap<NaiveDate, f64>,
+    date: NaiveDate,
+    cfg: &Bwgv2Config,
+) -> f64 {
+    // 取不晚于 date 的最近 cfg.lookback_days 个交易日收盘价（升序）
+    let mut recent: Vec<(NaiveDate, f64)> = csi300_map
+        .iter()
+        .filter(|(d, _)| **d <= date)
+        .map(|(d, c)| (*d, *c))
+        .collect();
+    if recent.len() < 20 {
+        return 1.00; // min_observations=20，不足默认满仓
+    }
+    recent.sort_by(|a, b| a.0.cmp(&b.0)); // 升序（旧→新）
+    let start = recent.len().saturating_sub(cfg.lookback_days);
+    let window = &recent[start..];
+    // 日收益序列
+    let rets: Vec<f64> = window
+        .windows(2)
+        .map(|w| if w[0].1 != 0.0 { w[1].1 / w[0].1 - 1.0 } else { 0.0 })
+        .collect();
+    if rets.len() < 20 {
+        return 1.00;
+    }
+    // 三信号
+    let total_return: f64 = rets.iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+    let mean = rets.iter().sum::<f64>() / rets.len() as f64;
+    let variance: f64 = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / rets.len() as f64;
+    let volatility = variance.sqrt() * (252.0_f64).sqrt();
+    // 路径最大回撤
+    let mut nav = 1.0;
+    let mut peak = 1.0;
+    let mut max_dd = 0.0;
+    for r in &rets {
+        nav *= 1.0 + r;
+        if nav > peak {
+            peak = nav;
+        }
+        if peak > 0.0 {
+            let dd = 1.0 - nav / peak;
+            if dd > max_dd {
+                max_dd = dd;
+            }
+        }
+    }
+    // 优先级短路判定（对齐 pit_alpha.rs:1025-1039 + capacity_budget:1917-1929）
+    let exposure = if volatility >= cfg.high_vol_threshold {
+        0.58 // HighVolatility
+    } else if total_return <= cfg.bear_return_threshold || max_dd >= cfg.bear_drawdown_threshold {
+        0.72 // Bear
+    } else {
+        1.00 // Bull/Sideways/Mixed 都满仓
+    };
+    debug!(
+        "[Regime] BWGV2: 6m ret={:.1}% vol={:.1}% dd={:.1}% → exposure={:.0}%",
+        total_return * 100.0,
+        volatility * 100.0,
+        max_dd * 100.0,
+        exposure * 100.0
+    );
+    exposure
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

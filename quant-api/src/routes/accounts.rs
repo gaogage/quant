@@ -626,21 +626,38 @@ async fn query_backtest_comparison(
         return serde_json::Value::Null;
     };
 
-    // P1 修复:优先读 composite 合成曲线(消除纯 A 股曲线的结构性偏差),
-    // 按账号 leverage_multiplier 放大(composite 曲线本身无杠杆)。缺失则回退 A 股曲线。
-    let composite_rows: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as(
-        "SELECT trade_date, portfolio_value::double precision FROM backtest_composite_equity_curve
-         WHERE strategy_id = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date",
+    // 优先读与账号同杠杆的 MVO 动态基准(真带杠杆跑,精确,不放大);缺失则回退无杠杆(1.0)
+    // 基准 × leverage_multiplier(线性放大,近似杠杆复利)。两者皆无才回退 A 股 BC3 曲线。
+    let mut mvo_rows: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as(
+        "SELECT trade_date, portfolio_value::double precision FROM backtest_mvo_equity_curve
+         WHERE strategy_id = $1 AND leverage_multiplier = $2 AND trade_date >= $3 AND trade_date <= $4 ORDER BY trade_date",
     )
     .bind(&sv_id)
+    .bind(leverage_multiplier)
     .bind(from_date)
     .bind(to_date)
     .fetch_all(db)
     .await
     .unwrap_or_default();
+    // 精确 lev 基准存在则 amplify=1.0(不放大);否则回退 unlev(1.0)基准线性放大
+    let amplify = if mvo_rows.is_empty() {
+        mvo_rows = sqlx::query_as(
+            "SELECT trade_date, portfolio_value::double precision FROM backtest_mvo_equity_curve
+             WHERE strategy_id = $1 AND leverage_multiplier = 1.0 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date",
+        )
+        .bind(&sv_id)
+        .bind(from_date)
+        .bind(to_date)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        leverage_multiplier
+    } else {
+        1.0
+    };
 
-    let bt_rows: Vec<(chrono::NaiveDate, f64)> = if !composite_rows.is_empty() {
-        composite_rows
+    let bt_rows: Vec<(chrono::NaiveDate, f64)> = if !mvo_rows.is_empty() {
+        mvo_rows
     } else {
         let Ok(rs) = crate::routes::strategy::load_resolved_strategy(db, &sv_id).await else {
             return serde_json::Value::Null;
@@ -675,7 +692,7 @@ async fn query_backtest_comparison(
     let series: Vec<serde_json::Value> = bt_rows
         .into_iter()
         .map(|(d, pv)| {
-            let ret_pct = (pv / base - 1.0) * leverage_multiplier * 100.0;
+            let ret_pct = (pv / base - 1.0) * amplify * 100.0;
             serde_json::json!({
                 "date": d.format("%Y-%m-%d").to_string(),
                 "cumulative_return": (ret_pct * 100.0).round() / 100.0,

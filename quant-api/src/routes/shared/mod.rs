@@ -27,7 +27,7 @@ pub(crate) use strategy_config::resolved_to_legacy_sc;
 pub use strategy_config::StrategyConfig;
 pub(crate) use mvo_weights::{compute_lw_mvo_weights, compute_vol_target_leverage};
 pub use mvo_weights::MvoWeightCache;
-pub use regime::{detect_regime_exposure, detect_regime_exposure_cached};
+pub use regime::{detect_regime_exposure, detect_regime_exposure_bwgv2, detect_regime_exposure_cached, Bwgv2Config};
 pub(crate) use alerts::{send_quality_alert, send_dingtalk_alert, send_dingtalk_alert_titled};
 pub use trade_block::preload_trade_block_map;
 pub(crate) use etf_prices::fetch_intraday_etf_prices;

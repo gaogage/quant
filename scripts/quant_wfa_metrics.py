@@ -83,6 +83,47 @@ def fetch_equity_curve(task_id: str, db_url: str = None) -> List[Dict[str, Any]]
         conn.close()
 
 
+def fetch_equity_curve_by_account(account_id: str, db_url: str = None) -> List[Dict[str, Any]]:
+    """从 paper_nav_snapshot 获取模拟账户权益曲线（nav + daily_return）。
+    返回结构与 fetch_equity_curve 对齐，供 run_wfa 复用。"""
+    conn = db_connect(db_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT snapshot_date, nav, daily_return, benchmark_return
+                FROM paper_nav_snapshot
+                WHERE paper_account_id = %s
+                ORDER BY snapshot_date
+                """,
+                (account_id,),
+            )
+            rows = cur.fetchall()
+        result = []
+        prev_nav = None
+        for r in rows:
+            date = str(r[0])
+            nav = float(r[1]) if r[1] is not None else None
+            ret = float(r[2]) if r[2] is not None else None
+            bench_ret = float(r[3]) if r[3] is not None else None
+            # ret 缺失时从 nav 反推
+            if ret is None and nav is not None and prev_nav is not None and prev_nav > 0:
+                ret = nav / prev_nav - 1.0
+            if nav is not None:
+                prev_nav = nav
+            result.append({
+                "date": date,
+                "portfolio_value": nav,
+                "benchmark_value": None,
+                "strategy_return": ret,
+                "benchmark_return": bench_ret,
+                "drawdown": None,
+            })
+        return result
+    finally:
+        conn.close()
+
+
 def compute_segment_metrics(dates: List[str], returns: List[float], annualize: int = 252) -> Dict[str, Any]:
     """计算单段绩效指标"""
     import numpy as np
@@ -120,7 +161,8 @@ def compute_segment_metrics(dates: List[str], returns: List[float], annualize: i
 
 
 def run_wfa(
-    task_id: str,
+    task_id: str = None,
+    account_id: str = None,
     train_start: Optional[str] = None,
     train_end: Optional[str] = None,
     test_start: Optional[str] = None,
@@ -146,10 +188,14 @@ def run_wfa(
         min_windows: 最少窗口数
         min_sharpe: 最低中位 Sharpe 阈值
     """
-    data = fetch_equity_curve(task_id, db_url)
+    if account_id:
+        data = fetch_equity_curve_by_account(account_id, db_url)
+        task_id = account_id  # 复用 task_id 作为 source 标识（report/JSON 字段）
+    else:
+        data = fetch_equity_curve(task_id, db_url)
 
     if len(data) < 2:
-        return {"error": f"task_id={task_id} 数据不足，仅 {len(data)} 行"}
+        return {"error": f"{task_id} 数据不足，仅 {len(data)} 行"}
 
     dates = [d["date"] for d in data]
     returns = [d["strategy_return"] for d in data if d["strategy_return"] is not None]
@@ -321,7 +367,8 @@ def format_wfa_report(result: dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="WFA 训练/测试分段绩效对比")
-    parser.add_argument("--task-id", required=True, help="回测 task_id")
+    parser.add_argument("--task-id", help="回测 task_id（与 --account-id 二选一）")
+    parser.add_argument("--account-id", help="模拟账户 id（读 paper_nav_snapshot，与 --task-id 二选一）")
     parser.add_argument("--train-start", help="训练段起始日 YYYY-MM-DD")
     parser.add_argument("--train-end", help="训练段结束日 YYYY-MM-DD")
     parser.add_argument("--test-start", help="测试段起始日 YYYY-MM-DD")
@@ -337,8 +384,12 @@ def main():
 
     args = parser.parse_args()
 
+    if not args.task_id and not args.account_id:
+        parser.error("必须指定 --task-id 或 --account-id 之一")
+
     result = run_wfa(
         task_id=args.task_id,
+        account_id=args.account_id,
         train_start=args.train_start,
         train_end=args.train_end,
         test_start=args.test_start,

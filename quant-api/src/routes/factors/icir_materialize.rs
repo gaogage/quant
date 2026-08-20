@@ -32,7 +32,7 @@ pub async fn materialize_pit_combo(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<u64, String> {
-    materialize_pit_combo_ext(db, combo_name, factor_version, horizon, start_date, end_date, false, None, None).await
+    materialize_pit_combo_ext(db, combo_name, factor_version, horizon, start_date, end_date, false, None, None, false).await
 }
 
 /// 扩展版物化:支持纳入基本面因子(fin_/mf_/north_)与 IC 强度阈值筛选。
@@ -50,11 +50,15 @@ pub async fn materialize_pit_combo_ext(
     include_fundamentals: bool,
     min_abs_ic_ir: Option<f64>,
     factor_whitelist: Option<&[String]>,
+    ind_neutral: bool,
 ) -> Result<u64, String> {
-    // 黑名单正则:include_fundamentals=true 时移除 fin_|margin_|mf_|north_,让基本面因子进 combo。
-    // block_/ar_ 原本不在黑名单。cf_/div_/event_/val_ 等始终排除(数据口径/事件类未纳入)。
+    // 黑名单正则:include_fundamentals=true 时移除 fin_|margin_|mf_|north_|val_,让基本面+估值因子进 combo。
+    // block_/ar_ 原本不在黑名单。cf_/div_/event_ 等始终排除(数据口径/事件类未纳入)。
+    // val_ 解除排除(2026-08-13 阶段2):价值因子(PS/PB/PE/股息率) ICIR 最强(5-38),是 A 股核心 alpha 源,
+    //   之前被黑名单拦截导致 sleeve alpha 不显著(WFA -0.56)。解除后仅白名单含 val_ 的 combo 纳入(交集过滤),
+    //   v24 白名单无 val_ 故不变,只有新价值 combo 才纳入。
     let blacklist_re = if include_fundamentals {
-        "^(cf_|div_|event_|external|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)"
+        "^(cf_|div_|event_|external|debt_|gross_|pe_|roe|ind_rel|mkt_rel)"
     } else {
         "^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)"
     };
@@ -81,7 +85,56 @@ pub async fn materialize_pit_combo_ext(
     // $6 = blacklist_re（黑名单正则，参数化支持 include_fundamentals 分支）
     // $7 = min_abs_ic_ir（IC 强度阈值，NULL 时不筛选）
     // $8 = factor_whitelist（去冗余白名单，NULL 时不筛选）
-    let per_quarter_sql = r#"
+    let per_quarter_sql = if ind_neutral {
+        // 行业中性化版(2026-08-13 阶段2):因子值减同行业均值(market_stock.industry 申万L1 约28行业),
+        // 剥离行业 beta(价值因子不再集中银行/地产陷阱),保留行业内相对 alpha,解决纯多头 value trap。
+        // ind_avg CTE 预算每因子每日各行业的 normalized_value 均值,scores 用 normalized_value - industry_avg。
+        r#"
+WITH pit AS (
+    SELECT DISTINCT ON (fe.factor_code) fe.factor_code, fe.mean_ic, fe.ic_ir
+    FROM factor_evaluation fe
+    JOIN factor_definition fd ON fd.factor_code = fe.factor_code AND fd.status = 'active'
+    WHERE fe.horizon = $3 AND fe.end_date <= $4
+      AND fe.mean_ic IS NOT NULL AND fe.ic_ir IS NOT NULL
+      AND fe.factor_code !~ $6
+      AND ($7 IS NULL OR ABS(fe.ic_ir) >= $7)
+      AND ($8 IS NULL OR fe.factor_code = ANY($8))
+    ORDER BY fe.factor_code, fe.end_date DESC
+),
+wsum AS (SELECT SUM(ABS(ic_ir)) AS tot FROM pit),
+ind_avg AS (
+    SELECT fv2.factor_code, fv2.trade_date, ms.industry, AVG(fv2.normalized_value) AS industry_avg
+    FROM factor_value fv2
+    JOIN pit p2 ON p2.factor_code = fv2.factor_code
+    JOIN market_stock ms ON ms.symbol = fv2.symbol AND ms.industry IS NOT NULL
+    WHERE fv2.factor_version = $2 AND fv2.trade_date >= $4 AND fv2.trade_date < $5
+      AND fv2.normalized_value IS NOT NULL
+    GROUP BY fv2.factor_code, fv2.trade_date, ms.industry
+),
+scores AS (
+    SELECT fv.symbol, fv.trade_date,
+        SUM((fv.normalized_value - COALESCE(ia.industry_avg, 0)) * (p.ic_ir / NULLIF(w.tot, 0.0)) * SIGN(p.mean_ic)) AS raw_score,
+        MAX(COALESCE(fv.available_at, fv.trade_date)) AS available_at
+    FROM pit p CROSS JOIN wsum w
+    JOIN factor_value fv
+      ON fv.factor_code = p.factor_code AND fv.factor_version = $2
+     AND fv.trade_date >= $4 AND fv.trade_date < $5 AND fv.normalized_value IS NOT NULL
+    JOIN market_stock ms2 ON ms2.symbol = fv.symbol AND ms2.industry IS NOT NULL
+    LEFT JOIN ind_avg ia ON ia.factor_code = fv.factor_code AND ia.trade_date = fv.trade_date AND ia.industry = ms2.industry
+    GROUP BY fv.symbol, fv.trade_date
+)
+INSERT INTO multi_factor_value
+    (combo_name, version, symbol, trade_date, raw_score, normalized_score, available_at)
+SELECT $1, $2, symbol, trade_date, raw_score, raw_score, available_at
+FROM scores
+ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
+    raw_score = EXCLUDED.raw_score,
+    normalized_score = EXCLUDED.normalized_score,
+    available_at = EXCLUDED.available_at,
+    created_at = NOW()
+"#
+    } else {
+        r#"
 WITH pit AS (
     -- PIT 因子集:JOIN factor_definition status='active' 过滤废弃因子。
     -- 早期原始版因子(mom_20d 等)未进 definition 表,后期 _std 版才注册;
@@ -120,7 +173,8 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
     normalized_score = EXCLUDED.normalized_score,
     available_at = EXCLUDED.available_at,
     created_at = NOW()
-"#;
+"#
+    };
 
     let mut total: u64 = 0;
     for (i, as_of) in quarters.iter().enumerate() {
@@ -316,6 +370,10 @@ pub struct MaterializePitComboRequest {
     /// 去冗余白名单:按 IC 相关性聚类选的代表因子列表。
     /// 给定时只让指定因子进 combo,避免同源信号放大。默认 None:不额外过滤。
     pub factor_whitelist: Option<Vec<String>>,
+    /// 行业中性化(2026-08-13 阶段2):true 时因子值减同行业均值(申万L1 约28行业)再 ICIR 加权,
+    /// 剥离行业 beta 解决价值因子纯多头 value trap。默认 false:原全市场加权。
+    #[serde(default)]
+    pub ind_neutral: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -828,10 +886,11 @@ pub async fn materialize_pit_combo_background(
     let include_fund = req.include_fundamentals;
     let min_ic_ir = req.min_abs_ic_ir;
     let whitelist = req.factor_whitelist.clone();
+    let ind_neutral = req.ind_neutral;
     let state = state.clone();
     let tid = task_id.clone();
     tokio::spawn(async move {
-        match materialize_pit_combo_ext(&state.db, &combo_name, &version, horizon, start, end, include_fund, min_ic_ir, whitelist.as_deref()).await {
+        match materialize_pit_combo_ext(&state.db, &combo_name, &version, horizon, start, end, include_fund, min_ic_ir, whitelist.as_deref(), ind_neutral).await {
             Ok(rows) => {
                 let _ = sqlx::query(
                     "UPDATE data_sync_task SET status='completed', total_count=$2, success_count=$2,

@@ -217,12 +217,23 @@ pub async fn run_daily_simulation(
     for d in &dates {
         let d = *d;
         // P2-B:regime 提前算(只依赖 date + csi300_map),供 rebalance_account 复用,省调仓日内 1 次 DB
-        let regime = crate::routes::shared::detect_regime_exposure_cached(
-            &csi300_map,
-            d,
-            deep_bear_threshold,
-            deep_bear_exposure,
-        );
+        // regime_policy 配置化(阶段1.2): bwgv2 走 bear_window_guard_v2，其余/缺省走 trailing-12m
+        let regime = match rs.mvo.as_ref().and_then(|m| m.regime_policy.as_deref()) {
+            Some("bwgv2") | Some("bear_window_guard_v2") | Some("quality_bear_window_guard_v2") => {
+                let m = rs.mvo.as_ref().unwrap();
+                let cfg = crate::routes::shared::Bwgv2Config {
+                    bear_return_threshold: m.regime_bear_return_threshold,
+                    ..crate::routes::shared::Bwgv2Config::default()
+                };
+                crate::routes::shared::detect_regime_exposure_bwgv2(&csi300_map, d, &cfg)
+            }
+            _ => crate::routes::shared::detect_regime_exposure_cached(
+                &csi300_map,
+                d,
+                deep_bear_threshold,
+                deep_bear_exposure,
+            ),
+        };
         // 3a. 调仓日控制（读 rebalance_freq）
         if is_rebalance_day(d, &rs.rebalance_freq, &mut last_marker) {
             rebalance_account(
@@ -244,13 +255,19 @@ pub async fn run_daily_simulation(
             .await?;
         }
         // 3b. 每日盯市
-        mark_to_market(db, account_id, d).await?;
+        mark_to_market(db, account_id, d, price_source).await?;
         // 3c. NAV 重算(P1-B:update_current_nav 返回 NAV,省下面的 SELECT current_nav)
         let nav_first = update_current_nav(db, account_id).await?;
         // 3c.1 每日维保检查(实盘口径):维保<平仓线触发强平,平仓后重算 NAV。
         // 非调仓日也可能因价格下跌触发强平(券商每日盯市)。
+        // EodCloseAdj 基准模式无成本(slippage=0)不强平;实盘/EodClose 用 0.002。
+        let maint_slippage = if matches!(price_source, PriceSource::EodCloseAdj) {
+            0.0
+        } else {
+            0.002
+        };
         let (liq_n, _warn_block) =
-            crate::routes::rebalance::check_maintenance_after_mark(db, account_id, d, 0.002)
+            crate::routes::rebalance::check_maintenance_after_mark(db, account_id, d, maint_slippage)
                 .await
                 .unwrap_or((0, false));
         // P1-A:仅强平日(liq_n>0)才重算 NAV,未强平用第1次值(省 ~N 次 DB)

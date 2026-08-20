@@ -159,12 +159,15 @@ async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) 
     // 6. 逐年收益
     let yearly = compute_yearly_from_navs(&navs);
 
-    // 7. 更新账号最终状态 —— 用回放结果完整填充，使标题栏与绩效指标一致
+    // 7. 更新账号最终状态 —— 用回放结果完整填充，使标题栏与绩效指标一致。
+    // 注意：不覆盖 cash。final_nav 由 run_daily_simulation 末日的 update_current_nav
+    // 算出（= SUM(market_value) + cash - margin），cash 是回放结束时的真实闲置资金。
+    // 若强制 cash=0 会让 current_nav 与 (mv + cash - margin) 失衡——unlev 等保留现金的
+    // 策略结束日本就有闲置资金（如 ETF 防御/未投满），清零后 NAV 恒等式被破坏。
     sqlx::query(
         "UPDATE paper_account SET
             current_nav=$1,
             peak_nav=$2,
-            cash=0,
             max_drawdown_pct=$3,
             total_trades=$4,
             updated_at=NOW()
@@ -172,7 +175,10 @@ async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) 
     )
     .bind(Decimal::from_f64_retain(final_nav).unwrap_or(init_cap))
     .bind(Decimal::from_f64_retain(peak).unwrap_or(init_cap))
-    .bind(max_dd * 100.0)
+    // max_drawdown_pct 语义=小数 0~1，不可 *100：实盘 update_current_nav 用 (peak-nav)/peak
+    // 写小数；日报 report.rs/dingtalk 读字段后 *100 展示。曾 *100 致日报显示 989%(2026-08-13)。
+    // 注：paper_replay 表(~L201)的 _pct 字段是百分数语义，与本表不同，勿照搬。
+    .bind(max_dd)
     .bind(total_trades)
     .bind(&account_id)
     .execute(db)
@@ -407,6 +413,138 @@ fn compute_yearly_from_navs(navs: &[DailyNav]) -> Vec<Value> {
         out.push(json!({"year": cur_year.to_string(), "return_pct": ((yr_nav - 1.0) * 1000.0).round() / 10.0}));
     }
     out
+}
+
+// ── MVO 动态基准曲线 ────────────────────────────────────────────
+// 生成与实盘同策略同逻辑(MVO 动态)但后复权 + 无交易成本的理论基准曲线,
+// 供 query_backtest_comparison 对比——让仪表盘"回测偏离"反映"真实价执行 vs 后复权理论"
+// 差异,而非静态 composite 与动态实盘的口径错配(曾致 v24 偏离 +30%)。
+
+const MVO_CURVE_TABLE_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS backtest_mvo_equity_curve (\
+    strategy_id         VARCHAR NOT NULL,\
+    trade_date          DATE NOT NULL,\
+    leverage_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,\
+    portfolio_value     NUMERIC(20,4) NOT NULL,\
+    created_at          TIMESTAMPTZ DEFAULT NOW(),\
+    PRIMARY KEY (strategy_id, trade_date, leverage_multiplier)\
+)";
+
+/// 幂等建表 backtest_mvo_equity_curve。
+pub async fn ensure_mvo_curve_table(db: &sqlx::PgPool) -> Result<(), String> {
+    sqlx::query(MVO_CURVE_TABLE_DDL)
+        .execute(db)
+        .await
+        .map_err(|e| format!("create backtest_mvo_equity_curve: {}", e))?;
+    Ok(())
+}
+
+fn default_lev_mult() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MvoBenchmarkRequest {
+    pub strategy_id: String,
+    /// 承载基准回测的专用 inactive 账号(run_daily_simulation 必须操作账号表,
+    /// 不能跑实盘账号否则 reset 会清实盘)。如 v24 用 pa-v24-mvo-bench。
+    pub benchmark_account_id: String,
+    pub start_date: String,
+    pub end_date: String,
+    /// 基准杠杆倍率(无杠杆 1.0 / 有杠杆 1.5)。基准按此真带杠杆跑,
+    /// query_backtest_comparison 按此匹配账号杠杆读取,不再线性放大。
+    #[serde(default = "default_lev_mult")]
+    pub leverage_multiplier: f64,
+}
+
+/// POST /api/v1/quant/paper/mvo-benchmark-sync
+/// 跑 MVO 动态后复权无成本回测,落 backtest_mvo_equity_curve 作实盘偏离基准。
+pub async fn mvo_benchmark_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MvoBenchmarkRequest>,
+) -> impl IntoResponse {
+    match run_mvo_benchmark_sync(&state.db, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})).into_response(),
+        Err(e) => Json(json!({"code": 1, "message": e})).into_response(),
+    }
+}
+
+pub async fn run_mvo_benchmark_sync(
+    db: &sqlx::PgPool,
+    req: MvoBenchmarkRequest,
+) -> Result<Value, String> {
+    ensure_mvo_curve_table(db).await?;
+    let strategy_id = req.strategy_id.trim().to_string();
+    let start = parse_date(&req.start_date)?;
+    let end = parse_date(&req.end_date)?;
+    let rs = crate::routes::strategy::load_resolved_strategy(db, &strategy_id)
+        .await
+        .map_err(|e| format!("load strategy: {}", e))?;
+
+    // 真实价(EodCloseAdj,与实盘同空间) + 无成本(slippage=0) + 按请求 lev_mult 真带杠杆跑。
+    // reset=true 清 benchmark 账号历史,从初始资金干净重跑整条理论曲线。
+    let tushare = quant_data::tushare::client::TushareClient::from_env()
+        .map_err(|e| format!("tushare: {}", e))?;
+    let cache = Arc::new(tokio::sync::Mutex::new(
+        None::<crate::routes::shared::MvoWeightCache>,
+    ));
+    let lev_enabled = (req.leverage_multiplier - 1.0).abs() > 1e-9;
+    // lev + slippage=0(EodCloseAdj) 触发融资失控(2026-08-14 实测 NAV 爆炸至 5479万/融资 4.6亿,
+    // 根因待查:疑 dynamic_target_cap/融资逻辑与无成本交互)。lev 基准用 EodClose
+    // (slippage=策略值,与实盘 lev 同口径,偏离≈0);unlev 基准用 EodCloseAdj(无成本理论)。
+    let price_source = if lev_enabled {
+        PriceSource::EodClose
+    } else {
+        PriceSource::EodCloseAdj
+    };
+    let navs = run_daily_simulation(
+        db,
+        &req.benchmark_account_id,
+        &rs,
+        start,
+        end,
+        price_source,
+        &cache,
+        &tushare,
+        true,
+        lev_enabled,
+        req.leverage_multiplier,
+        "fixed",
+    )
+    .await?;
+    if navs.is_empty() {
+        return Err("基准回测无有效交易日".into());
+    }
+
+    // UPSERT 逐日 NAV → backtest_mvo_equity_curve(照 equity_curve_sync UPSERT idiom)
+    let mut rows = 0u64;
+    for d in &navs {
+        sqlx::query(
+            "INSERT INTO backtest_mvo_equity_curve (strategy_id, trade_date, leverage_multiplier, portfolio_value)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (strategy_id, trade_date, leverage_multiplier)
+             DO UPDATE SET portfolio_value = EXCLUDED.portfolio_value",
+        )
+        .bind(&strategy_id)
+        .bind(d.date)
+        .bind(req.leverage_multiplier)
+        .bind(Decimal::from_f64_retain(d.nav).unwrap_or(Decimal::ZERO))
+        .execute(db)
+        .await
+        .map_err(|e| format!("upsert mvo curve: {}", e))?;
+        rows += 1;
+    }
+
+    let final_nav = navs.last().map(|d| d.nav).unwrap_or(0.0);
+    Ok(json!({
+        "strategy_id": strategy_id,
+        "benchmark_account_id": req.benchmark_account_id,
+        "leverage_multiplier": req.leverage_multiplier,
+        "start_date": start.to_string(),
+        "end_date": end.to_string(),
+        "rows": rows,
+        "final_nav": (final_nav * 100.0).round() / 100.0,
+    }))
 }
 
 #[cfg(test)]
