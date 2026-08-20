@@ -25,13 +25,20 @@ use crate::routes::shared::{NavSnapshot, send_quality_alert, upsert_nav_snapshot
 /// snapshot(nav/daily_return/cumulative_return),补齐真实日终口径。
 /// 幂等:ON CONFLICT 覆盖,重复调用无副作用。
 pub async fn refresh_eod_snapshot(db: &PgPool, date: NaiveDate) {
+    // 仅处理「snapshot 缺失或 daily_return IS NULL」的账户(即昨日日终数据不完整日):
+    // 无条件重写会把完整日的 trade_count 等 upsert 覆盖为 NULL(NavSnapshot 未填的字段)。
     let accounts: Vec<(String, f64, f64, f64)> = sqlx::query_as(
-        "SELECT paper_account_id,
-                COALESCE(current_nav, initial_capital)::double precision,
-                COALESCE(initial_capital, 0)::double precision,
-                COALESCE(cash, 0)::double precision
-         FROM paper_account WHERE status = 'active' AND account_type = 'simulated'",
+        "SELECT pa.paper_account_id,
+                COALESCE(pa.current_nav, pa.initial_capital)::double precision,
+                COALESCE(pa.initial_capital, 0)::double precision,
+                COALESCE(pa.cash, 0)::double precision
+         FROM paper_account pa
+         LEFT JOIN paper_nav_snapshot s
+                ON s.paper_account_id = pa.paper_account_id AND s.snapshot_date = $1
+         WHERE pa.status = 'active' AND pa.account_type = 'simulated'
+           AND (s.paper_account_id IS NULL OR s.daily_return IS NULL)",
     )
+    .bind(date)
     .fetch_all(db)
     .await
     .unwrap_or_default();
@@ -81,7 +88,27 @@ pub async fn refresh_eod_snapshot(db: &PgPool, date: NaiveDate) {
     info!("[report] T+1 补盯市 snapshot 重算完成({} 账户, {})", accounts.len(), date);
 }
 
+/// EOD 日报(全部 active 账户):偏离对比 + 快照写入 + 钉钉推送。
 pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Result<(), String> {
+    report_for_accounts(db, date, None, false).await
+}
+
+/// 次日 9:00 T+1 补发:仅指定账户(昨日日终数据缺失、daily_return 为 NULL 的账户),
+/// 标题带"(补发)"。数据已在 T+1 补盯市流程中补齐,此处重算并推送昨日日报。
+pub async fn resend_daily_performance_report(
+    db: &PgPool,
+    date: NaiveDate,
+    only_accounts: &[String],
+) -> Result<(), String> {
+    report_for_accounts(db, date, Some(only_accounts), true).await
+}
+
+async fn report_for_accounts(
+    db: &PgPool,
+    date: NaiveDate,
+    only_accounts: Option<&[String]>,
+    resend: bool,
+) -> Result<(), String> {
     use super::dingtalk;
 
     // P0 双保险:日报生成前强制复权因子兜底。即使 EOD 中段失败(如 daily_basic 卡死),
@@ -89,21 +116,59 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
     let dv_adj_id = format!("dv-adj-report-{}", date.format("%Y%m%d"));
     crate::routes::sync::market_data::backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
-    let accounts = sqlx::query_as::<_, (String, String, Option<String>, f64, f64, f64, f64, i32)>(
-        "SELECT paper_account_id, name, dingtalk_webhook_url,
-                COALESCE(current_nav, initial_capital)::double precision,
-                initial_capital::double precision,
-                COALESCE(peak_nav, initial_capital)::double precision,
-                COALESCE(max_drawdown_pct, 0)::double precision,
-                COALESCE(total_trades, 0)
-         FROM paper_account
-         WHERE status = 'active' AND account_type = 'simulated'",
-    )
-    .fetch_all(db)
-    .await
-    .map_err(|e| format!("account query: {}", e))?;
+    let accounts = match only_accounts {
+        Some(list) => {
+            sqlx::query_as::<_, (String, String, Option<String>, f64, f64, f64, f64, i32)>(
+                "SELECT paper_account_id, name, dingtalk_webhook_url,
+                        COALESCE(current_nav, initial_capital)::double precision,
+                        initial_capital::double precision,
+                        COALESCE(peak_nav, initial_capital)::double precision,
+                        COALESCE(max_drawdown_pct, 0)::double precision,
+                        COALESCE(total_trades, 0)
+                 FROM paper_account
+                 WHERE status = 'active' AND account_type = 'simulated'
+                   AND paper_account_id = ANY($1)",
+            )
+            .bind(list)
+            .fetch_all(db)
+            .await
+            .map_err(|e| format!("account query: {}", e))?
+        }
+        None => {
+            sqlx::query_as::<_, (String, String, Option<String>, f64, f64, f64, f64, i32)>(
+                "SELECT paper_account_id, name, dingtalk_webhook_url,
+                        COALESCE(current_nav, initial_capital)::double precision,
+                        initial_capital::double precision,
+                        COALESCE(peak_nav, initial_capital)::double precision,
+                        COALESCE(max_drawdown_pct, 0)::double precision,
+                        COALESCE(total_trades, 0)
+                 FROM paper_account
+                 WHERE status = 'active' AND account_type = 'simulated'",
+            )
+            .fetch_all(db)
+            .await
+            .map_err(|e| format!("account query: {}", e))?
+        }
+    };
 
     for (account_id, name, webhook, nav, init_cap, peak_nav, max_dd, total_trades) in &accounts {
+        // 0. 日终数据完整性:持仓 symbol 当日 bar 是否齐全(如 Tushare fund_delay 延迟)。
+        // 不完整时当日收益显示 --(snapshot.daily_return 置 NULL),次日 9:00 T+1 补发。
+        let missing_bars: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_position pp
+             WHERE pp.paper_account_id = $1 AND pp.quantity > 0
+               AND NOT EXISTS (SELECT 1 FROM market_stock_daily_bar b
+                               WHERE b.symbol = pp.symbol AND b.trade_date = $2)",
+        )
+        .bind(account_id)
+        .bind(date)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+        let data_complete = missing_bars == 0;
+
         // 1. 昨日 snapshot(算当日收益率) + 持仓数
         let prev_nav: Option<(rust_decimal::Decimal,)> = sqlx::query_as(
             "SELECT nav FROM paper_nav_snapshot WHERE paper_account_id = $1 AND snapshot_date < $2
@@ -118,10 +183,14 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
         let prev_nav_f = prev_nav
             .map(|(d,)| d.to_string().parse::<f64>().unwrap_or(*nav))
             .unwrap_or(*init_cap);
-        let daily_return = if prev_nav_f > 0.0 {
-            (*nav - prev_nav_f) / prev_nav_f
+        // 日终数据不完整时不产出当日收益(NULL):NAV 仍是昨收估值口径,算出来的
+        // daily_return 不是当日真实涨跌,宁缺毋滥,次日 9:00 补发。
+        let daily_return: Option<f64> = if !data_complete {
+            None
+        } else if prev_nav_f > 0.0 {
+            Some((*nav - prev_nav_f) / prev_nav_f)
         } else {
-            0.0
+            Some(0.0)
         };
         let cumulative_return = if *init_cap > 0.0 {
             (*nav - *init_cap) / *init_cap
@@ -257,7 +326,8 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
         snap.cash = cash.to_string().parse::<f64>().unwrap_or(0.0);
         snap.market_value = market_value.to_string().parse::<f64>().unwrap_or(0.0);
         snap.position_count = position_count as i32;
-        snap.daily_return = Some(daily_return);
+        // daily_return=None(数据不完整)时写 NULL:9:00 T+1 以此识别需补发的账户
+        snap.daily_return = daily_return;
         snap.cumulative_return = Some(cumulative_return);
         snap.max_drawdown = Some(*max_dd);
         snap.trade_count = Some(today_trades as i32);
@@ -290,11 +360,11 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
             },
         };
         // 当日涨跌箭头+颜色标记（突出显示当日表现）
-        // 中国股市习惯：涨红跌绿（与欧美相反）
-        let (daily_arrow, daily_color, daily_sign) = if daily_return >= 0.0 {
-            ("📈", "🔴", "+")
-        } else {
-            ("📉", "🟢", "")
+        // 中国股市习惯：涨红跌绿（与欧美相反）;数据不完整时无当日收益,中性图标
+        let (daily_arrow, daily_color, daily_sign) = match daily_return {
+            Some(dr) if dr >= 0.0 => ("📈", "🔴", "+"),
+            Some(_) => ("📉", "🟢", ""),
+            None => ("⏸", "⚪", ""),
         };
 
         // 当日交易明细摘要（买卖前 5 笔，超 10 笔折叠）
@@ -324,10 +394,17 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
         } else {
             0.0
         };
+        // 当日收益行:数据不完整时显示 --(宁缺毋滥,次日 09:00 T+1 补发)
+        let daily_line = match daily_return {
+            Some(dr) => format!("{}{}{:.2}%", daily_color, daily_sign, dr.abs() * 100.0),
+            None => format!("{}--(日终数据不完整:{} 持仓缺日线,次日 09:00 补发)",
+                daily_color, missing_bars),
+        };
+        let report_title = if resend { "实盘绩效日报(补发)" } else { "实盘绩效日报" };
         let text = format!(
-            "## {} 实盘绩效日报 — {}  \n\n\
+            "## {} {} — {}  \n\n\
              **日期**: {}  \n\n\
-             **当日收益**: {}{}{:.2}% | **累计收益**: {:.2}%  \n\
+             **当日收益**: {} | **累计收益**: {:.2}%  \n\
              **当前 NAV**: ¥{:.2} | **历史峰值**: ¥{:.2} | **当前回撤**: {:.2}% | **历史最大回撤**: {:.2}%  \n\
              **当日调仓**: 买入 {} 笔(¥{:.0}) / 卖出 {} 笔(¥{:.0})  \n\
              **累计成交**: {} 笔  \n\
@@ -336,10 +413,9 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
              > 自动生成于 {}",
             daily_arrow,
             name,
+            report_title,
             date.format("%Y-%m-%d"),
-            daily_color,
-            daily_sign,
-            daily_return.abs() * 100.0,
+            daily_line,
             cumulative_return * 100.0,
             nav,
             peak_nav,
@@ -360,7 +436,7 @@ pub async fn push_daily_performance_report(db: &PgPool, date: NaiveDate) -> Resu
             },
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         );
-        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "实盘绩效日报", &text).await
+        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, report_title, &text).await
         {
             warn!("[dingtalk] {} 日报推送失败: {}", name, e);
         } else {

@@ -1017,10 +1017,9 @@ async fn run_tick(
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
 
-            // Step 3b: T+1 补盯市。22:00 EOD 时 fund_daily 偶发无当日数据(akshare 兜底也失败时),
+            // Step 3b: T+1 补盯市。22:00 EOD 时 fund_daily 偶发无当日数据,
             // ETF 持仓的日终盯市被迫落在前日收盘。此处 ETF 日线已补齐,对 active 账户
-            // 补 mark_to_market(上一交易日收盘) + NAV 重算 + 重写该日 snapshot,
-            // 使 daily_return 补齐为真实日终口径(9:00 不重推钉钉,仅修正数据)。
+            // 补 mark_to_market(上一交易日收盘) + NAV 重算。
             let remak_accounts: Vec<String> = sqlx::query_scalar(
                 "SELECT paper_account_id FROM paper_account \
                  WHERE status = 'active' AND account_type = 'simulated'",
@@ -1044,8 +1043,52 @@ async fn run_tick(
                     warn!("[scheduler] T+1 NAV 重算失败 {}: {}", aid, e);
                 }
             }
-            if !remak_accounts.is_empty() {
+
+            // Step 3c: 昨日日终数据不完整的账户(snapshot 缺失或 daily_return IS NULL,
+            // 即昨日日报显示 --)→ 补盯市后数据已齐,refresh 重算 snapshot 并补发昨日绩效。
+            let needs_resend: Vec<String> = sqlx::query_scalar(
+                "SELECT pa.paper_account_id
+                 FROM paper_account pa
+                 LEFT JOIN paper_nav_snapshot s
+                        ON s.paper_account_id = pa.paper_account_id AND s.snapshot_date = $1
+                 WHERE pa.status = 'active' AND pa.account_type = 'simulated'
+                   AND (s.paper_account_id IS NULL OR s.daily_return IS NULL)",
+            )
+            .bind(sync_date)
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+            if !needs_resend.is_empty() {
                 crate::routes::report::refresh_eod_snapshot(db, sync_date).await;
+                // refresh 后 daily_return 仍 NULL 的(T+1 数据也缺)不补发,避免重复发 -- 日报
+                let recovered: Vec<String> = sqlx::query_scalar(
+                    "SELECT paper_account_id FROM paper_nav_snapshot \
+                     WHERE snapshot_date = $1 AND daily_return IS NOT NULL \
+                       AND paper_account_id = ANY($2)",
+                )
+                .bind(sync_date)
+                .bind(&needs_resend)
+                .fetch_all(db)
+                .await
+                .unwrap_or_default();
+                if !recovered.is_empty() {
+                    info!(
+                        "[scheduler] T+1 补发昨日绩效: {} 账户 ({})",
+                        recovered.len(),
+                        sync_date
+                    );
+                    if let Err(e) =
+                        crate::routes::report::resend_daily_performance_report(db, sync_date, &recovered)
+                            .await
+                    {
+                        warn!("[scheduler] T+1 补发昨日绩效失败: {}", e);
+                    }
+                } else {
+                    warn!(
+                        "[scheduler] ⚠ {} 昨日日终数据 T+1 仍未补齐,跳过补发",
+                        sync_date
+                    );
+                }
             }
 
             // Step 4: 日线就绪后才触发因子回填（覆盖v24全部因子类别）

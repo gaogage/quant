@@ -59,6 +59,13 @@ cargo clippy                   # Lint
 | `quant_annual_breakdown.py` | 年度收益分解 |
 | `quant_common.py` | 公共函数（DB连接、指标计算、格式化） |
 
+### 运行时零 Python 依赖（铁律）
+
+- **正式量化系统（quant-api 运行镜像）不引入任何 Python 运行时依赖**。主程序是 Rust，生产链路（数据同步/调仓/盯市/日报）全部用 Rust 实现，禁止在正式代码中桥接 python 进程。
+- Python 只用于**验证、预研、离线分析**（`scripts/` + `.venv/`），属于量化系统的独立辅助工具，不参与生产数据链路。
+- 数据源当日缺失时走"次日 T+1 补齐 + 补发"机制，**不引入第二数据源做运行时兜底**（曾试过 akshare 东财源运行时兜底，因限流不稳且有 python 依赖，2026-08-20 移除）。
+- 存量例外：`sync/analyst_revision.rs` 的 akshare python 桥接为历史遗留，待迁移 Rust 实现或下线，新功能不得模仿。
+
 ## 数据库核心表
 
 | 表 | 用途 |
