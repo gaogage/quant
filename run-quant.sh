@@ -60,12 +60,13 @@ case "$TARGET" in
     # 旧容器清理
     docker rm -f quant >/dev/null 2>&1 || true
 
-    # 本机部署：8080->8080，复用本机 PG（host.docker.internal:5432/quant）
+    # 本机部署：127.0.0.1:8080->8080（仅回环，不暴露局域网/Tailscale；HTTPS 经 gateway:443 转发），
+    # 复用本机 PG（host.docker.internal:5432/quant）
     # 敏感配置（JWT/TUSHARE/钉钉）通过 -e 从 .env.quant 注入，绝不打印。
     docker run -d \
       --name quant \
       --restart always \
-      -p 8080:8080 \
+      -p 127.0.0.1:8080:8080 \
       ${DATABASE_URL:+-e "DATABASE_URL=$DATABASE_URL"} \
       ${PORT:+-e "PORT=$PORT"} \
       -e "TUSHARE_TOKEN=$TUSHARE_TOKEN" \
