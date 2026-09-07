@@ -236,6 +236,68 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
             .await
             .map_err(|e| format!("materialize_pit_combo q={}: {}", as_of, e))?;
         total += res.rows_affected();
+
+        // 物化审计（2026-09-04 建，combo_materialization_log）：每季留痕实际参与
+        // 因子集与参数。防两类静默漂移：① 配置漂移（生产 combo 曾实配 70+ 因子
+        // 而 strategy_config.whitelist 只记 21，重物化按 21 跑出 -15pp 差异）；
+        // ② 因子停更静默退出（缺数据因子被剔除重归一化，构成逐季变化无告警）。
+        let audit: Option<(i64, Option<Vec<String>>)> = sqlx::query_as(
+            "SELECT COUNT(DISTINCT fv.factor_code)::bigint,
+                    array_agg(DISTINCT fv.factor_code)
+             FROM factor_value fv
+             WHERE fv.trade_date = $1 AND fv.factor_version = $2
+               AND fv.normalized_value IS NOT NULL
+               AND ($3 IS NULL OR fv.factor_code = ANY($3))
+               AND fv.factor_code !~ $4",
+        )
+        .bind(as_of)
+        .bind(factor_version)
+        .bind(factor_whitelist)
+        .bind(blacklist_re)
+        .fetch_one(db)
+        .await
+        .ok();
+        if let Some((n_actual, list)) = audit {
+            let missing: Vec<String> = factor_whitelist
+                .map(|wl| {
+                    wl.iter()
+                        .filter(|c| list.as_deref().map_or(true, |l| !l.contains(c)))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !missing.is_empty() {
+                tracing::warn!(
+                    combo = combo_name,
+                    quarter = %as_of,
+                    n = missing.len(),
+                    "白名单因子缺数据被静默剔除（combo 构成漂移源）: {:?}",
+                    missing
+                );
+            }
+            let _ = sqlx::query(
+                "INSERT INTO combo_materialization_log
+                   (combo_name, version, as_of, horizon, include_fundamentals, ind_neutral,
+                    min_abs_ic_ir, whitelist_size, actual_factors, actual_factor_list,
+                    missing_from_whitelist, rows_written)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+            )
+            .bind(combo_name)
+            .bind(factor_version)
+            .bind(as_of)
+            .bind(horizon)
+            .bind(include_fundamentals)
+            .bind(ind_neutral)
+            .bind(min_abs_ic_ir)
+            .bind(factor_whitelist.map(|w| w.len() as i32))
+            .bind(n_actual as i32)
+            .bind(serde_json::to_value(&list.unwrap_or_default()).unwrap_or_default())
+            .bind(serde_json::to_value(&missing).unwrap_or_default())
+            .bind(res.rows_affected() as i64)
+            .execute(db)
+            .await;
+        }
+
         info!(combo = combo_name, quarter = %as_of, rows = res.rows_affected(), "PIT combo 季度物化");
     }
     Ok(total)
@@ -999,3 +1061,53 @@ pub struct MaterializeP42bOverlayComboRequest {
     pub end_date: Option<String>,
 }
 
+
+#[cfg(test)]
+mod f1_combo_tests {
+    use super::*;
+
+    /// 22f combo 物化：现役 21 因子白名单 + ar_consensus_eps_revision_60d（F1）。
+    /// 对照组 = 生产的 full_pit_icir_37f_h20_fund_v2（同白名单无 F1）。
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api f1_combo_materialize -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn f1_combo_materialize_22f() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+
+        // 白名单从 DB 单一真相源读（2026-09-05 回填收缩后的 48 活跃因子）
+        let whitelist: Vec<String> = {
+            let raw: serde_json::Value = sqlx::query_scalar(
+                "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND combo_name='full_pit_icir_indneutral_val_v1'",
+            ).fetch_one(&db).await.expect("read whitelist");
+            raw.as_array().unwrap().iter()
+                .filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        println!("[rebuild] whitelist = {} 因子", whitelist.len());
+        let whitelist_21 = whitelist.clone(); // 命名沿用，实为同一清单
+
+        // 先清旧物化（上版 F1 因 version 不匹配未真正进组合，22f 数据作废重物化）
+        sqlx::query("DELETE FROM multi_factor_value WHERE combo_name='full_pit_icir_indneutral_val_v1'")
+            .execute(&db).await.expect("clean old");
+        // 季度循环物化：每个窗口用该时点最新的滚动 ICIR 评估（对齐 scheduler
+        // 保鲜语义），避免一次性全历史物化把权重钉死在 2014 年初快照。
+        let mut total = 0u64;
+        let mut q_start = chrono::NaiveDate::from_ymd_opt(2014, 1, 2).unwrap();
+        let final_end = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+        while q_start < final_end {
+            let q_end = (q_start + chrono::Months::new(3)).min(final_end);
+            // 生产 combo 全历史重建（消除三段拼接）：48 活跃白名单 / h20 / 中性化
+            let rows = materialize_pit_combo_ext(
+                &db, "full_pit_icir_indneutral_val_v1", "1.0.0", 20, q_start, q_end,
+                true, None, Some(whitelist_21.as_slice()),
+                true,
+            ).await.expect("materialize quarter");
+            total += rows;
+            q_start = q_end;
+        }
+        println!("[22f-materialize] quarterly total rows = {}", total);
+        assert!(total > 1_000_000, "全历史物化应超百万行，实际 {}", total);
+    }
+}

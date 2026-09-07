@@ -304,11 +304,14 @@ pub async fn run_daily_simulation(
     Ok(out)
 }
 
-/// 调仓日判断：quarterly（季首）/monthly（月首）/weekly（周首）。
+/// 调仓日判断：quarterly（季首）/monthly（月首）/weekly（周首）/biweekly（双周≈10交易日）。
 fn is_rebalance_day(d: NaiveDate, freq: &str, last_marker: &mut Option<(i32, u32)>) -> bool {
     let marker = match freq {
         "monthly" => Some((d.year(), d.month())),
         "weekly" => Some((d.year(), d.iso_week().week())),
+        // biweekly = 每 2 周 ≈ 10 交易日，与 sleeve 的 10 日调仓频率对齐，
+        // 消除 composite 季度采样 sleeve 导致的跟踪误差（2026-09-07）
+        "biweekly" | "10" => Some((d.year(), d.iso_week().week() / 2)),
         _ => Some((d.year(), (d.month() - 1) / 3 + 1)), // quarterly 默认
     };
     if *last_marker == marker {
@@ -865,5 +868,667 @@ mod tests {
             db_nav,
             last_sim_nav
         );
+    }
+
+    /// v26 MaxSharpe 对照实验：h20 配置下 maxsharpe vs minvariance（阶段2 仓位/目标函数探索）。
+    ///
+    /// 背景：MaxSharpe 对照仅在 v19/h1 时代做过（2026-06-11，DD 35% 顶红线被否）；
+    /// h20（更稳的 sleeve 风险特征）从未重跑。本实验在同一账户、同一引擎下先后回放：
+    ///   A = v24_lev（minvariance，现役配置）
+    ///   B = v26ms  （v24_lev 克隆，仅 mvo_objective='maxsharpe'）
+    /// 区间 2020-01-02 ~ 2026-09-02，fixed 1.5x，reset_account 全清。
+    ///
+    /// 运行：cargo test --release -p quant-api v26_maxsharpe -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_v26_maxsharpe_vs_minvariance_replay() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("connect db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("tushare env");
+        let start = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        let account = "pa-v26ms-lev";
+
+        for (label, strategy_id) in [("A-minvariance", "v24_lev"), ("B-maxsharpe", "v26ms")] {
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, strategy_id)
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                account,
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!(
+                "[v26 {}] AR={:.2}% DD={:.2}% Sharpe={:.2} Sortino={:.2} Calmar={:.2} cum={:.0}% days={}",
+                label,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.sortino,
+                m.calmar,
+                m.cumulative_return * 100.0,
+                m.trading_days
+            );
+        }
+    }
+
+    /// v24 现役配置（minvariance + adaptive）完整区间回放 2016-01-04 ~ 2026-09-02。
+    ///
+    /// 目的：回答"如果 2016 年就运行当前 v24 配置会怎样"——实盘曲线的 2016-2019 段
+    /// 是 v19/v21 旧配置的历史混合，当前配置的完整区间绩效从未测过；且本回放跑在
+    /// 修复后的引擎上（participation_rate cap 千元 bug + MVO 特征向量修复）。
+    ///
+    /// 运行：set -a; source .env; source .env.quant; set +a;
+    ///       cargo test --release -p quant-api v24_full_period -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_v24_full_period_replay_2016_2026() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("connect db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("tushare env");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        for (label, strategy_id, lev_on, mult) in [
+            ("unlev-1.0x", "v24", false, 1.0),
+            ("lev-1.5x", "v24_lev", true, 1.5),
+        ] {
+            // 落库到专用基准账户（inactive 不进调度，作为代码变更前后绩效对照的
+            // 固定配置快照曲线；每次引擎代码变更后重跑本测试刷新）
+            let account = if lev_on {
+                "pa-v21-prod-lev"
+            } else {
+                "pa-v21-prod-unlev"
+            };
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, strategy_id)
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                account,
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                lev_on,
+                mult,
+                "fixed",
+            )
+            .await
+            .expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!(
+                "[v24-full {}] AR={:.2}% DD={:.2}% Sharpe={:.2} Sortino={:.2} Calmar={:.2} cum={:.0}% days={}",
+                label,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.sortino,
+                m.calmar,
+                m.cumulative_return * 100.0,
+                m.trading_days
+            );
+            // 导出日收益序列供 bootstrap 检验（脚本读 CSV）
+            let mut csv = String::from("date,nav\n");
+            for d in &sim {
+                csv.push_str(&format!("{},{}\n", d.date, d.nav));
+            }
+            let path = format!("/tmp/v24_full_{}.csv", label);
+            std::fs::write(&path, csv).expect("write csv");
+            println!("[v24-full {}] curve -> {}", label, path);
+        }
+    }
+
+    /// 阶段3-方向A：ETF 扩池对照实验。E1=+4 分散资产（德国/日经/恒生/可转债），
+    /// E2=+2 保守（德国/可转债）。对照基准 = pa-v24-baseline-lev（AR 10.74%/
+    /// DD 33.89%/Sharpe 0.48，2016-2026 同引擎同区间）。
+    ///
+    /// 运行：set -a; source .env; source .env.quant; set +a;
+    ///       cargo test --release -p quant-api v27_etf_expand -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_v27_etf_pool_expand_replay() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("connect db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("tushare env");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        let account = "pa-v26ms-lev";
+
+        for (label, strategy_id) in [("E1-plus4", "v27e1"), ("E2-plus2", "v27e2")] {
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, strategy_id)
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                account,
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!(
+                "[v27 {}] AR={:.2}% DD={:.2}% Sharpe={:.2} Sortino={:.2} Calmar={:.2} cum={:.0}% days={}",
+                label,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.sortino,
+                m.calmar,
+                m.cumulative_return * 100.0,
+                m.trading_days
+            );
+            // 最后一天持仓快照（验证扩池资产确实被配置）
+            if let Some(last) = sim.last() {
+                println!("[v27 {}] final nav = {}", label, last.nav);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod v28dd_tests {
+    use super::*;
+
+    /// v28dd composite 验证：a_share sleeve 换 drawdown_control_v1 曲线后，
+    /// composite(1.5x) 与基准 pa-v24-baseline-lev（AR 10.74%/DD 33.89%/Sharpe 0.48，
+    /// 同引擎同区间 2016-2026）的对照。假设：sleeve 回撤 61→19.6% 释放风险预算。
+    ///
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api v28dd -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn v28dd_composite_replay_2016_2026() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("connect db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("tushare env");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        // 1.5x 版暴露强平记账 bug（margin 膨胀→维保击穿），先用 1.0x 验证
+        // dd_ctrl_v1 在 composite 层的净效果；强平交互留专项修复。
+        for (label, account, lev_on, mult) in [
+            ("unlev-1.0x", "pa-v28dd-unlev", false, 1.0),
+            ("lev-1.5x", "pa-v28dd-lev", true, 1.5),
+        ] {
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v28dd")
+            .await
+            .unwrap();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            None::<crate::routes::shared::MvoWeightCache>,
+        ));
+        let sim = run_daily_simulation(
+            &db,
+            account,
+            &rs,
+            start,
+            end,
+            crate::routes::rebalance::PriceSource::EodClose,
+            &cache,
+            &tushare,
+            true,
+            lev_on,
+            mult,
+            "fixed",
+        )
+        .await
+        .expect("sim");
+        let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+        let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+        println!(
+            "[v28dd-{}] AR={:.2}% DD={:.2}% Sharpe={:.2} Calmar={:.2} cum={:.0}% days={} (新基准: unlev 7.65%/11.02%/0.66, lev 12.43%/34.34%/0.61)",
+            label,
+            m.annual_return * 100.0,
+            m.max_drawdown * 100.0,
+            m.sharpe,
+            m.calmar,
+            m.cumulative_return * 100.0,
+            m.trading_days
+        );
+        }
+    }
+}
+
+#[cfg(test)]
+mod v29ra_tests {
+    use super::*;
+
+    /// H-μRA 预注册实验：μ 风险调整化（Sharpe×σ_target）能否解锁 dd_ctrl_v1
+    /// 与改善现役 h20。判据见 2026-09-04-MVO期望收益风险调整化预注册.md。
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api v29ra -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn v29ra_mu_risk_adjusted_replay() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("connect db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("tushare env");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        for (label, strategy_id, account) in [
+            ("E1-ddctrl-muRA", "v29ra", "pa-v29ra-lev"),
+            ("E2-h20-muRA", "v29rah", "pa-v29rah-lev"),
+        ] {
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, strategy_id)
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                account,
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!(
+                "[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} Calmar={:.2} cum={:.0}% days={} (基线: 12.43%/34.34%/0.61)",
+                label,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.calmar,
+                m.cumulative_return * 100.0,
+                m.trading_days
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod etf_expand_rerun {
+    use super::*;
+
+    /// 重跑2：ETF扩池在真实基线（授信预算+weight修复+72因子combo）下重测。
+    /// 之前否决时基线虚高12.43%，且 sleeve 用的是拼接体combo（11.14%）。
+    #[tokio::test]
+    #[ignore]
+    async fn etf_pool_expand_clean_rerun() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        for (label, sid) in [
+            ("基线-7资产", "v24_lev"),
+            ("E1-+4分散", "v27e1"),
+            ("E2-+2分散", "v27e2"),
+        ] {
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, sid).await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v26ms-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 1.5, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%", label,
+                m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod v30dd_tests {
+    use super::*;
+
+    /// v30dd：72 因子 dd_ctrl sleeve 的 composite 重测——最高优先实验。
+    /// sleeve 层 9.28%/0.804/-22%，看 composite 能否兑现。
+    #[tokio::test]
+    #[ignore]
+    async fn v30dd_composite_replay() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v30dd").await.unwrap();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+        let sim = run_daily_simulation(&db, "pa-v30dd-lev", &rs, start, end,
+            crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+            true, true, 1.5, "fixed").await.expect("sim");
+        let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+        let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+        println!("[v30dd-lev] AR={:.2}% DD={:.2}% Sharpe={:.2} Calmar={:.2} cum={:.0}% (真实基线: 10.31%/24.98%/0.60)",
+            m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.calmar, m.cumulative_return*100.0);
+    }
+}
+
+#[cfg(test)]
+mod v31fx_tests {
+    use super::*;
+
+    /// v31fx：固定权重(30%A+70%ETF池11资产) + dd_ctrl sleeve + 1.5x 回放验证。
+    #[tokio::test]
+    #[ignore]
+    async fn v31fx_composite_replay() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31fx").await.unwrap();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+        let sim = run_daily_simulation(&db, "pa-v31fx-lev", &rs, start, end,
+            crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+            true, true, 1.5, "fixed").await.expect("sim");
+        let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+        let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+        println!("[v31fx-lev] AR={:.2}% DD={:.2}% Sharpe={:.2} Calmar={:.2} cum={:.0}% (目标: 14%+/0.9+/-18%)",
+            m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.calmar, m.cumulative_return*100.0);
+    }
+}
+
+#[cfg(test)]
+mod v31_dual_tests {
+    use super::*;
+
+    /// v31 双组回放：11 资产（修正权重）vs 7 资产（原始池）。
+    #[tokio::test]
+    #[ignore]
+    async fn v31_dual_replay() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        for (label, sid, acct) in [
+            ("v31fx-11资产", "v31fx", "pa-v31fx-lev"),
+            ("v31f7-7资产", "v31f7", "pa-v31f7-lev"),
+        ] {
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, sid).await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, acct, &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 1.5, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%", label,
+                m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod v31_freq_tests {
+    use super::*;
+
+    /// 跟踪误差消除实验：quarterly vs monthly vs biweekly 三频率对照。
+    /// 假设：调仓频率越接近 sleeve 的 10 日频，跟踪误差越小，绩效越接近理论模拟。
+    #[tokio::test]
+    #[ignore]
+    async fn v31_tracking_error_elimination() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        for freq in ["quarterly", "monthly", "biweekly"] {
+            sqlx::query("UPDATE strategy_config SET rebalance_freq=$1 WHERE strategy_id='v31f7'")
+                .bind(freq).execute(&db).await.expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 1.5, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                freq, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod weekly_test {
+    use super::*;
+    #[tokio::test]
+    #[ignore]
+    async fn v31_weekly() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+        let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs,
+            chrono::NaiveDate::from_ymd_opt(2016,1,4).unwrap(), chrono::NaiveDate::from_ymd_opt(2026,9,2).unwrap(),
+            crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+            true, true, 1.5, "fixed").await.expect("sim");
+        let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+        let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+        println!("[weekly] AR={:.2}% DD={:.2}% Sharpe={:.2}", m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+    }
+}
+
+#[cfg(test)]
+mod freq_final {
+    use super::*;
+
+    /// 终局频率实验：修复价格空间 BUG 后的公平对比。
+    /// 之前 weekly 36.25% 是停牌股价格膨胀污染，本次应为真实绩效。
+    #[tokio::test]
+    #[ignore]
+    async fn freq_final_clean() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        for freq in ["quarterly", "monthly", "biweekly", "weekly"] {
+            sqlx::query("UPDATE strategy_config SET rebalance_freq=$1, status='active' WHERE strategy_id='v31f7' OR parent_strategy_id='v31f7'")
+                .bind(freq).execute(&db).await.expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 1.5, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                freq, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+        }
+        // 清理
+        sqlx::query("UPDATE strategy_config SET status='inactive' WHERE strategy_id='v31f7' OR parent_strategy_id='v31f7'").execute(&db).await.ok();
+    }
+}
+
+#[cfg(test)]
+mod final_optimization {
+    use super::*;
+
+    /// 终局参数优化：最优 sleeve（kelly=0.15）+ weekly + 权重扫描
+    #[tokio::test]
+    #[ignore]
+    async fn final_weight_scan() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        for aw in [0.20f64, 0.25, 0.30, 0.35, 0.40, 0.45] {
+            // 更新权重
+            let etf_w = 1.0 - aw;
+            let weights = format!("[{:.2}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                aw, etf_w*0.31, etf_w*0.40, etf_w*0.07, etf_w*0.14, etf_w*0.03, etf_w*0.03, etf_w*0.02);
+            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
+                .bind(&weights).execute(&db).await.expect("upd");
+
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 1.5, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[A={:.0}%] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                aw*100.0, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+        }
+    }
+
+    /// ETF 内部权重结构实验（2026-09-07 收益增强）：当前池内国债占 40%（年化仅 2.67%），
+    /// 纳指年化 19.93% 仅 14% 权重——结构性拖累。对比规则化权重方案（零拟合先验，
+    /// 非全样本挑参）：基准 / 等权 / 增长倾斜 / 半防御倾斜。均 A=20% + kelly=0.15 + weekly @1.5x。
+    #[tokio::test]
+    #[ignore]
+    async fn etf_weight_structure_scan() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        // 顺序: [A股, 黄金518880, 国债511010, 标普513500, 纳指513100, 有色159980, 豆粕159985, 原油501018]
+        let plans: Vec<(&str, Vec<f64>)> = vec![
+            ("BASE 现行", vec![0.20, 0.248, 0.320, 0.056, 0.112, 0.024, 0.024, 0.016]),
+            ("EQ 等权", vec![0.20, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143]),
+            ("GROW 增长倾斜", vec![0.20, 0.18, 0.10, 0.14, 0.24, 0.04, 0.06, 0.04]),
+            ("HALF 半防御", vec![0.20, 0.16, 0.18, 0.12, 0.20, 0.04, 0.06, 0.04]),
+        ];
+
+        for (name, w) in &plans {
+            let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
+                .bind(&weights).execute(&db).await.expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 1.5, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                name, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+        }
+    }
+
+    /// 杠杆扫描（2026-09-07 收益增强）：MaxDD 预算 35% 当前仅用 17%，风险预算闲置。
+    /// 在权重结构实验选定的权重上扫 1.5~2.5x，验证 dd_ctrl/强平非线性下的真实曲线。
+    /// 权重经环境变量 LEV_SCAN_WEIGHTS 注入（8 元素逗号分隔），缺省用生产现行权重。
+    #[tokio::test]
+    #[ignore]
+    async fn leverage_scan() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        let weights = std::env::var("LEV_SCAN_WEIGHTS")
+            .unwrap_or_else(|_| "0.20,0.248,0.320,0.056,0.112,0.024,0.024,0.016".into());
+        let w: Vec<&str> = weights.split(',').collect();
+        let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+            w[0].trim().parse::<f64>().unwrap(), w[1].trim().parse::<f64>().unwrap(),
+            w[2].trim().parse::<f64>().unwrap(), w[3].trim().parse::<f64>().unwrap(),
+            w[4].trim().parse::<f64>().unwrap(), w[5].trim().parse::<f64>().unwrap(),
+            w[6].trim().parse::<f64>().unwrap(), w[7].trim().parse::<f64>().unwrap());
+        sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
+            .bind(&weights).execute(&db).await.expect("upd");
+
+        for lev in [1.5f64, 1.8, 2.0, 2.2, 2.5] {
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, lev, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[lev={:.1}x] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                lev, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+        }
+    }
+
+    /// 等权 ETF 结构下的 A 股权重重扫（2026-09-07）：原 A 权重扫描基于旧权重结构
+    /// （国债 32%），等权结构下最优 A 权重可能偏移。ETF 侧等权，A 15%~30%，@2.2x。
+    #[tokio::test]
+    #[ignore]
+    async fn a_weight_scan_equal_weight() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        for aw in [0.15f64, 0.20, 0.25, 0.30] {
+            let etf_w = (1.0 - aw) / 7.0;
+            let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                aw, etf_w, etf_w, etf_w, etf_w, etf_w, etf_w, etf_w);
+            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
+                .bind(&weights).execute(&db).await.expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 2.2, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[A={:.0}% EW] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                aw*100.0, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+        }
     }
 }

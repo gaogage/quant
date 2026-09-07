@@ -78,18 +78,18 @@ pub async fn load_active_factor_combos(db: &PgPool) -> Vec<String> {
 /// 返回 (combo_name, include_fundamentals, factor_whitelist) 列表。
 pub async fn load_active_combo_materialize_configs(
     db: &PgPool,
-) -> Vec<(String, bool, Option<Vec<String>>)> {
-    let rows: Vec<(Option<String>, Option<bool>, Option<serde_json::Value>)> = sqlx::query_as(
-        "SELECT combo_name, include_fundamentals, factor_whitelist
+) -> Vec<(String, bool, Option<Vec<String>>, Option<i16>)> {
+    let rows: Vec<(Option<String>, Option<bool>, Option<serde_json::Value>, Option<i16>)> = sqlx::query_as(
+        "SELECT combo_name, include_fundamentals, factor_whitelist, combo_horizon
          FROM strategy_config
          WHERE status='active' AND combo_name IS NOT NULL AND btrim(combo_name) <> ''",
     )
     .fetch_all(db)
     .await
     .unwrap_or_default();
-    let mut map: std::collections::BTreeMap<String, (bool, Option<Vec<String>>)> =
+    let mut map: std::collections::BTreeMap<String, (bool, Option<Vec<String>>, Option<i16>)> =
         std::collections::BTreeMap::new();
-    for (combo, inc_fund, whitelist) in rows {
+    for (combo, inc_fund, whitelist, horizon) in rows {
         if let Some(c) = combo {
             let c = c.trim().to_string();
             if c.is_empty() {
@@ -102,17 +102,20 @@ pub async fn load_active_combo_materialize_configs(
                 v.as_array()
                     .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             });
-            let entry = map.entry(c).or_insert((false, None));
+            let entry = map.entry(c).or_insert((false, None, None));
             if inc {
                 entry.0 = true;
             }
             if entry.1.is_none() && wl.is_some() {
                 entry.1 = wl;
             }
+            if entry.2.is_none() {
+                entry.2 = horizon;
+            }
         }
     }
     map.into_iter()
-        .map(|(combo, (inc, wl))| (combo, inc, wl))
+        .map(|(combo, (inc, wl, h))| (combo, inc, wl, h))
         .collect()
 }
 

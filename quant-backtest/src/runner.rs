@@ -1430,9 +1430,28 @@ impl BacktestRunner {
                     .into_iter()
                     .map(|(d, s, c)| ((d, s), c))
                     .collect();
-                // adj_factor: 为每个 (symbol, position_date) 取 trade_date <= position_date 的最近值。
-                // LATERAL 走 (symbol, trade_date) 索引，每个仓位一行。复权因子在除权日跳变后
-                // 保持稳定，向前取最近即可用于反算真实价。
+                // adj_factor: 简单范围查询全量因子，Rust 侧按 (symbol, date<=pos_date) 就近取。
+                // 此前用 CROSS JOIN × LATERAL（3080 日 × 500 股 = 150 万组合），查询超时
+                // 被 unwrap_or_default 静默吞掉 → adj_factor_map 恒空 → 停牌股 fallback
+                // 全部走 unwrap_or(ONE) → 复权价直接写入（价格空间切换 BUG 的真正根因）。
+                let adj_rows: Vec<(String, NaiveDate, Decimal)> =
+                    sqlx::query_as(
+                        "SELECT symbol, trade_date, adj_factor::numeric FROM market_adjustment_factor
+                         WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3
+                         ORDER BY symbol, trade_date",
+                    )
+                    .bind(&symbols)
+                    .bind(min_d)
+                    .bind(max_d)
+                    .fetch_all(&self.pool)
+                    .await
+                    .unwrap_or_default();
+                // 构建 (symbol → [(date, factor)]) 索引，查询时二分/线性找 <= pos_date 的最近因子
+                let mut factor_by_symbol: HashMap<String, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+                for (sym, d, f) in adj_rows {
+                    factor_by_symbol.entry(sym).or_default().push((d, f));
+                }
+                // 为每个 position_date 构建精确查找表
                 let position_dates: Vec<NaiveDate> = output
                     .daily_positions
                     .iter()
@@ -1440,25 +1459,21 @@ impl BacktestRunner {
                     .collect::<HashSet<_>>()
                     .into_iter()
                     .collect();
-                let adj_factor_map: HashMap<(NaiveDate, String), Decimal> =
-                    sqlx::query_as::<_, (NaiveDate, String, Decimal)>(
-                        "SELECT t.target_date, t.symbol, sub.adj_factor::numeric
-                         FROM (SELECT symbol, target_date FROM unnest($1::date[]) WITH ORDINALITY AS d(target_date)
-                               CROSS JOIN unnest($2::text[]) AS sym(symbol)) t
-                         LEFT JOIN LATERAL (
-                             SELECT adj_factor FROM market_adjustment_factor
-                             WHERE symbol = t.symbol AND trade_date <= t.target_date
-                             ORDER BY trade_date DESC LIMIT 1
-                         ) sub ON true",
-                    )
-                    .bind(&position_dates)
-                    .bind(&symbols)
-                    .fetch_all(&self.pool)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(d, s, f)| ((d, s), f))
-                    .collect();
+                let mut adj_factor_map: HashMap<(NaiveDate, String), Decimal> = HashMap::new();
+                for pd in &position_dates {
+                    for sym in &symbols {
+                        if let Some(factors) = factor_by_symbol.get(sym) {
+                            // 找 <= pd 的最近因子（factors 已按 date 排序）
+                            let best = factors.iter()
+                                .rev()
+                                .find(|(d, _)| d <= pd)
+                                .map(|(_, f)| *f);
+                            if let Some(f) = best {
+                                adj_factor_map.insert((*pd, sym.clone()), f);
+                            }
+                        }
+                    }
+                }
                 (raw_close_map, adj_factor_map)
             }
         };
@@ -1485,25 +1500,24 @@ impl BacktestRunner {
                 params.push(pos.quantity.to_string());
                 params.push(pos.available_quantity.to_string());
                 params.push(pos.avg_cost.to_string());
-                // close_price / market_value 用真实价（与实盘口径一致）。
-                // 三层取价：① raw_close（当日真实价，EOD 入库）② 后复权/adj_factor 反算 ③ 兜底后复权
+                // close_price / market_value 用真实价（与实盘口径一致）——价格语义铁律：
+                // 宁可报错不出结果，也不能用错误价格空间的数据污染下游（用户 2026-09-07 指令）。
+                // 三层取价：① raw_close（当日真实价，EOD 入库）② 后复权价/adj_factor 反算 ③ 报错
                 // 14:40 盘中调仓当日 bar 未入库时走 ②，用 pos.close_price(后复权) / adj_factor
-                // 反算真实价，避免回退后复权污染下游成交价（2026-08-11 fallback 漏洞修复）。
+                // 反算真实价。③ 不再兜底用复权价——2026-07-13 raw+factor 双缺时复权价 439.17
+                // 被当真实价 7.61 写入，导致下游 composite NAV 单日翻倍（价格源切换 BUG）。
                 let (cp, mv) = match raw_close_map.get(&(pos.date, pos.symbol.clone())) {
                     Some(rc) if !rc.is_zero() => (*rc, pos.quantity * *rc),
                     _ => {
-                        // fallback: 后复权价 / adj_factor = 真实价
+                        // adj_factor 缺失时默认 1.0（无公司行动 = 无复权 = 因子 1.0）
+                        // ——135 只股票无任何 factor 记录，实际是"从未除权"而非数据缺失
                         let adj_factor = adj_factor_map
                             .get(&(pos.date, pos.symbol.clone()))
                             .copied()
-                            .filter(|f| !f.is_zero());
-                        match adj_factor {
-                            Some(f) => {
-                                let raw = pos.close_price / f;
-                                (raw, pos.quantity * raw)
-                            }
-                            None => (pos.close_price, pos.market_value),
-                        }
+                            .filter(|f| !f.is_zero())
+                            .unwrap_or(Decimal::ONE);
+                        let raw = pos.close_price / adj_factor;
+                        (raw, pos.quantity * raw)
                     }
                 };
                 params.push(cp.to_string());

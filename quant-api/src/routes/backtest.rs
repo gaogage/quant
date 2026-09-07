@@ -1589,6 +1589,9 @@ fn factor_rebalance_frequency(rebalance: &str) -> usize {
         "daily" => 1,
         "weekly" => 5,
         "monthly" => 20,
+        // quarterly 此前落入 parse fallback → 20（与 monthly 相同），生产配置
+        // 的 quarterly 语义被静默降频错配（2026-09-04 F1 实验发现）
+        "quarterly" => 60,
         value => value.parse::<usize>().unwrap_or(20),
     }
 }
@@ -4280,6 +4283,365 @@ mod tests {
             overlay_version: "1.0.0".to_string(),
             overlay_score_direction: None,
             overlay_weight: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod f1_sleeve_tests {
+    use super::*;
+
+    /// F1（一致预期修正动量）sleeve 参数适配实验——分解调仓频率与 kelly 各自影响。
+    /// 机制理由（非挖掘）：F1 是月频更新信号——10日调仓频率错配（换手翻倍）；
+    /// kelly 每日再平衡对月内不变的分数只加噪声。生产 strategy_config 为 quarterly。
+    ///
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api f1_sleeve -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn f1_sleeve_full_engine_backtest_2014_2026() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+
+        for (label, rebalance, kelly, task) in [
+            ("Q-k0", "quarterly", 0.0, "fbt-f1-qk0-20260904"),
+            ("Q-k025", "quarterly", 0.25, "fbt-f1-qk025-20260904"),
+            ("M-k0", "monthly", 0.0, "fbt-f1-mk0-20260904"),
+        ] {
+            let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
+                "combo_name": "ar_consensus_eps_rev_solo",
+                "version": "v1",
+                "strategy_version_id": "factor-combo-v1",
+                "data_version_id": "dv-eod-20260901",
+                "top_n": 40,
+                "rebalance": rebalance,
+                "start_date": "20140102",
+                "end_date": "20260903",
+                "entry_delay": 0,
+                "min_amount": 0,
+                "skip_top_pct": 0.0,
+                "kelly_fraction": kelly,
+                "max_position_pct": 0.1,
+                "max_gross_exposure": 0.95,
+                "score_direction": "descending",
+                "portfolio_method": "heuristic",
+                "universe_profile": "main_board_non_st",
+                "benchmark": "000300.SH"
+            }))
+            .expect("req");
+
+            let out = execute_factor_backtest(&db, task, req)
+                .await
+                .expect("backtest");
+            println!(
+                "[F1-{}] ann={:.2}% sharpe={:.3} sortino={:.3} maxdd={:.2}% calmar={:.3} \
+                 excess={:.2}% turnover={:.1} trades={} win={:.1}%",
+                label,
+                out.metrics.annual_return_pct,
+                out.metrics.sharpe_ratio,
+                out.metrics.sortino_ratio,
+                out.metrics.max_drawdown_pct,
+                out.metrics.calmar_ratio,
+                out.metrics.excess_return_pct,
+                out.metrics.turnover,
+                out.metrics.num_trades,
+                out.metrics.win_rate_pct
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod h20_regime_tests {
+    use super::*;
+
+    /// h20 sleeve 回撤治理实验：原参数基底（rebalance 10、kelly 0.25、
+    /// indneutral_val_v1 combo，对齐 fbt-b6435e7e 曲线）+ 5 种 regime policy。
+    /// 目标：最大 Sharpe 下的最小回撤（用户 2026-09-04 指令）。
+    ///
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api h20_regime -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn h20_sleeve_regime_policy_comparison() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+
+        let policies: Vec<(&str, Option<&str>)> = vec![
+            ("baseline-none", None),
+            ("professional_default", Some("professional_default")),
+            ("drawdown_control_v1", Some("drawdown_control_v1")),
+            ("drawdown_control_v2", Some("drawdown_control_v2")),
+            ("quality_crash_guard_v2", Some("quality_crash_guard_v2")),
+            ("quality_bear_window_guard_v1", Some("quality_bear_window_guard_v1")),
+        ];
+
+        for (label, policy) in policies {
+            let mut req_json = serde_json::json!({
+                "combo_name": "full_pit_icir_indneutral_val_v1",
+                "version": "1.0.0",
+                "strategy_version_id": "factor-combo-v1",
+                "data_version_id": "dv-eod-20260901",
+                "top_n": 40,
+                "rebalance": "10",
+                "start_date": "20140102",
+                "end_date": "20260903",
+                "entry_delay": 0,
+                "min_amount": 0,
+                "skip_top_pct": 0.0,
+                "kelly_fraction": 0.25,
+                "max_position_pct": 0.1,
+                "max_gross_exposure": 0.95,
+                "score_direction": "descending",
+                "portfolio_method": "heuristic",
+                "universe_profile": "main_board_non_st",
+                "benchmark": "000300.SH"
+            });
+            if let Some(p) = policy {
+                req_json["market_regime"] = serde_json::json!({
+                    "enabled": true,
+                    "policy": p,
+                    "benchmark": "000300.SH"
+                });
+            }
+            let req: RunFactorBacktestReq =
+                serde_json::from_value(req_json).expect("req");
+            let task = format!("fbt-h20-rg-{}-20260904", label);
+            let out = execute_factor_backtest(&db, &task, req)
+                .await
+                .expect("backtest");
+            println!(
+                "[h20-{}] ann={:.2}% sharpe={:.3} maxdd={:.2}% calmar={:.3} excess={:.2}% turnover={:.1}",
+                label,
+                out.metrics.annual_return_pct,
+                out.metrics.sharpe_ratio,
+                out.metrics.max_drawdown_pct,
+                out.metrics.calmar_ratio,
+                out.metrics.excess_return_pct,
+                out.metrics.turnover
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod f1_22f_tests {
+    use super::*;
+
+    /// 22f vs 21f(生产 fund_v2) sleeve 回测对照：F1 进 combo 的净增量。
+    /// 参数严格对齐 h20 原曲线（top_n 40、rebalance 10、kelly 0.25）。
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api f1_22f -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn f1_22f_vs_21f_sleeve_backtest() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+
+        for (label, combo, task) in [
+            ("21f-iso-无F1", "full_pit_icir_indneutral_val_v1", "fbt-rebuild79-0905"),
+            ("23f-iso-含F1", "full_pit_icir_23f_indneutral_v2", "fbt-rebuild48b-0905"),
+        ] {
+        let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
+            "combo_name": combo,
+            "version": "1.0.0",
+            "strategy_version_id": "factor-combo-v1",
+            "data_version_id": "dv-eod-20260901",
+            "top_n": 40,
+            "rebalance": "10",
+            "start_date": "20140102",
+            "end_date": "20260903",
+            "entry_delay": 0,
+            "min_amount": 0,
+            "skip_top_pct": 0.0,
+            "kelly_fraction": 0.25,
+            "max_position_pct": 0.1,
+            "max_gross_exposure": 0.95,
+            "score_direction": "descending",
+            "portfolio_method": "heuristic",
+            "universe_profile": "main_board_non_st",
+            "benchmark": "000300.SH"
+        })).expect("req");
+
+        let out = execute_factor_backtest(&db, task, req)
+            .await
+            .expect("backtest");
+        println!(
+            "[{}] trades={} turnover={:.1} (旧引擎21f基线: ann 11.14%/sharpe 0.595)",
+            label, out.metrics.num_trades, out.metrics.turnover
+        );
+        }
+    }
+}
+
+#[cfg(test)]
+mod iso23_solo {
+    use super::*;
+
+    /// 单组 23f（含 F1 中性化）——绕开双组循环的 task 冲突。
+    #[tokio::test]
+    #[ignore]
+    async fn iso23_solo_backtest() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+        let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
+            "combo_name": "full_pit_icir_23f_indneutral_v2",
+            "version": "1.0.0",
+            "strategy_version_id": "factor-combo-v1",
+            "data_version_id": "dv-eod-20260901",
+            "top_n": 40, "rebalance": "10",
+            "start_date": "20140102", "end_date": "20260903",
+            "entry_delay": 0, "min_amount": 0, "skip_top_pct": 0.0,
+            "kelly_fraction": 0.25, "max_position_pct": 0.1, "max_gross_exposure": 0.95,
+            "score_direction": "descending", "portfolio_method": "heuristic",
+            "universe_profile": "main_board_non_st", "benchmark": "000300.SH"
+        })).expect("req");
+        let out = execute_factor_backtest(&db, "fbt-iso23-solo-2230", req)
+            .await
+            .expect("backtest");
+        println!("[23f-solo] trades={} turnover={:.1}", out.metrics.num_trades, out.metrics.turnover);
+    }
+}
+
+#[cfg(test)]
+mod f1_quarterly_rerun {
+    use super::*;
+
+    /// 重跑1：F1 sleeve 正确 quarterly(60日)调仓——此前解析 bug 实际跑的是 20 日。
+    /// 对照：72 因子新基线 sleeve（同引擎同参数）。
+    #[tokio::test]
+    #[ignore]
+    async fn f1_sleeve_quarterly_correct() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+        for (label, combo, ver, rebal, kelly, task) in [
+            ("F1-Q60-k0", "ar_consensus_eps_rev_solo", "v1", "quarterly", 0.0, "fbt-f1q60-k0-0907"),
+            ("F1-Q60-k025", "ar_consensus_eps_rev_solo", "v1", "quarterly", 0.25, "fbt-f1q60-k025-0907"),
+            ("72f-Q60-k025(基线)", "full_pit_icir_indneutral_val_v1", "1.0.0", "quarterly", 0.25, "fbt-72fq60-k025-0907"),
+            ("72f-10d-k025(原参)", "full_pit_icir_indneutral_val_v1", "1.0.0", "10", 0.25, "fbt-72f10d-k025-0907"),
+        ] {
+            let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
+                "combo_name": combo, "version": ver,
+                "strategy_version_id": "factor-combo-v1", "data_version_id": "dv-eod-20260901",
+                "top_n": 40, "rebalance": rebal,
+                "start_date": "20140102", "end_date": "20260903",
+                "entry_delay": 0, "min_amount": 0, "skip_top_pct": 0.0,
+                "kelly_fraction": kelly, "max_position_pct": 0.1, "max_gross_exposure": 0.95,
+                "score_direction": "descending", "portfolio_method": "heuristic",
+                "universe_profile": "main_board_non_st", "benchmark": "000300.SH"
+            })).expect("req");
+            let out = execute_factor_backtest(&db, &task, req).await.expect("bt");
+            println!("[{}] trades={} turnover={:.1}", label, out.metrics.num_trades, out.metrics.turnover);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ddctrl_mu_rerun {
+    use super::*;
+
+    /// 重跑3：dd_ctrl_v1 sleeve 用 72 因子新 combo 重测。
+    #[tokio::test]
+    #[ignore]
+    async fn ddctrl_72f_rerun() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+        for (label, policy, task) in [
+            ("72f-base-none", None::<&str>, format!("fbt-72f-v3-none-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())),
+            ("72f-dd_ctrl_v1", Some("drawdown_control_v1"), format!("fbt-72f-v3-ddv1-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())),
+        ] {
+            let mut rj = serde_json::json!({
+                "combo_name": "full_pit_icir_indneutral_val_v1", "version": "1.0.0",
+                "strategy_version_id": "factor-combo-v1", "data_version_id": "dv-eod-20260901",
+                "top_n": 40, "rebalance": "10",
+                "start_date": "20140102", "end_date": "20260903",
+                "entry_delay": 0, "min_amount": 0, "skip_top_pct": 0.0,
+                "kelly_fraction": 0.25, "max_position_pct": 0.1, "max_gross_exposure": 0.95,
+                "score_direction": "descending", "portfolio_method": "heuristic",
+                "universe_profile": "main_board_non_st", "benchmark": "000300.SH"
+            });
+            if let Some(p) = policy { rj["market_regime"] = serde_json::json!({"enabled": true, "policy": p}); }
+            let req: RunFactorBacktestReq = serde_json::from_value(rj).expect("req");
+            let out = execute_factor_backtest(&db, &task, req).await.expect("bt");
+            println!("[{}] trades={} turnover={:.1}", label, out.metrics.num_trades, out.metrics.turnover);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sleeve_freq_scan {
+    use super::*;
+
+    /// sleeve 频率扫描：5/10/20/40 日频的 dd_ctrl sleeve 绩效对比。
+    /// 机制：dd_ctrl 的回撤检测窗口 vs 调仓响应速度的平衡。
+    #[tokio::test]
+    #[ignore]
+    async fn sleeve_frequency_scan() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+        for rebal in ["5", "10", "20", "40"] {
+            let task = format!("fbt-sleeve-freq-{}-0907", rebal);
+            // 清旧
+            let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id=$1").bind(&task).execute(&db).await;
+            let _ = sqlx::query("DELETE FROM backtest_equity_curve WHERE task_id=$1").bind(&task).execute(&db).await;
+            let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
+                "combo_name": "full_pit_icir_indneutral_val_v1", "version": "1.0.0",
+                "strategy_version_id": "factor-combo-v1", "data_version_id": "dv-eod-20260901",
+                "top_n": 40, "rebalance": rebal,
+                "start_date": "20140102", "end_date": "20260903",
+                "entry_delay": 0, "min_amount": 0, "skip_top_pct": 0.0,
+                "kelly_fraction": 0.25, "max_position_pct": 0.1, "max_gross_exposure": 0.95,
+                "score_direction": "descending", "portfolio_method": "heuristic",
+                "universe_profile": "main_board_non_st", "benchmark": "000300.SH",
+                "market_regime": {"enabled": true, "policy": "drawdown_control_v1"}
+            })).expect("req");
+            let out = execute_factor_backtest(&db, &task, req).await.expect("bt");
+            println!("[sleeve-{}] trades={}", rebal, out.metrics.num_trades);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sleeve_param_grid {
+    use super::*;
+
+    /// Sleeve 参数网格：top_n × kelly，dd_ctrl_v1，72 因子 combo。
+    /// 输出每组 sleeve 的绩效指标，找最佳组合。
+    #[tokio::test]
+    #[ignore]
+    async fn sleeve_param_grid_scan() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("db");
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+        for top_n in [20usize, 30, 40, 50] {
+            for kelly in [0.0f64, 0.15, 0.25, 0.50] {
+                let task = format!("fbt-grid-{}-{}-{}", top_n, (kelly*100.0) as u64, ts);
+                let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
+                    "combo_name": "full_pit_icir_indneutral_val_v1", "version": "1.0.0",
+                    "strategy_version_id": "factor-combo-v1", "data_version_id": "dv-eod-20260901",
+                    "top_n": top_n, "rebalance": "10",
+                    "start_date": "20140102", "end_date": "20260903",
+                    "entry_delay": 0, "min_amount": 0, "skip_top_pct": 0.0,
+                    "kelly_fraction": kelly, "max_position_pct": 0.1, "max_gross_exposure": 0.95,
+                    "score_direction": "descending", "portfolio_method": "heuristic",
+                    "universe_profile": "main_board_non_st", "benchmark": "000300.SH",
+                    "market_regime": {"enabled": true, "policy": "drawdown_control_v1"}
+                })).expect("req");
+                let out = match execute_factor_backtest(&db, &task, req).await {
+                    Ok(o) => o,
+                    Err(e) => { println!("[grid] top_n={} kelly={} ERR: {}", top_n, kelly, e); continue; }
+                };
+                println!("[grid] top_n={} kelly={:.2} trades={}", top_n, kelly, out.metrics.num_trades);
+            }
         }
     }
 }

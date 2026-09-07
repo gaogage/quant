@@ -770,13 +770,15 @@ impl BacktestEngine {
             return Decimal::zero();
         }
 
-        let cap = liquidity_amount * max_rate;
+        // bar 表 amount 为 Tushare 千元单位，与 participation_rate_for 同口径换算到元，
+        // 否则参与率 cap 被压 1000 倍，买单不足一手被整手规则全部跳过。
+        let cap = liquidity_amount * Decimal::from(1000u32) * max_rate;
         if desired_amount > cap {
             self.violations.push(ConstraintViolation {
                 trade_date: market.date,
                 constraint_name: "participation_rate".into(),
                 limit_value: max_rate,
-                actual_value: desired_amount / liquidity_amount,
+                actual_value: desired_amount / (liquidity_amount * Decimal::from(1000u32)),
                 severity: "hard".into(),
             });
             cap
@@ -2011,7 +2013,9 @@ mod tests {
         capacity_config.max_participation_rate = Some(d("0.10"));
         let mut capacity_limited = BacktestEngine::new(capacity_config);
         let mut thin_market = market("2024-01-02", ("A", "10"), ("A", "9.9"));
-        thin_market.amount.insert("A".into(), d("100000"));
+        // bar amount 为 Tushare 千元单位：100 千元 = 10 万元成交额，10% cap = 1 万元，
+        // 远低于 80% 目标仓位需求（100 万 NAV），构造"想吃吃不下"的容量受限场景。
+        thin_market.amount.insert("A".into(), d("100"));
 
         capacity_limited.process_day(&thin_market, Some(&signal("A", "0.80")));
 
@@ -2614,13 +2618,17 @@ mod tests {
         c.fee_config.slippage_bps = Decimal::zero();
         let mut e = BacktestEngine::new(c);
         let mut m = market("2024-01-02", ("A", "10"), ("A", "10"));
+        // bar 表 amount 为 Tushare 千元单位：1000 千元 = 100 万元成交额，
+        // 10% 参与率上限即 10 万元（f01af33 千元→元换算后的口径）
         m.amount.insert("A".into(), d("1000"));
 
         e.process_day(&m, Some(&signal("A", "0.95")));
         let o = e.finalize();
 
         assert_eq!(o.trades.len(), 1);
-        assert!(o.trades[0].amount <= d("100"));
+        // 数量视角断言：cap 10 万元 / 价 10 元 = 10000 股（成交额含滑点会略超 cap，
+        // 故不直接断言 amount）
+        assert!(o.trades[0].quantity <= d("10000"));
         assert!(o
             .violations
             .iter()

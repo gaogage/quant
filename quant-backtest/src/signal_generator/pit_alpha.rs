@@ -6682,6 +6682,9 @@ async fn insert_persistent_return_risk_pairwise_row_chunk(
     Ok(result.rows_affected() as i64)
 }
 
+/// 矩阵版 covariance_concentration_penalty 的朴素实现对照——tests.rs 用两者
+/// 做等价性断言，仅测试构建引用。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn covariance_concentration_penalty(
     symbol: &str,
     symbols: &[String],

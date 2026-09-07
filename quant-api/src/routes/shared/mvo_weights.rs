@@ -98,6 +98,34 @@ pub(crate) async fn compute_lw_mvo_weights(
         }
     }
 
+    // ── 固定权重分配模式（2026-09-07 突破性发现）──
+    // MVO 动量 μ 在有风控 sleeve 上是负贡献（防守期被误判为"资产差"→低配→错过复苏）。
+    // 固定模式直接用 default_weights（[A股, ETF1, ETF2...]），绕过整个 MVO 管线。
+    // default_weights 之和应为 1（不足部分自动补国债 ETF 或留现金）。
+    if sc.allocation_mode.as_deref() == Some("fixed") {
+        let n_etf = sc.etf_symbols.len();
+        let mut weights: Vec<f64> = Vec::with_capacity(1 + n_etf);
+        // 第 0 列 = A 股 sleeve
+        weights.push(sc.default_weights.first().copied().unwrap_or(0.30));
+        // 第 1..N 列 = ETF（按 default_weights 对应比例，不足补国债）
+        let remaining: f64 = 1.0 - weights[0];
+        let etf_sum: f64 = sc.default_weights.iter().skip(1).sum();
+        for (i, _) in sc.etf_symbols.iter().enumerate() {
+            let dw = sc.default_weights.get(i + 1).copied().unwrap_or(0.0);
+            let w = if etf_sum > 0.0 { dw / etf_sum * remaining } else { remaining / n_etf as f64 };
+            weights.push(w);
+        }
+        // 归一化（浮点安全）
+        let total: f64 = weights.iter().sum();
+        if total > 0.0 {
+            for w in weights.iter_mut() { *w /= total; }
+        }
+        let mut guard = cache.lock().await;
+        *guard = Some(MvoWeightCache { quarter: quarter.clone(), weights: weights.clone() });
+        info!(quarter = %quarter, weights = ?weights, "固定权重分配（绕过 MVO）");
+        return weights;
+    }
+
     // 过滤当日未发行的 ETF:MVO 只对已发行标的分配,未发行的不占维度
     // 用循环而非 .filter()+await(闭包不能 async)
     let mut listed_etf_symbols: Vec<String> = Vec::new();
@@ -281,7 +309,29 @@ pub(crate) async fn compute_lw_mvo_weights(
                     .collect(),
             );
             let bw = sc.momentum_blend_ratio;
-            let adj_mu = bw * &hist_mu + (1.0 - bw) * &mom_mu;
+            // μ 估计方法（2026-09-04 预注册 H-μRA）：risk_adjusted 时用
+            // Sharpe×σ_target 替代动量混合——动量 μ 惩罚防御型资产（减仓期收益低
+            // →μ 低→低配→复苏被甩下，四次否决同构根因）。
+            let adj_mu = if sc.mu_estimation.as_deref() == Some("risk_adjusted") {
+                ndarray::Array1::from_vec(
+                    (0..n_total_assets)
+                        .map(|j| {
+                            let col: Vec<f64> = all_monthly.iter().map(|r| r[j]).collect();
+                            let mean = col.iter().sum::<f64>() / col.len() as f64;
+                            let var =
+                                col.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / col.len() as f64;
+                            let ann_vol = var.sqrt() * (12.0f64).sqrt();
+                            if ann_vol > 1e-8 {
+                                (mean * 12.0) / ann_vol * 0.10 // Sharpe × σ_target(0.10)
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect(),
+                )
+            } else {
+                bw * &hist_mu + (1.0 - bw) * &mom_mu
+            };
             // 自适应max_single: 牛市用max_single_bull, 否则用max_single
             // P4 修复:同 trail_12m 修复,取最近 min(len,12) 个月(尾部)。
             let take_n = a_monthly.len().min(12);

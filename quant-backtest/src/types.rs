@@ -184,6 +184,58 @@ mod tests {
         assert_eq!(bar.data_version_id.as_str(), "dv_20260724_v1");
     }
 
+    #[test]
+    fn raw_bar_new_assembles_all_ohlcv_fields() {
+        let bar = RawBar::new(
+            "510300.SH",
+            NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+            Decimal::new(41, 1),
+            Decimal::new(419, 10),
+            Decimal::new(405, 10),
+            Decimal::new(412, 10),
+            Decimal::from(8_800_000),
+            "dv_smoke",
+        );
+        assert_eq!(bar.symbol.as_str(), "510300.SH");
+        assert_eq!(bar.trade_date, NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
+        assert_eq!(bar.open, Decimal::new(41, 1));
+        assert_eq!(bar.data_version_id, "dv_smoke");
+        // PartialEq：同参相等、dv_id 不同则不等
+        let same = RawBar::new(
+            "510300.SH",
+            NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+            Decimal::new(41, 1),
+            Decimal::new(419, 10),
+            Decimal::new(405, 10),
+            Decimal::new(412, 10),
+            Decimal::from(8_800_000),
+            "dv_smoke",
+        );
+        assert_eq!(bar, same);
+        let other_dv = RawBar {
+            data_version_id: "dv_other".to_string(),
+            ..same.clone()
+        };
+        assert_ne!(bar, other_dv);
+    }
+
+    #[test]
+    fn strategy_state_markers_are_distinct_types() {
+        // 状态标记类型可实例化且 Debug（类型门禁的基石；非法转换由缺失 From 实现
+        // 在编译期拒绝，无法在运行时测试）
+        let _d = Draft;
+        let _v = Validated;
+        let _b = Backtested;
+        let _p = PaperLive;
+        let _prod = Production;
+        fn assert_state<S: StrategyState>(_: &S) {}
+        assert_state(&Draft);
+        assert_state(&Validated);
+        assert_state(&Backtested);
+        assert_state(&PaperLive);
+        assert_state(&Production);
+    }
+
     /// 验证 `RawBar::try_from_raw` 的 DB 校验逻辑。
     ///
     /// 需 DB,默认不跑(--ignored 触发)。运行:

@@ -115,6 +115,15 @@ pub async fn compute_weights_pit(
         .await
         .map_err(|e| format!("Failed to load PIT IC evals: {}", e))?;
 
+    Ok(icir_weights_from_evals(factors, &ic_evals))
+}
+
+/// ICIR 加权纯计算：权重 = |IR| / Σ|IR|，IC<0 的因子取负号（反向使用）。
+/// 无任何 IC 评估记录时退化为等权（total_ir=0 防除零）。
+pub(crate) fn icir_weights_from_evals(
+    factors: &[(String, String)],
+    ic_evals: &HashMap<String, (f64, f64)>,
+) -> Vec<FactorWeight> {
     let total_ir: f64 = factors
         .iter()
         .filter_map(|(code, ver)| {
@@ -124,7 +133,7 @@ pub async fn compute_weights_pit(
         .sum();
     let total_ir = if total_ir == 0.0 { 1.0 } else { total_ir };
 
-    let weights: Vec<FactorWeight> = factors
+    factors
         .iter()
         .map(|(code, ver)| {
             let key = format!("{}:{}", code, ver);
@@ -136,8 +145,28 @@ pub async fn compute_weights_pit(
                 weight: if ic < 0.0 { -w } else { w },
             }
         })
-        .collect();
-    Ok(weights)
+        .collect()
+}
+
+/// 等权纯计算：每个因子 1/N，IC<0 取负号。
+pub(crate) fn equal_weights_from_evals(
+    factors: &[(String, String)],
+    ic_evals: &HashMap<String, (f64, f64)>,
+) -> Vec<FactorWeight> {
+    let n = factors.len() as f64;
+    factors
+        .iter()
+        .map(|(code, ver)| {
+            let key = format!("{}:{}", code, ver);
+            let (ic, _) = ic_evals.get(&key).copied().unwrap_or((0.0, 0.0));
+            let w = 1.0 / n;
+            FactorWeight {
+                factor_code: code.clone(),
+                factor_version: ver.clone(),
+                weight: if ic < 0.0 { -w } else { w },
+            }
+        })
+        .collect()
 }
 
 /// Compute factor weights based on IC evaluations
@@ -150,51 +179,10 @@ pub async fn compute_weights(
     let ic_evals = load_ic_evals(pool, horizon)
         .await
         .map_err(|e| format!("Failed to load IC evals: {}", e))?;
-    let n = factors.len() as f64;
 
     match method {
-        CombineMethod::EqualWeight => {
-            let weights: Vec<FactorWeight> = factors
-                .iter()
-                .map(|(code, ver)| {
-                    let key = format!("{}:{}", code, ver);
-                    let (ic, _) = ic_evals.get(&key).copied().unwrap_or((0.0, 0.0));
-                    let w = 1.0 / n;
-                    FactorWeight {
-                        factor_code: code.clone(),
-                        factor_version: ver.clone(),
-                        weight: if ic < 0.0 { -w } else { w },
-                    }
-                })
-                .collect();
-            Ok(weights)
-        }
-        CombineMethod::IcirWeighted => {
-            let total_ir: f64 = factors
-                .iter()
-                .filter_map(|(code, ver)| {
-                    let key = format!("{}:{}", code, ver);
-                    ic_evals.get(&key).map(|(_, ir)| ir.abs())
-                })
-                .sum();
-
-            let total_ir = if total_ir == 0.0 { 1.0 } else { total_ir };
-
-            let weights: Vec<FactorWeight> = factors
-                .iter()
-                .map(|(code, ver)| {
-                    let key = format!("{}:{}", code, ver);
-                    let (ic, ir) = ic_evals.get(&key).copied().unwrap_or((0.0, 0.0));
-                    let w = ir.abs() / total_ir;
-                    FactorWeight {
-                        factor_code: code.clone(),
-                        factor_version: ver.clone(),
-                        weight: if ic < 0.0 { -w } else { w },
-                    }
-                })
-                .collect();
-            Ok(weights)
-        }
+        CombineMethod::EqualWeight => Ok(equal_weights_from_evals(factors, &ic_evals)),
+        CombineMethod::IcirWeighted => Ok(icir_weights_from_evals(factors, &ic_evals)),
     }
 }
 
@@ -350,6 +338,66 @@ pub async fn combine_and_persist(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── 权重纯计算（无 DB）──────────────────────────────────
+
+    fn eval_map(entries: &[(&str, f64, f64)]) -> HashMap<String, (f64, f64)> {
+        entries
+            .iter()
+            .map(|(k, ic, ir)| (k.to_string(), (*ic, *ir)))
+            .collect()
+    }
+
+    #[test]
+    fn icir_weights_proportional_to_abs_ir_with_ic_sign() {
+        // IR 1.0 / 3.0 → 权重 0.25 / 0.75；第二个因子 IC<0 → 负号
+        let factors = vec![
+            ("f1".to_string(), "v1".to_string()),
+            ("f2".to_string(), "v1".to_string()),
+        ];
+        let evals = eval_map(&[("f1:v1", 0.05, 1.0), ("f2:v1", -0.02, 3.0)]);
+        let w = icir_weights_from_evals(&factors, &evals);
+        assert!((w[0].weight - 0.25).abs() < 1e-12);
+        assert!((w[1].weight - (-0.75)).abs() < 1e-12, "IC<0 应取负号");
+        // 权重绝对值和为 1
+        let abs_sum: f64 = w.iter().map(|x| x.weight.abs()).sum();
+        assert!((abs_sum - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn icir_weights_no_evals_fall_back_to_equal() {
+        // 无任何 IC 记录 → total_ir=0 → 各因子权重 0（不 panic）
+        let factors = vec![("f1".to_string(), "v1".to_string())];
+        let w = icir_weights_from_evals(&factors, &HashMap::new());
+        assert_eq!(w.len(), 1);
+        assert!((w[0].weight - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn icir_weights_negative_ir_still_positive_weight() {
+        // IR 为负但 IC 为正：权重用 |IR|，符号跟 IC
+        let factors = vec![("f1".to_string(), "v1".to_string())];
+        let evals = eval_map(&[("f1:v1", 0.10, -2.0)]);
+        let w = icir_weights_from_evals(&factors, &evals);
+        assert!((w[0].weight - 1.0).abs() < 1e-12, "|IR| 全部归一");
+    }
+
+    #[test]
+    fn equal_weights_one_over_n_with_ic_sign() {
+        let factors = vec![
+            ("f1".to_string(), "v1".to_string()),
+            ("f2".to_string(), "v1".to_string()),
+            ("f3".to_string(), "v1".to_string()),
+            ("f4".to_string(), "v1".to_string()),
+        ];
+        let evals = eval_map(&[("f1:v1", 0.1, 1.0), ("f2:v1", -0.1, 1.0)]);
+        let w = equal_weights_from_evals(&factors, &evals);
+        assert!((w[0].weight - 0.25).abs() < 1e-12);
+        assert!((w[1].weight - (-0.25)).abs() < 1e-12);
+        // 无 IC 记录的因子默认正号
+        assert!((w[2].weight - 0.25).abs() < 1e-12);
+        assert!((w[3].weight - 0.25).abs() < 1e-12);
+    }
 
     /// PIT 红线单测：构造一条合规历史 IC（end<=as_of）和一条越界未来 IC（end>as_of），
     /// 断言 compute_weights_pit 只用历史那条、绝不读未来。

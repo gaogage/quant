@@ -88,6 +88,29 @@ pub async fn sync_eod_data(
         &format!("etf-eod-{}", date_str),
     )
     .await;
+    // ── 业绩预告增量同步（forecast 族因子数据源，2026-09-05 接入）──
+    // forecast 接口要求 ann_date 或 ts_code 至少一个参数，按日增量拉当日公告。
+    // 用充值 token（现行 token 无此接口权限）。同步失败不阻塞 EOD 主链路。
+    if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
+        if !tok.trim().is_empty() {
+            let mut fc_cfg = quant_data::tushare::client::TushareConfig::default();
+            fc_cfg.token = tok.trim().to_string();
+            fc_cfg.rate_limit_per_minute = 60;
+            match quant_data::tushare::client::TushareClient::new(fc_cfg) {
+                Ok(fc_client) => {
+                    let empty_syms: Vec<String> = vec![];
+                    match quant_data::sync::sync_forecast(
+                        db, &fc_client, &empty_syms, &date_str, &date_str,
+                        &format!("fc-eod-{}", date_str),
+                    ).await {
+                        Ok(n) => info!("[EOD] 业绩预告增量: {} 条", n),
+                        Err(e) => warn!("[EOD] 业绩预告增量失败(不阻塞): {}", e),
+                    }
+                }
+                Err(e) => warn!("[EOD] forecast client 初始化失败(不阻塞): {}", e),
+            }
+        }
+    }
     // fund_daily 当日缺失时不做运行时兜底(运行时零 Python 依赖铁律,见 quant/AGENTS.md):
     // Tushare fund_daily 就绪率不稳定属数据源现实。缺失时日报当日收益显示 --
     // (snapshot.daily_return 置 NULL),次日 9:00 T+1 补齐后补盯市并补发昨日绩效。

@@ -277,6 +277,8 @@ mod tests {
     /// 测试用 StrategyConfig 字面量(显式构造,避免触发 panic 版 Default)。
     fn test_strategy_config() -> StrategyConfig {
         StrategyConfig {
+            allocation_mode: None,
+            mu_estimation: None,
             strategy_id: "test".into(),
             name: "test".into(),
             etf_symbols: vec![],
@@ -374,12 +376,13 @@ mod tests {
     #[test]
     fn eod_sync_window_does_not_replay_after_startup_late_in_day() {
         // EOD 于 22:00：Tushare 日线 16:00 未发布，fund_daily 当日就绪率不稳定
-        assert!(is_eod_sync_window(20, 0));
-        assert!(is_eod_sync_window(20, 9));
-        assert!(!is_eod_sync_window(20, 10));
-        assert!(!is_eod_sync_window(20, 39));
+        assert!(is_eod_sync_window(22, 0));
+        assert!(is_eod_sync_window(22, 9));
+        assert!(!is_eod_sync_window(22, 10));
+        assert!(!is_eod_sync_window(22, 39));
         assert!(!is_eod_sync_window(16, 0));
-        assert!(!is_eod_sync_window(21, 0));
+        assert!(!is_eod_sync_window(20, 0)); // 旧 20:00 窗口已废弃，防回归
+        assert!(!is_eod_sync_window(23, 0));
     }
 
     #[test]
@@ -532,15 +535,17 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
                 let refresh_end = chrono::Utc::now().date_naive();
                 let combos = load_active_combo_materialize_configs(db).await;
-                let pit_combos: Vec<(String, bool, Option<Vec<String>>)> = combos
+                let pit_combos: Vec<(String, bool, Option<Vec<String>>, Option<i16>)> = combos
                     .into_iter()
-                    .filter(|(c, _, _)| c.starts_with("full_pit_icir"))
+                    .filter(|(c, _, _, _)| c.starts_with("full_pit_icir"))
                     .collect();
                 if pit_combos.is_empty() {
                     warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
                 }
-                for (combo, include_fund, whitelist) in &pit_combos {
-                    let horizon = combo_horizon_from_name(combo);
+                for (combo, include_fund, whitelist, horizon_col) in &pit_combos {
+                    // 显式 combo_horizon 列优先（2026-09-05：indneutral_val_v1 名字无
+                    // _h{N} 后缀曾被推断为 1，而实际物化口径是 20——三段拼接根源）
+                    let horizon = horizon_col.unwrap_or_else(|| combo_horizon_from_name(combo));
                     info!(
                         "[scheduler] PIT combo 保鲜: combo={} horizon={} include_fund={} whitelist={} 区间 {}~{}",
                         combo, horizon, include_fund, whitelist.as_ref().map(|w| w.len()).unwrap_or(0), refresh_start, refresh_end
@@ -1121,6 +1126,14 @@ async fn run_tick(
                     .ok()
                     .flatten()
                     .unwrap_or(false);
+                    let horizon_col: Option<i16> = sqlx::query_scalar(
+                        "SELECT combo_horizon FROM strategy_config WHERE strategy_id=$1 AND status='active'",
+                    )
+                    .bind(&sid)
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten();
                     let whitelist: Option<Vec<String>> = {
                         let raw: Option<serde_json::Value> = sqlx::query_scalar(
                             "SELECT factor_whitelist FROM strategy_config WHERE strategy_id=$1 AND status='active'",
@@ -1142,7 +1155,7 @@ async fn run_tick(
                         db,
                         &combo,
                         "1.0.0",
-                        combo_horizon_from_name(&combo),
+                        horizon_col.unwrap_or_else(|| combo_horizon_from_name(&combo)),
                         sync_date - chrono::Duration::days(7),
                         sync_date,
                         inc_fund,
@@ -2513,4 +2526,63 @@ pub async fn compute_mvo_weights_for_date(
 ) -> Vec<f64> {
     let cache = tokio::sync::Mutex::new(None::<MvoWeightCache>);
     compute_lw_mvo_weights(db, date, &cache, sc).await
+}
+
+#[cfg(test)]
+mod stale_factor_recompute_tests {
+    use super::*;
+
+    /// 停更因子重算（2026-09-05 数据已补齐后的管道触发）：
+    /// 跑全部启用路由覆盖 2026-05-01 以来的因子缺口。
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api stale_factor_recompute -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn stale_factor_recompute() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        // HTTP 自调用需要服务端口——直接用容器跑着的 8080
+        std::env::set_var("PORT", "8080");
+        trigger_v24_backfill_routes(&db, "20260501", "20260905").await;
+        println!("[recompute] 全部路由已触发（异步后台执行，等几分钟后查因子新鲜度）");
+    }
+}
+
+#[cfg(test)]
+mod forecast_daily_tests {
+    use super::*;
+
+    /// forecast 表补同步（2026-09-05：数据断在 4-29，充值 token 有权限）。
+    /// 运行：TUSHARE_TOKEN_ALT=<token> cargo test --release -p quant-api forecast_backfill -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn forecast_backfill_apr_to_now() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT（充值 token）");
+        let mut cfg = quant_data::tushare::client::TushareConfig::default();
+        cfg.token = tok;
+        cfg.rate_limit_per_minute = 240;
+        let tushare = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
+        let empty: Vec<String> = vec![];
+        // 按月分块（forecast 单次上限同量级）
+        let windows = [
+            ("20260429", "20260531"), ("20260601", "20260630"),
+            ("20260701", "20260731"), ("20260801", "20260831"),
+            ("20260901", "20260905"),
+        ];
+        for (s, e) in windows {
+            let n = quant_data::sync::sync_forecast(&db, &tushare, &empty, s, e, &format!("dv-fc-bf-{}", s))
+                .await.unwrap_or_else(|err| { println!("[fc-bf] {}..{} err: {}", s, e, err); 0 });
+            println!("[fc-bf] {}..{} rows={}", s, e, n);
+        }
+    }
 }

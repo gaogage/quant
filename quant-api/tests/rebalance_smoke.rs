@@ -73,11 +73,11 @@ async fn v24_margin_account_load_select_has_alias_columns() {
         .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
     let db = PgPool::connect(&url).await.expect("DB 连接成功");
 
-    // 取任意 v24 杠杆账号
+    // 取任意 v24 系列杠杆账号（版本号随账户代际有 v24 / v24_lev 等变体）
     let account_id: String = sqlx::query_scalar(
         "SELECT paper_account_id FROM paper_account \
          WHERE status = 'active' AND account_type = 'simulated' \
-         AND strategy_version_id = 'v24' AND leverage_enabled = true LIMIT 1",
+         AND strategy_version_id LIKE 'v24%' AND leverage_enabled = true LIMIT 1",
     )
     .fetch_one(&db)
     .await

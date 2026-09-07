@@ -337,6 +337,18 @@ pub async fn update_current_nav(db: &PgPool, account_id: &str) -> Result<f64, St
     //   max_drawdown_pct = GREATEST(旧max_dd, 当前回撤) -- 当前回撤=(新peak-新nav)/新peak
     // SET 表达式中的 peak_nav/max_drawdown_pct 引用 UPDATE 前的旧值（PostgreSQL 语义），
     // calc.nav 由 paper_position 聚合 + cash - margin 计算得出（均为本语句未修改的列，安全）。
+    //
+    // NAV 日度合理性检查（2026-09-07 加，价格源不一致 BUG 防御）：
+    // 单日 NAV 变化 > 20% 时告警（分散组合+1.5x 杠杆下单日物理极限 ~10-15%，
+    // >20% 几乎必然是价格源错配/计算错误，如 2026-07-13 的 raw→adjusted 切换）。
+    let prev_nav: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(current_nav, 0)::double precision FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0.0);
+
     let nav: f64 = sqlx::query_scalar(
         "UPDATE paper_account SET
          current_nav = calc.nav,
@@ -361,6 +373,20 @@ pub async fn update_current_nav(db: &PgPool, account_id: &str) -> Result<f64, St
     .fetch_one(db)
     .await
     .map_err(|e| format!("update_nav: {}", e))?;
+
+    // NAV 合理性告警：>20% 单日变化
+    if prev_nav > 0.0 && nav > 0.0 {
+        let change_pct = (nav / prev_nav - 1.0).abs() * 100.0;
+        if change_pct > 20.0 {
+            tracing::error!(
+                account = account_id,
+                prev_nav = prev_nav,
+                new_nav = nav,
+                change_pct = change_pct,
+                "⚠️ NAV 单日变化 >20%——疑似价格源错配或计算错误（分散组合+杠杆的物理极限 ~15%）"
+            );
+        }
+    }
     Ok(nav)
 }
 

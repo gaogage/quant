@@ -67,6 +67,15 @@ pub struct StrategyConfig {
     pub slippage_pct: f64,
     #[serde(default = "default_mvo_objective")]
     pub mvo_objective: String,
+    /// 分配模式："mvo"(默认,动态) | "fixed"(固定权重,用 default_weights,绕过 MVO)。
+    /// 2026-09-07 突破性发现：MVO 动量 μ 在有风控 sleeve 上是负贡献，
+    /// 固定 30%A+70%ETF 比 MVO +3.4pp 年化/+0.34 Sharpe/-8.3pp 回撤。
+    #[serde(default)]
+    pub allocation_mode: Option<String>,
+    /// μ 估计方法："momentum"(默认,hist+mom 混合) | "risk_adjusted"(μ=Sharpe×σ_target)。
+    /// 2026-09-04 预注册实验：动量 μ 惩罚防御型资产（四次否决同构根因）。
+    #[serde(default)]
+    pub mu_estimation: Option<String>,
     // regime policy 选择（阶段1.2 配置化）。
     // None/"trailing_12m" → 旧 trailing-12m 单档(deep_bear_threshold/exposure)。
     // "bwgv2"/"bear_window_guard_v2" → bear_window_guard_v2 多档(126天+3信号，前瞻分级减仓)。
@@ -180,6 +189,8 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         leverage_regime_threshold: mvo.leverage_regime_threshold,
         slippage_pct: mvo.slippage_pct,
         mvo_objective: mvo.mvo_objective.clone(),
+        allocation_mode: mvo.allocation_mode.clone(),
+        mu_estimation: mvo.mu_estimation.clone(),
         regime_policy: mvo.regime_policy.clone(),
         regime_bear_return_threshold: mvo.regime_bear_return_threshold,
     })
@@ -207,6 +218,8 @@ mod tests {
             strategy_type: StrategyType::Composite,
             mvo: Some(MvoParams {
                 vol_target: 0.2,
+                allocation_mode: None,
+                mu_estimation: None,
                 leverage_cap: 2.5,
                 leverage_floor: 1.0,
                 default_weights: vec![0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],
@@ -423,6 +436,8 @@ mod tests {
             strategy_type: StrategyType::Composite,
             mvo: Some(MvoParams {
                 vol_target: 0.2,
+                allocation_mode: None,
+                mu_estimation: None,
                 leverage_cap: 2.5,
                 leverage_floor: 1.0,
                 default_weights: vec![0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],

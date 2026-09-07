@@ -8652,3 +8652,168 @@ mod tests {
         assert!(ld.is_some(), "518880.SH list_date 应被回填");
     }
 }
+
+/// 阶段3-方向A：候选扩展 ETF 日线同步（资产池扩充审计用，一次性）。
+/// 8 个标的 × 2014 起年分块，限流下约 3 分钟。
+/// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+///       cargo test --release -p quant-data sync_candidate_etf_pool -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn sync_candidate_etf_pool() {
+    let db = sqlx::PgPool::connect(
+        &std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+    )
+    .await
+    .expect("db");
+    let tushare = crate::tushare::client::TushareClient::from_env().expect("tushare env");
+
+    // 按资产类别先验选池（德国/法国/日经/恒生/恒生科技/恒生国企/可转债/短融），
+    // 禁止按历史收益排序选择（PIT 纪律，见阶段3方向探索文档）
+    let symbols: Vec<String> = [
+        "513030.SH", // 德国 DAX（补 2026-06 断点）
+        "513080.SH", // 法国 CAC40
+        "513520.SH", // 日经 225（补 2023-01 断点）
+        "513660.SH", // 恒生指数
+        "513180.SH", // 恒生科技
+        "510900.SH", // 恒生国企
+        "511380.SH", // 可转债（补到最新）
+        "511360.SH", // 短融
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    let n = sync_fund_daily(&db, &tushare, &symbols, "20140101", "20260903", "dv-etf-pool-expand-20260903")
+        .await
+        .expect("sync fund daily");
+    println!("同步完成，rows = {}", n);
+    assert!(n > 0, "应同步到数据");
+}
+
+/// 停更数据源补同步（2026-09-05 绩效生命线修复）：
+/// fin_indicator(5-15断)/dividend(5-14断)/share_float(6-16断) 用充值 token 补缺口。
+/// 运行：cargo test --release -p quant-data backfill_stale_sources -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn backfill_stale_sources() {
+    let db = sqlx::PgPool::connect(
+        &std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+    )
+    .await
+    .expect("db");
+    // 充值 token（ab9f...）——现行 token 无这三接口权限
+    let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
+    let mut cfg = crate::tushare::client::TushareConfig::default();
+    cfg.token = tok;
+    cfg.rate_limit_per_minute = 240; // 8000 积分档
+    let tushare = crate::tushare::client::TushareClient::new(cfg).expect("client");
+
+    // 全市场活跃股票
+    let symbols: Vec<String> = sqlx::query_scalar(
+        "SELECT symbol FROM market_stock WHERE list_status='L' ORDER BY symbol",
+    )
+    .fetch_all(&db)
+    .await
+    .expect("symbols");
+    println!("[backfill] symbols = {}", symbols.len());
+
+    // 1) 财务指标（因子族根）：sync_financial_data 全量拉（内部增量）
+    let (stmt, ind) = sync_financial_data(&db, &tushare, &symbols)
+        .await
+        .expect("fina");
+    println!("[backfill] financial: stmt={} ind={}", stmt, ind);
+
+    // 2) 分红（5-14 断）
+    let n = sync_dividend(&db, &tushare, &symbols, "20260501", "20260905", "dv-dividend-backfill-20260905")
+        .await.expect("dividend");
+    println!("[backfill] dividend rows={}", n);
+
+    // 3) 限售解禁（6-16 断）
+    let n = sync_share_float(&db, &tushare, &symbols, "20260601", "20260905", "dv-float-backfill-20260905")
+        .await.expect("float");
+    println!("[backfill] share_float rows={}", n);
+}
+
+/// share_float 尾段按月切块补齐（2026-09-05）：深翻页(offset 超限)触发 50101，
+/// 切月窗避开。幂等 upsert，已存行无害。
+/// 运行：TUSHARE_TOKEN_ALT=<充值token> cargo test --release -p quant-data share_float_monthly -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn share_float_monthly_backfill() {
+    let db = sqlx::PgPool::connect(
+        &std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+    )
+    .await
+    .expect("db");
+    let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
+    let mut cfg = crate::tushare::client::TushareConfig::default();
+    cfg.token = tok;
+    cfg.rate_limit_per_minute = 240;
+    let tushare = crate::tushare::client::TushareClient::new(cfg).expect("client");
+
+    let empty: Vec<String> = vec![];
+    let windows = [
+        ("20260616", "20260622"),
+        ("20260623", "20260630"),
+    ];
+    for (s, e) in windows {
+        let n = sync_share_float(&db, &tushare, &empty, s, e,
+            &format!("dv-float-mb-{}", s))
+            .await
+            .unwrap_or_else(|err| { println!("[float-mb] {}..{} err: {}", s, e, err); 0 });
+        println!("[float-mb] {}..{} rows={}", s, e, n);
+    }
+}
+
+/// share_float 超限窗口按 ann_date 逐日补齐（2026-09-05）：
+/// offset 全局上限 10 万，超限窗口（6-23~6-30 单周 >10 万行）改按公告日切分。
+#[tokio::test]
+#[ignore]
+async fn share_float_by_anndate() {
+    let db = sqlx::PgPool::connect(
+        &std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+    )
+    .await
+    .expect("db");
+    let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
+    let mut cfg = crate::tushare::client::TushareConfig::default();
+    cfg.token = tok;
+    cfg.rate_limit_per_minute = 240;
+    let client = crate::tushare::client::TushareClient::new(cfg).expect("client");
+    use chrono::NaiveDate;
+    let d0 = NaiveDate::from_ymd_opt(2026, 6, 23).unwrap();
+    let d1 = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+    let mut d = d0;
+    let mut total = 0usize;
+    while d <= d1 {
+        let ann = d.format("%Y%m%d").to_string();
+        let mut offset = 0usize;
+        loop {
+            let resp = client.share_float(None, Some(&ann), None, None, Some(2000), Some(offset))
+                .await.expect("api");
+            let maps = resp.data.map(|x| x.to_maps()).unwrap_or_default();
+            let n = maps.len();
+            if n == 0 { break; }
+            let rows: Vec<_> = maps.iter().filter_map(share_float_row_from_map)
+                .filter(|r| r.float_date >= d0 && r.float_date <= d1).collect();
+            if !rows.is_empty() {
+                let dv = format!("dv-float-ad-{}", ann);
+                // FK 前置注册（quant-adj-factor-backfill-fk-silent-fail 已知坑）
+                let _ = crate::repository::create_data_version(
+                    &db, &dv, "share_float ann_date backfill", "tushare",
+                    &["market_stock_share_float"], d0, d1).await;
+                total += crate::repository::upsert_share_float_batch(&db, &rows, &dv, "tushare")
+                    .await.expect("upsert");
+            }
+            if n < 2000 { break; }
+            offset += 2000;
+        }
+        println!("[float-ad] ann={} 累计入库={}", ann, total);
+        d += chrono::Duration::days(1);
+    }
+    println!("[float-ad] 完成，6-23~6-30 窗口累计 {}", total);
+}

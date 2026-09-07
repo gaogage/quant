@@ -1307,4 +1307,174 @@ mod tests {
         assert_eq!(output.name, "amt_intensity_3d");
         assert!((output.values[0].value - 3.0).abs() < 0.001);
     }
+
+    // ─── 未覆盖因子的方向性特征测试 ─────────────────────────────
+
+    fn make_input(bars: Vec<DailyBar>) -> FactorInput {
+        let mut m = HashMap::new();
+        let symbol = bars[0].symbol.clone();
+        let dates = bars.iter().map(|b| b.trade_date).collect();
+        m.insert(symbol, bars);
+        FactorInput { bars: m, trade_dates: dates }
+    }
+
+    #[test]
+    fn test_rsi_factor_extremes() {
+        let factor = RSIFactor::new(5);
+        // 几乎全涨（仅一次微跌保证 avg_loss>0 有输出点）：RSI 归一化后应≈1
+        let up = make_bars(
+            "R1",
+            &[10.0, 10.5, 11.0, 10.99, 12.0, 12.5, 13.0],
+            &[1000.0; 7],
+        );
+        let out = factor.compute(&make_input(up));
+        assert_eq!(out.name, "rsi_5d");
+        assert!(!out.values.is_empty());
+        assert!(out.values.last().unwrap().value > 0.9, "近全涨 RSI 应≈1");
+
+        // 全下跌：avg_gain=0 → RSI=0，归一化后≈0
+        let down = make_bars(
+            "R2",
+            &[13.0, 12.5, 12.0, 11.5, 11.0, 10.5, 10.0],
+            &[1000.0; 7],
+        );
+        let out = factor.compute(&make_input(down));
+        assert!(out.values.last().unwrap().value < 0.05, "全跌 RSI 应≈0");
+
+        // 数据不足：无输出
+        let short = make_bars("R3", &[10.0, 10.5], &[100.0; 2]);
+        let out = factor.compute(&make_input(short));
+        assert!(out.values.is_empty());
+    }
+
+    #[test]
+    fn test_bband_position_extremes() {
+        let factor = BBandPositionFactor::new(5);
+        // 稳步上行后跳涨：收盘应高于上轨 → 位置 > 1 或接近上界
+        let mut closes = vec![10.0, 10.1, 10.2, 10.3, 10.4, 10.5];
+        closes.push(11.5); // 远超均值+2σ
+        let bars = make_bars("B1", &closes, &[1000.0; 7]);
+        let out = factor.compute(&make_input(bars));
+        assert_eq!(out.name, "bb_pos_5d");
+        assert!(out.values.last().unwrap().value > 0.8, "突破上轨位置应高");
+
+        // 深跌破下轨：位置 < 0
+        let mut closes2 = vec![10.0, 9.9, 9.8, 9.7, 9.6, 9.5];
+        closes2.push(8.5);
+        let bars2 = make_bars("B2", &closes2, &[1000.0; 7]);
+        let out2 = factor.compute(&make_input(bars2));
+        assert!(out2.values.last().unwrap().value < 0.2, "跌破下轨位置应低");
+    }
+
+    #[test]
+    fn test_atr_factor_scales_with_range() {
+        let factor = ATRFactor::new(5);
+        // 窄幅 vs 宽幅（make_bars 的 high/low = close±2%/±... 固定比例，用价格水平控制）
+        // 高波动序列：人为构造大波动的 pre_close gap 无法通过 make_bars，改用方向断言
+        let calm = make_bars(
+            "T1",
+            &[10.0, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6],
+            &[1000.0; 7],
+        );
+        let wild = make_bars(
+            "T2",
+            &[10.0, 12.0, 9.0, 13.0, 8.0, 12.5, 9.5],
+            &[1000.0; 7],
+        );
+        let calm_out = factor.compute(&make_input(calm));
+        let wild_out = factor.compute(&make_input(wild));
+        assert_eq!(wild_out.name, "atr_5d");
+        assert!(
+            wild_out.values.last().unwrap().value > calm_out.values.last().unwrap().value,
+            "大波动 ATR 应大于窄幅"
+        );
+        assert!(wild_out.values.last().unwrap().value > 0.0);
+    }
+
+    #[test]
+    fn test_amplitude_factor_positive_and_scales() {
+        let factor = AmplitudeFactor::new(5);
+        // make_bars 固定 high/low = close*1.02/0.98 → 振幅约 4%，与价格水平无关但为正
+        let bars = make_bars(
+            "A1",
+            &[10.0, 10.5, 11.0, 11.5, 12.0, 12.5],
+            &[1000.0; 6],
+        );
+        let out = factor.compute(&make_input(bars));
+        assert_eq!(out.name, "amp_5d");
+        let last = out.values.last().unwrap().value;
+        assert!(last > 0.0 && last < 1.0, "振幅应在 (0,1) 区间，实际 {}", last);
+    }
+
+    #[test]
+    fn test_vol_price_corr_sign() {
+        let factor = VolPriceCorrFactor::new(5);
+        // 价涨量增 → 正相关
+        let prices: Vec<f64> = (0..8).map(|i| 10.0 + i as f64 * 0.5).collect();
+        let volumes: Vec<f64> = (0..8).map(|i| 1000.0 + i as f64 * 100.0).collect();
+        let bars = make_bars("C1", &prices, &volumes);
+        let pos = factor.compute(&make_input(bars));
+        assert_eq!(pos.name, "vp_corr_5d");
+        assert!(
+            pos.values.last().unwrap().value > 0.0,
+            "价量同向应正相关，实际 {}",
+            pos.values.last().unwrap().value
+        );
+
+        // 价涨量减 → 负相关
+        let volumes_down: Vec<f64> = (0..8).map(|i| 3000.0 - i as f64 * 200.0).collect();
+        let bars2 = make_bars("C2", &prices, &volumes_down);
+        let neg = factor.compute(&make_input(bars2));
+        assert!(
+            neg.values.last().unwrap().value < 0.0,
+            "价量背离应负相关，实际 {}",
+            neg.values.last().unwrap().value
+        );
+    }
+
+    #[test]
+    fn test_skewness_factor_direction() {
+        let factor = SkewnessFactor::new(10);
+        // 上涨慢、偶发大跌 → 左偏（负偏度）；上涨慢、偶发大涨 → 右偏（正偏度）
+        let left_tail = vec![
+            10.0, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4, 11.6, 11.8, 9.0, 11.9,
+        ];
+        let right_tail = vec![
+            10.0, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4, 11.6, 11.8, 13.8, 11.9,
+        ];
+        let out_l = factor.compute(&make_input(make_bars("K1", &left_tail, &[100.0; 12])));
+        let out_r = factor.compute(&make_input(make_bars("K2", &right_tail, &[100.0; 12])));
+        assert_eq!(out_r.name, "skew_10d");
+        let sl = out_l.values.last().unwrap().value;
+        let sr = out_r.values.last().unwrap().value;
+        assert!(sl < sr, "左尾分布偏度({})应小于右尾({})", sl, sr);
+        assert!(sr > 0.0, "右尾偏度应为正，实际 {}", sr);
+        assert!(sl < 0.0, "左尾偏度应为负，实际 {}", sl);
+    }
+
+    #[test]
+    fn test_max_drawdown_factor_direction() {
+        let factor = MaxDrawdownFactor::new(10);
+        // 单边上涨 → 无回撤，值≈0
+        let up = make_bars(
+            "M1",
+            &[10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0, 15.5],
+            &[100.0; 12],
+        );
+        let out = factor.compute(&make_input(up));
+        assert_eq!(out.name, "maxdd_10d");
+        assert!(out.values.last().unwrap().value.abs() < 1e-9, "单边涨无回撤");
+
+        // 先涨后崩 40% → 回撤接近 -0.4
+        let crash = make_bars(
+            "M2",
+            &[10.0, 11.0, 12.0, 13.0, 14.0, 12.0, 9.5, 8.4, 8.6, 8.8, 9.0, 9.2],
+            &[100.0; 12],
+        );
+        let out2 = factor.compute(&make_input(crash));
+        let dd = out2.values.last().unwrap().value;
+        assert!(dd < -0.35, "崩盘回撤应≈-40%，实际 {}", dd);
+        assert!(dd > -0.45);
+    }
+
 }

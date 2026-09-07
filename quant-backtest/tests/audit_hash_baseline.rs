@@ -19,7 +19,9 @@ use quant_backtest::db_perf_baseline::{run_db_perf_baseline, DbPerfBaselineConfi
 /// 2026-08-02 更新：非线性冲击成本（平方根模型 coeff=0.05）+ 沪市过户费（万0.1），
 /// 成本模型改变使 equity_curve 变化，signal 不变（成本不影响信号生成）。
 // 2026-08-20 更新:participation_rate_for 千元单位 bug 修复(见 scripts/audit_hash_baseline.json changelog)
-const BASELINE_EQUITY_HASH: &str = "901d295ecd88256c3b4c431137469355dedf4bf21bee26d6ad5a992d9c3dbb14";
+// 2026-09-03 更新:cap_order_amount 千元单位 bug 修复(f01af33 同根因另一半,参与率
+// cap 被压小 1000 倍致低流动性买单遭整手规则跳过),equity 变化,signal 不变
+const BASELINE_EQUITY_HASH: &str = "fba8f638d6b4d87e1fb3125732a23b357087ef5b5859688af75ae3145ae71bb6";
 const BASELINE_SIGNAL_HASH: &str = "d1ee0c46975b02bded46ca5dc44b39d4ae19fbdd90b4909f7aa3a3de83d6c95b";
 
 /// 跑一个最小规模 DB 回测,验证 hash 产出链路通畅 + 确定性。

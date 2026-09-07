@@ -80,6 +80,10 @@ impl Default for BacktestMetrics {
 }
 
 impl BacktestMetrics {
+    /// 单位口径（2026-09-04 澄清）：annual_return_pct / max_drawdown_pct /
+    /// total_return_pct / win_rate_pct 等字段的值是**小数比例**（0.11 = 11%），
+    /// 字段名 _pct 仅表语义不含单位换算——消费方显示时需 ×100。
+    /// 此前两轮实验曾把 0.11 误读为 0.11% 导致"metrics 不可信"的误判。
     pub fn compute(nav: &[Decimal], bm_nav: &[Decimal], initial_capital: Decimal) -> Self {
         let n = nav.len();
         if n < 2 {

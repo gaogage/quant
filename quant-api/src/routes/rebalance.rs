@@ -44,17 +44,20 @@ pub struct Position {
     pub symbol: String,
     pub quantity: Decimal,
     pub market_value: Decimal,
+    /// 截面组合权重（占被复制 sleeve 组合总值比例，含现金语义：
+    /// regime 减仓期各票 weight 同步缩小，权重和 < 1）。
+    pub weight: Decimal,
 }
 
 /// 统一选股:读指定 task_id 的 backtest_position 当日截面。
-/// task_id 来源:实盘=run-factor 当日产生;回放=rs 的 a_share asset equity_curve_task_id(调用方传入)。
+/// task_id 来源:实盘=run-factor 当日产生;回放=rs 的 a_share asset equity_curve_task_id(由调用方传入)。
 pub async fn select_positions(
     db: &PgPool,
     task_id: &str,
     date: NaiveDate,
 ) -> Result<Vec<Position>, String> {
-    let rows = sqlx::query_as::<_, (String, Decimal, Decimal)>(
-        "SELECT symbol, COALESCE(quantity,0), COALESCE(market_value,0)
+    let rows = sqlx::query_as::<_, (String, Decimal, Decimal, Decimal)>(
+        "SELECT symbol, COALESCE(quantity,0), COALESCE(market_value,0), COALESCE(weight,0)
          FROM backtest_position
          WHERE task_id = $1 AND position_date = $2
            AND quantity > 0 AND market_value > 0
@@ -67,10 +70,11 @@ pub async fn select_positions(
     .map_err(|e| format!("select_positions: {}", e))?;
     Ok(rows
         .into_iter()
-        .map(|(symbol, quantity, market_value)| Position {
+        .map(|(symbol, quantity, market_value, weight)| Position {
             symbol,
             quantity,
             market_value,
+            weight,
         })
         .collect())
 }
@@ -232,16 +236,11 @@ pub async fn rebalance_account(
     let total_stock_mv: Decimal = positions.iter().map(|p| p.market_value).sum();
     let a_share_capital =
         current_nav * Decimal::from_f64_retain(mvo_a_pct).unwrap_or(Decimal::ZERO);
-    let base_scale = if total_stock_mv > Decimal::ZERO {
-        a_share_capital / total_stock_mv
-    } else {
-        Decimal::ZERO
-    };
-
-    // 4. 杠杆倍数:margin 路径算 vol_target/固定倍数,cash 路径恒 ONE。
-    // Step 5d:杠杆计算提取为 compute_leverage_mult,cash 路径 leverage_enabled=false
-    // 时函数内返回 ONE(编译期可通过 Account<CashAccount> 不调此函数进一步强化,留后续)。
-    let leverage_mult = compute_leverage_mult(
+    // 复制目标量基于截面 weight（占被复制 sleeve 组合总值比例），不再按
+    // market_value 归一拉满——regime 减仓曲线（如 drawdown_control）的截面
+    // 权重和 < 1，拉满归一会抹掉减仓语义并放大风险敞口（2026-09-04 v28dd
+    // 回放 -80% 事故根因：敞口放大击穿维保触发强平记账 bug）。
+    let leverage_d = compute_leverage_mult(
         db,
         account_id,
         &sc,
@@ -260,7 +259,20 @@ pub async fn rebalance_account(
     } else {
         false
     };
-    let scale = base_scale * leverage_mult;
+
+    // 融资授信预算池（账户级业务语义，2026-09-04 重设计）：
+    // margin_amount 是融资余额，授信上限 = NAV × (杠杆-1)（1.5x → 0.5×NAV）。
+    // 可用买入资金 = cash + 剩余授信；卖出回流预算池；A股与 ETF 两段共享。
+    // 根治逐笔 fill 级"cash 不够就无限借"的融资膨胀——对账实锤 margin 可累积
+    // 至 NAV 的 1.9 倍（授信上限的 3.8 倍），维保被击穿后触发强平连锁。
+    let (acct_cash, acct_margin): (Decimal, Decimal) =
+        sqlx::query_as("SELECT COALESCE(cash,0), COALESCE(margin_amount,0) FROM paper_account WHERE paper_account_id=$1")
+            .bind(account_id)
+            .fetch_one(db)
+            .await
+            .map_err(|e| format!("credit budget read: {}", e))?;
+    let credit_cap = (current_nav * (leverage_d - Decimal::ONE)).max(Decimal::ZERO);
+    let mut buy_budget = acct_cash + (credit_cap - acct_margin).max(Decimal::ZERO);
 
     // 6. 读当前持仓(增量调仓基础)
     let current_positions: HashMap<String, (Decimal, Decimal)> = sqlx::query_as::<
@@ -309,7 +321,16 @@ pub async fn rebalance_account(
             continue;
         }
         target_symbols.insert(p.symbol.clone());
-        let target_qty = p.quantity * scale;
+        // 目标数量 = A股资本 × 截面 weight × 杠杆 / 现价（weight 含减仓语义；
+        // weight=0 的历史截面兜底用市值占比，避免退化成 0 仓）
+        let weight_d = if p.weight > Decimal::ZERO {
+            p.weight
+        } else if total_stock_mv > Decimal::ZERO {
+            p.market_value / total_stock_mv * Decimal::from_f64_retain(mvo_a_pct).unwrap_or(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
+        let target_qty = a_share_capital * weight_d * leverage_d / price;
         let cur_qty = current_positions
             .get(&p.symbol)
             .map(|(q, _)| *q)
@@ -319,7 +340,7 @@ pub async fn rebalance_account(
             // |delta| < 0.01,忽略
             continue;
         }
-        let (side, qty) = if delta > Decimal::ZERO {
+        let (side, mut qty) = if delta > Decimal::ZERO {
             // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
             (
                 "buy",
@@ -388,9 +409,31 @@ pub async fn rebalance_account(
                 continue;
             }
         }
-        let target_value = qty * price;
+        let mut target_value = qty * price;
         if side == "buy" && target_value < Decimal::ONE {
             continue;
+        }
+        // 授信预算：买入不得超预算池（cash+剩余授信），超出则缩量到预算内整手；
+        // 卖出回款回流预算池（供后续买入 pass 使用）。
+        if side == "buy" {
+            if buy_budget < target_value {
+                let allowed_qty = quant_common::trading_rules::round_down_to_lot(
+                    buy_budget / price,
+                    quant_common::trading_rules::LOT_SIZE,
+                );
+                if allowed_qty <= Decimal::ZERO {
+                    warn!(
+                        "[rebalance] 授信预算不足，跳过买入 {} 需 {:.0} 池余 {:.0}",
+                        p.symbol, target_value, buy_budget
+                    );
+                    continue;
+                }
+                qty = allowed_qty;
+                target_value = qty * price;
+            }
+            buy_budget -= target_value;
+        } else {
+            buy_budget += target_value;
         }
         let trade = crate::routes::trading::PlannedTrade {
             account_id: account_id.to_string(),
@@ -552,7 +595,7 @@ pub async fn rebalance_account(
         // 修复前:alloc_amount = current_nav × alloc_pct(不放大)→ 杠杆只对 A股生效,总 nav 几乎不变。
         let alloc_amount = current_nav
             * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO)
-            * leverage_mult;
+            * leverage_d;
         if alloc_amount <= Decimal::ZERO {
             continue;
         }
@@ -585,7 +628,7 @@ pub async fn rebalance_account(
         if delta.abs() < Decimal::new(1, 2) {
             continue;
         }
-        let (side, qty) = if delta > Decimal::ZERO {
+        let (side, mut qty) = if delta > Decimal::ZERO {
             // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
             (
                 "buy",
@@ -617,7 +660,28 @@ pub async fn rebalance_account(
         if (pass == 0) != (side == "sell") {
             continue;
         }
-        let target_value = qty * price;
+        let mut target_value = qty * price;
+        // 授信预算（与 A 股段共享同一池）：买入缩量到预算内整手，卖出回流。
+        if side == "buy" {
+            if buy_budget < target_value {
+                let allowed_qty = quant_common::trading_rules::round_down_to_lot(
+                    buy_budget / price,
+                    quant_common::trading_rules::LOT_SIZE,
+                );
+                if allowed_qty <= Decimal::ZERO {
+                    warn!(
+                        "[rebalance] 授信预算不足，跳过 ETF 买入 {} 需 {:.0} 池余 {:.0}",
+                        etf_symbol, target_value, buy_budget
+                    );
+                    continue;
+                }
+                qty = allowed_qty;
+                target_value = qty * price;
+            }
+            buy_budget -= target_value;
+        } else {
+            buy_budget += target_value;
+        }
         let trade = crate::routes::trading::PlannedTrade {
             account_id: account_id.to_string(),
             symbol: etf_symbol.to_string(),
@@ -839,9 +903,13 @@ async fn force_liquidation(
                 }
                 // 卖出后 cash += sell_qty*sell_price,主动还款降低 margin
                 let repay_amount = sell_qty * sell_price;
+                // 实际还款额 = min(卖款, cash, margin)：卖款进 cash 后从这里还。
+                // 此前 cash/margin 各自 GREATEST(x-$2,0) 钳 0，cash 不足时差额蒸发
+                // ——2022-01-14 回放单日 -83% 的直接成因（强平越还越少的假还款）。
                 let _ = sqlx::query(
-                    "UPDATE paper_account SET cash = GREATEST(cash - $2, 0),
-                         margin_amount = GREATEST(margin_amount - $2, 0)
+                    "UPDATE paper_account SET
+                         cash = cash - LEAST($2, cash, margin_amount),
+                         margin_amount = margin_amount - LEAST($2, cash, margin_amount)
                      WHERE paper_account_id = $1",
                 )
                 .bind(account_id)
@@ -1351,6 +1419,8 @@ mod tests {
     #[test]
     fn test_sc_slippage_pct_reads_field() {
         let sc = StrategyConfig {
+            allocation_mode: None,
+            mu_estimation: None,
             strategy_id: "test".into(),
             name: "test".into(),
             etf_symbols: vec![],

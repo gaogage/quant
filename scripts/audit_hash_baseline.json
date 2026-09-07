@@ -1,7 +1,7 @@
 {
   "_comment": "DDD 重构 audit hash 金标准(Step 0 安全网)。每步重构 MR 必须保证此 hash 不变,证明回测行为等价。变更需 MR 说明原因 + review 确认。",
-  "_generated_at": "2026-08-20",
-  "_changelog": "2026-08-20: 修复 participation_rate_for 千元单位 bug——bar 表 amount 为 Tushare 千元单位,order_amount 为元,此前直接相除使参与率虚大 1000 倍(小盘股虚算 300%+,单边冲击成本 9%),所有含成本回测被污染。修复后统一换算到元。equity hash 更新,signal 不变(成本不影响信号)。",
+  "_generated_at": "2026-09-03",
+  "_changelog": "2026-09-03: 修复 cap_order_amount 千元单位 bug(f01af33 同一根因的另一半)——参与率上限 cap 此前用 bar 表 amount(Tushare 千元单位)直接乘 max_rate,被压小 1000 倍,低流动性标的买单被砍至不足一手后遭整手规则全部跳过。修复后与 participation_rate_for 同口径换算到元。equity hash 更新,signal 不变(订单截断不影响信号生成)。2026-08-20: 修复 participation_rate_for 千元单位 bug——bar 表 amount 为 Tushare 千元单位,order_amount 为元,此前直接相除使参与率虚大 1000 倍(小盘股虚算 300%+,单边冲击成本 9%),所有含成本回测被污染。修复后统一换算到元。equity hash 更新,signal 不变(成本不影响信号)。",
   "_config": {
     "scenario": "phase2_db_runner_smoke",
     "trading_days": 40,
@@ -12,6 +12,6 @@
     "end_date": "2024-12-31",
     "benchmark": "000300.SH"
   },
-  "equity_curve_sha256": "901d295ecd88256c3b4c431137469355dedf4bf21bee26d6ad5a992d9c3dbb14",
+  "equity_curve_sha256": "fba8f638d6b4d87e1fb3125732a23b357087ef5b5859688af75ae3145ae71bb6",
   "signal_hash_sha256": "d1ee0c46975b02bded46ca5dc44b39d4ae19fbdd90b4909f7aa3a3de83d6c95b"
 }

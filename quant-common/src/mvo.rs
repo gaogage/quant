@@ -101,14 +101,16 @@ fn sym_eigen_decomp(matrix: &Array2<f64>) -> EigenDecomp {
 
         eigvals = new_vals;
 
-        // Update eigenvectors: V' = V * J
+        // Update eigenvectors: V' = V * J（与上方 A' = J^T·A·J 的 J 同一约定，
+        // J(p,q)=+s, J(q,p)=-s。此前符号相反（V·J^T）使特征向量旋转方向错误，
+        // 谱收缩在错误基上进行）
         let mut new_vecs = Array2::zeros((n, n));
         for i in 0..n {
             for j in 0..n {
                 if j == p {
-                    new_vecs[(i, j)] = c * eigvecs[(i, p)] + s * eigvecs[(i, q)];
+                    new_vecs[(i, j)] = c * eigvecs[(i, p)] - s * eigvecs[(i, q)];
                 } else if j == q {
-                    new_vecs[(i, j)] = -s * eigvecs[(i, p)] + c * eigvecs[(i, q)];
+                    new_vecs[(i, j)] = s * eigvecs[(i, p)] + c * eigvecs[(i, q)];
                 } else {
                     new_vecs[(i, j)] = eigvecs[(i, j)];
                 }
@@ -351,7 +353,18 @@ fn random_feasible_weights(
     max_single: f64,
     rng: &mut impl Rng,
 ) -> Vec<f64> {
-    loop {
+    // 可行性预检：min_stock > max_single 或 max_single·n < 1 时约束集为空，
+    // 无条件重采样会无限循环（配置错误会让 GA 初始化挂死）。回退等权，
+    // 由调用方后续 enforce_constraints 尽力钳制。
+    if min_stock > max_single || max_single * (n as f64) < 1.0 - 1e-9 {
+        let mut w = vec![1.0 / n as f64; n];
+        enforce_constraints(&mut w, min_stock.min(max_single), max_single);
+        return w;
+    }
+    // 有限尝试：随机采样多数情况几次内命中；失败则等权回退。
+    // 返回前统一 enforce：采样内 w[0]=max(w0,min_stock) 后归一化会使 w[0]
+    // 略低于 min_stock（sum>1 摊薄），enforce_constraints 补齐下限语义。
+    for _ in 0..1000 {
         let mut w = random_simplex(n, rng);
         // Enforce min_stock on first asset (A股)
         w[0] = w[0].max(min_stock);
@@ -368,8 +381,12 @@ fn random_feasible_weights(
         if w.iter().any(|&wi| wi > max_single + 1e-6) {
             continue;
         }
+        enforce_constraints(&mut w, min_stock, max_single);
         return w;
     }
+    let mut w = vec![1.0 / n as f64; n];
+    enforce_constraints(&mut w, min_stock, max_single);
+    w
 }
 
 /// Tournament selection: pick k random individuals, return the best.
@@ -614,8 +631,9 @@ fn ga_optimize_with_params(
                 -1.0 - (target - port_mu)
             }
         } else {
-            // MaxSharpe mode
-            (port_mu - RISK_FREE) / port_var.sqrt()
+            // MaxSharpe mode。cov 为月度口径，×12 年化后再开方——此前直接
+            // sqrt(月度方差) 使 sharpe 虚大 √12≈3.46 倍（排序不变，绝对值失真）。
+            (port_mu - RISK_FREE) / (port_var * 12.0).sqrt()
         }
     };
 
@@ -793,6 +811,12 @@ pub fn ewma_covariance(returns: &Array2<f64>, lambda: f64) -> Array2<f64> {
     let mut cov = Array2::zeros((n_assets, n_assets));
     if n_periods < 2 {
         return cov;
+    }
+    // lambda<=0 时权重退化为 [0,..,0,1]，归一化平方和=1 使偏差修正项 1/(1-Σw̃²)
+    // 除零产出 inf/NaN；lambda>=1 无衰减意义。回退等权样本协方差。
+    // 注意 0.0..1.0 的 Range 含 0.0，必须显式排除 lambda<=0。
+    if lambda <= 0.0 || lambda >= 1.0 {
+        return sample_covariance(returns);
     }
     let means = returns.mean_axis(Axis(0)).unwrap();
     let centered = returns - &means;
@@ -1225,7 +1249,9 @@ fn grid_search_n_asset_ext(
             if port_var <= 0.0 {
                 return;
             }
-            let sharpe = port_mu / port_var.sqrt();
+            // cov 为月度口径，×12 年化对齐 mu（此前月度 σ 使 sharpe 虚大 √12 倍，
+            // 排序不受影响——单调缩放，仅绝对值失真）。
+            let sharpe = port_mu / (port_var * 12.0).sqrt();
 
             if sharpe > *best_sharpe {
                 *best_sharpe = sharpe;
@@ -1584,5 +1610,617 @@ mod tests {
             "weights don't sum to 1: {}",
             w.sum()
         );
+    }
+
+    // ─── 协方差估计器 ───────────────────────────────────────────
+
+    #[test]
+    fn sample_covariance_single_period_falls_back_to_identity() {
+        let returns = arr2(&[[0.01, 0.02]]);
+        let cov = sample_covariance(&returns);
+        assert_eq!(cov[(0, 0)], 1.0);
+        assert_eq!(cov[(1, 1)], 1.0);
+        assert_eq!(cov[(0, 1)], 0.0);
+    }
+
+    #[test]
+    fn sample_covariance_matches_manual_computation() {
+        // 2 期 2 资产：均值各 0，n-1=1 → cov = 逐元素外积和
+        // cov00 = 0.01²+0.01² = 0.0002；cov11 = 0.02²+0.02² = 0.0008；
+        // cov01 = 0.01·(-0.02)+(-0.01)·0.02 = -0.0004
+        let returns = arr2(&[[0.01, -0.02], [-0.01, 0.02]]);
+        let cov = sample_covariance(&returns);
+        assert!((cov[(0, 0)] - 0.0002).abs() < 1e-12);
+        assert!((cov[(1, 1)] - 0.0008).abs() < 1e-12);
+        assert!((cov[(0, 1)] - (-0.0004)).abs() < 1e-12);
+        // 对称
+        assert_eq!(cov[(0, 1)], cov[(1, 0)]);
+    }
+
+    #[test]
+    fn sym_eigen_decomp_diagonal_matrix_returns_sorted_eigenvalues() {
+        let m = arr2(&[[3.0, 0.0], [0.0, 5.0]]);
+        let d = sym_eigen_decomp(&m);
+        assert!((d.eigenvalues[0] - 5.0).abs() < 1e-9);
+        assert!((d.eigenvalues[1] - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sym_eigen_decomp_known_2x2() {
+        // [[2,1],[1,2]] 特征值 3 和 1
+        let m = arr2(&[[2.0, 1.0], [1.0, 2.0]]);
+        let d = sym_eigen_decomp(&m);
+        assert!((d.eigenvalues[0] - 3.0).abs() < 1e-9);
+        assert!((d.eigenvalues[1] - 1.0).abs() < 1e-9);
+        // 重构 A = V·diag(λ)·V^T
+        let mut recon = Array2::zeros((2, 2));
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut s = 0.0;
+                for k in 0..2 {
+                    s += d.eigenvectors[(i, k)] * d.eigenvalues[k] * d.eigenvectors[(j, k)];
+                }
+                recon[(i, j)] = s;
+            }
+        }
+        assert!((recon[(0, 0)] - 2.0).abs() < 1e-9);
+        assert!((recon[(0, 1)] - 1.0).abs() < 1e-9);
+        assert!((recon[(1, 1)] - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn epanechnikov_kernel_boundaries() {
+        assert!((epanechnikov_kernel(0.0) - 0.75).abs() < 1e-12);
+        assert!((epanechnikov_kernel(1.0) - 0.0).abs() < 1e-12);
+        assert_eq!(epanechnikov_kernel(-1.5), 0.0);
+        assert_eq!(epanechnikov_kernel(2.0), 0.0);
+    }
+
+    #[test]
+    fn silverman_bandwidth_identical_values_uses_epsilon_floor() {
+        let h = silverman_bandwidth(&[1.0; 10]);
+        assert!(h > 0.0 && h < 1e-8);
+    }
+
+    #[test]
+    fn nonlinear_shrinkage_small_sample_falls_back_to_lw() {
+        // n_periods(2) < n_assets(2)+2 → 回退线性 LW
+        let returns = arr2(&[[0.01, 0.02], [-0.01, 0.01]]);
+        let nl = nonlinear_shrinkage(&returns);
+        let lw = ledoit_wolf_shrinkage(&returns);
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((nl[(i, j)] - lw[(i, j)]).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn nonlinear_shrinkage_output_symmetric_positive_diagonal() {
+        // 24 期 × 3 资产（满足 n >= N+2）
+        let returns = arr2(&[
+            [0.01, 0.02, 0.005],
+            [-0.01, 0.01, 0.003],
+            [0.02, -0.01, 0.004],
+            [0.005, 0.015, 0.002],
+            [-0.005, 0.005, 0.003],
+            [0.015, 0.01, 0.004],
+            [0.01, -0.005, 0.002],
+            [-0.02, 0.02, 0.001],
+            [0.03, 0.005, 0.005],
+            [0.01, 0.015, 0.003],
+            [0.012, -0.008, 0.006],
+            [-0.015, 0.018, 0.002],
+            [0.025, 0.002, 0.007],
+            [-0.008, -0.012, 0.001],
+            [0.018, 0.011, 0.004],
+            [0.004, 0.022, 0.005],
+            [-0.011, 0.008, 0.002],
+            [0.022, -0.002, 0.003],
+            [0.008, 0.012, 0.006],
+            [-0.018, 0.016, 0.001],
+            [0.028, 0.006, 0.008],
+            [0.006, 0.018, 0.004],
+            [-0.006, -0.004, 0.002],
+            [0.016, 0.009, 0.005],
+        ]);
+        let cov = nonlinear_shrinkage(&returns);
+        // 对称
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((cov[(i, j)] - cov[(j, i)]).abs() < 1e-9);
+            }
+        }
+        // 对角为正（方差）
+        for i in 0..3 {
+            assert!(cov[(i, i)] > 0.0, "diag[{}] = {}", i, cov[(i, i)]);
+        }
+    }
+
+    #[test]
+    fn rmt_filtered_small_sample_falls_back_to_lw() {
+        let returns = arr2(&[[0.01, 0.02], [-0.01, 0.01]]);
+        let rmt = rmt_filtered_covariance(&returns);
+        let lw = ledoit_wolf_shrinkage(&returns);
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((rmt[(i, j)] - lw[(i, j)]).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn rmt_filtered_reduces_noise_dispersion() {
+        // 一个高波动"信号"资产 + 多个低波动"噪声"资产：
+        // 过滤后噪声特征值离散度应不高于原始样本谱
+        let mut rows = Vec::new();
+        for t in 0..60 {
+            let signal = if t % 2 == 0 { 0.08 } else { -0.08 };
+            let noise_a = if t % 3 == 0 { 0.004 } else { -0.003 };
+            let noise_b = if t % 4 == 0 { -0.005 } else { 0.0035 };
+            rows.push([signal, noise_a, noise_b]);
+        }
+        let data = Array2::from(rows);
+        let sample = sample_covariance(&data);
+        let filtered = rmt_filtered_covariance(&data);
+        let disp = |m: &Array2<f64>| {
+            let d = sym_eigen_decomp(m);
+            d.eigenvalues[0] - d.eigenvalues[d.eigenvalues.len() - 1]
+        };
+        assert!(
+            disp(&filtered) <= disp(&sample) + 1e-12,
+            "RMT 应压缩噪声谱离散度"
+        );
+    }
+
+    #[test]
+    fn ledoit_wolf_full_shrinkage_when_assets_ge_periods() {
+        // N(3) >= T(3) → rho=1 → 纯对角目标
+        let returns = arr2(&[[0.01, 0.02, 0.005], [-0.01, 0.01, 0.003], [0.02, -0.01, 0.004]]);
+        let cov = ledoit_wolf_shrinkage(&returns);
+        assert!((cov[(0, 1)]).abs() < 1e-12, "非对角应为 0");
+        assert!((cov[(1, 2)]).abs() < 1e-12, "非对角应为 0");
+        let sample = sample_covariance(&returns);
+        for i in 0..3 {
+            assert!((cov[(i, i)] - sample[(i, i)]).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn ewma_covariance_lambda_near_one_approximates_sample() {
+        let returns = arr2(&[[0.01, 0.02], [-0.01, 0.01], [0.02, -0.01], [0.005, 0.015]]);
+        let ewma = ewma_covariance(&returns, 0.999);
+        let sample = sample_covariance(&returns);
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (ewma[(i, j)] - sample[(i, j)]).abs() < 5e-4,
+                    "[{}][{}] ewma={} sample={}",
+                    i,
+                    j,
+                    ewma[(i, j)],
+                    sample[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ewma_covariance_recency_weighting() {
+        // 60 期：前 59 期零波动、末期暴涨 30%。λ=0.94 半衰期约 11 期，
+        // 末期有效权重约 6%（等权仅 1/60）→ EWMA 方差应数倍于样本方差。
+        // 短窗口（T<10）下 EWMA 权重近乎均匀，recency 效应体现不出来。
+        let mut rows = vec![[0.0]; 60];
+        rows[59] = [0.30];
+        let returns = Array2::from(rows);
+        let ewma = ewma_covariance(&returns, 0.94);
+        let sample = sample_covariance(&returns);
+        assert!(
+            ewma[(0, 0)] > sample[(0, 0)] * 2.0,
+            "ewma={} sample={}",
+            ewma[(0, 0)],
+            sample[(0, 0)]
+        );
+    }
+
+    #[test]
+    fn ewma_covariance_invalid_lambda_falls_back_to_sample() {
+        let returns = arr2(&[[0.01, 0.02], [-0.01, 0.01]]);
+        for lambda in [0.0, -0.5, 1.0, 1.5] {
+            let cov = ewma_covariance(&returns, lambda);
+            let sample = sample_covariance(&returns);
+            assert!(
+                (cov[(0, 0)] - sample[(0, 0)]).abs() < 1e-12,
+                "lambda={} 应回退样本协方差",
+                lambda
+            );
+        }
+    }
+
+    #[test]
+    fn downside_semi_covariance_only_negative_comovements() {
+        // 资产 A、B 完全负相关：centered 后永不同时为负 → 半协方差非对角为 0
+        let returns = arr2(&[[0.01, -0.01], [-0.01, 0.01], [0.02, -0.02], [-0.02, 0.02]]);
+        let sc = downside_semi_covariance(&returns);
+        assert!(sc[(0, 1)].abs() < 1e-12);
+        // 对角仍为正（各自有负偏离期）
+        assert!(sc[(0, 0)] > 0.0);
+        assert!(sc[(1, 1)] > 0.0);
+    }
+
+    #[test]
+    fn downside_semi_covariance_short_input_returns_zero() {
+        let sc = downside_semi_covariance(&arr2(&[[0.01, 0.02]]));
+        assert_eq!(sc[(0, 0)], 0.0);
+    }
+
+    // ─── GA 基础组件 ───────────────────────────────────────────
+
+    #[test]
+    fn random_simplex_sums_to_one_non_negative() {
+        let mut rng = StdRng::seed_from_u64(42);
+        for _ in 0..50 {
+            let w = random_simplex(5, &mut rng);
+            assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            assert!(w.iter().all(|&x| x >= 0.0));
+        }
+    }
+
+    #[test]
+    fn random_feasible_weights_infeasible_constraints_fallback_not_hang() {
+        // min_stock > max_single：不可行约束集，历史上此函数无限循环
+        let mut rng = StdRng::seed_from_u64(7);
+        let w = random_feasible_weights(3, 0.8, 0.5, &mut rng);
+        assert_eq!(w.len(), 3);
+        // max_single*n < 1 同样不可行
+        let w2 = random_feasible_weights(3, 0.0, 0.2, &mut rng);
+        assert_eq!(w2.len(), 3);
+    }
+
+    #[test]
+    fn enforce_constraints_caps_max_single_waterfilling() {
+        // 归一化后单资产超 cap 的经典用例：[0.80, 0.05] → normalize → [0.94, 0.06]
+        let mut w = vec![0.80, 0.05, 0.05, 0.05, 0.05];
+        enforce_constraints(&mut w, 0.0, 0.30);
+        assert!(
+            w.iter().all(|&x| x <= 0.30 + 1e-9),
+            "max_single 被突破: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn enforce_constraints_min_stock_floor() {
+        let mut w = vec![0.10, 0.45, 0.45];
+        enforce_constraints(&mut w, 0.30, 0.75);
+        assert!(w[0] >= 0.30 - 1e-9, "w[0]={}", w[0]);
+        assert!(w.iter().all(|&x| x >= 0.0));
+    }
+
+    #[test]
+    fn enforce_constraints_all_zero_falls_back_equal_weight() {
+        let mut w = vec![0.0, 0.0, 0.0, 0.0];
+        enforce_constraints(&mut w, 0.0, 0.75);
+        for &x in &w {
+            assert!((x - 0.25).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn sbx_crossover_preserves_gene_pool_mean() {
+        let mut rng = StdRng::seed_from_u64(3);
+        let p1 = vec![0.2, 0.5, 0.1, 0.2];
+        let p2 = vec![0.4, 0.1, 0.3, 0.2];
+        let (c1, c2) = sbx_crossover(&p1, &p2, 2.0, &mut rng);
+        // SBX 对称性：child1+child2 = parent1+parent2（逐基因）
+        for i in 0..4 {
+            assert!(
+                ((c1[i] + c2[i]) - (p1[i] + p2[i])).abs() < 1e-9,
+                "gene {} 均值被破坏",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn mutate_keeps_non_negative_and_sums_near_one() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut w = vec![0.25; 4];
+        for _ in 0..20 {
+            mutate(&mut w, 0.05, &mut rng);
+            assert!(w.iter().all(|&x| x >= 0.0));
+            assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn tournament_select_picks_best_of_sampled() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let fitness = vec![
+            (vec![1.0], 0.1),
+            (vec![2.0], 0.9),
+            (vec![3.0], 0.5),
+        ];
+        // 锦标赛可重复抽样：选中者必为抽样内最优；20 次内几乎必然
+        // 抽到过 0.9（全不中概率 (2/3)^60 ≈ 2e-11）
+        let mut saw_best = false;
+        for _ in 0..20 {
+            let idx = tournament_select(&fitness, 3, &mut rng);
+            let chosen = fitness[idx].1;
+            assert!(chosen == 0.1 || chosen == 0.5 || chosen == 0.9);
+            if chosen == 0.9 {
+                saw_best = true;
+            }
+        }
+        assert!(saw_best, "20 次锦标赛应至少一次选中全局最优");
+    }
+
+    // ─── GA 优化器 ─────────────────────────────────────────────
+
+    #[test]
+    fn ga_optimize_deterministic_and_respects_constraints() {
+        let mu = Array1::from_vec(vec![0.20, 0.10, 0.05]);
+        let cov = arr2(&[[0.04, 0.01, 0.0], [0.01, 0.02, 0.005], [0.0, 0.005, 0.01]]);
+        let r1 = ga_optimize(&mu, &cov, 0.20, 0.60).expect("GA 应有解");
+        let r2 = ga_optimize(&mu, &cov, 0.20, 0.60).expect("GA 应有解");
+        // 确定性：同输入同输出（种子由输入派生）
+        for i in 0..3 {
+            assert!((r1.weights[i] - r2.weights[i]).abs() < 1e-12);
+        }
+        // 约束
+        assert!(r1.weights[0] >= 0.20 - 1e-6);
+        assert!(r1.weights.iter().all(|&x| x >= -1e-9));
+        assert!(r1.weights.iter().all(|&x| x <= 0.60 + 1e-6));
+        assert!((r1.weights.sum() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ga_optimize_maxsharpe_uses_annualized_vol_scale() {
+        // mu 年化、cov 月度对角：修复前 sharpe 虚大 √12。已知最优 w≈[1,0] 时
+        // sharpe = (0.24-0.02)/sqrt(0.01*12) ≈ 0.635
+        let mu = Array1::from_vec(vec![0.24, 0.0]);
+        let cov = arr2(&[[0.01, 0.0], [0.0, 0.01]]);
+        let r = ga_optimize(&mu, &cov, 0.0, 1.0).expect("GA 应有解");
+        assert!(
+            r.sharpe < 1.2,
+            "年化口径修复后 sharpe 应≈0.635，实际 {}",
+            r.sharpe
+        );
+        assert!(r.sharpe > 0.3, "sharpe={}", r.sharpe);
+    }
+
+    #[test]
+    fn ga_optimize_min_variance_prefers_feasible_over_infeasible() {
+        // 目标 8%：低收益资产组合无法达标（infeasible），高收益可行组合应胜出
+        let mu = Array1::from_vec(vec![0.10, 0.02]);
+        let cov = arr2(&[[0.02, 0.0], [0.0, 0.01]]);
+        let r = ga_optimize_min_variance(&mu, &cov, 0.0, 0.90, 0.08).expect("GA 应有解");
+        // 可行解 w·mu >= 0.08 → 资产 0 占比至少 75%
+        let port_mu: f64 = r.weights.iter().zip(mu.iter()).map(|(w, m)| w * m).sum();
+        assert!(port_mu >= 0.08 - 1e-6, "port_mu={}", port_mu);
+        assert!((r.weights.sum() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ga_optimize_single_asset_returns_none() {
+        let mu = Array1::from_vec(vec![0.1]);
+        let cov = arr2(&[[0.01]]);
+        assert!(ga_optimize(&mu, &cov, 0.0, 1.0).is_none());
+    }
+
+    // ─── Grid Search 与入口路由 ────────────────────────────────
+
+    #[test]
+    fn cov_method_from_str_all_branches() {
+        use std::str::FromStr;
+        assert_eq!(CovMethod::from_str("linear").unwrap(), CovMethod::LinearLW);
+        assert_eq!(CovMethod::from_str("LW").unwrap(), CovMethod::LinearLW);
+        assert_eq!(
+            CovMethod::from_str("ledoit_wolf").unwrap(),
+            CovMethod::LinearLW
+        );
+        assert_eq!(CovMethod::from_str("nl").unwrap(), CovMethod::Nonlinear);
+        assert_eq!(
+            CovMethod::from_str("nonlinear").unwrap(),
+            CovMethod::Nonlinear
+        );
+        assert_eq!(CovMethod::from_str("rmt").unwrap(), CovMethod::RMT);
+        assert!(CovMethod::from_str("bogus").is_err());
+    }
+
+    fn sample_monthly_3asset() -> Array2<f64> {
+        arr2(&[
+            [0.02, 0.01, 0.005],
+            [-0.01, 0.015, 0.003],
+            [0.03, -0.008, 0.004],
+            [0.005, 0.012, 0.002],
+            [-0.004, 0.006, 0.003],
+            [0.015, 0.01, 0.004],
+            [0.01, -0.005, 0.002],
+            [-0.02, 0.02, 0.001],
+            [0.025, 0.005, 0.005],
+            [0.012, 0.015, 0.003],
+            [0.011, -0.008, 0.006],
+            [-0.014, 0.018, 0.002],
+            [0.022, 0.002, 0.007],
+            [-0.008, -0.012, 0.001],
+            [0.017, 0.011, 0.004],
+        ])
+    }
+
+    #[test]
+    fn mvo_allocate_with_target_family_produce_constrained_weights() {
+        let data = sample_monthly_3asset();
+        let min_stock = 0.20;
+
+        let cases: Vec<Option<MvoWeights>> = vec![
+            mvo_allocate_with_target(&data, min_stock, 0.02),
+            mvo_allocate_with_target_n(&data, min_stock, 0.02, 0.10),
+            mvo_allocate_sortino_n(&data, min_stock, 0.02, 0.10),
+            mvo_allocate_ewma_n(&data, min_stock, 0.02, 0.10, 0.94),
+        ];
+        for (i, r) in cases.iter().enumerate() {
+            let r = r.as_ref().unwrap_or_else(|| panic!("case {} 应有解", i));
+            assert!(r.weights[0] >= min_stock - 0.02, "case {} w0={}", i, r.weights[0]);
+            assert!(r.weights.iter().all(|&x| x >= -1e-9));
+            assert!(r.weights.iter().all(|&x| x <= MAX_SINGLE + 1e-6));
+            assert!((r.weights.sum() - 1.0).abs() < 0.02);
+            assert!((0.0..=1.0).contains(&r.rho), "case {} rho={}", i, r.rho);
+        }
+    }
+
+    #[test]
+    fn mvo_allocate_with_target_unreachable_target_falls_back_to_maxsharpe() {
+        let data = sample_monthly_3asset();
+        // 年化 500% 目标不可达 → 应回退 max-Sharpe 权重（仍有解）
+        let r = mvo_allocate_with_target(&data, 0.20, 5.0).expect("不可达 target 应回退");
+        assert!((r.weights.sum() - 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn mvo_allocate_with_custom_mu_family_all_cov_methods() {
+        let data = sample_monthly_3asset();
+        let custom_mu = Array1::from_vec(vec![0.15, 0.08, 0.04]);
+
+        let lw = mvo_allocate_with_custom_mu(&data, &custom_mu, 0.20, 0.02, 0.10);
+        let nl = mvo_allocate_with_custom_mu_nl(&data, &custom_mu, 0.20, 0.02, 0.10);
+        let rmt = mvo_allocate_with_custom_mu_rmt(&data, &custom_mu, 0.20, 0.02, 0.10);
+        for (i, r) in [&lw, &nl, &rmt].iter().enumerate() {
+            let r = r.as_ref().unwrap_or_else(|| panic!("cov method {} 应有解", i));
+            assert!(r.weights[0] >= 0.18, "method {} w0={}", i, r.weights[0]);
+            assert!((r.weights.sum() - 1.0).abs() < 0.02);
+        }
+
+        // 路由一致性：with_cov_method 应与直接调用等价（全部三个分支）
+        for (method, direct) in [
+            (CovMethod::LinearLW, &lw),
+            (CovMethod::Nonlinear, &nl),
+            (CovMethod::RMT, &rmt),
+        ] {
+            let via_router = mvo_allocate_with_cov_method(
+                &data,
+                &custom_mu,
+                0.20,
+                0.02,
+                0.10,
+                method,
+            )
+            .unwrap_or_else(|| panic!("router {:?} 应有解", method));
+            let d = direct.as_ref().unwrap();
+            for i in 0..3 {
+                assert!(
+                    (via_router.weights[i] - d.weights[i]).abs() < 1e-12,
+                    "{:?} 路由不等价",
+                    method
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ewma_covariance_single_period_returns_zero_matrix() {
+        let cov = ewma_covariance(&arr2(&[[0.01, 0.02]]), 0.94);
+        assert_eq!(cov[(0, 0)], 0.0);
+        assert_eq!(cov[(1, 1)], 0.0);
+    }
+
+    #[test]
+    fn ga_optimize_zero_covariance_falls_to_infeasible_ranking() {
+        // 协方差全零 → MaxSharpe fitness 返回 NEG_INFINITY，GA 仍应返回
+        // 结构合法的权重（不 panic、不 NaN）
+        let mu = Array1::from_vec(vec![0.1, 0.05]);
+        let cov = Array2::zeros((2, 2));
+        let r = ga_optimize(&mu, &cov, 0.0, 1.0);
+        if let Some(r) = r {
+            assert!((r.weights.sum() - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn enforce_constraints_large_min_stock_squeezes_others_to_zero() {
+        // min_stock=0.9：其他资产被按比例压缩，可能触底 0（负值钳制分支）
+        let mut w = vec![0.5, 0.25, 0.25];
+        enforce_constraints(&mut w, 0.90, 0.95);
+        assert!(w[0] >= 0.90 - 1e-9);
+        assert!(w.iter().all(|&x| x >= 0.0));
+    }
+
+    #[test]
+    fn random_feasible_weights_tight_max_single_resamples_or_falls_back() {
+        // max_single=0.34（3 资产下界之上极紧）：多数采样会触发 continue 重采样；
+        // 无论重采样命中或回退，返回结构必须合法且不挂起
+        let mut rng = StdRng::seed_from_u64(19);
+        let w = random_feasible_weights(3, 0.0, 0.34, &mut rng);
+        assert_eq!(w.len(), 3);
+        assert!((w.iter().sum::<f64>() - 1.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn mvo_allocate_ga_family_produce_weights() {
+        let data = sample_monthly_3asset();
+        let custom_mu = Array1::from_vec(vec![0.15, 0.08, 0.04]);
+
+        let ga = mvo_allocate_ga(&data, &custom_mu, 0.20, 0.02, 0.10);
+        let ga_ms = mvo_allocate_ga_with_max_single(&data, &custom_mu, 0.20, 0.02, 0.10, 0.60);
+        let ga_sharpe = mvo_allocate_ga_maxsharpe_with_max_single(&data, &custom_mu, 0.20, 0.60);
+        let ga_nl = mvo_allocate_ga_nl(&data, &custom_mu, 0.20, 0.02, 0.10);
+        for (i, r) in [&ga, &ga_ms, &ga_sharpe, &ga_nl].iter().enumerate() {
+            let r = r.as_ref().unwrap_or_else(|| panic!("ga variant {} 应有解", i));
+            assert!((r.weights.sum() - 1.0).abs() < 1e-6, "variant {}", i);
+            assert!(r.weights[0] >= 0.20 - 1e-6, "variant {} w0={}", i, r.weights[0]);
+        }
+        // ga_ms 的 max_single=0.60 应被遵守
+        let w = ga_ms.as_ref().unwrap();
+        assert!(w.weights.iter().all(|&x| x <= 0.60 + 1e-6));
+    }
+
+    #[test]
+    fn optimize_mvo_single_asset_returns_none() {
+        let mu = Array1::from_vec(vec![0.1]);
+        let cov = arr2(&[[0.01]]);
+        assert!(optimize_mvo(&mu, &cov, 0.0).is_none());
+    }
+
+    // ─── 工具函数 ──────────────────────────────────────────────
+
+    #[test]
+    fn annualized_returns_simple_mean_times_twelve() {
+        let returns = arr2(&[[0.01, 0.02], [0.03, 0.04]]);
+        let mu = annualized_returns(&returns);
+        assert!((mu[0] - 0.24).abs() < 1e-12);
+        assert!((mu[1] - 0.36).abs() < 1e-12);
+    }
+
+    #[test]
+    fn monthly_returns_from_daily_groups_by_month() {
+        // 1 月两日 + 2 月两日 → 2 个月度收益（当月首→当月末口径）
+        let daily = vec![
+            ("2024-01-02".to_string(), vec![100.0, 200.0]),
+            ("2024-01-31".to_string(), vec![110.0, 190.0]),
+            ("2024-02-01".to_string(), vec![121.0, 195.0]),
+            ("2024-02-28".to_string(), vec![127.05, 205.0]),
+        ];
+        let m = monthly_returns_from_daily(&daily);
+        assert_eq!(m.nrows(), 2);
+        // 1 月：110/100-1=10%，190/200-1=-5%
+        assert!((m[(0, 0)] - 0.10).abs() < 1e-12);
+        assert!((m[(0, 1)] - (-0.05)).abs() < 1e-12);
+        // 2 月：127.05/121-1=5%，205/195-1≈5.13%
+        assert!((m[(1, 0)] - 0.05).abs() < 1e-12);
+        assert!((m[(1, 1)] - (205.0 / 195.0 - 1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn monthly_returns_from_daily_degenerate_inputs() {
+        assert_eq!(monthly_returns_from_daily(&[]).nrows(), 0);
+        let single = vec![("2024-01-02".to_string(), vec![100.0])];
+        assert_eq!(monthly_returns_from_daily(&single).nrows(), 0);
+        // 价格为 0 的资产该月收益记 0
+        let daily = vec![
+            ("2024-01-02".to_string(), vec![100.0, 0.0]),
+            ("2024-01-31".to_string(), vec![110.0, 0.0]),
+        ];
+        let m = monthly_returns_from_daily(&daily);
+        assert!((m[(0, 1)] - 0.0).abs() < 1e-12);
     }
 }

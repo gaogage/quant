@@ -193,3 +193,63 @@ fn parse_factor(name: &str) -> (&'static str, usize) {
         ("momentum", 20) // default fallback
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_factor_recognizes_all_prefixes() {
+        let cases = [
+            ("mom_60d", "momentum", 60),
+            ("mom_20", "momentum", 20),
+            ("vol_20d", "volatility", 20),
+            ("downvol_30d", "downside_volatility", 30),
+            ("rev_5d", "reversal", 5),
+            ("turn_20d", "turnover", 20),
+            ("amihud_20d", "amihud_illiquidity", 20),
+            ("amt_intensity_10d", "amount_intensity", 10),
+            ("rsi_14d", "rsi", 14),
+            ("bb_pos_20d", "bb_position", 20),
+            ("atr_14d", "atr", 14),
+            ("amp_20d", "amplitude", 20),
+            ("vp_corr_20d", "vol_price_corr", 20),
+            ("skew_60d", "skewness", 60),
+            ("maxdd_20d", "max_drawdown", 20),
+        ];
+        for (name, expect_kind, expect_window) in cases {
+            let (kind, window) = parse_factor(name);
+            assert_eq!(kind, expect_kind, "解析 {}", name);
+            assert_eq!(window, expect_window, "窗口 {}", name);
+        }
+    }
+
+    #[test]
+    fn parse_factor_invalid_window_falls_back_to_default() {
+        // 非数字窗口 → 各前缀默认值
+        let (kind, window) = parse_factor("mom_xxd");
+        assert_eq!(kind, "momentum");
+        assert_eq!(window, 20);
+        let (kind, window) = parse_factor("rev_badd");
+        assert_eq!(kind, "reversal");
+        assert_eq!(window, 5);
+    }
+
+    #[test]
+    fn parse_factor_unknown_name_falls_back_to_momentum_20() {
+        let (kind, window) = parse_factor("nonexistent_factor");
+        assert_eq!(kind, "momentum");
+        assert_eq!(window, 20);
+    }
+
+    #[test]
+    fn parse_factor_suffix_ordering_matters() {
+        // downvol_ 必须先于 vol_ 匹配（都含 vol 前缀子串），否则 downvol 会被
+        // 误解析为 volatility——锁定当前 if-else 顺序
+        let (kind, _) = parse_factor("downvol_20d");
+        assert_eq!(kind, "downside_volatility");
+        // amt_intensity_ 与 turn_/mom_ 无冲突，但同样锁定
+        let (kind, _) = parse_factor("amt_intensity_5d");
+        assert_eq!(kind, "amount_intensity");
+    }
+}

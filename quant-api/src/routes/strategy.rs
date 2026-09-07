@@ -154,6 +154,10 @@ pub enum StrategyType {
 #[derive(Debug, Clone)]
 pub struct MvoParams {
     pub vol_target: f64,
+    /// 分配模式：mvo(默认) | fixed（2026-09-07 固定权重突破）
+    pub allocation_mode: Option<String>,
+    /// μ 估计方法：momentum(默认) | risk_adjusted（2026-09-04 H-μRA 预注册）
+    pub mu_estimation: Option<String>,
     pub leverage_cap: f64,
     pub leverage_floor: f64,
     pub default_weights: Vec<f64>, // 7维 ETF 权重(MVO 第1-7列)
@@ -264,6 +268,8 @@ struct CompositeRow {
     leverage_regime_threshold: Option<f64>,
     slippage_pct: Option<f64>,
     mvo_objective: Option<String>,
+    allocation_mode: Option<String>,
+    mu_estimation: Option<String>,
     kelly_fraction: Option<f64>,
     score_candidate_pool_size: Option<i32>,
     regime_policy: Option<String>,
@@ -325,7 +331,7 @@ pub async fn load_resolved_strategy(
                 regime_bull_min_stock, regime_bear_min_stock,
                 deep_bear_threshold, deep_bear_exposure,
                 dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step,
-                leverage_regime_threshold, slippage_pct, mvo_objective,
+                leverage_regime_threshold, slippage_pct, mvo_objective, allocation_mode, mu_estimation,
                 kelly_fraction, score_candidate_pool_size, regime_policy, regime_bear_return_threshold
          FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
@@ -364,6 +370,8 @@ pub async fn load_resolved_strategy(
             }
             let mvo = MvoParams {
                 vol_target: main.vol_target.unwrap_or(0.2),
+                allocation_mode: main.allocation_mode.clone(),
+                mu_estimation: main.mu_estimation.clone(),
                 leverage_cap: main.leverage_cap.unwrap_or(2.5),
                 leverage_floor: main.leverage_floor.unwrap_or(1.0),
                 default_weights: parse_f64_array(&main.default_weights),
@@ -488,6 +496,8 @@ mod tests {
             strategy_type: StrategyType::Composite,
             mvo: Some(MvoParams {
                 vol_target: 0.2,
+                allocation_mode: None,
+                mu_estimation: None,
                 leverage_cap: 2.5,
                 leverage_floor: 1.0,
                 default_weights: vec![0.22, 0.28, 0.05, 0.10, 0.03, 0.03, 0.03],

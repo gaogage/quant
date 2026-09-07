@@ -15,7 +15,6 @@ use tracing::info;
 
 use quant_factor::factors::price_volume::*;
 use quant_factor::neutralize::NeutralizeConfig;
-use quant_factor::*;
 
 use crate::AppState;
 use super::*;
@@ -1834,3 +1833,265 @@ pub async fn neutralize_factors(
     }))
 }
 
+
+#[cfg(test)]
+mod stale_pv_recompute_tests {
+    use super::*;
+    use quant_factor::batch::{batch_compute_factors, BatchConfig};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// mom_5d_std / vol_20d_std 尾段重算（7-15 停更，不在 phase7 specs，
+    /// 走 quant-factor 原生 batch 计算 + 截面 z-score 标准化）。
+    /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api stale_pv_recompute -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn stale_pv_recompute() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        let symbols: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT symbol FROM market_stock_daily_bar WHERE trade_date >= '2026-07-01' ORDER BY 1",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("symbols");
+        println!("[pv-rc] symbols={}", symbols.len());
+
+        // 单线程 test runtime 不支持 block_in_place——预载 bar 到全局缓存，
+        // saver 只收集，循环结束后统一落库。
+        use std::sync::Mutex;
+        let cache: Arc<Mutex<HashMap<(String, chrono::NaiveDate, chrono::NaiveDate), HashMap<String, Vec<quant_factor::types::DailyBar>>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let collected: Arc<Mutex<Vec<(String, Vec<(String, chrono::NaiveDate, f64, bool)>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let db_loader = db.clone();
+        let loader: Arc<
+            dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
+                + Send + Sync,
+        > = {
+            let cache = cache.clone();
+            Arc::new(move |syms, s, e| {
+                let key = (syms.first().cloned().unwrap_or_default(), s, e);
+                if let Some(m) = cache.lock().unwrap().get(&key) { return Ok(m.clone()); }
+                // 预载由外层 async 完成（见下方 PRELOAD）
+                Err(format!("bars not preloaded for {:?}", key))
+            })
+        };
+        let saver: Arc<
+            dyn Fn(&str, &str, &[(String, chrono::NaiveDate, f64, bool)]) -> Result<usize, String>
+                + Send + Sync,
+        > = {
+            let collected = collected.clone();
+            Arc::new(move |factor, _ver, vals| {
+                collected.lock().unwrap().push((format!("{}_std", factor), vals.to_vec()));
+                Ok(vals.len())
+            })
+        };
+        let _ = &db_loader;
+
+        // PRELOAD：一次性加载全部窗口 bar 进缓存（batch_compute 内部按 chunk 取）
+        {
+            let s = chrono::NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+            let e = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+            let all = load_bars_static(&db, &symbols, &s, &e).await.expect("preload");
+            let mut c = cache.lock().unwrap();
+            // 以首 symbol 为 key 的粗粒度缓存（loader 对任意 chunk 都返回全集——内存换正确性）
+            c.insert((String::new(), s, e), all);
+            // 同时按每个可能的首符号注册
+            let base = c.get(&(String::new(), s, e)).cloned().unwrap_or_default();
+            for sym in &symbols { c.insert((sym.clone(), s, e), base.clone()); }
+        }
+        // loader 改为忽略 key 直接返回全集——重写 loader 闭包为无缓存版
+        let all_bars: Arc<HashMap<String, Vec<quant_factor::types::DailyBar>>> = Arc::new(
+            cache.lock().unwrap().get(&(String::new(), chrono::NaiveDate::from_ymd_opt(2026,7,10).unwrap(), chrono::NaiveDate::from_ymd_opt(2026,9,4).unwrap())).cloned().unwrap_or_default()
+        );
+        let loader2: Arc<
+            dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
+                + Send + Sync,
+        > = {
+            let all = all_bars.clone();
+            Arc::new(move |_syms, _s, _e| Ok((*all).clone()))
+        };
+        for factor in ["mom_5d", "vol_20d"] {
+            let cfg = BatchConfig {
+                factor: factor.into(),
+                version: "1.0.0".into(),
+                symbols: symbols.clone(),
+                start_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 10).unwrap(),
+                end_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                standardize: Some(quant_factor::types::StandardizeMethod::ZScore),
+                chunk_size: 200,
+                progress: None,
+            };
+            let r = batch_compute_factors(cfg, loader2.clone(), saver.clone()).await;
+            println!("[pv-rc] {}_std: total={}", factor, r.total_values);
+        }
+        // 统一落库
+        for (code, vals) in collected.lock().unwrap().iter() {
+            let n = save_factor_values(&db, code, "1.0.0", vals).await.expect("save");
+            println!("[pv-rc] {} 落库 {} 行", code, n);
+        }
+    }
+
+    async fn load_bars_static(
+        db: &sqlx::PgPool,
+        syms: &[String],
+        s: &chrono::NaiveDate,
+        e: &chrono::NaiveDate,
+    ) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String> {
+        use rust_decimal::Decimal;
+        let rows: Vec<(String, chrono::NaiveDate, Decimal, Decimal, Decimal, Decimal, Decimal, Option<Decimal>)> =
+            sqlx::query_as(
+                "SELECT symbol, trade_date, open, high, low, close, volume, pre_close \
+                 FROM market_stock_daily_bar_adj WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3 ORDER BY symbol, trade_date",
+            )
+            .bind(syms)
+            .bind(s)
+            .bind(e)
+            .fetch_all(db)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut m: HashMap<String, Vec<quant_factor::types::DailyBar>> = HashMap::new();
+        for (sym, d, o, h, l, c, v, pc) in rows {
+            use rust_decimal::prelude::ToPrimitive;
+            m.entry(sym.clone()).or_default().push(quant_factor::types::DailyBar {
+                symbol: sym, trade_date: d,
+                open: o, high: h, low: l, close: c, volume: v,
+                pre_close: pc,
+                change_pct: None, amount: Decimal::ZERO,
+            });
+        }
+        Ok(m)
+    }
+
+    async fn save_factor_values(
+        db: &sqlx::PgPool,
+        factor: &str,
+        _ver: &str,
+        vals: &[(String, chrono::NaiveDate, f64, bool)],
+    ) -> Result<usize, String> {
+        use rust_decimal::Decimal;
+        let mut n = 0usize;
+        for (sym, d, v, valid) in vals {
+            if !valid { continue; }
+            let code = format!("{}_std", factor);
+            let r = sqlx::query(
+                "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+                 VALUES ($1, '1.0.0', $2, $3, $4, $4, $3)
+                 ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                   raw_value = EXCLUDED.raw_value, normalized_value = EXCLUDED.normalized_value, available_at = EXCLUDED.available_at",
+            )
+            .bind(&code).bind(sym).bind(d).bind(Decimal::from_f64_retain(*v).unwrap_or_default())
+            .execute(db).await.map_err(|e| e.to_string())?;
+            n += r.rows_affected() as usize;
+        }
+        Ok(n)
+    }
+
+    /// 5 个断供量价 _std 因子补算（2026-09-07 收益增强）：
+    /// turn_20d_std/mom_20d_std/rsi_14d_std/amp_5d_std/bb_pos_20d_std 停更于 2026-05-11，
+    /// 补 2026-05-12 ~ 2026-09-04。这些因子在生产 combo 白名单（换裸名等价物），
+    /// 断供导致 2025-Q3 后物化缺失 7-8 个反转/低波 alpha 因子。
+    /// 分批处理（500 股/批，算完即落库即释放）——全量单跑会被 OOM 杀（首跑教训）。
+    /// 运行：set -a; source ../.env; set +a;
+    ///       cargo test --release -p quant-api pv_std_backfill_2605 -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn pv_std_backfill_2605() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        // 窗口多取 30 天预热（20d 窗因子需要前置 bar）
+        let preload_start = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 5, 12).unwrap();
+        let symbols: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT symbol FROM market_stock_daily_bar WHERE trade_date >= '2026-08-01' ORDER BY 1",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("symbols");
+        println!("[pv-bf] symbols={}", symbols.len());
+
+        // 截面 zscore 需要当日全截面——先按因子分轮：每轮加载该日全截面 raw？
+        // 不行，batch_compute 的 zscore 是 chunk 内截面。stale_pv_recompute 先例：
+        // chunk_size=200 时 zscore 也是 chunk 内截面（近似）。为保持与存量 _std 口径
+        // 一致（同为 chunk 内 zscore），沿用相同 chunk_size 与分批方式。
+        let batch_n = 500usize;
+        use std::sync::Mutex;
+        let mut total_saved = 0usize;
+        for (bi, chunk_syms) in symbols.chunks(batch_n).enumerate() {
+            let chunk_syms: Vec<String> = chunk_syms.to_vec();
+            let bars = load_bars_static(&db, &chunk_syms, &preload_start, &end).await.expect("load bars");
+            let loader: Arc<
+                dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
+                    + Send + Sync,
+            > = {
+                let bars = bars.clone();
+                Arc::new(move |_syms, _s, _e| Ok(bars.clone()))
+            };
+            let collected: Arc<Mutex<Vec<(String, Vec<(String, chrono::NaiveDate, f64, bool)>)>>> = Arc::new(Mutex::new(Vec::new()));
+            let saver: Arc<
+                dyn Fn(&str, &str, &[(String, chrono::NaiveDate, f64, bool)]) -> Result<usize, String>
+                    + Send + Sync,
+            > = {
+                let collected = collected.clone();
+                Arc::new(move |factor, _ver, vals| {
+                    collected.lock().unwrap().push((format!("{}_std", factor), vals.to_vec()));
+                    Ok(vals.len())
+                })
+            };
+            for factor in ["turn_20d", "mom_20d", "rsi_14d", "amp_5d", "bb_pos_20d"] {
+                let cfg = BatchConfig {
+                    factor: factor.into(),
+                    version: "1.0.0".into(),
+                    symbols: chunk_syms.clone(),
+                    start_date: preload_start,
+                    end_date: end,
+                    standardize: Some(quant_factor::types::StandardizeMethod::ZScore),
+                    chunk_size: 200,
+                    progress: None,
+                };
+                let _ = batch_compute_factors(cfg, loader.clone(), saver.clone()).await;
+            }
+            // 落库本批（cutoff 后）
+            let mut batch_saved = 0usize;
+            for (code, vals) in collected.lock().unwrap().iter() {
+                let recent: Vec<&(String, chrono::NaiveDate, f64, bool)> =
+                    vals.iter().filter(|(_, d, _, _)| *d >= cutoff).collect();
+                batch_saved += save_factor_values_ref(&db, code, &recent).await.expect("save");
+            }
+            total_saved += batch_saved;
+            println!("[pv-bf] batch {}/{}: saved {} rows (total {})", bi + 1, (symbols.len() + batch_n - 1) / batch_n, batch_saved, total_saved);
+        }
+        println!("[pv-bf] done, total saved {}", total_saved);
+    }
+
+    async fn save_factor_values_ref(
+        db: &sqlx::PgPool,
+        code: &str,
+        vals: &[&(String, chrono::NaiveDate, f64, bool)],
+    ) -> Result<usize, String> {
+        use rust_decimal::Decimal;
+        let mut n = 0usize;
+        for (sym, d, v, valid) in vals {
+            if !valid { continue; }
+            let r = sqlx::query(
+                "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+                 VALUES ($1, '1.0.0', $2, $3, $4, $4, $3)
+                 ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                   raw_value = EXCLUDED.raw_value, normalized_value = EXCLUDED.normalized_value, available_at = EXCLUDED.available_at",
+            )
+            .bind(code).bind(sym).bind(d).bind(Decimal::from_f64_retain(*v).unwrap_or_default())
+            .execute(db).await.map_err(|e| e.to_string())?;
+            n += r.rows_affected() as usize;
+        }
+        Ok(n)
+    }
+}
