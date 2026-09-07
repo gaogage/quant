@@ -2042,8 +2042,10 @@ mod stale_pv_recompute_tests {
                     + Send + Sync,
             > = {
                 let collected = collected.clone();
-                Arc::new(move |factor, _ver, vals| {
-                    collected.lock().unwrap().push((format!("{}_std", factor), vals.to_vec()));
+                Arc::new(move |name, _ver, vals| {
+                    // batch 的 standardize 已把 output.name 变为 {factor}_std（带后缀），
+                    // 直接用传入名——再 format 加后缀会产生 _std_std 双后缀（首跑教训）
+                    collected.lock().unwrap().push((name.to_string(), vals.to_vec()));
                     Ok(vals.len())
                 })
             };
@@ -2065,6 +2067,13 @@ mod stale_pv_recompute_tests {
             for (code, vals) in collected.lock().unwrap().iter() {
                 let recent: Vec<&(String, chrono::NaiveDate, f64, bool)> =
                     vals.iter().filter(|(_, d, _, _)| *d >= cutoff).collect();
+                if bi == 0 {
+                    let (mn, mx) = recent.iter().map(|(_, d, _, _)| **d).fold(
+                        (chrono::NaiveDate::MAX, chrono::NaiveDate::MIN),
+                        |(a, b), d| (a.min(d), b.max(d)),
+                    );
+                    println!("[pv-bf][diag] {} recent={} dates {} ~ {}", code, recent.len(), mn, mx);
+                }
                 batch_saved += save_factor_values_ref(&db, code, &recent).await.expect("save");
             }
             total_saved += batch_saved;
