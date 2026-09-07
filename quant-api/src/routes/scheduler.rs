@@ -1151,6 +1151,19 @@ async fn run_tick(
                             })
                         })
                     };
+                    // 增量物化口径继承（2026-09-07 事故修复）：按该 combo 在
+                    // combo_materialization_log 的最近一次实跑口径继承 ind_neutral，
+                    // 防止硬编码 false 覆盖手动物化确立的 t 口径造成信号漂移
+                    //（9/07 实例：t 口径全量物化被 scheduler f 增量覆盖，sleeve 9.4%→0.15%）。
+                    let ind_neut: bool = sqlx::query_scalar(
+                        "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name=$1 ORDER BY materialized_at DESC LIMIT 1",
+                    )
+                    .bind(&combo)
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false);
                     match crate::routes::factors::materialize_pit_combo_ext(
                         db,
                         &combo,
@@ -1161,7 +1174,7 @@ async fn run_tick(
                         inc_fund,
                         None, // min_abs_ic_ir: T+1 保鲜不加阈值(白名单已筛)
                         whitelist.as_deref(),
-                        false, // ind_neutral: scheduler 保鲜不做行业中性化(仅手动物化新 combo 时启用)
+                        ind_neut,
                     )
                     .await
                     {

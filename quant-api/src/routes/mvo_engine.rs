@@ -1531,4 +1531,49 @@ mod final_optimization {
                 aw*100.0, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
         }
     }
+
+    /// ETF 池扩容实验（2026-09-07）：相关性审计（日期对齐）显示红利/创业板/可转债
+    /// 与现有资产最大相关 ≤0.36，德国 0.69（欧系簇取德弃法），红利三兄弟取 510880。
+    /// 三方案 × 双杠杆档（2.2x 有杠杆 / 1.0x 无杠杆），A=15% 基准，等权零拟合。
+    /// X1 扩3：红利+创业板+德国（10 资产）；X2 扩4：+可转债（11）；X3 扩5：+日经（12）。
+    #[tokio::test]
+    #[ignore]
+    async fn pool_expansion_scan() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        let base_etf = vec!["518880.SH","511010.SH","513500.SH","513100.SH","159980.SZ","159985.SZ","501018.SH"];
+        let plans: Vec<(&str, Vec<&str>)> = vec![
+            ("X0 现行7ETF", base_etf.clone()),
+            ("X1 +红利+创业板+德国", [base_etf.clone(), vec!["510880.SH","159915.SZ","513030.SH"]].concat()),
+            ("X2 +可转债(11)", [base_etf.clone(), vec!["510880.SH","159915.SZ","513030.SH","511380.SH"]].concat()),
+            ("X3 +日经(12)", [base_etf.clone(), vec!["510880.SH","159915.SZ","513030.SH","511380.SH","513520.SH"]].concat()),
+        ];
+
+        for (name, etf) in &plans {
+            let etf_json = serde_json::to_string(etf).unwrap();
+            let aw = 0.15f64;
+            let etf_w = (1.0 - aw) / etf.len() as f64;
+            let mut ws = vec![format!("{:.4}", aw)];
+            for _ in 0..etf.len() { ws.push(format!("{:.4}", etf_w)); }
+            let weights = format!("[{}]", ws.join(", "));
+            sqlx::query("UPDATE strategy_config SET etf_symbols=$1::jsonb, default_weights=$2::jsonb WHERE strategy_id='v31f7'")
+                .bind(&etf_json).bind(&weights).execute(&db).await.expect("upd etf+w");
+
+            for lev in [2.2f64, 1.0] {
+                let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+                let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+                let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                    crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                    true, true, lev, "fixed").await.expect("sim");
+                let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+                let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+                println!("[{} @{:.1}x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                    name, lev, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+            }
+        }
+    }
 }
