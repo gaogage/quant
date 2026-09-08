@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::super::model::tushare_dto::{TushareRequest, TushareResponse};
 
@@ -21,6 +21,8 @@ use super::super::model::tushare_dto::{TushareRequest, TushareResponse};
 pub struct TushareConfig {
     pub base_url: String,
     pub token: String,
+    /// 备用 token（充值号）：主 token 请求失败/无权限时 fallback 重试一次（2026-09-08）
+    pub fallback_token: Option<String>,
     pub timeout_secs: u64,
     pub max_retries: usize,
     pub retry_delay_ms: u64,
@@ -39,6 +41,7 @@ impl Default for TushareConfig {
             base_url: std::env::var("TUSHARE_API_URL")
                 .unwrap_or_else(|_| "http://api.tushare.pro".to_string()),
             token: std::env::var("TUSHARE_TOKEN").unwrap_or_default(),
+            fallback_token: std::env::var("TUSHARE_TOKEN_ALT").ok().filter(|t| !t.is_empty()),
             timeout_secs: 30,
             max_retries: 3,
             retry_delay_ms: 1000,
@@ -373,12 +376,39 @@ impl TushareClient {
         Self::new(TushareConfig::default())
     }
 
-    /// 等待速率限制许可后发送 API 请求
+    /// 等待速率限制许可后发送 API 请求（主 token 优先，失败切备用 token 重试一次）
     async fn call_api<T: DeserializeOwned>(
         &self,
         api_name: &str,
         params: Vec<(&str, &str)>,
         fields: &[&str],
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        match self.call_api_with_token::<Vec<serde_json::Value>>(api_name, &params, fields, &self.config.token).await {
+            Ok(resp) => Ok(resp),
+            Err(primary_err) => {
+                let fallback = self.config.fallback_token.clone();
+                match fallback {
+                    Some(fb) if !fb.is_empty() && fb != self.config.token => {
+                        warn!(
+                            api = %api_name,
+                            error = %primary_err,
+                            "主 Tushare token 请求失败，fallback 到备用 token 重试"
+                        );
+                        self.call_api_with_token::<Vec<serde_json::Value>>(api_name, &params, fields, &fb).await
+                    }
+                    _ => Err(primary_err),
+                }
+            }
+        }
+    }
+
+    /// 按指定 token 发送 API 请求
+    async fn call_api_with_token<T: DeserializeOwned>(
+        &self,
+        api_name: &str,
+        params: &[(&str, &str)],
+        fields: &[&str],
+        token: &str,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         // 速率限制：使用 "tushare" 作为全局 key
         // until_key_ready() 会阻塞直到有可用令牌
@@ -386,10 +416,10 @@ impl TushareClient {
 
         let request = TushareRequest {
             api_name: api_name.into(),
-            token: self.config.token.clone(),
+            token: token.to_string(),
             params: params
-                .into_iter()
-                .map(|(k, v)| (k.into(), serde_json::Value::String(v.into())))
+                .iter()
+                .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
                 .collect(),
             fields: Some(fields.iter().map(|&s| s.into()).collect()),
         };
