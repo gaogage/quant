@@ -15,7 +15,7 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{error, warn};
 
 use quant_data::tushare::client::TushareClient;
 
@@ -615,7 +615,8 @@ pub async fn rebalance_account(
             )
             .await
         };
-        let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ONE);
+        // 数据门禁：转换失败置 0 由下方 price<=0 拦截（旧 ONE 兜底是 1 元虚假成交路径）
+        let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ZERO);
         if price <= Decimal::ZERO {
             continue;
         }
@@ -625,7 +626,12 @@ pub async fn rebalance_account(
             .map(|(q, _)| *q)
             .unwrap_or(Decimal::ZERO);
         let delta = target_qty - cur_qty;
-        if delta.abs() < Decimal::new(1, 2) {
+        // ETF 再平衡带宽（2026-09-08 换手优化）：目标数量相对当前持仓偏离 <25% 不调仓。
+        // 等权再平衡的漂移是慢变量，无 band 时每周微小漂移都触发交易（年换手 ~4.7 倍，
+        // 0.2% 滑点双边吃掉 ~0.9pp/年）。25% 是业界标准带宽（跟踪误差上限 3pp 权重）。
+        // 新买入(cur=0)与清仓(target=0)不受影响。A股 sleeve 段不适用（信号驱动换仓）。
+        let band = (cur_qty * Decimal::new(25, 2)).max(Decimal::new(1, 2));
+        if delta.abs() < band {
             continue;
         }
         let (side, mut qty) = if delta > Decimal::ZERO {
@@ -1323,7 +1329,7 @@ async fn fetch_eod_price(
     price_source: PriceSource,
 ) -> f64 {
     let table = daily_bar_table(price_source);
-    sqlx::query_scalar::<_, f64>(&format!(
+    let fetched = sqlx::query_scalar::<_, f64>(&format!(
         "SELECT close::double precision FROM {table}
          WHERE symbol=$1 AND trade_date<=$2 ORDER BY trade_date DESC LIMIT 1",
     ))
@@ -1333,7 +1339,18 @@ async fn fetch_eod_price(
     .await
     .ok()
     .flatten()
-    .unwrap_or(1.0)
+    .unwrap_or_else(|| {
+        // 数据门禁（价格语义铁律，2026-09-08）：取不到价返回 0.0 而非旧默认 1.0——
+        // 调用方 price<=0 即 continue 跳过该笔交易。旧 1.0 兜底会在 bar 断更时
+        // 按 1 元虚假成交（真实价 2~141 元），是"虚假数据"路径。
+        error!(
+            symbol = symbol,
+            date = %date,
+            "⚠️ fetch_eod_price 无可用收盘价——跳过该笔交易（数据门禁：宁可跳过不可虚假成交）"
+        );
+        0.0
+    });
+    fetched
 }
 
 /// P2-C:批量预加载 ETF 当日收盘价(EodClose 口径)。

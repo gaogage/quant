@@ -103,6 +103,24 @@ pub(crate) async fn compute_lw_mvo_weights(
     // 固定模式直接用 default_weights（[A股, ETF1, ETF2...]），绕过整个 MVO 管线。
     // default_weights 之和应为 1（不足部分自动补国债 ETF 或留现金）。
     if sc.allocation_mode.as_deref() == Some("fixed") {
+        // 配置门禁（2026-09-08）：default_weights 和=1 是设计约束，偏离>2% 属配置错误。
+        // 引擎内部会归一化兜底，但静默修复掩盖配置事故——必须告警暴露（宁可报错）。
+        let cfg_sum: f64 = sc.default_weights.iter().sum();
+        if (cfg_sum - 1.0).abs() > 0.02 {
+            tracing::error!(
+                strategy = %sc.strategy_id,
+                weights_sum = cfg_sum,
+                "⚠️ default_weights 权重和偏离 1 超过 2%——配置错误，已归一化兜底但需立即修正"
+            );
+        }
+        if sc.default_weights.len() != sc.etf_symbols.len() + 1 {
+            tracing::error!(
+                strategy = %sc.strategy_id,
+                n_weights = sc.default_weights.len(),
+                expected = sc.etf_symbols.len() + 1,
+                "⚠️ default_weights 长度与 etf_symbols+1 不匹配——缺失权重按 0 处理，ETF 分配将失真"
+            );
+        }
         let n_etf = sc.etf_symbols.len();
         let mut weights: Vec<f64> = Vec::with_capacity(1 + n_etf);
         // 第 0 列 = A 股 sleeve
@@ -414,12 +432,18 @@ async fn get_monthly_returns(
         .await
         .unwrap_or_default();
 
-        // 权益曲线新鲜度检查
+        // 权益曲线新鲜度分级门禁（2026-09-08 升级）：
+        // >30 天 info（训练窗口内影响可忽略）；>45 天 error+质量告警（信号陈旧，
+        // 持仓复用旧日期，alpha 衰减风险需人工介入）；旧 >60 warn 升级为 error。
         if let Some(last) = eq_rows.last() {
             let gap = (end - last.0).num_days();
-            if gap > 60 {
-                warn!("[MVO] ⚠ A股权益曲线数据滞后{}天 (最新: {}), MVO训练窗口可能缺失近期数据。建议重新运行全量回测更新fbt-36e18e12",
-                      gap, last.0.format("%Y-%m-%d"));
+            if gap > 45 {
+                tracing::error!(
+                    curve_task = %sc.equity_curve_task_id,
+                    gap_days = gap,
+                    latest = %last.0.format("%Y-%m-%d"),
+                    "⚠️ A股 sleeve 权益曲线滞后超过 45 天——调仓信号陈旧（复用旧持仓），需重跑 sleeve 曲线或检查 equity_curve 同步调度"
+                );
             } else if gap > 30 {
                 info!(
                     "[MVO] A股权益曲线滞后{}天 (最新: {}), 36月训练窗口内影响可忽略",

@@ -13,7 +13,7 @@
 use chrono::NaiveDate;
 use quant_data::tushare::client::TushareClient;
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::routes::scheduler::{
     ensure_prediction_coverage, load_active_etf_symbols_union, load_first_active_strategy_config,
@@ -269,6 +269,31 @@ pub async fn sync_eod_data(
             if let Err(e) = crate::routes::trading::update_current_nav(db, aid).await {
                 warn!("[scheduler] EOD NAV 重算失败 {}: {}", aid, e);
             }
+        }
+        // 盯市完整性门禁（2026-09-08）：逐账户校验当日 NAV 快照已写入。
+        // 背景：unlev 账户 09-04 起快照静默断链 3 个交易日无任何告警（日报路径
+        // 单账户失败被吞），绩效曲线出现空洞。宁可告警不可静默。
+        let missing_snapshots: Vec<String> = sqlx::query_scalar(
+            "SELECT a.paper_account_id FROM paper_account a
+             WHERE a.status='active' AND a.account_type='simulated'
+               AND NOT EXISTS (SELECT 1 FROM paper_nav_snapshot s
+                               WHERE s.paper_account_id=a.paper_account_id AND s.snapshot_date=$1)",
+        )
+        .bind(date)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        if !missing_snapshots.is_empty() {
+            error!(
+                accounts = ?missing_snapshots,
+                "⚠️ EOD 盯市完整性门禁：{} 个活跃账户当日 NAV 快照缺失（宁可报错不可静默断链）",
+                missing_snapshots.len()
+            );
+            let msgs: Vec<String> = missing_snapshots
+                .iter()
+                .map(|a| format!("EOD 盯市后账户 {} 在 {} 无 NAV 快照——绩效断链，需排查 mark_to_market/日报路径", a, date))
+                .collect();
+            crate::routes::shared::send_quality_alert(db, &msgs).await;
         }
         info!(
             "[scheduler] EOD 日终盯市完成({} 账户, 当日收盘价口径)",
