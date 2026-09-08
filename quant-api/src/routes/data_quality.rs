@@ -36,7 +36,7 @@ pub async fn run_data_quality_check(db: &PgPool) {
     .flatten();
     if let Some((max_dt,)) = stock_max {
         let trading_days_behind: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+            "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE exchange = 'SSE' AND is_open = true AND trade_date > $1 AND trade_date < $2"
         ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
         if trading_days_behind.0 > 1 {
             gaps.push(format!(
@@ -65,7 +65,7 @@ pub async fn run_data_quality_check(db: &PgPool) {
             .flatten();
             if let Some((max_dt,)) = max_row {
                 let trading_gap: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM market_trade_calendar WHERE is_open = true AND trade_date > $1 AND trade_date < $2"
+                    "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE exchange = 'SSE' AND is_open = true AND trade_date > $1 AND trade_date < $2"
                 ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
                 if trading_gap.0 > 1 {
                     // ETF T+1，允许落后1个交易日
