@@ -88,6 +88,92 @@ pub async fn sync_eod_data(
         &format!("etf-eod-{}", date_str),
     )
     .await;
+    // ── 个股两融明细每日增量（2026-09-08 接入，margin_rq* 因子数据源）──
+    // 充值 token 权限接口；双 token fallback 后主 client 失败自动切 ALT。
+    // 同步失败不阻塞 EOD 主链路（因子次日 T+1 保鲜窗口兜底）。
+        {
+            let empty_syms: Vec<String> = vec![];
+            match quant_data::sync::sync_margin_detail(
+                db,
+                tushare,
+                &empty_syms,
+                &date_str,
+                &date_str,
+                &format!("margin-detail-eod-{}", date_str),
+            )
+            .await
+            {
+                Ok(n) if n > 0 => info!("[scheduler] EOD 两融明细同步 {} 行 ({})", n, date_str),
+                Ok(_) => {}
+                Err(e) => warn!("[scheduler] EOD 两融明细同步失败 {}: {}", date_str, e),
+            }
+        }
+        // ── 两融因子每日增量物化（margin_rq*，生效日口径，与生产白名单 74 因子配套）──
+        // 增量只算近 5 个数据日（20 日窗口因子由 SQL 窗口自动取足前置数据）。
+        // 失败仅告警：因子缺数当季贡献为零，不会污染既有信号（白名单缺数告警会提示）。
+        {
+            let factor_sql = r#"
+            WITH win AS (
+              SELECT MAX(trade_date) - 7 AS min_d, MAX(trade_date) AS max_d FROM market_stock_margin_detail
+            ),
+            ratio AS (
+              SELECT m.symbol, m.available_at AS eff_date,
+                AVG(m.rqye / NULLIF(m.rzye, 0)) OVER (
+                  PARTITION BY m.symbol ORDER BY m.trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                ) AS rq_ratio
+              FROM market_stock_margin_detail m CROSS JOIN win
+              WHERE m.rqye IS NOT NULL AND m.rzye IS NOT NULL AND m.rzye > 0 AND m.available_at IS NOT NULL
+                AND m.trade_date >= win.min_d - 40 AND m.trade_date <= win.max_d
+            ),
+            ins AS (
+              INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+              SELECT 'margin_rq_ratio_20d_std', '1.0.0', symbol, eff_date, rq_ratio,
+                     percent_rank() OVER (PARTITION BY eff_date ORDER BY rq_ratio), eff_date
+              FROM ratio WHERE rq_ratio IS NOT NULL AND eff_date >= (SELECT min_d FROM win)
+              ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                raw_value = EXCLUDED.raw_value, normalized_value = EXCLUDED.normalized_value, available_at = EXCLUDED.available_at
+              RETURNING 1
+            )
+            SELECT COUNT(*) FROM ins"#;
+            match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
+                Ok(n) if n > 0 => info!("[scheduler] 两融因子 rq_ratio 增量物化 {} 行", n),
+                Ok(_) => {}
+                Err(e) => warn!("[scheduler] 两融因子增量物化失败: {}", e),
+            }
+        }
+        {
+            let factor_sql = r#"
+            WITH win AS (
+              SELECT MAX(trade_date) - 7 AS min_d, MAX(trade_date) AS max_d FROM market_stock_margin_detail
+            ),
+            raw AS (
+              SELECT m.symbol, m.available_at AS eff_date,
+                m.rqye / NULLIF(lag20.rqye, 0) - 1 AS chg
+              FROM market_stock_margin_detail m CROSS JOIN win
+              JOIN LATERAL (
+                SELECT rqye FROM market_stock_margin_detail x
+                WHERE x.symbol = m.symbol AND x.trade_date < m.trade_date
+                ORDER BY x.trade_date DESC OFFSET 19 LIMIT 1
+              ) lag20 ON true
+              WHERE m.rqye IS NOT NULL AND m.rqye > 0 AND m.available_at IS NOT NULL
+                AND m.trade_date >= win.min_d AND m.trade_date <= win.max_d
+            ),
+            ins AS (
+              INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+              SELECT 'margin_rqye_chg_20d_std', '1.0.0', symbol, eff_date, chg,
+                     percent_rank() OVER (PARTITION BY eff_date ORDER BY chg), eff_date
+              FROM raw WHERE chg IS NOT NULL
+              ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                raw_value = EXCLUDED.raw_value, normalized_value = EXCLUDED.normalized_value, available_at = EXCLUDED.available_at
+              RETURNING 1
+            )
+            SELECT COUNT(*) FROM ins"#;
+            match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
+                Ok(n) if n > 0 => info!("[scheduler] 两融因子 rqye_chg 增量物化 {} 行", n),
+                Ok(_) => {}
+                Err(e) => warn!("[scheduler] 两融因子 rqye_chg 增量物化失败: {}", e),
+            }
+        }
     // ── 业绩预告增量同步（forecast 族因子数据源，2026-09-05 接入）──
     // forecast 接口要求 ann_date 或 ts_code 至少一个参数，按日增量拉当日公告。
     // 用充值 token（现行 token 无此接口权限）。同步失败不阻塞 EOD 主链路。
