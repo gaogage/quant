@@ -1576,4 +1576,42 @@ mod final_optimization {
             }
         }
     }
+
+    /// 无杠杆收益增强实验（2026-09-08）：无杠杆 MaxDD 仅 -13.57%，风险预算闲置 21pp；
+    /// sleeve(9.4%) 年化高于 ETF 等权池(~7.4%)，无融资成本考量下应提高 A 权重。
+    /// A 权重 × ETF 结构（等权/增长倾斜）网格，@1.0x 全部。
+    #[tokio::test]
+    #[ignore]
+    async fn unlev_boost_scan() {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = PgPool::connect(&url).await.expect("db");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
+        let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        // ETF 内部权重: 等权 vs 增长倾斜(黄金/国债降,纳指/标普升) —— [黄金,国债,标普,纳指,有色,豆粕,原油]
+        let etf_eq = |w: f64| vec![w; 7];
+        let grow = |w: f64| vec![w*1.196, w*0.640, w*1.537, w*2.220, w*0.427, w*0.640, w*0.342];   // 和=7
+        let grow_mild = |w: f64| vec![w*1.136, w*0.773, w*1.364, w*1.909, w*0.545, w*0.773, w*0.500]; // 和=7
+
+        for aw in [0.15f64] {
+            let etf_w = (1.0 - aw) / 7.0;
+            for (sname, etf_ws) in [("EQ", etf_eq(etf_w)), ("GR", grow(etf_w)), ("GM", grow_mild(etf_w))] {
+                let mut ws = vec![format!("{:.4}", aw)];
+                for w in &etf_ws { ws.push(format!("{:.4}", w)); }
+                let weights = format!("[{}]", ws.join(", "));
+                sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
+                    .bind(&weights).execute(&db).await.expect("upd");
+                let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+                let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+                let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                    crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                    true, true, 1.0, "fixed").await.expect("sim");
+                let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+                let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+                println!("[A={:.0}% {} @1.0x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                    aw*100.0, sname, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+            }
+        }
+    }
 }

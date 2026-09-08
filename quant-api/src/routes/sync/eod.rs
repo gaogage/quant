@@ -115,7 +115,10 @@ pub async fn sync_eod_data(
     // Tushare fund_daily 就绪率不稳定属数据源现实。缺失时日报当日收益显示 --
     // (snapshot.daily_return 置 NULL),次日 9:00 T+1 补齐后补盯市并补发昨日绩效。
     let index_codes = vec!["000300.SH".to_string()];
-    let _ = quant_data::sync::sync_index_daily(
+    // CSI300 是重放门禁与基准对比的必依赖——失败不能静默（9/07 EOD 静默断更一日，
+    // 次日重放被门禁拦截才发现）。失败即告警，次日 9:00 T+1 路径会补齐。
+    // 错误先转 String：Box<dyn StdError> 非 Send，不能跨 await 存活于 spawn 的 future。
+    let idx_err: Option<String> = match quant_data::sync::sync_index_daily(
         db,
         tushare,
         &index_codes,
@@ -123,7 +126,19 @@ pub async fn sync_eod_data(
         &date_str,
         &format!("idx-eod-{}", date_str),
     )
-    .await;
+    .await
+    {
+        Ok(_) => None,
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(err) = idx_err {
+        warn!("[EOD] 指数日线同步失败 {}: {}", date_str, err);
+        crate::routes::shared::send_quality_alert(
+            db,
+            &[format!("EOD 指数日线同步失败 {}（次日 T+1 会补齐，若仍缺需手工 sync/index-daily）: {}", date_str, err)],
+        )
+        .await;
+    }
 
     // 日线基础指标(批量拉取：传空走 trade_date 全市场路径，1 次 API 调用几秒完成)
     {
