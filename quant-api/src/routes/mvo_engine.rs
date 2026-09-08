@@ -1589,29 +1589,29 @@ mod final_optimization {
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
 
-        // ETF 内部权重: 等权 vs 增长倾斜(黄金/国债降,纳指/标普升) —— [黄金,国债,标普,纳指,有色,豆粕,原油]
-        let etf_eq = |w: f64| vec![w; 7];
-        let grow = |w: f64| vec![w*1.196, w*0.640, w*1.537, w*2.220, w*0.427, w*0.640, w*0.342];   // 和=7
-        let grow_mild = |w: f64| vec![w*1.136, w*0.773, w*1.364, w*1.909, w*0.545, w*0.773, w*0.500]; // 和=7
-
-        for aw in [0.15f64] {
-            let etf_w = (1.0 - aw) / 7.0;
-            for (sname, etf_ws) in [("EQ", etf_eq(etf_w)), ("GR", grow(etf_w)), ("GM", grow_mild(etf_w))] {
-                let mut ws = vec![format!("{:.4}", aw)];
-                for w in &etf_ws { ws.push(format!("{:.4}", w)); }
-                let weights = format!("[{}]", ws.join(", "));
-                sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
-                    .bind(&weights).execute(&db).await.expect("upd");
-                let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-                let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-                let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                    crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                    true, true, 1.0, "fixed").await.expect("sim");
-                let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
-                let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-                println!("[A={:.0}% {} @1.0x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
-                    aw*100.0, sname, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
-            }
+        // 防御微调结构 @2.2x（MaxDD 优化）：降杠杆已证不降 DD（dd_ctrl 主导），
+        // 从结构入手——等权基础上黄金/国债 +5pp、美股扣减。找 DD<=26% 且 AR>=14% 的点。
+        // [A股, 黄金, 国债, 标普, 纳指, 有色, 豆粕, 原油]
+        let plans: Vec<(&str, Vec<f64>)> = vec![
+            ("EQ 等权基准", vec![0.15, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214]),
+            ("DEF5 黄金+5", vec![0.15, 0.1714, 0.1214, 0.0964, 0.0964, 0.1214, 0.1214, 0.1214]),
+            ("DEF5B 国债+5", vec![0.15, 0.1214, 0.1714, 0.0964, 0.0964, 0.1214, 0.1214, 0.1214]),
+            ("DEF10 双+5", vec![0.15, 0.1714, 0.1714, 0.0964, 0.0964, 0.0964, 0.0964, 0.0964]),
+        ];
+        for (name, w) in &plans {
+            let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
+                .bind(&weights).execute(&db).await.expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
+            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
+                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
+                true, true, 2.2, "fixed").await.expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!("[{} @2.2x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                name, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
         }
     }
 }
