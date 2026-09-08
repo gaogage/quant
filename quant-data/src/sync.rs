@@ -6709,14 +6709,26 @@ fn industry_membership_row_from_map(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Option<MarketStockIndustryMembershipPit> {
-    let symbol = get_str(item, "con_code");
+    // index_member_all 输出 ts_code/name/l1-l3 字段(旧接口 con_code/con_name/index_code 双兼容)
+    let symbol = {
+        let v = get_str(item, "con_code");
+        if v.is_empty() { get_str(item, "ts_code") } else { v }
+    };
     let in_date = to_date(&get_str(item, "in_date"))?;
     let out_date = to_date(&get_str(item, "out_date"));
     if symbol.is_empty() || in_date > end || out_date.map(|date| date < start).unwrap_or(false) {
         return None;
     }
-    let index_code = get_opt_str(item, "index_code").unwrap_or_else(|| classify.index_code.clone());
-    let index_name = get_opt_str(item, "index_name").unwrap_or_default();
+    let index_code = get_opt_str(item, "index_code")
+        .or_else(|| get_opt_str(item, "l1_code"))
+        .or_else(|| get_opt_str(item, "l2_code"))
+        .or_else(|| get_opt_str(item, "l3_code"))
+        .unwrap_or_else(|| classify.index_code.clone());
+    let index_name = get_opt_str(item, "index_name")
+        .or_else(|| get_opt_str(item, "l1_name"))
+        .or_else(|| get_opt_str(item, "l2_name"))
+        .or_else(|| get_opt_str(item, "l3_name"))
+        .unwrap_or_default();
     Some(MarketStockIndustryMembershipPit {
         classification_source: classify.classification_source.clone(),
         industry_level: classify.industry_level.clone(),
@@ -6726,7 +6738,9 @@ fn industry_membership_row_from_map(
         industry_name: classify.industry_name.clone(),
         parent_code: classify.parent_code.clone(),
         symbol,
-        symbol_name: get_opt_str(item, "con_name").unwrap_or_default(),
+        symbol_name: get_opt_str(item, "con_name")
+            .or_else(|| get_opt_str(item, "name"))
+            .unwrap_or_default(),
         in_date,
         out_date,
         available_at: in_date,

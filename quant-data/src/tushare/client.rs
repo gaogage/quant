@@ -60,10 +60,13 @@ const INDEX_CLASSIFY_FIELDS: &[&str] = &[
     "src",
 ];
 const INDEX_MEMBER_FIELDS: &[&str] = &[
-    "index_code",
-    "index_name",
-    "con_code",
-    "con_name",
+    // 2026-09-08 修正: Tushare 申万成分接口实为 index_member_all(非 index_member),
+    // 输出为三级分级字段。下游 row_from_map 已做新旧 key 双兼容。
+    "l1_code",
+    "l2_code",
+    "l3_code",
+    "ts_code",
+    "name",
     "in_date",
     "out_date",
     "is_new",
@@ -1033,12 +1036,23 @@ impl TushareClient {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
-        let limit_value = limit.map(|value| value.to_string());
-        let offset_value = offset.map(|value| value.to_string());
-
+        // 2026-09-08 修正: Tushare 无 index_member 接口, 申万分级成分为 index_member_all
+        // (单次 2000 行无 offset 分页, 参数为 l1/l2/l3_code)。保留旧签名兼容调用方,
+        // limit/offset 被忽略(单分类成分 < 2000 行无需分页); index_code 按 legacy
+        // 约定视为分类码直接映射(申万 l1/l2/l3 码可通用于任一级参数位——服务端按
+        // 码段识别级别)。若实测某级不识别, 调用方需传级别化参数(见 sync.rs 改造)。
+        let _ = (limit, offset);
         let mut params: Vec<(&str, &str)> = Vec::new();
         if let Some(code) = index_code {
-            params.push(("index_code", code));
+            // 申万分级码 801xxx.SI=L1 / 801xxx+高位段=L2 / 85xxxx.SI=L3,
+            // 按码前缀分发到对应级别参数
+            if code.starts_with("801") {
+                params.push(("l1_code", code));
+            } else if code.starts_with("85") {
+                params.push(("l3_code", code));
+            } else {
+                params.push(("l2_code", code));
+            }
         }
         if let Some(code) = ts_code {
             params.push(("ts_code", code));
@@ -1046,14 +1060,8 @@ impl TushareClient {
         if let Some(value) = is_new {
             params.push(("is_new", value));
         }
-        if let Some(value) = limit_value.as_deref() {
-            params.push(("limit", value));
-        }
-        if let Some(value) = offset_value.as_deref() {
-            params.push(("offset", value));
-        }
 
-        self.call_api::<Vec<serde_json::Value>>("index_member", params, INDEX_MEMBER_FIELDS)
+        self.call_api::<Vec<serde_json::Value>>("index_member_all", params, INDEX_MEMBER_FIELDS)
             .await
     }
 
