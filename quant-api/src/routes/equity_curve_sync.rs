@@ -150,6 +150,18 @@ pub async fn sync_strategy_equity_curve(
             "include_rebalance_warmup": false
         }
     });
+    // ── sleeve 风控参数（2026-09-08 修复）──
+    // 此前 kelly/regime 只在 prediction_blend 分支携带，v24 的 factor_combo 分支裸奔——
+    // run-factor 落引擎默认（kelly 0.25、无 dd_ctrl），曲线 MaxDD 52% 与生产语义
+    // （kelly 0.15 + drawdown_control_v1，MaxDD ~20%）不符。
+    payload["kelly_fraction"] = serde_json::json!(sc.kelly_fraction);
+    payload["market_regime"] = serde_json::json!({
+        "policy": "drawdown_control_v1",
+        "enabled": true,
+        "benchmark": null,
+        "lookback_days": null,
+        "min_observations": null
+    });
     // 因子+ML混合:带上策略指定的全周期预测集
     if sc.signal_source == "prediction_blend" || sc.signal_source == "prediction" {
         let pid = if let Some(ref p) = sc.prediction_set_id {
