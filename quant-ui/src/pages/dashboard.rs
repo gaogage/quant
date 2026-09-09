@@ -445,13 +445,15 @@ fn V24PerformanceSection(accounts: Vec<Value>) -> Element {
     let live_rel: Vec<f64> = nav_points.iter().map(|p| p["relative_return"].as_f64().unwrap_or(0.0)).collect();
     let deviation = norm_last(&live_rel) - norm_last(&bt_ret);
     let dev_cls = if deviation.abs() > 2.0 { "text-red-600 dark:text-red-400" } else { "text-gray-500 dark:text-gray-400" };
+    // 口径: bt 曲线是 MVO 动态基准(每日重算,非实盘 fixed 配置),差值反映
+    // "fixed DEF10 vs MVO 动态"的策略间差异,不是执行偏离。
 
     rsx! {
         section { class: "mb-8 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-5",
             div { class: "flex items-center justify-between mb-4",
                 h2 { class: "text-lg font-semibold text-gray-900 dark:text-white", "v24 实盘绩效 — {acc_name}" }
                 if !bt_points.is_empty() {
-                    span { class: "text-xs {dev_cls}", "与回测偏离 {deviation:+.2}%" }
+                    span { class: "text-xs {dev_cls}", "vs MVO动态基准 {deviation:+.2}%" }
                 }
             }
 
