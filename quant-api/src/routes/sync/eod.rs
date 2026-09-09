@@ -174,6 +174,114 @@ pub async fn sync_eod_data(
                 Err(e) => warn!("[scheduler] 两融因子 rqye_chg 增量物化失败: {}", e),
             }
         }
+        // ── 东财主力资金流每日增量（2026-09-09 接入，mfdc_* 因子数据源，76 白名单配套）──
+        // moneyflow_dc 按日全市场 6000 行；双 token fallback 兜权限。生效日 = 数据日+1。
+        {
+            // raw 拉取：当日 moneyflow_dc 全市场（6000 行/次，reqwest 直调充值 token，
+            // 主 token 无该接口权限；失败仅告警不阻塞 EOD）
+            if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
+                if !tok.trim().is_empty() {
+                    let body = serde_json::json!({
+                        "api_name": "moneyflow_dc", "token": tok.trim(),
+                        "params": {"trade_date": date_str},
+                        "fields": "ts_code,trade_date,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_sm_amount"
+                    });
+                    match reqwest::Client::new()
+                        .post("http://api.tushare.pro")
+                        .json(&body)
+                        .timeout(std::time::Duration::from_secs(60))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            if let Ok(parsed) = resp.json::<serde_json::Value>().await {
+                                if parsed["code"].as_i64() == Some(0) {
+                                    if let Some(items) = parsed["data"]["items"].as_array() {
+                                        let mut n = 0usize;
+                                        for it in items {
+                                            let g = |k: &str| it.get(k).and_then(|v| v.as_f64());
+                                            let s = |k: &str| it.get(k).and_then(|v| v.as_str());
+                                            let (Some(tc), Some(td)) = (s("ts_code"), s("trade_date")) else { continue };
+                                            let r = sqlx::query(
+                                                "INSERT INTO market_stock_moneyflow_dc_raw
+                                                 (ts_code, trade_date, net_amount, net_amount_rate, buy_elg_amount, buy_elg_amount_rate,
+                                                  buy_lg_amount, buy_lg_amount_rate, buy_md_amount, buy_sm_amount, available_at)
+                                                 VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $2::date + 1)
+                                                 ON CONFLICT DO NOTHING",
+                                            )
+                                            .bind(tc).bind(td)
+                                            .bind(g("net_amount")).bind(g("net_amount_rate"))
+                                            .bind(g("buy_elg_amount")).bind(g("buy_elg_amount_rate"))
+                                            .bind(g("buy_lg_amount")).bind(g("buy_lg_amount_rate"))
+                                            .bind(g("buy_md_amount")).bind(g("buy_sm_amount"))
+                                            .execute(db).await;
+                                            if r.map(|x| x.rows_affected()).unwrap_or(0) > 0 { n += 1; }
+                                        }
+                                        if n > 0 { info!("[scheduler] EOD 东财资金流同步 {} 行 ({})", n, date_str); }
+                                    }
+                                } else {
+                                    warn!("[scheduler] EOD 东财资金流拉取失败 code={:?}", parsed["code"]);
+                                }
+                            }
+                        }
+                        Err(e) => warn!("[scheduler] EOD 东财资金流请求失败: {}", e),
+                    }
+                }
+            }
+            // 因子增量物化保鲜
+            let factor_sql = r#"
+            WITH win AS (
+              SELECT MAX(trade_date) - 30 AS min_d, MAX(trade_date) AS max_d FROM market_stock_moneyflow_dc_raw
+            ),
+            smoothed AS (
+              SELECT m.ts_code, m.available_at AS eff_date,
+                AVG(m.net_amount_rate) OVER (PARTITION BY m.ts_code ORDER BY m.trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma20
+              FROM market_stock_moneyflow_dc_raw m CROSS JOIN win
+              WHERE m.net_amount_rate IS NOT NULL AND m.available_at IS NOT NULL
+                AND m.trade_date >= win.min_d
+            ),
+            ins AS (
+              INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+              SELECT 'mfdc_net_rate_20d_std', '1.0.0', ts_code, eff_date, sma20,
+                     percent_rank() OVER (PARTITION BY eff_date ORDER BY sma20), eff_date
+              FROM smoothed WHERE sma20 IS NOT NULL AND eff_date >= (SELECT min_d FROM win)
+              ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                raw_value = EXCLUDED.raw_value, normalized_value = EXCLUDED.normalized_value, available_at = EXCLUDED.available_at
+              RETURNING 1
+            )
+            SELECT COUNT(*) FROM ins"#;
+            match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
+                Ok(n) if n > 0 => info!("[scheduler] 主力资金流因子 net_rate 增量物化 {} 行", n),
+                Ok(_) => {}
+                Err(e) => warn!("[scheduler] 主力资金流因子物化失败: {}", e),
+            }
+            let factor_sql2 = r#"
+            WITH win AS (
+              SELECT MAX(trade_date) - 30 AS min_d, MAX(trade_date) AS max_d FROM market_stock_moneyflow_dc_raw
+            ),
+            smoothed AS (
+              SELECT m.ts_code, m.available_at AS eff_date,
+                AVG(m.buy_elg_amount_rate) OVER (PARTITION BY m.ts_code ORDER BY m.trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma20
+              FROM market_stock_moneyflow_dc_raw m CROSS JOIN win
+              WHERE m.buy_elg_amount_rate IS NOT NULL AND m.available_at IS NOT NULL
+                AND m.trade_date >= win.min_d
+            ),
+            ins AS (
+              INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+              SELECT 'mfdc_elg_rate_20d_std', '1.0.0', ts_code, eff_date, sma20,
+                     percent_rank() OVER (PARTITION BY eff_date ORDER BY sma20), eff_date
+              FROM smoothed WHERE sma20 IS NOT NULL AND eff_date >= (SELECT min_d FROM win)
+              ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+                raw_value = EXCLUDED.raw_value, normalized_value = EXCLUDED.normalized_value, available_at = EXCLUDED.available_at
+              RETURNING 1
+            )
+            SELECT COUNT(*) FROM ins"#;
+            match sqlx::query_scalar::<_, i64>(factor_sql2).fetch_one(db).await {
+                Ok(n) if n > 0 => info!("[scheduler] 主力资金流因子 elg_rate 增量物化 {} 行", n),
+                Ok(_) => {}
+                Err(e) => warn!("[scheduler] 主力资金流因子 elg 物化失败: {}", e),
+            }
+        }
     // ── 业绩预告增量同步（forecast 族因子数据源，2026-09-05 接入）──
     // forecast 接口要求 ann_date 或 ts_code 至少一个参数，按日增量拉当日公告。
     // 用充值 token（现行 token 无此接口权限）。同步失败不阻塞 EOD 主链路。
