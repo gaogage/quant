@@ -1454,8 +1454,10 @@ async fn fill_paper_order_inner(
 }
 
 async fn paper_account_summary_inner(db: &sqlx::PgPool, account_id: &str) -> Result<Value, String> {
-    let account = sqlx::query_as::<_, (String, String, Decimal, Decimal, String)>(
-        "SELECT paper_account_id, name, initial_capital, cash, status
+    // 2026-09-09 修复: 旧实现 "nav": account.3 把 cash 当 NAV 返回——全仓/融资账户 cash=0,
+    // 页面净值显示 0（生产杠杆账户实测命中）。NAV 直接取 current_nav（EOD 盯市维护）。
+    let account = sqlx::query_as::<_, (String, String, Decimal, Decimal, String, Option<Decimal>, Option<Decimal>)>(
+        "SELECT paper_account_id, name, initial_capital, cash, status, current_nav, peak_nav
          FROM paper_account
          WHERE paper_account_id = $1",
     )
@@ -1476,13 +1478,23 @@ async fn paper_account_summary_inner(db: &sqlx::PgPool, account_id: &str) -> Res
     .await
     .map_err(|error| format!("Failed to summarize paper_order: {}", error))?;
 
+    let nav = account.5.or(Some(account.2)).unwrap_or_default();
+    let init = account.2;
+    let total_return = if init > Decimal::ZERO {
+        Some(format!("{}", (nav - init) / init))
+    } else {
+        None
+    };
+
     Ok(json!({
         "paper_account_id": account.0,
         "name": account.1,
         "initial_capital": account.2,
         "cash": account.3,
         "status": account.4,
-        "nav": account.3,
+        "nav": nav,
+        "peak_nav": account.6,
+        "total_return": total_return,
         "order_count": counts.0,
         "filled_order_count": counts.1,
         "rejected_order_count": counts.2
