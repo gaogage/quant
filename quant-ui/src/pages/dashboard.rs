@@ -194,7 +194,11 @@ fn AccountCard(data: Value) -> Element {
     let name = data["name"].as_str().unwrap_or("-");
     let acc_type = data["account_type"].as_str().unwrap_or("-");
     let strategy = data["strategy_version_id"].as_str().filter(|s| !s.is_empty()).unwrap_or("-");
-    let cap = data["initial_capital"].as_f64().unwrap_or(0.0) as i64;
+    // 2026-09-09: 卡片展示当前净值(原显示初始资金 100 万,与账户状态脱节)
+    let cap = data["current_nav"]
+        .as_f64()
+        .filter(|v| *v > 0.0)
+        .unwrap_or_else(|| data["initial_capital"].as_f64().unwrap_or(0.0)) as i64;
     let status = data["status"].as_str().unwrap_or("-");
     rsx! {
         div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4 flex items-center justify-between",
@@ -410,12 +414,36 @@ fn V24PerformanceSection(accounts: Vec<Value>) -> Element {
     let last = nav_points.last().cloned().unwrap_or(Value::Null);
     let cur_nav = last["nav"].as_f64().unwrap_or(0.0);
     let cur_cum_ret = last["cumulative_return"].as_f64().unwrap_or(0.0);
-    let cur_mdd = nav_points.iter().map(|p| p["max_drawdown"].as_f64().unwrap_or(0.0)).fold(0.0_f64, f64::max);
+    // 2026-09-09: 快照 max_drawdown 列长期无人写入(恒 0),改为 NAV 序列现场计算峰值回撤
+    let cur_mdd = {
+        let mut peak = 0.0_f64;
+        let mut mdd = 0.0_f64;
+        for p in &nav_points {
+            let nav = p["nav"].as_f64().unwrap_or(0.0);
+            if nav > peak { peak = nav; }
+            if peak > 0.0 {
+                let dd = nav / peak - 1.0;
+                if dd < mdd { mdd = dd; }
+            }
+        }
+        mdd * 100.0
+    };
     let sharpe = acc["sharpe_ratio"].as_f64().unwrap_or(0.0);
 
-    // 与回测偏离(用最后一点对比,同 P2-1 push_daily_performance_report 的窗口思路,这里取全窗口)
-    let bt_last_ret = bt_ret.last().copied().unwrap_or(0.0);
-    let deviation = cur_cum_ret - bt_last_ret;
+    // 与回测偏离(2026-09-09 修正口径): 原实现拿"实盘自初始资金累计收益"减
+    // "回测对比曲线累计",两者锚点不同(346% vs ~68% 出 +278% 假偏离)。
+    // 改为两条曲线各自从自身首点归一(relative 口径)后取末点差——同锚可比。
+    let norm_last = |series: &[f64]| -> f64 {
+        if series.len() < 2 { return 0.0; }
+        let base = series[0];
+        if base.is_finite() && (base - 1.0).abs() > f64::EPSILON {
+            series.last().copied().unwrap_or(0.0) - base
+        } else {
+            series.last().copied().unwrap_or(0.0)
+        }
+    };
+    let live_rel: Vec<f64> = nav_points.iter().map(|p| p["relative_return"].as_f64().unwrap_or(0.0)).collect();
+    let deviation = norm_last(&live_rel) - norm_last(&bt_ret);
     let dev_cls = if deviation.abs() > 2.0 { "text-red-600 dark:text-red-400" } else { "text-gray-500 dark:text-gray-400" };
 
     rsx! {
