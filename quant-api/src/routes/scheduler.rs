@@ -663,11 +663,11 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         match strategy_config.as_ref() {
             Some(sc) => info!(
-                "[scheduler] {} 已启动 ({}): 14:40调仓 | 22:00 EOD | 9:00 T+1数据补同步",
+                "[scheduler] {} 已启动 ({}): 09:35调仓(早间) | 22:00 EOD+夜间预备链 | 9:00 T+1数据补同步",
                 sc.strategy_id, sc.name
             ),
             None => info!(
-                "[scheduler] 已启动 (无 active 复合策略): 14:40调仓 | 22:00 EOD | 9:00 T+1数据补同步"
+                "[scheduler] 已启动 (无 active 复合策略): 09:35调仓(早间) | 22:00 EOD+夜间预备链 | 9:00 T+1数据补同步"
             ),
         }
 
