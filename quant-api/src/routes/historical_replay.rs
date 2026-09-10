@@ -21,6 +21,9 @@ pub struct HistoricalReplayRequest {
     pub paper_account_id: String,
     pub start_date: String,
     pub end_date: String,
+    /// 执行价口径:缺省 "close"(收盘执行=回测标准口径);"open"=T日开盘价执行
+    /// (实盘 B1' 早间执行模式的绩效验证,信号仍为 T-1 信息集)。
+    pub price_source: Option<String>,
     /// WFA 切窗模式：true 切 OOS 段拼 stitched 曲线，false/缺省走单曲线回放。
     #[serde(default)]
     pub wfa_mode: bool,
@@ -107,13 +110,17 @@ async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) 
     let cache = Arc::new(tokio::sync::Mutex::new(
         None::<crate::routes::shared::MvoWeightCache>,
     ));
+    let ps = match req.price_source.as_deref() {
+        Some("open") => PriceSource::EodOpen,
+        _ => PriceSource::EodClose,
+    };
     let navs = run_daily_simulation(
         db,
         &account_id,
         &rs,
         start,
         end,
-        PriceSource::EodClose,
+        ps,
         &cache,
         &tushare,
         true,

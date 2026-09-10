@@ -30,6 +30,14 @@ pub enum PriceSource {
     /// 与实盘同策略同逻辑同价格空间(MVO 动态、真实价)但无摩擦的基准曲线,偏离仅反映
     /// 执行成本(slippage),应接近 0。后复权会因复权因子放大老股市值与真实资金不可比,故基准也用真实价。
     EodCloseAdj,
+    /// 回放绩效验证:T-1 信号 + T 日开盘价执行口径(实盘 B1' 早间执行模式的模拟,
+    /// 正常 slippage)。盯市仍收盘价,仅调仓执行价用当日 open。
+    EodOpen,
+}
+
+/// 执行取价列:EodOpen 用当日开盘价,其余收盘价(盯市一律收盘)。
+fn exec_price_col(ps: PriceSource) -> &'static str {
+    if matches!(ps, PriceSource::EodOpen) { "open" } else { "close" }
 }
 
 /// 日线条材表:统一真实价(market_stock_daily_bar)。基准与实盘必须同真实价口径——
@@ -570,7 +578,7 @@ pub async fn rebalance_account(
     }
     let etf_allocations = build_etf_allocations(&mvo_weights, regime, &listed_etf_symbols);
     // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
-    let etf_eod_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::EodClose | PriceSource::EodCloseAdj) {
+    let etf_eod_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::EodClose | PriceSource::EodCloseAdj | PriceSource::EodOpen) {
         preload_etf_eod_prices(db, &listed_etf_symbols, date, price_source).await
     } else {
         HashMap::new()
@@ -600,7 +608,7 @@ pub async fn rebalance_account(
             continue;
         }
         // P2-C:EodClose 模式优先用预加载的 etf_eod_prices,Intraday 模式用 intraday_prices
-        let price_val = if matches!(price_source, PriceSource::EodClose) {
+        let price_val = if matches!(price_source, PriceSource::EodClose | PriceSource::EodOpen) {
             etf_eod_prices
                 .get(etf_symbol.as_str())
                 .copied()
@@ -1329,8 +1337,9 @@ async fn fetch_eod_price(
     price_source: PriceSource,
 ) -> f64 {
     let table = daily_bar_table(price_source);
+    let col = exec_price_col(price_source);
     let fetched = sqlx::query_scalar::<_, f64>(&format!(
-        "SELECT close::double precision FROM {table}
+        "SELECT {col}::double precision FROM {table}
          WHERE symbol=$1 AND trade_date<=$2 ORDER BY trade_date DESC LIMIT 1",
     ))
     .bind(symbol)
@@ -1367,10 +1376,11 @@ async fn preload_etf_eod_prices(
         return HashMap::new();
     }
     let table = daily_bar_table(price_source);
+    let col = exec_price_col(price_source);
     let rows: Vec<(String, f64)> = sqlx::query_as(&format!(
-        "SELECT DISTINCT ON (symbol) symbol, close::double precision
+        "SELECT DISTINCT ON (symbol) symbol, {col}::double precision
          FROM {table}
-         WHERE symbol = ANY($1) AND trade_date <= $2 AND close > 0
+         WHERE symbol = ANY($1) AND trade_date <= $2 AND {col} > 0
          ORDER BY symbol, trade_date DESC",
     ))
     .bind(symbols)
