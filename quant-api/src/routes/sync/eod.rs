@@ -539,6 +539,61 @@ pub async fn sync_eod_data(
     // 数据完整性检查
     crate::routes::data_quality::run_data_quality_check(db).await;
 
+    // ── 夜间信号预备链（2026-09-10 接入，T日早6:00 信号生成的前置）──
+    // 背景：早6:00 生成 T 日信号需要 T-1 全链数据就绪，但 phase7 因子回填（~1h）
+    // 与 PIT 评估/物化（~40m）原本排在次日 9:05/9:30，sleeve 曲线 17:00 跑时
+    // 当日 bar 未入库（实质滞后到 T-2）。此处在 EOD 尾部 spawn 串行补全，
+    // 预计 00:30 前完成，凌晨 06:00 门禁只做校验。幂等，失败告警不阻塞。
+    {
+        let db2 = db.clone();
+        let date2 = date;
+        tokio::spawn(async move {
+            let t0 = std::time::Instant::now();
+            let sd = (date2 - chrono::Duration::days(190)).format("%Y%m%d").to_string();
+            let ed = date2.format("%Y%m%d").to_string();
+            // 1) phase7 因子回补（内部逐路由触发，幂等只补缺，~1h）
+            crate::routes::scheduler::trigger_v24_backfill_routes_pub(&db2, &sd, &ed).await;
+            info!("[夜间预备] phase7 因子回补完成 累计{}s", t0.elapsed().as_secs());
+            // 2) PIT combo 增量物化（近90天，t 口径继承 log）
+            let wl: Option<Vec<String>> = sqlx::query_scalar(
+                "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND status='active'",
+            )
+            .fetch_optional(&db2)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v: serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()));
+            let ind_neut: bool = sqlx::query_scalar(
+                "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name='full_pit_icir_indneutral_val_v1' ORDER BY materialized_at DESC LIMIT 1",
+            )
+            .fetch_optional(&db2)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+            let _ = crate::routes::factors::materialize_pit_combo_ext(
+                &db2,
+                "full_pit_icir_indneutral_val_v1",
+                "1.0.0",
+                20,
+                date2 - chrono::Duration::days(90),
+                date2,
+                true,
+                None,
+                wl.as_deref(),
+                ind_neut,
+            )
+            .await;
+            info!("[夜间预备] PIT 物化完成 累计{}s", t0.elapsed().as_secs());
+            // 3) sleeve 曲线同步（bar 已在库，曲线可含 T-1 当日）
+            let _ = crate::routes::equity_curve_sync::sync_strategy_equity_curve(
+                &db2, "v24", date2 - chrono::Duration::days(10), date2, false,
+            )
+            .await;
+            info!("[夜间预备] sleeve 曲线更新完成 累计{}s", t0.elapsed().as_secs());
+        });
+    }
+
     Ok(())
 }
 

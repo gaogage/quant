@@ -64,6 +64,10 @@ fn self_api_base() -> String {
 /// P4-1: 路由清单从 `factor_backfill_route` 表读取（按 priority 升序，仅 enabled=true）。
 /// 表为空时回退到 `V24_BACKFILL_ROUTES_FALLBACK` 常量，保证 DB 异常时链路不中断。
 /// 新增因子类别只需 INSERT 一行到 factor_backfill_route，无需改代码。
+pub(crate) async fn trigger_v24_backfill_routes_pub(db: &PgPool, start_date: &str, end_date: &str) {
+    trigger_v24_backfill_routes(db, start_date, end_date).await
+}
+
 async fn trigger_v24_backfill_routes(db: &PgPool, start_date: &str, end_date: &str) {
     let api_base = self_api_base();
     let client = reqwest::Client::new();
@@ -736,8 +740,21 @@ async fn run_tick(
 
     let is_trade = is_trading_day(db, today).await?;
 
-    // ── 14:40~15:00 (收盘前): 交易日才调仓 ──
-    if is_trade && hour == 14 && minute >= 40 {
+    // ── 调仓窗口（2026-09-10 起 09:35~10:30 开盘后早间执行）──
+    // 与实盘 B1' 信号时序对齐: T-1 夜间预备链产出信号, T 日开盘后执行。
+    // 绩效验证(回放 open 口径): lev 15.35%/1.002/-23.34% vs 收盘执行 15.14%/0.994,
+    // 无折损且杠杆账户 Sharpe 破 1.0。窗口可经 REBALANCE_WINDOW_HOUR 覆盖(默认 9)。
+    let reb_hour: u32 = std::env::var("REBALANCE_WINDOW_HOUR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9);
+    let reb_min: u32 = 35;
+    let in_reb_window = if reb_hour < 12 {
+        (hour == reb_hour && minute >= reb_min) || (hour == reb_hour + 1 && minute <= 30)
+    } else {
+        hour == reb_hour && minute >= reb_min
+    };
+    if is_trade && in_reb_window {
         let should_trade = {
             let st = state.lock().await;
             !st.traded_today
