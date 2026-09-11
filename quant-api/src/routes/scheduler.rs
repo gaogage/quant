@@ -157,6 +157,10 @@ struct DailyState {
     report_pushed: bool, // 今日是否已推送实盘绩效日报 (16:00 EOD 后)
 }
 
+/// ⚠️ cron crate 数字 DOW 是 **1=Sunday** 语义（2026-09-11 实测：`1-5` 的触发日为
+/// 周日~周四，周五漏跑），与标准 Vixie cron（1=Monday）不同。
+/// 周字段一律用名字（MON-FRI/SAT/SUN），禁止数字区间——scheduled_task_config
+/// 已全量迁移 MON-FRI，新增任务必须遵守。
 fn normalize_cron_expr(expr: &str) -> String {
     let parts: Vec<&str> = expr.split_whitespace().collect();
     if parts.len() == 5 {
