@@ -23,6 +23,7 @@ pub mod rebalance;
 pub mod report;
 pub mod scheduler;
 pub mod shared;
+pub mod signal_export;
 pub mod strategies;
 pub mod strategy_query;
 pub mod strategy;

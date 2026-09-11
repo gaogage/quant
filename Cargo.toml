@@ -54,6 +54,7 @@ dotenv = "0.15"
 rust_decimal = { version = "1", features = ["serde"] }
 
 # Hashing (audit 回测基线 hash 守卫,Step 0 DDD 重构安全网)
+sha1 = "0.10"
 sha2 = "0.10"
 
 # ML / Data Science

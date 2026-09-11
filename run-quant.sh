@@ -76,6 +76,7 @@ case "$TARGET" in
       ${DINGTALK_CLIENT_ID:+-e "DINGTALK_CLIENT_ID=$DINGTALK_CLIENT_ID"} \
       ${RUST_LOG:+-e "RUST_LOG=$RUST_LOG"} \
       -e "TZ=Asia/Shanghai" \
+      -v "$HOME/.ssh:/root/.ssh:ro" \
       "$RUN_IMAGE"
 
     echo "[run-quant] 本机已启动: http://localhost:8080 (镜像: $RUN_IMAGE)"

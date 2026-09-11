@@ -53,7 +53,7 @@ RUN trunk build --release
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates libssl3 curl tzdata python3 python3-pip \
+        ca-certificates libssl3 curl tzdata python3 python3-pip openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && pip3 install --no-cache-dir --break-system-packages akshare \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \

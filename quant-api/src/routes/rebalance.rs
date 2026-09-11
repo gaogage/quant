@@ -113,7 +113,7 @@ fn short_id() -> String {
 /// margin 路径：regime > leverage_regime_threshold 且 multiplier > 1.0 时，
 /// 按 mode（vol_target 动态 / fixed 固定）算杠杆倍数。
 /// cash 路径（leverage_enabled=false）：恒 ONE。
-async fn compute_leverage_mult(
+pub async fn compute_leverage_mult(
     db: &PgPool,
     account_id: &str,
     sc: &StrategyConfig,
@@ -1285,7 +1285,7 @@ fn sc_slippage_pct(sc: &StrategyConfig) -> f64 {
     sc.slippage_pct
 }
 
-fn build_etf_allocations(
+pub fn build_etf_allocations(
     mvo_weights: &[f64],
     regime: f64,
     etf_symbols: &[String],
@@ -1396,7 +1396,7 @@ async fn preload_etf_eod_prices(
 /// 替代循环内逐个 is_etf_listed_on(每个 ETF 1-2 次 DB)。
 /// 对齐 equity_curve_sync.rs:24 is_etf_listed_on 逻辑:优先 list_date,fallback MIN(trade_date)。
 /// 一次查所有 ETF 的 list_date + 首发行情日,返回 HashMap<symbol, is_listed>。
-async fn preload_etf_listed_map(
+pub async fn preload_etf_listed_map(
     db: &PgPool,
     symbols: &[String],
     date: NaiveDate,

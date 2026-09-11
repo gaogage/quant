@@ -573,6 +573,17 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     }
                 });
             }
+            "ptrade_signal_export" => {
+                // PTrade 实盘信号生成(2026-09-11, B1' 文件桥): 23:30 触发。
+                // 门禁→run-factor 截面→目标权重(与本文件模拟盘同源组件)→JSON→scp 推送。
+                // 依赖夜间预备链(22:10)的因子/物化/曲线在 23:20 前就绪。
+                // 详见 signal_export.rs 与 docs/projects/quant/PTrade实盘对接设计方案.md §5。
+                let db2 = db.clone();
+                let params2 = params.clone();
+                tokio::spawn(async move {
+                    crate::routes::signal_export::run_ptrade_signal_export(&db2, &params2).await;
+                });
+            }
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
                 // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。
@@ -746,7 +757,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
 }
 
 /// 获取当前日期对应的最优 WFA 参数（从已完成的实验中提取）
-async fn get_current_wfa_params(db: &PgPool, date: NaiveDate) -> Result<serde_json::Value, String> {
+pub(crate) async fn get_current_wfa_params(db: &PgPool, date: NaiveDate) -> Result<serde_json::Value, String> {
     let row = sqlx::query_as::<_, (serde_json::Value,)>(
         "SELECT parameters FROM wfa_strategy_params
          WHERE test_start <= $1 AND test_end >= $1
