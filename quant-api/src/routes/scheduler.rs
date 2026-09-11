@@ -525,6 +525,54 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     .to_string();
                 trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
             }
+            "nightly_signal_prep" => {
+                // 夜间信号预备链(2026-09-11): 22:10 独立触发,不等 EOD 主链(主链被
+                // forecast 拖到 00:00 的历史教训)。bar 22:01 入库即满足前置。
+                // 链: phase7 因子回补(~67m) → PIT 物化增量 → sleeve 曲线更新。
+                // 预计 23:20 完成,为 23:30 信号生成与日终通知留窗。幂等,失败告警。
+                let db2 = db.clone();
+                let date = chrono::Local::now().date_naive();
+                tokio::spawn(async move {
+                    let t0 = std::time::Instant::now();
+                    let sd = (date - chrono::Duration::days(190)).format("%Y%m%d").to_string();
+                    let ed = date.format("%Y%m%d").to_string();
+                    trigger_v24_backfill_routes(&db2, &sd, &ed).await;
+                    info!("[夜间预备] phase7 因子回补完成 累计{}s", t0.elapsed().as_secs());
+                    let wl: Option<Vec<String>> = sqlx::query_scalar(
+                        "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND status='active'",
+                    )
+                    .fetch_optional(&db2)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|v: serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()));
+                    let ind_neut: bool = sqlx::query_scalar(
+                        "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name='full_pit_icir_indneutral_val_v1' ORDER BY materialized_at DESC LIMIT 1",
+                    )
+                    .fetch_optional(&db2)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false);
+                    match crate::routes::factors::materialize_pit_combo_ext(
+                        &db2, "full_pit_icir_indneutral_val_v1", "1.0.0", 20,
+                        date - chrono::Duration::days(120), date, true, None, wl.as_deref(), ind_neut,
+                    ).await {
+                        Ok(rows) => info!("[夜间预备] PIT 物化 {} 行 累计{}s", rows, t0.elapsed().as_secs()),
+                        Err(e) => { error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e); }
+                    }
+                    match crate::routes::equity_curve_sync::sync_strategy_equity_curve(
+                        &db2, "v24", date - chrono::Duration::days(10), date, false,
+                    ).await {
+                        results => {
+                            for r in results { if r.status != "success" {
+                                warn!("[夜间预备] 曲线同步失败 {}: {:?}", r.strategy_id, r.error);
+                            } }
+                            info!("[夜间预备] sleeve 曲线更新完成 累计{}s", t0.elapsed().as_secs());
+                        }
+                    }
+                });
+            }
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
                 // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。

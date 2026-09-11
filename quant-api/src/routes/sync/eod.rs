@@ -292,14 +292,22 @@ pub async fn sync_eod_data(
             fc_cfg.rate_limit_per_minute = 60;
             match quant_data::tushare::client::TushareClient::new(fc_cfg) {
                 Ok(fc_client) => {
-                    let empty_syms: Vec<String> = vec![];
-                    match quant_data::sync::sync_forecast(
-                        db, &fc_client, &empty_syms, &date_str, &date_str,
-                        &format!("fc-eod-{}", date_str),
-                    ).await {
-                        Ok(n) => info!("[EOD] 业绩预告增量: {} 条", n),
-                        Err(e) => warn!("[EOD] 业绩预告增量失败(不阻塞): {}", e),
-                    }
+                    // 2026-09-11 后台化: 原串行 await 阻塞主链 2 小时(22:00→00:00),
+                    // 导致后续 index/adj_factor 跨 00:00——违反本机 00:00-08:30 关机约束。
+                    // forecast(业绩预告)是 forecast_* 因子数据源,非当日信号硬依赖
+                    // (当晚缺则次日 9 点档补,影响=该 3 因子晚一天),spawn 后台不阻塞。
+                    let db2 = db.clone();
+                    let ds = date_str.clone();
+                    tokio::spawn(async move {
+                        let empty_syms: Vec<String> = vec![];
+                        match quant_data::sync::sync_forecast(
+                            &db2, &fc_client, &empty_syms, &ds, &ds,
+                            &format!("fc-eod-{}", ds),
+                        ).await {
+                            Ok(n) => info!("[EOD] 业绩预告增量(后台): {} 条", n),
+                            Err(e) => warn!("[EOD] 业绩预告增量失败(后台,次日9点兜底): {}", e),
+                        }
+                    });
                 }
                 Err(e) => warn!("[EOD] forecast client 初始化失败(不阻塞): {}", e),
             }
@@ -539,61 +547,10 @@ pub async fn sync_eod_data(
     // 数据完整性检查
     crate::routes::data_quality::run_data_quality_check(db).await;
 
-    // ── 夜间信号预备链（2026-09-10 接入，T日早6:00 信号生成的前置）──
-    // 背景：早6:00 生成 T 日信号需要 T-1 全链数据就绪，但 phase7 因子回填（~1h）
-    // 与 PIT 评估/物化（~40m）原本排在次日 9:05/9:30，sleeve 曲线 17:00 跑时
-    // 当日 bar 未入库（实质滞后到 T-2）。此处在 EOD 尾部 spawn 串行补全，
-    // 预计 00:30 前完成，凌晨 06:00 门禁只做校验。幂等，失败告警不阻塞。
-    {
-        let db2 = db.clone();
-        let date2 = date;
-        tokio::spawn(async move {
-            let t0 = std::time::Instant::now();
-            let sd = (date2 - chrono::Duration::days(190)).format("%Y%m%d").to_string();
-            let ed = date2.format("%Y%m%d").to_string();
-            // 1) phase7 因子回补（内部逐路由触发，幂等只补缺，~1h）
-            crate::routes::scheduler::trigger_v24_backfill_routes_pub(&db2, &sd, &ed).await;
-            info!("[夜间预备] phase7 因子回补完成 累计{}s", t0.elapsed().as_secs());
-            // 2) PIT combo 增量物化（近90天，t 口径继承 log）
-            let wl: Option<Vec<String>> = sqlx::query_scalar(
-                "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND status='active'",
-            )
-            .fetch_optional(&db2)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v: serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()));
-            let ind_neut: bool = sqlx::query_scalar(
-                "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name='full_pit_icir_indneutral_val_v1' ORDER BY materialized_at DESC LIMIT 1",
-            )
-            .fetch_optional(&db2)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(false);
-            let _ = crate::routes::factors::materialize_pit_combo_ext(
-                &db2,
-                "full_pit_icir_indneutral_val_v1",
-                "1.0.0",
-                20,
-                date2 - chrono::Duration::days(90),
-                date2,
-                true,
-                None,
-                wl.as_deref(),
-                ind_neut,
-            )
-            .await;
-            info!("[夜间预备] PIT 物化完成 累计{}s", t0.elapsed().as_secs());
-            // 3) sleeve 曲线同步（bar 已在库，曲线可含 T-1 当日）
-            let _ = crate::routes::equity_curve_sync::sync_strategy_equity_curve(
-                &db2, "v24", date2 - chrono::Duration::days(10), date2, false,
-            )
-            .await;
-            info!("[夜间预备] sleeve 曲线更新完成 累计{}s", t0.elapsed().as_secs());
-        });
-    }
-
+    // 夜间信号预备链已迁移为独立定时任务 nightly_signal_prep(22:10 触发,
+    // 见 scheduled_task_config)——原 EOD 尾部 spawn 依赖主链完成时点,主链被
+    // forecast 拖到 00:00 后预备链才启动,违反关机约束。bar 22:01 入库即满足
+    // 预备链全部前置,22:10 独立触发可提前 ~2 小时完成。
     Ok(())
 }
 
