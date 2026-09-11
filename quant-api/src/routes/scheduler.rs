@@ -584,6 +584,15 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     crate::routes::signal_export::run_ptrade_signal_export(&db2, &params2).await;
                 });
             }
+            "ptrade_report_fetch" => {
+                // PTrade 实盘回报抓取(2026-09-11, B1' 回报回流链): 16:30 触发。
+                // IMAP 拉当日 exec/heartbeat 邮件 → ptrade_execution_report 入库 → 钉钉日报。
+                // 心跳缺失告警(区分"无交易"与"策略挂了/通道故障")。见 ptrade_report.rs。
+                let db2 = db.clone();
+                tokio::spawn(async move {
+                    crate::routes::ptrade_report::run_ptrade_report_fetch(&db2).await;
+                });
+            }
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
                 // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。

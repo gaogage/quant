@@ -76,6 +76,8 @@ case "$TARGET" in
       ${DINGTALK_CLIENT_ID:+-e "DINGTALK_CLIENT_ID=$DINGTALK_CLIENT_ID"} \
       ${RUST_LOG:+-e "RUST_LOG=$RUST_LOG"} \
       -e "TZ=Asia/Shanghai" \
+      ${PTRADE_IMAP_PWD:+-e "PTRADE_IMAP_PWD=$PTRADE_IMAP_PWD"} \
+      ${PTRADE_IMAP_USER:+-e "PTRADE_IMAP_USER=$PTRADE_IMAP_USER"} \
       -v "$HOME/.ssh:/root/.ssh:ro" \
       "$RUN_IMAGE"
 

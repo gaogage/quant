@@ -24,6 +24,7 @@ pub mod report;
 pub mod scheduler;
 pub mod shared;
 pub mod signal_export;
+pub mod ptrade_report;
 pub mod strategies;
 pub mod strategy_query;
 pub mod strategy;
