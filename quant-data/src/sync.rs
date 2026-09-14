@@ -4637,7 +4637,7 @@ pub async fn sync_forecast_by_day(
         }
         offset += page_limit;
     }
-    repo::update_sync_task(pool, dv_id, "success", total_rows as i32,
+    repo::update_sync_task(pool, dv_id, "completed", total_rows as i32,
                            total_rows as i32, 0).await?;
     Ok(total_rows)
 }
