@@ -299,12 +299,12 @@ pub async fn sync_eod_data(
                     let db2 = db.clone();
                     let ds = date_str.clone();
                     tokio::spawn(async move {
-                        let empty_syms: Vec<String> = vec![];
-                        match quant_data::sync::sync_forecast(
-                            &db2, &fc_client, &empty_syms, &ds, &ds,
-                            &format!("fc-eod-{}", ds),
+                        // 2026-09-15: 逐股(7210次×60/min=2h)改 ann_date 全市场单次拉取;
+                        // 备用端点教训见 sync_forecast_by_day 文档注释
+                        match quant_data::sync::sync_forecast_by_day(
+                            &db2, &fc_client, &ds, &format!("fc-eod-{}", ds),
                         ).await {
-                            Ok(n) => info!("[EOD] 业绩预告增量(后台): {} 条", n),
+                            Ok(n) => info!("[EOD] 业绩预告增量(后台,按日): {} 条", n),
                             Err(e) => warn!("[EOD] 业绩预告增量失败(后台,次日9点兜底): {}", e),
                         }
                     });

@@ -4598,6 +4598,50 @@ async fn record_event_symbol_sync_attempt(
     .await
 }
 
+/// forecast 按 ann_date 全市场单次拉取(2026-09-15 替代逐股模式)。
+///
+/// 历史教训: 逐股模式 7210 次/天 × 60/min = 2 小时, 且备用端点对充值 token 报
+/// 40101 时整晚刷屏(09-07~09-14 连续全失败)。ann_date 单日全市场公告通常
+/// < 200 行, 一次调用(含分页)即完成——性能与额度双收益。
+/// 端点铁律: 充值 token(ALT)只能走官方域名 api.tushare.pro, 备用直连 IP 不认。
+pub async fn sync_forecast_by_day(
+    pool: &PgPool,
+    client: &TushareClient,
+    date: &str,
+    dv_id: &str,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    use repository as repo;
+    let d = NaiveDate::parse_from_str(date, "%Y%m%d")?;
+    repo::create_sync_task_with_context(
+        pool, dv_id, "forecast", "tushare", None, Some(d), Some(d), "running", None,
+    ).await?;
+    repo::create_data_version(pool, dv_id, "earnings forecast sync (by-day)", "tushare",
+        &["market_stock_forecast"], d, d).await?;
+    let page_limit = 2000usize;
+    let mut total_rows = 0usize;
+    let mut offset = 0usize;
+    loop {
+        let resp = client
+            .forecast(None, Some(date), None, None, None, None,
+                      Some(page_limit), Some(offset)).await?;
+        let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+        let n = maps.len();
+        let rows: Vec<MarketStockForecast> =
+            maps.iter().filter_map(forecast_row_from_map).collect();
+        if !rows.is_empty() {
+            repo::upsert_forecast_batch(pool, &rows, dv_id, "tushare").await?;
+            total_rows += rows.len();
+        }
+        if n < page_limit {
+            break;
+        }
+        offset += page_limit;
+    }
+    repo::update_sync_task(pool, dv_id, "success", total_rows as i32,
+                           total_rows as i32, 0).await?;
+    Ok(total_rows)
+}
+
 fn forecast_row_from_map(item: &Map<String, Value>) -> Option<MarketStockForecast> {
     let ann_date = to_date(&get_str(item, "ann_date"))?;
     let end_date = to_date(&get_str(item, "end_date"))?;

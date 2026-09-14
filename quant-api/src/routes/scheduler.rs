@@ -2654,6 +2654,44 @@ mod stale_factor_recompute_tests {
 }
 
 #[cfg(test)]
+mod forecast_backfill_byday_tests {
+    use super::*;
+
+    /// forecast 断档回补(2026-09-15): 8-26 起每日按 ann_date 单次拉取回补至 9-14。
+    /// 运行: set -a; source ../.env.quant; set +a;
+    ///       cargo test --release -p quant-api forecast_backfill_byday -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn forecast_backfill_byday() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        ).await
+        .expect("db");
+        let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
+        let mut cfg = quant_data::tushare::client::TushareConfig::default();
+        cfg.token = tok;
+        cfg.rate_limit_per_minute = 60;
+        // 端点铁律: 充值 token 只走官方域名(备用直连 IP 报 40101)
+        cfg.base_url = std::env::var("TUSHARE_API_URL")
+            .unwrap_or_else(|_| "http://api.tushare.pro".to_string());
+        let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
+        let mut d = chrono::NaiveDate::from_ymd_opt(2026, 8, 26).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
+        while d <= end {
+            let ds = d.format("%Y%m%d").to_string();
+            match quant_data::sync::sync_forecast_by_day(
+                &db, &client, &ds, &format!("fc-bf-{}", ds)).await {
+                Ok(n) => println!("[fc-bf] {} -> {} 条", ds, n),
+                Err(e) => println!("[fc-bf] {} 失败: {}", ds, e),
+            }
+            d += chrono::Duration::days(1);
+        }
+        println!("[fc-bf] 回补完成");
+    }
+}
+
+#[cfg(test)]
 mod forecast_daily_tests {
     use super::*;
 
