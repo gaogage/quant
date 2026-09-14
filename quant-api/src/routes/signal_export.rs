@@ -78,7 +78,10 @@ pub async fn run_ptrade_signal_export(db: &PgPool, params: &serde_json::Value) {
 }
 
 async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<String, String> {
-    let date = chrono::Local::now().date_naive();
+    // 2026-09-14 修复: 用最近交易日而非自然日——周末/节假日补跑时(容器重启/延迟),
+    // now() 是非交易日, run-factor 当日截面为空 → A股 sleeve 缺失的残缺信号
+    // (09-14 事故: 周六 07:01 补跑生成仅 7 ETF 的降级信号, 若执行将清空 A 股持仓)。
+    let date = latest_trading_day(db).await?;
 
     // 1. 账户与策略加载(与模拟盘调仓同路径: load_account → resolved → production 门禁)
     let loaded = crate::routes::account::load_account(db, account_id).await?;
@@ -110,6 +113,20 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     let body = build_run_factor_body(db, &sc, date).await;
     let task_id = run_factor_task(&body).await?;
 
+    // 3b. 截面查询 + 质量门禁: 策略含 A股 sleeve 而截面为空 = 数据异常, 拒绝导出
+    // (宁可无信号也不要残缺信号——残缺信号执行会清空 A 股持仓, 09-14 事故根因之二)
+    let positions = select_positions(db, &task_id, date).await?;
+    let has_a_share_sleeve = rs
+        .assets
+        .iter()
+        .any(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare);
+    if has_a_share_sleeve && positions.is_empty() {
+        return Err(format!(
+            "当日截面为空(task={} date={}): A股 sleeve 缺失将生成清仓信号, 拒绝导出",
+            task_id, date
+        ));
+    }
+
     // 4. 目标权重(与 rebalance_account 同组件同口径)
     let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<MvoWeightCache>));
     let mvo_weights = compute_lw_mvo_weights(db, date, &cache, &sc).await;
@@ -131,7 +148,7 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     // A股 sleeve(口径复刻 rebalance_account §7):
     //   目标权重(占NAV) = mvo_a_pct × weight_d × lev
     //   weight_d = 截面weight(>0) | 兜底 mv/total_mv × mvo_a_pct(weight=0 历史截面)
-    let positions = select_positions(db, &task_id, date).await?;
+    // positions 已在 3b 查得并通过质量门禁
     let total_stock_mv: f64 = positions
         .iter()
         .map(|p| p.market_value.to_string().parse::<f64>().unwrap_or(0.0))
@@ -247,6 +264,19 @@ async fn next_trading_day(db: &PgPool, after: chrono::NaiveDate) -> Result<chron
     .map_err(|e| format!("calendar: {}", e))?;
     row.map(|d| d.0)
         .ok_or_else(|| "交易日历无未来交易日".to_string())
+}
+
+/// 最近已到交易日(<= today): 信号截面与因子均以此日为准, 周末/节假日补跑不退化。
+async fn latest_trading_day(db: &PgPool) -> Result<chrono::NaiveDate, String> {
+    let row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT trade_date FROM market_trade_calendar
+         WHERE is_open = true AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 1",
+    )
+    .bind(chrono::Local::now().date_naive())
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("calendar: {}", e))?;
+    row.map(|d| d.0).ok_or_else(|| "交易日历无数据".to_string())
 }
 
 async fn scp_push(local: &PathBuf) -> Result<(), String> {

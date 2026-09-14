@@ -760,11 +760,10 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
             {
                 error!("[scheduler] 任务失败: {}", e);
             }
-            // 每小时检查一次定时任务
-            let now = chrono::Local::now();
-            if now.minute() == 0 {
-                run_scheduled_tasks(&db).await;
-            }
+            // 每分钟检查定时任务(2026-09-14 修复: 原整点检查+23:30 cron=死任务——
+            // 23:00 整点查时 next=23:30 未到期, 下个整点 00:00 已关机, 信号任务
+            // 周六开机才补跑且截面退化。60s tick 直接查, next_run_at 幂等控频)
+            run_scheduled_tasks(&db).await;
         }
     });
 }
