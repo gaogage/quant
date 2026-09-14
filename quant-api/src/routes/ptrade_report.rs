@@ -38,9 +38,15 @@ pub async fn run_ptrade_report_fetch(db: &PgPool) {
 
 #[derive(serde::Deserialize, Default)]
 struct FetchSummary {
-    exec_files: Vec<String>,
+    execs: Vec<ExecMail>,
     heartbeats: Vec<String>,
     error: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ExecMail {
+    path: String,
+    subject: String,
 }
 
 async fn fetch_mail_reports() -> Result<FetchSummary, String> {
@@ -70,23 +76,105 @@ async fn ingest_reports(db: &PgPool, summary: &FetchSummary) -> String {
     if let Some(e) = &summary.error {
         lines.push(format!("⚠️ 拉取部分异常: {}", e));
     }
-    if summary.exec_files.is_empty() && summary.heartbeats.is_empty() {
+    if summary.execs.is_empty() && summary.heartbeats.is_empty() {
         // 当日既无回报也无心跳: 策略未运行/邮件未发/通道故障——按设计告警
         return "⚠️ [PTrade实盘日报] 当日无 exec 回报且无心跳邮件——请检查 PTrade 策略状态与邮件通道(策略挂了? 15:00 后未发?)".to_string();
     }
     for hb in &summary.heartbeats {
         lines.push(format!("🫀 心跳: {}", hb));
     }
-    for f in &summary.exec_files {
-        match ingest_one(db, f).await {
+    for m in &summary.execs {
+        match ingest_one(db, &m.path, &m.subject).await {
             Ok(desc) => lines.push(desc),
-            Err(e) => lines.push(format!("⚠️ {} 入库失败: {}", f, e)),
+            Err(e) => lines.push(format!("⚠️ {} 入库失败: {}", m.path, e)),
         }
     }
     format!("📊 [PTrade实盘日报]\n{}", lines.join("\n"))
 }
 
-async fn ingest_one(db: &PgPool, path: &str) -> Result<String, String> {
+/// 从邮件主题提取通道tag: ptrade_exec_{sim|live}_{date} → "sim"/"live"。
+fn channel_tag(subject: &str) -> Option<&str> {
+    let rest = subject.strip_prefix("ptrade_exec_")?;
+    match rest.split('_').next() {
+        Some(t @ ("sim" | "live")) => Some(t),
+        _ => None, // 旧格式(无tag)或未知
+    }
+}
+
+/// 镜像账户回写: 按通道tag找 ptrade_channel_config 对应账户, 同步 nav/cash/持仓。
+/// 首次回写且账户为空仓时顺带校准 initial_capital(以 PTrade 真实值为基准)。
+async fn sync_mirror_account(
+    db: &PgPool,
+    tag: &str,
+    v: &serde_json::Value,
+) -> Result<Option<String>, String> {
+    let is_prod = tag == "live";
+    let account: Option<(String,)> = sqlx::query_as(
+        "SELECT paper_account_id FROM ptrade_channel_config
+         WHERE is_production = $1 AND enabled = true LIMIT 1",
+    )
+    .bind(is_prod)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("mirror account: {}", e))?;
+    let Some((account_id,)) = account else {
+        return Ok(None); // 无对应通道配置: 仅入库不回写
+    };
+    let nav = v.get("nav_after").and_then(|x| x.as_f64());
+    let cash = v.get("cash_after").and_then(|x| x.as_f64());
+    let pos_arr = v.get("positions").and_then(|x| x.as_array());
+    let empty_before: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM paper_position WHERE paper_account_id=$1 AND quantity>0",
+    )
+    .bind(&account_id)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("mirror count: {}", e))?;
+    sqlx::query("UPDATE paper_account SET current_nav=$2, cash=$3, updated_at=now(),
+                 initial_capital = CASE WHEN $4 AND $5 THEN $2 ELSE initial_capital END
+                 WHERE paper_account_id=$1")
+        .bind(&account_id)
+        .bind(nav.map(rust_decimal::Decimal::from_f64_retain).flatten())
+        .bind(cash.map(rust_decimal::Decimal::from_f64_retain).flatten())
+        .bind(empty_before.0 == 0 && pos_arr.map(|a| a.is_empty()).unwrap_or(true))
+        .bind(nav.is_some())
+        .execute(db)
+        .await
+        .map_err(|e| format!("mirror nav: {}", e))?;
+    if let Some(positions) = pos_arr {
+        sqlx::query("DELETE FROM paper_position WHERE paper_account_id=$1")
+            .bind(&account_id)
+            .execute(db)
+            .await
+            .map_err(|e| format!("mirror del: {}", e))?;
+        for p in positions {
+            let sym = p.get("symbol").and_then(|x| x.as_str()).unwrap_or("");
+            let qty = p.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let px = p.get("last_sale_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            if sym.is_empty() || qty <= 0.0 {
+                continue;
+            }
+            // avg_cost 用现价近似(回报无成本字段); 绩效口径以 NAV 为准
+            sqlx::query(
+                "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol,
+                   quantity, avg_cost, market_price, market_value, created_at, updated_at)
+                 VALUES ($1,$2,$3,$4,$5,$5,$6,now(),now())",
+            )
+            .bind(format!("pp-{}", uuid::Uuid::new_v4()))
+            .bind(&account_id)
+            .bind(sym)
+            .bind(rust_decimal::Decimal::from_f64_retain(qty).unwrap_or_default())
+            .bind(rust_decimal::Decimal::from_f64_retain(px).unwrap_or_default())
+            .bind(rust_decimal::Decimal::from_f64_retain(qty * px).unwrap_or_default())
+            .execute(db)
+            .await
+            .map_err(|e| format!("mirror pos {}: {}", sym, e))?;
+        }
+    }
+    Ok(Some(account_id))
+}
+
+async fn ingest_one(db: &PgPool, path: &str, subject: &str) -> Result<String, String> {
     let raw_str = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let v: serde_json::Value =
         serde_json::from_str(&raw_str).map_err(|e| format!("json: {}", e))?;
@@ -135,10 +223,15 @@ async fn ingest_one(db: &PgPool, path: &str) -> Result<String, String> {
     .await
     .map_err(|e| format!("db: {}", e))?;
 
+    let mirror = match channel_tag(subject) {
+        Some(tag) => sync_mirror_account(db, tag, &v).await?,
+        None => None, // 旧格式主题(无通道tag): 仅入库
+    };
     Ok(format!(
-        "📈 {} ({}): 订单 {} 笔, 未成交 {}, NAV {:.0}, 换手 {:.0}",
+        "📈 {} ({}){}: 订单 {} 笔, 未成交 {}, NAV {:.0}, 换手 {:.0}",
         signal_id,
         trade_date,
+        mirror.map(|a| format!(" →已同步{}", a)).unwrap_or_default(),
         n_orders,
         n_unfilled,
         v.get("nav_after").and_then(|x| x.as_f64()).unwrap_or(0.0),

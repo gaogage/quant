@@ -6,7 +6,8 @@
 exec 附件落盘 /tmp/quant_reports/, stdout 输出 JSON 摘要供 Rust 侧消费。
 
 环境变量: PTRADE_IMAP_USER(默认 455510687@qq.com) / PTRADE_IMAP_PWD(QQ授权码,必填)
-输出契约: {"exec_files": [绝对路径...], "heartbeats": [主题...], "error": null|str}
+输出契约: {"execs": [{"path":..., "subject":...}], "heartbeats": [主题...], "error": null|str}
+subject 含通道tag(ptrade_exec_sim_/ptrade_exec_live_), Rust 据此路由回写镜像账户。
 """
 import email
 import imaplib
@@ -23,12 +24,12 @@ def main():
     user = os.environ.get('PTRADE_IMAP_USER', '455510687@qq.com')
     pwd = os.environ.get('PTRADE_IMAP_PWD', '')
     if not pwd:
-        print(json.dumps({'exec_files': [], 'heartbeats': [],
+        print(json.dumps({'execs': [], 'heartbeats': [],
                           'error': 'PTRADE_IMAP_PWD 未配置'}))
         sys.exit(0)
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    result = {'exec_files': [], 'heartbeats': [], 'error': None}
+    result = {'execs': [], 'heartbeats': [], 'error': None}
     try:
         m = imaplib.IMAP4_SSL('imap.qq.com', 993)
         m.login(user, pwd)
@@ -65,7 +66,7 @@ def main():
                 path = os.path.join(OUT_DIR, os.path.basename(fname))
                 with open(path, 'wb') as f:
                     f.write(part.get_payload(decode=True))
-                result['exec_files'].append(path)
+                result['execs'].append({'path': path, 'subject': subj})
         m.logout()
     except Exception as e:
         result['error'] = f'{type(e).__name__}: {e}'
