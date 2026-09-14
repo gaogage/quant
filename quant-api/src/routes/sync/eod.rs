@@ -290,6 +290,14 @@ pub async fn sync_eod_data(
             let mut fc_cfg = quant_data::tushare::client::TushareConfig::default();
             fc_cfg.token = tok.trim().to_string();
             fc_cfg.rate_limit_per_minute = 60;
+            // 凭证配对铁律: 充值 token(ALT)必须走官方域名——TUSHARE_API_URL 是私有
+            // 直连端点(专属 token), default 读到的主 URL 与 ALT 不匹配会 40101
+            // (2026-09-15 事故: 逐股全失败一周的根因)。fallback_base_url 也清空——
+            // 该 client 的主备 token 相同(都是 ALT), 无 fallback 意义。
+            fc_cfg.base_url = std::env::var("TUSHARE_API_URL_ALT")
+                .unwrap_or_else(|_| "http://api.tushare.pro".to_string());
+            fc_cfg.fallback_token = None;
+            fc_cfg.fallback_base_url = None;
             match quant_data::tushare::client::TushareClient::new(fc_cfg) {
                 Ok(fc_client) => {
                     // 2026-09-11 后台化: 原串行 await 阻塞主链 2 小时(22:00→00:00),

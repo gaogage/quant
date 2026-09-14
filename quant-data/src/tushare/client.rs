@@ -23,6 +23,10 @@ pub struct TushareConfig {
     pub token: String,
     /// 备用 token（充值号）：主 token 请求失败/无权限时 fallback 重试一次（2026-09-08）
     pub fallback_token: Option<String>,
+    /// 备用端点 URL(与 fallback_token 配对使用)。Tushare 凭证是两套系统:
+    /// 私有直连端点+专属 token(快/独立额度) 与 官方 api.tushare.pro+充值 token——
+    /// 地址与 token 必须匹配。fallback 时 URL+token 成对切换(2026-09-15)。
+    pub fallback_base_url: Option<String>,
     pub timeout_secs: u64,
     pub max_retries: usize,
     pub retry_delay_ms: u64,
@@ -42,6 +46,9 @@ impl Default for TushareConfig {
                 .unwrap_or_else(|_| "http://api.tushare.pro".to_string()),
             token: std::env::var("TUSHARE_TOKEN").unwrap_or_default(),
             fallback_token: std::env::var("TUSHARE_TOKEN_ALT").ok().filter(|t| !t.is_empty()),
+            fallback_base_url: std::env::var("TUSHARE_API_URL_ALT")
+                .ok()
+                .filter(|u| !u.is_empty()),
             timeout_secs: 30,
             max_retries: 3,
             retry_delay_ms: 1000,
@@ -379,25 +386,38 @@ impl TushareClient {
         Self::new(TushareConfig::default())
     }
 
-    /// 等待速率限制许可后发送 API 请求（主 token 优先，失败切备用 token 重试一次）
+    /// 等待速率限制许可后发送 API 请求。
+    /// 凭证配对切换(2026-09-15): 主对(base_url+token)失败 → 备对(fallback_base_url+fallback_token)
+    /// 成对切换重试一次——两套凭证系统(私有直连/官方充值)地址与 token 必须匹配,
+    /// 只换 token 不换 URL 会打错端点(私有 token 打官方域名、充值 token 打私有 IP 均 40101)。
     async fn call_api<T: DeserializeOwned>(
         &self,
         api_name: &str,
         params: Vec<(&str, &str)>,
         fields: &[&str],
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
-        match self.call_api_with_token::<Vec<serde_json::Value>>(api_name, &params, fields, &self.config.token).await {
+        let primary = self.call_api_with_source::<Vec<serde_json::Value>>(
+            api_name, &params, fields, &self.config.base_url, &self.config.token, "tushare").await;
+        match primary {
             Ok(resp) => Ok(resp),
             Err(primary_err) => {
                 let fallback = self.config.fallback_token.clone();
+                let fb_url = self.config
+                    .fallback_base_url
+                    .clone()
+                    .unwrap_or_else(|| self.config.base_url.clone());
                 match fallback {
                     Some(fb) if !fb.is_empty() && fb != self.config.token => {
                         warn!(
                             api = %api_name,
                             error = %primary_err,
-                            "主 Tushare token 请求失败，fallback 到备用 token 重试"
+                            from = %self.config.base_url,
+                            to = %fb_url,
+                            "主 Tushare 数据源失败, 配对切换到备用数据源(URL+token)"
                         );
-                        self.call_api_with_token::<Vec<serde_json::Value>>(api_name, &params, fields, &fb).await
+                        // 限流键按凭证拆分: 两套账号额度独立, 不共用一个桶
+                        self.call_api_with_source::<Vec<serde_json::Value>>(
+                            api_name, &params, fields, &fb_url, &fb, "tushare-alt").await
                     }
                     _ => Err(primary_err),
                 }
@@ -405,17 +425,18 @@ impl TushareClient {
         }
     }
 
-    /// 按指定 token 发送 API 请求
-    async fn call_api_with_token<T: DeserializeOwned>(
+    /// 按指定端点+token 发送 API 请求(限流键按凭证源拆分)
+    async fn call_api_with_source<T: DeserializeOwned>(
         &self,
         api_name: &str,
         params: &[(&str, &str)],
         fields: &[&str],
+        base_url: &str,
         token: &str,
+        rate_key: &str,
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
-        // 速率限制：使用 "tushare" 作为全局 key
-        // until_key_ready() 会阻塞直到有可用令牌
-        self.limiter.until_key_ready(&"tushare".to_string()).await;
+        // 速率限制: 主备凭证额度独立, 各自一个桶
+        self.limiter.until_key_ready(&rate_key.to_string()).await;
 
         let request = TushareRequest {
             api_name: api_name.into(),
@@ -431,7 +452,7 @@ impl TushareClient {
 
         let resp = self
             .http
-            .post(&self.config.base_url)
+            .post(base_url)
             .json(&request)
             .send()
             .await?;
