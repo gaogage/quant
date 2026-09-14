@@ -25,14 +25,42 @@ use sqlx::PgPool;
 use tracing::{error, warn};
 use std::path::PathBuf;
 
-/// scp 目标(Windows 侧信号目录; ssh config 别名 gaocheng-center = Tailscale 100.70.30.64)。
-const SCP_TARGET: &str = "gaocheng-center:D:/ptrade_sync/signals/";
-/// 本地留存目录(env 可覆盖; 默认 /tmp, 容器/裸跑均可写, 仅 debug 用途——
-/// Windows 侧与邮件回报互为备份)。
-fn local_signal_dir() -> PathBuf {
-    std::env::var("PTRADE_SIGNAL_DIR")
-        .unwrap_or_else(|_| "/tmp/quant_signals".to_string())
-        .into()
+/// PTrade 执行通道配置(DB 表 ptrade_channel_config, 未来页面化管理)。
+/// quant 账户 → Windows 信号目录映射: 生产账号 D:/ptrade_sync, 仿真账号 D:/ptrade_sync_test。
+#[derive(sqlx::FromRow)]
+pub struct PtradeChannel {
+    #[sqlx(rename = "paper_account_id")]
+    pub account_id: String,
+    pub channel_name: String,
+    pub scp_target: String,
+    pub is_production: bool,
+    pub enabled: bool,
+}
+
+/// 本地留存目录(按账户分子目录防双通道同名覆盖; env 可覆盖根目录)。
+fn local_signal_dir(account_id: &str) -> PathBuf {
+    let root = std::env::var("PTRADE_SIGNAL_DIR")
+        .unwrap_or_else(|_| "/tmp/quant_signals".to_string());
+    PathBuf::from(root).join(account_id)
+}
+
+async fn load_channel(db: &PgPool, account_id: &str) -> Result<PtradeChannel, String> {
+    let ch: Option<PtradeChannel> = sqlx::query_as(
+        "SELECT paper_account_id, channel_name, scp_target, is_production, enabled
+         FROM ptrade_channel_config WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("channel config: {}", e))?;
+    match ch {
+        Some(c) if c.enabled => Ok(c),
+        Some(_) => Err(format!("通道 {} 已停用(enabled=false)", account_id)),
+        None => Err(format!(
+            "账户 {} 无 ptrade_channel_config 配置(未配通道目录,拒绝推送防误发)",
+            account_id
+        )),
+    }
 }
 
 /// 定时任务入口(scheduler.rs "ptrade_signal_export" 分支调用)。
@@ -82,6 +110,9 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     // now() 是非交易日, run-factor 当日截面为空 → A股 sleeve 缺失的残缺信号
     // (09-14 事故: 周六 07:01 补跑生成仅 7 ETF 的降级信号, 若执行将清空 A 股持仓)。
     let date = latest_trading_day(db).await?;
+
+    // 0. 执行通道配置(DB: ptrade_channel_config——生产/仿真各自目录, 未来页面化管理)
+    let channel = load_channel(db, account_id).await?;
 
     // 1. 账户与策略加载(与模拟盘调仓同路径: load_account → resolved → production 门禁)
     let loaded = crate::routes::account::load_account(db, account_id).await?;
@@ -213,18 +244,18 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     signal["checksum"] = serde_json::json!(checksum);
 
     // 6. 本地留存 + scp 推送(失败重试 1 次; 推送失败=当日实盘无信号, 钉钉已告警)
-    let dir = local_signal_dir();
+    let dir = local_signal_dir(account_id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
     let fname = format!("signal_{}_001.json", trade_date.format("%Y%m%d"));
     let local = dir.join(&fname);
     std::fs::write(&local, serde_json::to_string_pretty(&signal).unwrap())
         .map_err(|e| format!("write {}: {}", local.display(), e))?;
-    scp_push(&local).await?;
+    scp_push(&local, &channel.scp_target).await?;
 
     let n_etf = listed.len() + 1; // +现金段按需
     Ok(format!(
-        "📤 [PTrade信号] {}({}) 已生成并推送 → {} 执行\nA股 {} 只 + ETF {} 只, 权重和 {:.3}, regime {:.2}, lev {:.2}x\nsignal_id={} checksum={:.8}…",
-        name, account_id, trade_date.format("%Y-%m-%d"), positions.len(), n_etf,
+        "📤 [PTrade信号] {}({}) 已生成并推送[{}] → {} 执行\nA股 {} 只 + ETF {} 只, 权重和 {:.3}, regime {:.2}, lev {:.2}x\nsignal_id={} checksum={:.8}…",
+        name, account_id, channel.channel_name, trade_date.format("%Y-%m-%d"), positions.len(), n_etf,
         signal["total_target_weight"].as_f64().unwrap_or(0.0), regime,
         leverage_d_f64(&leverage_d), signal["signal_id"].as_str().unwrap_or(""), checksum
     ))
@@ -279,13 +310,13 @@ async fn latest_trading_day(db: &PgPool) -> Result<chrono::NaiveDate, String> {
     row.map(|d| d.0).ok_or_else(|| "交易日历无数据".to_string())
 }
 
-async fn scp_push(local: &PathBuf) -> Result<(), String> {
+async fn scp_push(local: &PathBuf, scp_target: &str) -> Result<(), String> {
     let arg = local.to_string_lossy().to_string();
     for attempt in 0..2 {
         let st = tokio::process::Command::new("scp")
             .arg("-o").arg("BatchMode=yes").arg("-o").arg("ConnectTimeout=15")
             .arg("-o").arg("StrictHostKeyChecking=accept-new")
-            .arg(&arg).arg(SCP_TARGET)
+            .arg(&arg).arg(scp_target)
             .output()
             .await
             .map_err(|e| format!("scp spawn: {}", e))?;
