@@ -10012,6 +10012,7 @@ async fn execute_set_based_factor_backfill(
         )
     })?;
     set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+    set_local_tuples_decompressed_limit(&mut tx).await?;
 
     let sql = factor_sql(spec);
     let result = sqlx::query(&sql)
@@ -10044,6 +10045,7 @@ async fn execute_set_based_combo_backfill(
         .await
         .map_err(|error| format!("Failed to start combo backfill transaction: {}", error))?;
     set_local_statement_timeout(&mut tx, plan.statement_timeout_ms).await?;
+    set_local_tuples_decompressed_limit(&mut tx).await?;
 
     sqlx::query(
         "INSERT INTO multi_factor_weight (combo_name, version, weights, method, status)
@@ -10178,6 +10180,19 @@ async fn set_local_statement_timeout(
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("Failed to set statement_timeout: {}", error))?;
+    Ok(())
+}
+
+/// 回填大事务写入已压缩 chunk 时, TimescaleDB 限制单事务解压 tuple 数(默认 10 万),
+/// 跨季度区间(约 68 万行)触发 "tuple decompression limit exceeded by operation"。
+/// 事务内放宽该限制(仅本事务生效, 不改全局)。
+async fn set_local_tuples_decompressed_limit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), String> {
+    sqlx::query("SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 1000000")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("Failed to set tuples_decompressed limit: {}", error))?;
     Ok(())
 }
 

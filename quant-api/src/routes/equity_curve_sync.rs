@@ -550,15 +550,26 @@ pub async fn sync_composite_equity_curve(
         .as_ref()
         .ok_or("a_share 子策略缺 equity_curve_task_id")?;
 
-    // 权重:A 股用 min_stock,ETF 用 default_weights(按 etf_symbols 顺序)
-    let w_a = mvo.min_stock;
+    // 权重语义双兼容(2026-09-15 修):
+    // - 新语义: default_weights = [A股, ETF...] 共 etf_symbols.len()+1 个 —— 与
+    //   compute_lw_mvo_weights 固定权重分配(mvo_weights[0]=A股)同源, A股权重取首位。
+    // - 旧语义: default_weights 为纯 ETF 权重, A股权重用 mvo.min_stock。
+    // 两代 strategy_config 并存, 按长度路由; 2026-09-15 事故: v24 升级为新语义后
+    // 长度校验 7≠8 拒绝合成, 偏离基准曲线停更。
+    let w_a: f64;
+    let etf_ws: &[f64];
     let etf_syms = &rs.etf_symbols;
-    let etf_ws = &mvo.default_weights;
-    if etf_syms.len() != etf_ws.len() {
+    if mvo.default_weights.len() == rs.etf_symbols.len() + 1 {
+        w_a = mvo.default_weights[0];
+        etf_ws = &mvo.default_weights[1..];
+    } else if mvo.default_weights.len() == rs.etf_symbols.len() {
+        w_a = mvo.min_stock;
+        etf_ws = &mvo.default_weights;
+    } else {
         return Err(format!(
             "etf_symbols({}) 与 default_weights({}) 长度不一致",
-            etf_syms.len(),
-            etf_ws.len()
+            rs.etf_symbols.len(),
+            mvo.default_weights.len()
         ));
     }
     let w_etf_sum: f64 = etf_ws.iter().sum();

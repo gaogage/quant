@@ -36,32 +36,16 @@ pub(crate) async fn fetch_intraday_etf_prices(
         }
     }
 
-    // 2. 对于 DB 中没有当日数据的 ETF，通过 Tushare realtime_quote 获取盘中实时价格
+    // 2. 对于 DB 中没有当日数据的 ETF, 尝试 Tushare fund_daily。
+    // (历史: 此处曾先调 realtime_quote 盘中实时价, 但 Tushare 官方 HTTP API 无此接口
+    //  —— 主备源均 40101"接口不存在", 该调用从未成功过, 2026-09-15 移除。
+    //  实时价需 rt_k 接口(realtimeapi 网关, 另行申请开通)再接入。)
     let missing: Vec<&String> = etf_symbols
         .iter()
         .filter(|s| !prices.contains_key(*s))
         .collect();
     if !missing.is_empty() {
         for sym in missing {
-            // 盘中实时行情（PRO 用户可用）
-            match tushare.realtime_quote(Some(sym)).await {
-                Ok(resp) => {
-                    if let Some(data) = resp.data {
-                        let maps = data.to_maps();
-                        if let Some(row) = maps.first() {
-                            if let Some(price) = row.get("price").and_then(|v| v.as_f64()) {
-                                if price > 0.0 {
-                                    prices.insert(sym.clone(), price);
-                                    info!("[intraday] {} Tushare实时价 {:.4}", sym, price);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(ref e) => warn!("[intraday] {} realtime_quote失败: {}", sym, e),
-            }
-            // realtime_quote 失败时，尝试 fund_daily (T+1 数据)
             let today_str = today.format("%Y%m%d").to_string();
             match tushare
                 .fund_daily(Some(sym), None, Some(&today_str), Some(&today_str))
