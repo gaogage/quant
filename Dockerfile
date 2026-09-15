@@ -71,7 +71,9 @@ COPY --from=build-frontend /app/quant-ui/dist /app/ui-dist
 COPY quant-ui/icon.svg /app/ui-dist/icon.svg
 
 # http-port 显式声明 web 端口给 OrbStack 域名 80/443 反代，跳过自动探测（防探测失败回归）
-LABEL dev.orbstack.icon="http://quant.orb.local/icon.svg" \
+# icon URL 必须带 ?v=N 缓存版本号：OrbStack GUI 经 URLSession 磁盘缓存图标且响应无过期头，
+# URL 不变永久命中旧缓存（缓存库 ~/Library/Caches/dev.kdrag0n.MacVirt/Cache.db）；图标内容变更时 bump N
+LABEL dev.orbstack.icon="http://quant.orb.local/icon.svg?v=2" \
       dev.orbstack.http-port=8080
 
 ENV PORT=8080 \
