@@ -70,7 +70,9 @@ COPY --from=build-frontend /app/quant-ui/dist /app/ui-dist
 # OrbStack 容器图标（quant web favicon：深色底 + 上升折线 + 数据点，量化主题）
 COPY quant-ui/icon.svg /app/ui-dist/icon.svg
 
-LABEL dev.orbstack.icon="http://quant.orb.local/icon.svg"
+# http-port 显式声明 web 端口给 OrbStack 域名 80/443 反代，跳过自动探测（防探测失败回归）
+LABEL dev.orbstack.icon="http://quant.orb.local/icon.svg" \
+      dev.orbstack.http-port=8080
 
 ENV PORT=8080 \
     QUANT_UI_DIST=/app/ui-dist \
