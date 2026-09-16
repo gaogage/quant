@@ -91,13 +91,19 @@ pub async fn sync_eod_data(
     // ── 个股两融明细每日增量（2026-09-08 接入，margin_rq* 因子数据源）──
     // 充值 token 权限接口；双 token fallback 后主 client 失败自动切 ALT。
     // 同步失败不阻塞 EOD 主链路（因子次日 T+1 保鲜窗口兜底）。
+    // 2026-09-16 修复: margin_detail 是 T+1 数据源(数据日次日才发布), 原来只拉
+    // trade_date=今日每晚必空、静默 0 行断供 9 天(源表停 09-07)。改为 [T-1, T]
+    // 区间: 昨日为主(T+1 已发布), 今日兜底(防未来改 T+0 发布)。
         {
             let empty_syms: Vec<String> = vec![];
+            let prev_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+                .format("%Y%m%d")
+                .to_string();
             match quant_data::sync::sync_margin_detail(
                 db,
                 tushare,
                 &empty_syms,
-                &date_str,
+                &prev_str,
                 &date_str,
                 &format!("margin-detail-eod-{}", date_str),
             )
