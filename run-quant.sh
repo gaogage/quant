@@ -83,5 +83,26 @@ case "$TARGET" in
       "$RUN_IMAGE"
 
     echo "[run-quant] 本机已启动: http://localhost:8080 (镜像: $RUN_IMAGE)"
+
+    # ---- 收尾验证：服务健康 + 图标 URL 可达（OrbStack GUI 依赖，异常当场暴露）----
+    HEALTH=""
+    for _ in $(seq 1 15); do
+      HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:8080/api/v1/health || true)
+      [ "$HEALTH" = "200" ] && break
+      sleep 2
+    done
+    echo "[run-quant] 健康检查 /api/v1/health => $HEALTH"
+
+    # 图标经 ECS 静态资源站拉取（www.knyzo.com），与本机容器无关；非 svg 意味着 GUI 图标显示占位符
+    ICON_URL=$(docker inspect -f '{{index .Config.Labels "dev.orbstack.icon"}}' quant 2>/dev/null || true)
+    if [ -n "$ICON_URL" ]; then
+      ICON_CT=$(curl -s -o /dev/null -w "%{content_type}" --max-time 8 "$ICON_URL" || true)
+      if [ "$ICON_CT" = "image/svg+xml" ]; then
+        echo "[run-quant] 图标 URL 验证通过: $ICON_URL"
+      else
+        echo "[run-quant] ⚠️ 图标 URL 返回 '$ICON_CT'（非 image/svg+xml）: $ICON_URL" >&2
+        echo "[run-quant] ⚠️ OrbStack GUI 图标将显示占位符——检查 ECS www.knyzo.com 站点与源文件同步" >&2
+      fi
+    fi
     ;;
 esac

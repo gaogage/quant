@@ -71,9 +71,10 @@ COPY --from=build-frontend /app/quant-ui/dist /app/ui-dist
 COPY quant-ui/icon.svg /app/ui-dist/icon.svg
 
 # http-port 显式声明 web 端口给 OrbStack 域名 80/443 反代，跳过自动探测（防探测失败回归）
-# icon URL 必须带 ?v=N 缓存版本号：OrbStack GUI 经 URLSession 磁盘缓存图标且响应无过期头，
-# URL 不变永久命中旧缓存（缓存库 ~/Library/Caches/dev.kdrag0n.MacVirt/Cache.db）；图标内容变更时 bump N
-LABEL dev.orbstack.icon="http://quant.orb.local/icon.svg?v=2" \
+# 图标托管在 aliyun-ecs 的 www.knyzo.com/static/icons/（静态公共资源，与本机容器/OrbStack
+# 生命周期解耦——orb.local 域名形式依赖 OrbStack 反代，容器重建窗口拉取失败后 GUI 固化
+# 占位图标不自愈，2026-09-16 弃用）。图标源文件在本仓库 quant-ui/icon.svg，ECS 是分发副本
+LABEL dev.orbstack.icon="https://www.knyzo.com/static/icons/quant.svg" \
       dev.orbstack.http-port=8080
 
 ENV PORT=8080 \
