@@ -1845,6 +1845,7 @@ mod stale_pv_recompute_tests {
     /// 走 quant-factor 原生 batch 计算 + 截面 z-score 标准化）。
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api stale_pv_recompute -- --ignored --nocapture
+    /// 窗口：起点 07-10（保留 20d 回溯余量），终点改到待补的最新交易日（2026-09-16 更新为 09-15）。
     #[tokio::test]
     #[ignore]
     async fn stale_pv_recompute() {
@@ -1885,8 +1886,8 @@ mod stale_pv_recompute_tests {
                 + Send + Sync,
         > = {
             let collected = collected.clone();
-            Arc::new(move |factor, _ver, vals| {
-                collected.lock().unwrap().push((format!("{}_std", factor), vals.to_vec()));
+            Arc::new(move |name, _ver, vals| {
+                collected.lock().unwrap().push((name.to_string(), vals.to_vec()));
                 Ok(vals.len())
             })
         };
@@ -1895,18 +1896,16 @@ mod stale_pv_recompute_tests {
         // PRELOAD：一次性加载全部窗口 bar 进缓存（batch_compute 内部按 chunk 取）
         {
             let s = chrono::NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-            let e = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+            let e = chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap();
             let all = load_bars_static(&db, &symbols, &s, &e).await.expect("preload");
             let mut c = cache.lock().unwrap();
-            // 以首 symbol 为 key 的粗粒度缓存（loader 对任意 chunk 都返回全集——内存换正确性）
+            // 只存一份全集（loader2 忽略 chunk key 直接返回全集）。
+            // 勿按 symbol 逐份 clone：5200 份全量拷贝会 OOM 被 SIGKILL（2026-09-16 实测）。
             c.insert((String::new(), s, e), all);
-            // 同时按每个可能的首符号注册
-            let base = c.get(&(String::new(), s, e)).cloned().unwrap_or_default();
-            for sym in &symbols { c.insert((sym.clone(), s, e), base.clone()); }
         }
         // loader 改为忽略 key 直接返回全集——重写 loader 闭包为无缓存版
         let all_bars: Arc<HashMap<String, Vec<quant_factor::types::DailyBar>>> = Arc::new(
-            cache.lock().unwrap().get(&(String::new(), chrono::NaiveDate::from_ymd_opt(2026,7,10).unwrap(), chrono::NaiveDate::from_ymd_opt(2026,9,4).unwrap())).cloned().unwrap_or_default()
+            cache.lock().unwrap().get(&(String::new(), chrono::NaiveDate::from_ymd_opt(2026,7,10).unwrap(), chrono::NaiveDate::from_ymd_opt(2026,9,15).unwrap())).cloned().unwrap_or_default()
         );
         let loader2: Arc<
             dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
@@ -1921,7 +1920,7 @@ mod stale_pv_recompute_tests {
                 version: "1.0.0".into(),
                 symbols: symbols.clone(),
                 start_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 10).unwrap(),
-                end_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                end_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap(),
                 standardize: Some(quant_factor::types::StandardizeMethod::ZScore),
                 chunk_size: 200,
                 progress: None,
@@ -1977,14 +1976,13 @@ mod stale_pv_recompute_tests {
         let mut n = 0usize;
         for (sym, d, v, valid) in vals {
             if !valid { continue; }
-            let code = format!("{}_std", factor);
             let r = sqlx::query(
                 "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
                  VALUES ($1, '1.0.0', $2, $3, $4, $4, $3)
                  ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
                    raw_value = EXCLUDED.raw_value, normalized_value = EXCLUDED.normalized_value, available_at = EXCLUDED.available_at",
             )
-            .bind(&code).bind(sym).bind(d).bind(Decimal::from_f64_retain(*v).unwrap_or_default())
+            .bind(factor).bind(sym).bind(d).bind(Decimal::from_f64_retain(*v).unwrap_or_default())
             .execute(db).await.map_err(|e| e.to_string())?;
             n += r.rows_affected() as usize;
         }
@@ -2009,8 +2007,9 @@ mod stale_pv_recompute_tests {
         .expect("db");
         // 窗口多取 30 天预热（20d 窗因子需要前置 bar）
         let preload_start = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
-        let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
-        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 5, 12).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap();
+        // 只落 2026-09-05 起的新数据（09-05 前由上次补数覆盖，ON CONFLICT 幂等但省时）
+        let cutoff = chrono::NaiveDate::from_ymd_opt(2026, 9, 5).unwrap();
         let symbols: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT symbol FROM market_stock_daily_bar WHERE trade_date >= '2026-08-01' ORDER BY 1",
         )
