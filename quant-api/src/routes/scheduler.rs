@@ -597,6 +597,16 @@ async fn run_scheduled_tasks(db: &PgPool) {
                     crate::routes::ptrade_report::run_ptrade_report_fetch(&db2).await;
                 });
             }
+            "native_pv_increment" => {
+                // quant-factor 原生量价 7 因子夜间增量(2026-09-16 治本): 23:00 触发。
+                // mom_5d/vol_20d/turn_20d/mom_20d/rsi_14d/amp_5d/bb_pos_20d 不在 phase7
+                // 回填体系内, 历史 5-12/7-15/9-05 三次断供全靠手动测试补数。此任务分批
+                // 增量计算(口径与 pv_std_backfill_2605 一致), 见 factors/native_pv.rs。
+                let db2 = db.clone();
+                tokio::spawn(async move {
+                    crate::routes::factors::run_native_pv_increment(&db2).await;
+                });
+            }
             "pit_combo_refresh" => {
                 // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
                 // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。

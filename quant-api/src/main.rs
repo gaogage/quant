@@ -561,6 +561,10 @@ async fn main() {
             post(routes::factors::materialize_pit_combo_background),
         )
         .route(
+            "/api/v1/quant/factors/native-pv-increment/background",
+            post(routes::factors::native_pv_increment_background),
+        )
+        .route(
             "/api/v1/quant/factors/p42b-overlay-combo/materialize/background",
             post(routes::factors::materialize_p42b_overlay_combo_background),
         )

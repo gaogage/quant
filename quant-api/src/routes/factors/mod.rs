@@ -286,10 +286,12 @@ pub(crate) fn usize_to_i32(value: usize) -> i32 {
 mod crud;
 mod icir_materialize;
 mod backfill;
+mod native_pv;
 
 pub use crud::*;
 pub use icir_materialize::*;
 pub use backfill::*;
+pub use native_pv::*;
 
 // ─── Tests ─────────────────────────────────────────────────────
 #[cfg(test)]
