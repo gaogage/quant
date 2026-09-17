@@ -97,8 +97,11 @@ pub async fn load_etf_premium_map(
                FROM (SELECT symbol, close FROM market_stock_daily_bar
                      WHERE trade_date = $1 AND symbol = ANY($2)) b
                LEFT JOIN LATERAL (
+                   -- PIT: 取 nav_date <= 截面日 的最近一条。条件不可省——否则回放
+                   -- 历史日期时取到全局最新净值, 既穿越又不满足 7 天新鲜度被 WHERE
+                   -- 过滤 → 门禁静默放行(2026-09-17 实测回放零触发, 实盘恰好正常)。
                    SELECT nav_date, unit_nav FROM market_fund_nav
-                   WHERE symbol = b.symbol
+                   WHERE symbol = b.symbol AND nav_date <= $1
                    ORDER BY nav_date DESC LIMIT 1
                ) n ON true
                WHERE n.unit_nav IS NOT NULL
