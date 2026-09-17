@@ -4,8 +4,9 @@
 //! 遵循 05-表结构设计.md 中的表结构。
 
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
 use crate::model::entities::{
@@ -138,6 +139,54 @@ pub async fn get_daily_date_range(
     .fetch_optional(pool)
     .await?;
     Ok(row.unwrap_or((None, None)))
+}
+
+// ─── market_fund_nav (ETF 溢价门禁) ────────────────────────────────
+
+pub async fn upsert_fund_navs(
+    pool: &PgPool,
+    navs: &[crate::model::entities::MarketFundNav],
+) -> Result<usize, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    for nav in navs {
+        sqlx::query(
+            r#"INSERT INTO market_fund_nav
+                 (symbol, nav_date, ann_date, unit_nav, accum_nav, adj_nav, source)
+               VALUES ($1, $2, $3, $4, $5, $6, 'tushare')
+               ON CONFLICT (symbol, nav_date) DO UPDATE SET
+                 ann_date  = EXCLUDED.ann_date,
+                 unit_nav  = EXCLUDED.unit_nav,
+                 accum_nav = EXCLUDED.accum_nav,
+                 adj_nav   = EXCLUDED.adj_nav"#,
+        )
+        .bind(&nav.symbol)
+        .bind(nav.nav_date)
+        .bind(nav.ann_date)
+        .bind(nav.unit_nav)
+        .bind(nav.accum_nav)
+        .bind(nav.adj_nav)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(navs.len())
+}
+
+/// 每标的最近一条净值(溢价门禁取价; nav_date 过旧由调用方判断新鲜度)。
+pub async fn latest_fund_navs(
+    pool: &PgPool,
+    symbols: &[String],
+) -> Result<HashMap<String, (NaiveDate, Decimal)>, sqlx::Error> {
+    let rows: Vec<(String, NaiveDate, Decimal)> = sqlx::query_as(
+        r#"SELECT DISTINCT ON (symbol) symbol, nav_date, unit_nav
+           FROM market_fund_nav
+           WHERE symbol = ANY($1)
+           ORDER BY symbol, nav_date DESC"#,
+    )
+    .bind(symbols)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(s, d, v)| (s, (d, v))).collect())
 }
 
 // ─── market_stock_daily_basic ────────────────────────────────────

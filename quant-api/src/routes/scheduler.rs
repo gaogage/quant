@@ -415,7 +415,7 @@ pub(crate) use crate::routes::strategy_query::{
     load_active_factor_combos, load_first_active_strategy_config, load_strategy_config,
 };
 
-async fn run_scheduled_tasks(db: &PgPool) {
+async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
     let now = chrono::Local::now();
     let tasks: Vec<(String, String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT task_name, task_type, schedule_cron, params FROM scheduled_task_config
@@ -532,9 +532,11 @@ async fn run_scheduled_tasks(db: &PgPool) {
             "nightly_signal_prep" => {
                 // 夜间信号预备链(2026-09-11): 22:10 独立触发,不等 EOD 主链(主链被
                 // forecast 拖到 00:00 的历史教训)。bar 22:01 入库即满足前置。
-                // 链: phase7 因子回补(~67m) → PIT 物化增量 → sleeve 曲线更新。
+                // 链: phase7 因子回补(~67m) → PIT 物化增量 → sleeve 曲线更新
+                //      → fund_nav 净值增量(2026-09-17, ETF 溢价门禁数据源)。
                 // 预计 23:20 完成,为 23:30 信号生成与日终通知留窗。幂等,失败告警。
                 let db2 = db.clone();
+                let tushare2 = tushare.clone();
                 let date = chrono::Local::now().date_naive();
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
@@ -575,6 +577,13 @@ async fn run_scheduled_tasks(db: &PgPool) {
                             info!("[夜间预备] sleeve 曲线更新完成 累计{}s", t0.elapsed().as_secs());
                         }
                     }
+                    // 基金净值增量(2026-09-17, ETF 溢价门禁数据源): 每标的增量秒级完成。
+                    // 门禁对缺数据降级放行, 此处失败不阻断 23:30 信号(告警留痕)。
+                    let etf_syms = load_active_etf_symbols_union(&db2).await;
+                    match quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
+                        Ok(n) => info!("[夜间预备] fund_nav 净值同步 {} 行 累计{}s", n, t0.elapsed().as_secs()),
+                        Err(e) => warn!("[夜间预备] fund_nav 净值同步失败(门禁将降级放行): {}", e),
+                    }
                 });
             }
             "ptrade_signal_export" => {
@@ -583,8 +592,15 @@ async fn run_scheduled_tasks(db: &PgPool) {
                 // 依赖夜间预备链(22:10)的因子/物化/曲线在 23:20 前就绪。
                 // 详见 signal_export.rs 与 docs/projects/quant/PTrade实盘对接设计方案.md §5。
                 let db2 = db.clone();
+                let tushare2 = tushare.clone();
                 let params2 = params.clone();
                 tokio::spawn(async move {
+                    // 溢价门禁净值兜底(2026-09-17): 22:10 链失败/EOD 拖延时补拉,
+                    // 增量幂等秒级; 再失败则门禁降级放行(signal_export 内置)。
+                    let etf_syms = load_active_etf_symbols_union(&db2).await;
+                    if let Err(e) = quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
+                        warn!("[PTrade信号] fund_nav 兜底同步失败(门禁降级放行): {}", e);
+                    }
                     crate::routes::signal_export::run_ptrade_signal_export(&db2, &params2).await;
                 });
             }
@@ -754,7 +770,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         }
 
         // 首次运行时检查定时任务
-        run_scheduled_tasks(&db).await;
+        run_scheduled_tasks(&db, &tushare).await;
 
         loop {
             interval.tick().await;
@@ -773,7 +789,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
             // 每分钟检查定时任务(2026-09-14 修复: 原整点检查+23:30 cron=死任务——
             // 23:00 整点查时 next=23:30 未到期, 下个整点 00:00 已关机, 信号任务
             // 周六开机才补跑且截面退化。60s tick 直接查, next_run_at 幂等控频)
-            run_scheduled_tasks(&db).await;
+            run_scheduled_tasks(&db, &tushare).await;
         }
     });
 }

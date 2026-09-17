@@ -597,6 +597,32 @@ impl TushareClient {
             .await
     }
 
+    /// 公募基金净值(tushare fund_nav, 2000 积分档)——ETF 溢价门禁数据源。
+    /// QDII 净值 T+1 上午公布, 拉取区间建议 [T-2, T] 保证命中最近可得净值。
+    pub async fn fund_nav(
+        &self,
+        ts_code: Option<&str>,
+        nav_date: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(d) = nav_date {
+            params.push(("nav_date", d));
+        }
+        if let Some(d) = start_date {
+            params.push(("start_date", d));
+        }
+        if let Some(d) = end_date {
+            params.push(("end_date", d));
+        }
+        self.call_api::<Vec<serde_json::Value>>("fund_nav", params, &[])
+            .await
+    }
+
     /// 获取每日基础/估值数据，支持按交易日或按单只股票区间分页拉取。
     pub async fn daily_basic(
         &self,

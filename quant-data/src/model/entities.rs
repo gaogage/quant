@@ -375,3 +375,14 @@ pub struct BacktestTask {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
 }
+
+/// 基金净值 (market_fund_nav, ETF 溢价门禁数据源)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketFundNav {
+    pub symbol: String,
+    pub nav_date: NaiveDate,
+    pub ann_date: Option<NaiveDate>,
+    pub unit_nav: Decimal,
+    pub accum_nav: Option<Decimal>,
+    pub adj_nav: Option<Decimal>,
+}

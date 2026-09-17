@@ -1315,6 +1315,136 @@ pub async fn sync_fund_daily(
     Ok(total_rows)
 }
 
+// ─── sync_fund_nav (基金净值, ETF 溢价门禁数据源, 2026-09-17) ──────
+
+fn fund_navs_from_maps(maps: &[Map<String, Value>]) -> Vec<crate::model::entities::MarketFundNav> {
+    maps.iter()
+        .filter_map(|item| {
+            let unit_nav = get_f64(item, "unit_nav")?;
+            Some(crate::model::entities::MarketFundNav {
+                symbol: get_str(item, "ts_code"),
+                nav_date: to_date(&get_str(item, "nav_date"))?,
+                ann_date: get_str(item, "ann_date").parse::<NaiveDate>().ok(),
+                unit_nav: Decimal::from_f64_retain(unit_nav)?,
+                accum_nav: get_f64(item, "accum_nav").and_then(Decimal::from_f64_retain),
+                adj_nav: get_f64(item, "adj_nav").and_then(|v| Decimal::from_f64_retain(v)),
+            })
+        })
+        .collect()
+}
+
+/// 基金净值增量同步(ETF 溢价门禁): 每标的从 max(nav_date)+1 拉到今天, 无历史回补 2 年。
+/// 不注册 data_version——门禁辅助数据, 不参与 PIT 因子链, 避开 FK/密封依赖。
+/// QDII 净值 T+1 上午公布: 当日拉到 0 行是常态(昨日净值已在库), 不算错误。
+/// 单标的失败只记 attempt 不中断整体(门禁侧对缺数据降级放行, 见 signal_export 门禁)。
+pub async fn sync_fund_nav(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let today = chrono::Local::now().date_naive();
+    let task_id = format!("fund-nav-sync-{}", today.format("%Y%m%d"));
+    // data_sync_attempt 有 FK → data_sync_task, 必须先建 task 记录
+    // (2026-09-17 实测 FK 违反, 同 data_version FK 静默拦截坑)
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "fund_nav",
+        "tushare",
+        Some(symbols),
+        None,
+        None,
+        "running",
+        None,
+    )
+    .await?;
+    let mut total = 0usize;
+    for symbol in symbols {
+        let latest: Option<NaiveDate> =
+            sqlx::query_scalar("SELECT MAX(nav_date) FROM market_fund_nav WHERE symbol = $1")
+                .bind(symbol)
+                .fetch_one(pool)
+                .await?;
+        let start_date = latest.unwrap_or(today - Duration::days(730)) + Duration::days(1);
+        if start_date > today {
+            continue; // 已是最新
+        }
+        let start = start_date.format("%Y%m%d").to_string();
+        let end = today.format("%Y%m%d").to_string();
+
+        let mut navs: Vec<_> = Vec::new();
+        let mut last_err: Option<String> = None;
+        for attempt in 0..2 {
+            match client
+                .fund_nav(Some(symbol), None, Some(&start), Some(&end))
+                .await
+            {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    navs = fund_navs_from_maps(&maps);
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if attempt == 0 && (err_str.contains("40203") || err_str.contains("4000")) {
+                        warn!("fund_nav rate-limit, waiting 5s for {}: {}", symbol, err_str);
+                        tokio::time::sleep(StdDuration::from_secs(5)).await;
+                        continue;
+                    }
+                    last_err = Some(err_str);
+                    break;
+                }
+            }
+        }
+        match last_err {
+            None => {
+                if !navs.is_empty() {
+                    total += navs.len();
+                    repository::upsert_fund_navs(pool, &navs).await?;
+                }
+                repository::upsert_sync_attempt(
+                    pool,
+                    "fund_nav",
+                    symbol,
+                    start_date,
+                    today,
+                    &task_id,
+                    "completed",
+                    navs.len() as i64,
+                    None,
+                )
+                .await?;
+            }
+            Some(err) => {
+                error!("fund_nav 同步失败 {}: {}", symbol, err);
+                repository::upsert_sync_attempt(
+                    pool,
+                    "fund_nav",
+                    symbol,
+                    start_date,
+                    today,
+                    &task_id,
+                    "failed",
+                    0,
+                    Some(&err),
+                )
+                .await?;
+            }
+        }
+        tokio::time::sleep(StdDuration::from_millis(300)).await; // 温和限速
+    }
+    repository::update_sync_task(pool, &task_id, "completed", total as i32, total as i32, 0)
+        .await?;
+    info!(
+        "[fund_nav] {} 标的同步完成, 新增 {} 行",
+        symbols.len(),
+        total
+    );
+    Ok(total)
+}
+
+
 // ─── sync_moneyflow ─────────────────────────────────────────────
 
 fn moneyflow_row_from_map(item: &Map<String, Value>) -> Option<MarketStockMoneyflow> {

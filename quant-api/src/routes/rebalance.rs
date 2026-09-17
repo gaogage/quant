@@ -590,8 +590,34 @@ pub async fn rebalance_account(
         HashMap::new()
     };
     // ETF 段同样两遍执行:先卖后买(卖出资金当轮可用于买入,与 A 股段口径一致)
+    // 溢价门禁(2026-09-17, 与 signal_export 同源): QDII 高溢价标的跳过调仓维持现状
+    // (513100 溢价停牌事故——停牌期间 EodClose 模式会按昨收价虚拟成交, 模拟与现实脱节;
+    //  高溢价本身也不该按市价买)。数据缺失放行(降级取向), 见 shared/etf_premium.rs。
+    let etf_premium_map = crate::routes::shared::load_etf_premium_map(
+        db,
+        date,
+        &etf_allocations
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect::<Vec<_>>(),
+        crate::routes::shared::DEFAULT_ETF_PREMIUM_GATE,
+    )
+    .await;
     for pass in 0..2 {
     for (etf_symbol, alloc_pct) in &etf_allocations {
+        if let Some(p) = etf_premium_map.get(etf_symbol.as_str()) {
+            if p.blocked {
+                if pass == 0 {
+                    warn!(
+                        "[rebalance] 溢价门禁: 跳过 ETF {} 调仓(溢价 {:.1}% > {:.0}%, 维持现状)",
+                        etf_symbol,
+                        p.premium_pct.unwrap_or(0.0) * 100.0,
+                        crate::routes::shared::DEFAULT_ETF_PREMIUM_GATE * 100.0
+                    );
+                }
+                continue;
+            }
+        }
         if warn_no_buy {
             continue; // 警戒禁买:不建仓 ETF(减仓由增量 delta 自然处理)
         }
