@@ -222,8 +222,9 @@ async fn sync_mirror_account(
                 px = o.get("limit_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
             }
             if px <= 0.0 {
+                // PIT 最近 bar: 当日 bar 可能尚未入库(EOD 22:00), 取 <= td 最近一条
                 let fallback: Option<rust_decimal::Decimal> = sqlx::query_scalar(
-                    "SELECT close FROM market_stock_daily_bar WHERE symbol=$1 AND trade_date=$2",
+                    "SELECT close FROM market_stock_daily_bar WHERE symbol=$1 AND trade_date <= $2 ORDER BY trade_date DESC LIMIT 1",
                 )
                 .bind(norm_sym(sym))
                 .bind(td)
