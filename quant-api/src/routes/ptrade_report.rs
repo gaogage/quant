@@ -247,7 +247,7 @@ async fn sync_mirror_account(
             .bind(norm_sym(sym))
             .bind(if filled > 0.0 { "buy" } else { "sell" })
             .bind(qty)
-            .bind(o.get("limit_price").and_then(|x| x.as_f64).map(dec))
+            .bind(o.get("limit_price").and_then(|x| x.as_f64()).map(dec))
             .execute(db)
             .await
             .map_err(|e| format!("mirror order {}: {}", sym, e))?;
