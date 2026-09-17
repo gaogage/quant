@@ -1333,7 +1333,8 @@ fn fund_navs_from_maps(maps: &[Map<String, Value>]) -> Vec<crate::model::entitie
         .collect()
 }
 
-/// 基金净值增量同步(ETF 溢价门禁): 每标的从 max(nav_date)+1 拉到今天, 无历史回补 2 年。
+/// 基金净值增量同步(ETF 溢价门禁): 每标的从 max(nav_date)+1 拉到今天, 无历史回补
+/// 2500 天(覆盖 2020 起, 生产模拟 2020-至今回放的门禁数据前置)。
 /// 不注册 data_version——门禁辅助数据, 不参与 PIT 因子链, 避开 FK/密封依赖。
 /// QDII 净值 T+1 上午公布: 当日拉到 0 行是常态(昨日净值已在库), 不算错误。
 /// 单标的失败只记 attempt 不中断整体(门禁侧对缺数据降级放行, 见 signal_export 门禁)。
@@ -1365,7 +1366,7 @@ pub async fn sync_fund_nav(
                 .bind(symbol)
                 .fetch_one(pool)
                 .await?;
-        let start_date = latest.unwrap_or(today - Duration::days(730)) + Duration::days(1);
+        let start_date = latest.unwrap_or(today - Duration::days(2500)) + Duration::days(1);
         if start_date > today {
             continue; // 已是最新
         }

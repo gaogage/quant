@@ -188,6 +188,8 @@ pub struct MvoParams {
     pub regime_policy: Option<String>,
     /// bwgv2 bear_return_threshold(阶段1.2 配置化 WFA 调优，默认 -0.03)。其余 bwgv2 阈值用 Bwgv2Config::default()。
     pub regime_bear_return_threshold: f64,
+    /// ETF 溢价门禁阈值(2026-09-17 方向感知): |溢价| 超阈值单边阻断(正禁买/负禁卖)。
+    pub etf_premium_gate: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,6 +276,7 @@ struct CompositeRow {
     score_candidate_pool_size: Option<i32>,
     regime_policy: Option<String>,
     regime_bear_return_threshold: Option<f64>,
+    etf_premium_gate: Option<f64>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -332,7 +335,8 @@ pub async fn load_resolved_strategy(
                 deep_bear_threshold, deep_bear_exposure,
                 dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step,
                 leverage_regime_threshold, slippage_pct, mvo_objective, allocation_mode, mu_estimation,
-                kelly_fraction, score_candidate_pool_size, regime_policy, regime_bear_return_threshold
+                kelly_fraction, score_candidate_pool_size, regime_policy, regime_bear_return_threshold,
+                etf_premium_gate
          FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)
@@ -397,6 +401,7 @@ pub async fn load_resolved_strategy(
                 score_candidate_pool_size: main.score_candidate_pool_size.unwrap_or(200) as i64,
                 regime_policy: main.regime_policy.clone(),
                 regime_bear_return_threshold: main.regime_bear_return_threshold.unwrap_or(-0.03),
+                etf_premium_gate: main.etf_premium_gate.unwrap_or(0.10),
             };
             Ok(Strategy::validated(ResolvedStrategy {
                 strategy_id: main.strategy_id,
@@ -523,6 +528,7 @@ mod tests {
                 score_candidate_pool_size: 200,
                 regime_policy: None,
                 regime_bear_return_threshold: -0.03,
+                etf_premium_gate: 0.10,
             }),
             assets: vec![],
             etf_symbols: vec![

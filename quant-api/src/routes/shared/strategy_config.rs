@@ -84,6 +84,14 @@ pub struct StrategyConfig {
     /// bwgv2 bear_return_threshold（regime_policy=bwgv2 时生效，默认 -0.03）。WFA 调优主杠杆。
     #[serde(default = "default_bwgv2_bear_return")]
     pub regime_bear_return_threshold: f64,
+    /// ETF 溢价门禁阈值(2026-09-17 方向感知版): |溢价| 超过此值触发单边阻断
+    /// (正向禁买可卖/负向禁卖可买), 策略层配置 strategy_config.etf_premium_gate。
+    #[serde(default = "default_etf_premium_gate")]
+    pub etf_premium_gate: f64,
+}
+
+fn default_etf_premium_gate() -> f64 {
+    0.10
 }
 
 fn default_signal_source() -> String {
@@ -193,6 +201,7 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         mu_estimation: mvo.mu_estimation.clone(),
         regime_policy: mvo.regime_policy.clone(),
         regime_bear_return_threshold: mvo.regime_bear_return_threshold,
+        etf_premium_gate: mvo.etf_premium_gate,
     })
 }
 
@@ -217,6 +226,7 @@ mod tests {
             name: "v19策略".into(),
             strategy_type: StrategyType::Composite,
             mvo: Some(MvoParams {
+                etf_premium_gate: 0.10,
                 vol_target: 0.2,
                 allocation_mode: None,
                 mu_estimation: None,
@@ -435,6 +445,7 @@ mod tests {
             name: "v19策略".into(),
             strategy_type: StrategyType::Composite,
             mvo: Some(MvoParams {
+                etf_premium_gate: 0.10,
                 vol_target: 0.2,
                 allocation_mode: None,
                 mu_estimation: None,

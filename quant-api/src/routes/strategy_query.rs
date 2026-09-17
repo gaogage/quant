@@ -155,7 +155,8 @@ pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyCon
             'slippage_pct', slippage_pct,
             'mvo_objective', mvo_objective,
             'regime_policy', regime_policy,
-            'regime_bear_return_threshold', regime_bear_return_threshold
+            'regime_bear_return_threshold', regime_bear_return_threshold,
+            'etf_premium_gate', COALESCE(etf_premium_gate, 0.10)
         ) FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)

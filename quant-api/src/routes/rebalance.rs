@@ -590,9 +590,10 @@ pub async fn rebalance_account(
         HashMap::new()
     };
     // ETF 段同样两遍执行:先卖后买(卖出资金当轮可用于买入,与 A 股段口径一致)
-    // 溢价门禁(2026-09-17, 与 signal_export 同源): QDII 高溢价标的跳过调仓维持现状
-    // (513100 溢价停牌事故——停牌期间 EodClose 模式会按昨收价虚拟成交, 模拟与现实脱节;
-    //  高溢价本身也不该按市价买)。数据缺失放行(降级取向), 见 shared/etf_premium.rs。
+    // 溢价门禁·方向感知(2026-09-17, 与 signal_export 同源, 阈值策略层配置):
+    // 溢价 > +gate 禁买可卖(高溢价买入承受回归损失, 卖出占便宜);
+    // 折价 < -gate 禁卖可买; 区间内正常双向。堵 EodClose 模式停牌标的按昨收价
+    // 虚拟成交的模拟与现实脱节。数据缺失放行(降级取向), 见 shared/etf_premium.rs。
     let etf_premium_map = crate::routes::shared::load_etf_premium_map(
         db,
         date,
@@ -600,19 +601,22 @@ pub async fn rebalance_account(
             .iter()
             .map(|(s, _)| s.clone())
             .collect::<Vec<_>>(),
-        crate::routes::shared::DEFAULT_ETF_PREMIUM_GATE,
+        sc.etf_premium_gate,
     )
     .await;
     for pass in 0..2 {
     for (etf_symbol, alloc_pct) in &etf_allocations {
+        // pass 0=卖出, pass 1=买入; 门禁按方向单边拦截(双 pass 各查一次同方向)
+        let side_now = if pass == 0 { "sell" } else { "buy" };
         if let Some(p) = etf_premium_map.get(etf_symbol.as_str()) {
-            if p.blocked {
+            if p.blocks_side(side_now) {
                 if pass == 0 {
                     warn!(
-                        "[rebalance] 溢价门禁: 跳过 ETF {} 调仓(溢价 {:.1}% > {:.0}%, 维持现状)",
+                        "[rebalance] 溢价门禁: 跳过 ETF {} {}向调仓(溢价 {:+.1}%, 阈值 {:.0}%)",
                         etf_symbol,
+                        side_now,
                         p.premium_pct.unwrap_or(0.0) * 100.0,
-                        crate::routes::shared::DEFAULT_ETF_PREMIUM_GATE * 100.0
+                        sc.etf_premium_gate * 100.0
                     );
                 }
                 continue;
@@ -1472,6 +1476,7 @@ mod tests {
     #[test]
     fn test_sc_slippage_pct_reads_field() {
         let sc = StrategyConfig {
+            etf_premium_gate: 0.10,
             allocation_mode: None,
             mu_estimation: None,
             strategy_id: "test".into(),

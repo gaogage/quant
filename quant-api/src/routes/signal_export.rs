@@ -18,7 +18,7 @@
 use crate::routes::rebalance::{build_etf_allocations, compute_leverage_mult, select_positions};
 use crate::routes::shared::{
     compute_lw_mvo_weights, detect_regime_exposure, load_etf_premium_map, resolved_to_legacy_sc,
-    send_dingtalk_alert, MvoWeightCache, StrategyConfig, DEFAULT_ETF_PREMIUM_GATE,
+    send_dingtalk_alert, MvoWeightCache, StrategyConfig,
 };
 use sha1::{Digest, Sha1};
 use sqlx::PgPool;
@@ -91,13 +91,8 @@ pub async fn run_ptrade_signal_export(db: &PgPool, params: &serde_json::Value) {
         .await;
         return;
     }
-    // 溢价门禁阈值(params.premium_gate_pct 可调, 默认 5%; 设 0 关闭门禁)
-    let gate = params
-        .get("premium_gate_pct")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(DEFAULT_ETF_PREMIUM_GATE);
     for account_id in &accounts {
-        match export_signal_for_account(db, account_id, gate).await {
+        match export_signal_for_account(db, account_id).await {
             Ok(msg) => send_dingtalk_alert(db, &msg).await,
             Err(e) => {
                 error!("[PTrade信号] 账户 {} 信号生成失败: {}", account_id, e);
@@ -111,11 +106,7 @@ pub async fn run_ptrade_signal_export(db: &PgPool, params: &serde_json::Value) {
     }
 }
 
-async fn export_signal_for_account(
-    db: &PgPool,
-    account_id: &str,
-    premium_gate: f64,
-) -> Result<String, String> {
+async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<String, String> {
     // 2026-09-14 修复: 用最近交易日而非自然日——周末/节假日补跑时(容器重启/延迟),
     // now() 是非交易日, run-factor 当日截面为空 → A股 sleeve 缺失的残缺信号
     // (09-14 事故: 周六 07:01 补跑生成仅 7 ETF 的降级信号, 若执行将清空 A 股持仓)。
@@ -217,34 +208,34 @@ async fn export_signal_for_account(
         .filter(|s| etf_listed_map.get(*s).copied().unwrap_or(false))
         .cloned()
         .collect();
-    // ETF 溢价门禁(2026-09-17): 溢价超阈值的标的标记 blocked, 执行端"维持现状"跳过 diff。
-    // 背景: QDII 高溢价 → 开市停牌至 10:30, 与执行窗口 09:35-10:30 结构性重叠(513100 事故);
-    // 且高溢价本身不该按市价买入。数据缺失放行(降级取向), 详见 shared/etf_premium.rs。
+    // ETF 溢价门禁·方向感知(2026-09-17): 溢价 > +gate 禁买可卖(高溢价买入承受回归
+    // 损失, 卖出占便宜); 折价 < -gate 禁卖可买; 区间内正常双向。阈值策略层配置
+    // (strategy_config.etf_premium_gate, 默认 0.10)。数据缺失放行(降级取向)。
+    let premium_gate = sc.etf_premium_gate;
     let premium_map: HashMap<String, crate::routes::shared::EtfPremium> =
         load_etf_premium_map(db, date, &listed, premium_gate).await;
-    let blocked: Vec<String> = premium_map
+    let gate_hit: Vec<String> = premium_map
         .iter()
-        .filter(|(_, p)| p.blocked)
+        .filter(|(_, p)| !p.is_free())
         .map(|(s, _)| s.clone())
         .collect();
-    if !blocked.is_empty() {
-        let detail = blocked
+    if !gate_hit.is_empty() {
+        let detail = gate_hit
             .iter()
             .map(|s| {
                 let p = &premium_map[s];
                 format!(
-                    "{} 溢价{:.1}%(净值{} {:.4})",
+                    "{} 溢价{:+.1}%→{}",
                     to_ptrade_symbol(s),
                     p.premium_pct.unwrap_or(0.0) * 100.0,
-                    p.nav_date.map(|d| d.format("%m-%d").to_string()).unwrap_or_default(),
-                    p.unit_nav.unwrap_or(0.0)
+                    if p.blocks_side("buy") { "禁买可卖" } else { "禁卖可买" }
                 )
             })
             .collect::<Vec<_>>()
             .join("; ");
         warn!(
-            "[PTrade信号] 溢价门禁拦截 {} 只 ETF(阈值 {:.0}%): {}",
-            blocked.len(),
+            "[PTrade信号] 溢价门禁命中 {} 只 ETF(阈值 {:.0}%): {}",
+            gate_hit.len(),
             premium_gate * 100.0,
             detail
         );
@@ -270,7 +261,11 @@ async fn export_signal_for_account(
         "account_type": if leverage_enabled { "margin" } else { "cash" },
         "trade_date": trade_date.format("%Y%m%d").to_string(),
         "generated_at": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        // 主窗口保持 09:35-10:30(正常标的); 门禁命中标的的交易推迟到复牌后的
+        // 延迟窗口(10:30 溢价停牌复牌, 留 5 分钟行情稳定), 执行器按 blocked_side
+        // 在延迟窗口只执行允许方向(高溢价→只卖, 高折价→只买)。
         "execute_window": {"start": "09:35", "end": "10:30"},
+        "deferred_execute_window": {"start": "10:35", "end": "11:30"},
         "nav_estimate": (nav * 100.0).round() / 100.0,
         "target_positions": targets
             .iter()
@@ -280,17 +275,20 @@ async fn export_signal_for_account(
                     "target_weight": (*w * 10000.0).round() / 10000.0,
                     "side": "auto",
                 });
-                // blocked 协议: target_weight 保留策略原值(回放对账), 执行端见 blocked
-                // 跳过该标的 diff(维持现状, 不买不卖)。fair_limit_price 为二期限价挂单
-                // 预留锚(净值×1.02), 一期执行端不使用。
+                // blocked_side 协议(2026-09-17 方向感知): "buy"=禁买可卖, "sell"=禁卖可买。
+                // target_weight 保留策略原值(回放对账), 执行端按方向跳过对应委托。
                 if let Some(p) = premium_map.get(sym) {
-                    if p.blocked {
-                        item["blocked"] = serde_json::json!(true);
-                        item["block_reason"] = serde_json::json!("premium");
-                        item["premium_pct"] =
-                            serde_json::json!((p.premium_pct.unwrap_or(0.0) * 100.0 * 10.0).round() / 10.0);
-                        item["fair_limit_price"] = serde_json::json!(
-                            (p.unit_nav.unwrap_or(0.0) * 1.02 * 1000.0).round() / 1000.0
+                    let side = if p.blocks_side("buy") {
+                        "buy"
+                    } else if p.blocks_side("sell") {
+                        "sell"
+                    } else {
+                        ""
+                    };
+                    if !side.is_empty() {
+                        item["blocked_side"] = serde_json::json!(side);
+                        item["premium_pct"] = serde_json::json!(
+                            (p.premium_pct.unwrap_or(0.0) * 100.0 * 10.0).round() / 10.0
                         );
                     }
                 }
@@ -312,19 +310,22 @@ async fn export_signal_for_account(
     scp_push(&local, &channel.scp_target).await?;
 
     let n_etf = listed.len() + 1; // +现金段按需
-    let blocked_msg = if blocked.is_empty() {
+    let gate_msg = if gate_hit.is_empty() {
         String::new()
     } else {
         format!(
-            "\n🚫 溢价门禁 {} 只(维持现状): {}",
-            blocked.len(),
-            blocked
+            "\n🚫 溢价门禁 {} 只(阈值{:.0}%): {}",
+            gate_hit.len(),
+            premium_gate * 100.0,
+            gate_hit
                 .iter()
                 .map(|s| {
+                    let p = &premium_map[s];
                     format!(
-                        "{}({:.1}%)",
+                        "{}({:+.1}%→{})",
                         to_ptrade_symbol(s),
-                        premium_map[s].premium_pct.unwrap_or(0.0) * 100.0
+                        p.premium_pct.unwrap_or(0.0) * 100.0,
+                        if p.blocks_side("buy") { "禁买" } else { "禁卖" }
                     )
                 })
                 .collect::<Vec<_>>()
@@ -335,7 +336,7 @@ async fn export_signal_for_account(
         "📤 [PTrade信号] {}({}) 已生成并推送[{}] → {} 执行\nA股 {} 只 + ETF {} 只, 权重和 {:.3}, regime {:.2}, lev {:.2}x{}\nsignal_id={} checksum={:.8}…",
         name, account_id, channel.channel_name, trade_date.format("%Y-%m-%d"), positions.len(), n_etf,
         signal["total_target_weight"].as_f64().unwrap_or(0.0), regime,
-        leverage_d_f64(&leverage_d), blocked_msg,
+        leverage_d_f64(&leverage_d), gate_msg,
         signal["signal_id"].as_str().unwrap_or(""), checksum
     ))
 }
@@ -530,7 +531,7 @@ mod tests {
         assert_eq!(to_ptrade_symbol("000001.SZ"), "000001.SZ");
     }
 
-    /// blocked 协议字段参与 checksum 的双端对齐(2026-09-17 溢价门禁一期):
+    /// blocked_side 协议字段参与 checksum 的双端对齐(2026-09-17 方向感知门禁):
     /// Python 端 json.dumps(sort_keys, ensure_ascii=False, separators) 预计算基准。
     #[test]
     fn canonical_sha1_with_blocked_fields() {
@@ -538,17 +539,18 @@ mod tests {
             "version": 1, "signal_id": "t2", "account_type": "cash",
             "trade_date": "20260918", "generated_at": "2026-09-17T23:30:00",
             "nav_estimate": 5000000.0,
+            "execute_window": {"start": "09:35", "end": "10:30"},
+            "deferred_execute_window": {"start": "10:35", "end": "11:30"},
             "target_positions": [
                 {"symbol": "511010.SS", "target_weight": 0.1214, "side": "auto"},
                 {"symbol": "513100.SS", "target_weight": 0.1214, "side": "auto",
-                 "blocked": true, "block_reason": "premium", "premium_pct": 13.6,
-                 "fair_limit_price": 1.991},
+                 "blocked_side": "buy", "premium_pct": 13.6},
             ],
             "total_target_weight": 0.2428
         });
         assert_eq!(
             canonical_sha1(&payload),
-            "16e4bb70de462bcba8a70079e4df8c842f96981b"
+            "61e52b7e48baa3bb0ce6b7549e5313acefdc13b8"
         );
     }
 

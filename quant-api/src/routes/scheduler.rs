@@ -285,6 +285,7 @@ mod tests {
     /// 测试用 StrategyConfig 字面量(显式构造,避免触发 panic 版 Default)。
     fn test_strategy_config() -> StrategyConfig {
         StrategyConfig {
+            etf_premium_gate: 0.10,
             allocation_mode: None,
             mu_estimation: None,
             strategy_id: "test".into(),
@@ -837,8 +838,9 @@ async fn run_tick(
 
     let is_trade = is_trading_day(db, today).await?;
 
-    // ── 调仓窗口（2026-09-10 起 09:35~10:30 开盘后早间执行）──
+    // ── 调仓窗口（09:35~10:30 开盘后早间执行, 2026-09-17 门禁调整后主窗口不变）──
     // 与实盘 B1' 信号时序对齐: T-1 夜间预备链产出信号, T 日开盘后执行。
+    // 溢价门禁命中标的由执行端延迟窗口(10:35-11:30)处理, 主窗口不因此移动。
     // 绩效验证(回放 open 口径): lev 15.35%/1.002/-23.34% vs 收盘执行 15.14%/0.994,
     // 无折损且杠杆账户 Sharpe 破 1.0。窗口可经 REBALANCE_WINDOW_HOUR 覆盖(默认 9)。
     let reb_hour: u32 = std::env::var("REBALANCE_WINDOW_HOUR")
