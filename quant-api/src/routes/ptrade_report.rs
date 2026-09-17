@@ -208,6 +208,7 @@ async fn sync_mirror_account(
 
     // ── 交易明细回写(2026-09-17 v2: orders→paper_fill, 镜像账户与 PTrade 全量一致) ──
     // 成交价优先级: 执行器 avg_price(新版) > limit_price > 当日收盘价兜底。
+    let mut missing_px = 0i32;
     if let (Some(orders), Some(td)) = (v.get("orders").and_then(|x| x.as_array()), trade_date) {
         for o in orders {
             let sym = o.get("symbol").and_then(|x| x.as_str()).unwrap_or("");
@@ -217,22 +218,18 @@ async fn sync_mirror_account(
                 continue; // 只回写已全部成交的委托(状态8)
             }
             let entrust = o.get("entrust_no").and_then(|x| x.as_str()).unwrap_or("");
-            let mut px = o.get("avg_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            // 成交价唯一真源 = 执行器回报 avg_price(PTrade Order 真实成交均价)。
+            // 缺价即拒绝写明细并告警——宁缺毋假: limit_price 是委托限价、bar close 是
+            // 收盘价, 都不是成交价, 近似冒充会造成对账永差与绩效失真
+            // (2026-09-17 曾用前日收盘冒充被用户纠正)。
+            let px = o.get("avg_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
             if px <= 0.0 {
-                px = o.get("limit_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            }
-            if px <= 0.0 {
-                // PIT 最近 bar: 当日 bar 可能尚未入库(EOD 22:00), 取 <= td 最近一条
-                let fallback: Option<rust_decimal::Decimal> = sqlx::query_scalar(
-                    "SELECT close FROM market_stock_daily_bar WHERE symbol=$1 AND trade_date <= $2 ORDER BY trade_date DESC LIMIT 1",
-                )
-                .bind(norm_sym(sym))
-                .bind(td)
-                .fetch_optional(db)
-                .await
-                .map_err(|e| format!("fill px fallback {}: {}", sym, e))?
-                .flatten();
-                px = fallback.map(|d| d.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
+                missing_px += 1;
+                tracing::error!(
+                    "[mirror] {} {} 回报缺成交均价(avg_price), 跳过该笔明细——执行器需升级(orders 带 avg_price)",
+                    sym, entrust
+                );
+                continue;
             }
             let qty = dec(filled.abs());
             let amt = dec(filled.abs() * px);
@@ -271,6 +268,13 @@ async fn sync_mirror_account(
             .await
             .map_err(|e| format!("mirror fill {}: {}", sym, e))?;
         }
+    }
+
+    if missing_px > 0 {
+        tracing::error!(
+            "[mirror] {} 当日回报 {} 笔缺成交均价, 明细未写入(持仓/NAV 不受影响)——升级执行器后次日自愈",
+            account_id, missing_px
+        );
     }
 
     // ── NAV 快照回写(v2: nav-history 曲线/日报依赖, 与模拟盘同表) ──
