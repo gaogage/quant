@@ -181,6 +181,12 @@ pub struct MarketStockDividend {
     pub available_at: NaiveDate,
     pub cash_div: Option<Decimal>,
     pub cash_div_tax: Option<Decimal>,
+    /// 每股送转(送股+转增合计, 10送5=0.5)——份额拆分调整权威字段(2026-09-17 补)
+    pub stk_div: Option<Decimal>,
+    /// 每股送股比例
+    pub stk_bo_rate: Option<Decimal>,
+    /// 每股转增比例
+    pub stk_co_rate: Option<Decimal>,
     pub record_date: Option<NaiveDate>,
     pub ex_date: Option<NaiveDate>,
     pub pay_date: Option<NaiveDate>,

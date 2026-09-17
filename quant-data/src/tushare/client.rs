@@ -1536,12 +1536,18 @@ impl TushareClient {
                 "end_date",
                 "ann_date",
                 "div_proc",
+                // 送转三字段(2026-09-17 补): 份额拆分调整的权威数据源
+                // (mark_to_market 公司行动调整依赖, 此前白名单遗漏致送转数据缺失)
+                "stk_div",
+                "stk_bo_rate",
+                "stk_co_rate",
                 "cash_div",
                 "cash_div_tax",
                 "record_date",
                 "ex_date",
                 "pay_date",
                 "imp_ann_date",
+                "div_listdate",
             ],
         )
         .await

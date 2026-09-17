@@ -1013,6 +1013,14 @@ pub async fn check_maintenance_after_mark(
 
 /// 每日盯市:用当日收盘价重算持仓 market_price/market_value,使 update_current_nav 反映真实市值。
 /// 回放逐日复利的必要步骤(否则 NAV 停在建仓日不动)。
+///
+/// 公司行动调整(2026-09-17, 513100 份额拆分假跌事故):
+/// - 股票送转:dividend 表权威字段 stk_div(div_proc=实施, ex_date 落在两次估值间)
+///   → quantity ×= (1+stk_div);现金分红 cash_div → 入账 cash(此前分红一直被忽略)。
+/// - ETF 拆分/折算:market_adjustment_factor 因子跳变比 >10%(拆分级)→ quantity ×= 跳变比;
+///   ≤10% 的跳变是分红除息(如 511010 季度分红 ~0.5%),份额不动,现金暂不入账(误差微小)。
+/// - 配股:dividend 表无记录,份额不动价格除权下跌——等同实盘不缴配股款的真实损失,维持现状。
+/// 事件窗口 = 最近两条 bar 之间 (t2, t1](逐日=昨日至今;隔日补跑=上次估值至今,均正确)。
 pub async fn mark_to_market(
     db: &PgPool,
     account_id: &str,
@@ -1024,23 +1032,133 @@ pub async fn mark_to_market(
     // 放大老股市值与真实资金不可比。daily_bar_table 已统一真实价。
     // 2026-08-10 NAV +21.6% 根因之一:实盘从不 mark_to_market,持仓市值冻结在后复权建仓价。
     let table = daily_bar_table(price_source);
-    sqlx::query(&format!(
-        "UPDATE paper_position pp SET
-             market_price = sub.close, market_value = pp.quantity * sub.close
-         FROM paper_position p2
-         LEFT JOIN LATERAL (
-             SELECT close::numeric AS close
-             FROM {table}
-             WHERE symbol = p2.symbol AND trade_date <= $1
-             ORDER BY trade_date DESC LIMIT 1
-         ) sub ON true
-         WHERE pp.paper_account_id = $2 AND p2.paper_account_id = $2 AND pp.symbol = p2.symbol",
-    ))
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| format!("mtm tx begin: {}", e))?;
+
+    // ── 步骤1: 现金分红入账(用送转调整前的份额, 除息日持股口径)──
+    let cash_div: rust_decimal::Decimal = sqlx::query_scalar(
+        &format!(
+            r#"SELECT COALESCE(SUM(pp.quantity * d.cash_div), 0)
+               FROM paper_position pp
+               JOIN LATERAL (
+                   SELECT trade_date FROM {table}
+                   WHERE symbol = pp.symbol AND trade_date <= $1
+                   ORDER BY trade_date DESC LIMIT 1
+               ) t1 ON true
+               JOIN LATERAL (
+                   SELECT trade_date FROM {table}
+                   WHERE symbol = pp.symbol AND trade_date < t1.trade_date
+                   ORDER BY trade_date DESC LIMIT 1
+               ) t2 ON true
+               JOIN market_stock_dividend d
+                 ON d.symbol = pp.symbol AND d.div_proc = '实施'
+                AND d.cash_div > 0
+                AND d.ex_date > t2.trade_date AND d.ex_date <= t1.trade_date
+               WHERE pp.paper_account_id = $2 AND pp.quantity > 0"#
+        ),
+    )
     .bind(date)
     .bind(account_id)
-    .execute(db)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(|e| format!("mtm: {}", e))?;
+    .map_err(|e| format!("mtm cash_div: {}", e))?;
+    if cash_div > rust_decimal::Decimal::ZERO {
+        sqlx::query("UPDATE paper_account SET cash = cash + $1 WHERE paper_account_id = $2")
+            .bind(cash_div)
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("mtm cash_div apply: {}", e))?;
+        tracing::info!(
+            "[mtm] {} {} 现金分红入账 {:.2}",
+            account_id,
+            date,
+            cash_div
+        );
+    }
+
+    // ── 步骤2: 份额调整 + 估值(送转/拆分 × 最新收盘)──
+    // etf_mult: 因子跳变>10%(拆分级); stk_mult: 权威送转 1+stk_div; 同标的多事件乘积聚合
+    let adjusted: Vec<(String, Option<rust_decimal::Decimal>)> = sqlx::query_as(
+        &format!(
+            r#"WITH bars AS (
+                   SELECT p.symbol, t1.trade_date AS d1, t1.close AS c1
+                   FROM (SELECT DISTINCT symbol FROM paper_position WHERE paper_account_id = $2) p
+                   JOIN LATERAL (
+                       SELECT trade_date, close FROM {table}
+                       WHERE symbol = p.symbol AND trade_date <= $1
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) t1 ON true
+               ),
+               etf_mult AS (
+                   SELECT b.symbol,
+                          (f1.adj_factor / NULLIF(f2.adj_factor, 0)) AS mult
+                   FROM bars b
+                   JOIN LATERAL (
+                       SELECT adj_factor FROM market_adjustment_factor
+                       WHERE symbol = b.symbol AND trade_date <= b.d1
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) f1 ON true
+                   JOIN LATERAL (
+                       SELECT adj_factor FROM market_adjustment_factor
+                       WHERE symbol = b.symbol AND trade_date < b.d1
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) f2 ON true
+                   WHERE b.symbol ~ '^5[0-9]{{5}}\.SH$' OR b.symbol ~ '^1[0-9]{{5}}\.SZ$'
+               ),
+               stk_mult AS (
+                   SELECT d.symbol, (1 + COALESCE(d.stk_div, 0)) AS mult
+                   FROM market_stock_dividend d
+                   JOIN bars b ON b.symbol = d.symbol
+                   JOIN LATERAL (
+                       SELECT trade_date FROM {table}
+                       WHERE symbol = b.symbol AND trade_date < b.d1
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) t2 ON true
+                   WHERE d.div_proc = '实施'
+                     AND d.ex_date > t2.trade_date AND d.ex_date <= b.d1
+               ),
+               final_mult AS (
+                   SELECT symbol, mult FROM etf_mult WHERE ABS(mult - 1) > 0.10
+                   UNION ALL
+                   SELECT symbol, mult FROM stk_mult WHERE ABS(mult - 1) > 0.001
+               ),
+               agg AS (
+                   SELECT symbol, EXP(SUM(LN(mult))) AS mult
+                   FROM final_mult GROUP BY symbol
+               )
+               UPDATE paper_position pp SET
+                   quantity = pp.quantity * COALESCE(agg.mult, 1),
+                   market_price = bars.c1,
+                   market_value = pp.quantity * COALESCE(agg.mult, 1) * bars.c1
+               FROM bars
+               LEFT JOIN agg ON agg.symbol = bars.symbol
+               JOIN paper_position p2
+                 ON p2.paper_account_id = $2 AND p2.symbol = bars.symbol
+               WHERE pp.paper_account_id = $2 AND pp.symbol = bars.symbol
+               RETURNING pp.symbol, agg.mult"#
+        ),
+    )
+    .bind(date)
+    .bind(account_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| format!("mtm adjust: {}", e))?;
+    for (symbol, mult) in &adjusted {
+        if let Some(m) = mult {
+            tracing::info!(
+                "[mtm] {} {} 公司行动份额调整: {} ×{:.4}",
+                account_id,
+                date,
+                symbol,
+                m
+            );
+        }
+    }
+
+    tx.commit().await.map_err(|e| format!("mtm commit: {}", e))?;
     Ok(())
 }
 

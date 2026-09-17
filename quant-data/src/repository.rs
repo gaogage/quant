@@ -949,6 +949,7 @@ pub async fn upsert_dividend_batch(
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_dividend \
              (symbol, end_date, ann_date, div_proc, available_at, cash_div, cash_div_tax, \
+              stk_div, stk_bo_rate, stk_co_rate, \
               record_date, ex_date, pay_date, imp_ann_date, raw_payload, source, data_version_id) ",
         );
         builder.push_values(chunk, |mut row_builder, item| {
@@ -960,6 +961,9 @@ pub async fn upsert_dividend_batch(
                 .push_bind(item.available_at)
                 .push_bind(item.cash_div)
                 .push_bind(item.cash_div_tax)
+                .push_bind(item.stk_div)
+                .push_bind(item.stk_bo_rate)
+                .push_bind(item.stk_co_rate)
                 .push_bind(item.record_date)
                 .push_bind(item.ex_date)
                 .push_bind(item.pay_date)
@@ -972,6 +976,9 @@ pub async fn upsert_dividend_batch(
             " ON CONFLICT (symbol, end_date, ann_date, div_proc, available_at) DO UPDATE SET \
               cash_div = EXCLUDED.cash_div, \
               cash_div_tax = EXCLUDED.cash_div_tax, \
+              stk_div = EXCLUDED.stk_div, \
+              stk_bo_rate = EXCLUDED.stk_bo_rate, \
+              stk_co_rate = EXCLUDED.stk_co_rate, \
               record_date = EXCLUDED.record_date, \
               ex_date = EXCLUDED.ex_date, \
               pay_date = EXCLUDED.pay_date, \

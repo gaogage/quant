@@ -613,4 +613,50 @@ mod tests {
                  p.premium_pct, p.block_buy, p.block_sell);
         assert!(p.block_buy, "63% 溢价未触发 block_buy");
     }
+
+    /// dividend 送转字段回填(一次性, 2026-09-17 公司行动调整):
+    /// 对 2019-06 以来复权因子跳变过的股票重拉 dividend(stk_div 等字段旧白名单遗漏)。
+    /// sync_dividend 全历史分页拉取, upsert 覆盖旧行。
+    /// 运行: set -a; source .env; source .env.quant; set +a;
+    ///   cargo test --release -p quant-api dividend_stkdiv_backfill -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn dividend_stkdiv_backfill() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        let mut cfg = quant_data::tushare::client::TushareConfig::default();
+        cfg.token = std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN");
+        cfg.rate_limit_per_minute = 60;
+        let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
+
+        let symbols: Vec<String> = sqlx::query_scalar(
+            r#"WITH f AS (SELECT symbol, adj_factor,
+                        LAG(adj_factor) OVER (PARTITION BY symbol ORDER BY trade_date) AS pf
+                        FROM market_adjustment_factor WHERE trade_date >= '2019-06-01')
+               SELECT DISTINCT symbol FROM f
+               WHERE pf IS NOT NULL AND ABS(adj_factor/pf - 1) > 0.05"#,
+        )
+        .fetch_all(&db)
+        .await
+        .expect("跳变标的查询");
+        println!("[dividend_backfill] 重拉 {} 只标的的 dividend(全历史, 限速约50分钟)", symbols.len());
+        let dv = format!("div-stkdiv-backfill-{}", chrono::Local::now().format("%Y%m%d%H%M"));
+        let n = quant_data::sync::sync_dividend(&db, &client, &symbols, "20190601", "20260917", &dv)
+            .await
+            .expect("sync_dividend");
+        println!("[dividend_backfill] 完成 {} 行", n);
+        // 验证: 送转字段非空
+        let filled: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM market_stock_dividend WHERE stk_div IS NOT NULL AND div_proc='实施'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("验证查询");
+        println!("[dividend_backfill] stk_div 非空实施记录 {} 条", filled);
+        assert!(filled > 1000, "送转字段回填异常");
+    }
 }
