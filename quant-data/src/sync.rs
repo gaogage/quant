@@ -1445,6 +1445,148 @@ pub async fn sync_fund_nav(
     Ok(total)
 }
 
+// ─── sync_fund_div (基金分红, ETF 公司行动权威定性, 2026-09-17) ────
+
+/// 基金分红同步(ETF 分红定性 + div_cash 现金入账依据):
+/// 全量幂等拉取(每标的一次调用, fund_div 数据量小), upsert 覆盖。
+/// 与 market_adjustment_factor 因子跳变组合成 ETF 权威判定法(见 mark_to_market)。
+pub async fn sync_fund_div(
+    pool: &PgPool,
+    client: &TushareClient,
+    symbols: &[String],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let today = chrono::Local::now().date_naive();
+    let task_id = format!("fund-div-sync-{}", today.format("%Y%m%d"));
+    repository::create_sync_task_with_context(
+        pool,
+        &task_id,
+        "fund_div",
+        "tushare",
+        Some(symbols),
+        None,
+        None,
+        "running",
+        None,
+    )
+    .await?;
+    let mut total = 0usize;
+    for symbol in symbols {
+        let mut rows: Vec<(String, Option<NaiveDate>, Option<NaiveDate>, String, Option<NaiveDate>, Option<NaiveDate>, Option<f64>)> = Vec::new();
+        let mut last_err: Option<String> = None;
+        for attempt in 0..2 {
+            match client.fund_div(Some(symbol), None).await {
+                Ok(resp) => {
+                    let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
+                    rows = maps
+                        .iter()
+                        .filter_map(|item| {
+                            // div_proc=实施 才是已实施分红; div_cash 必填
+                            let proc = get_str(item, "div_proc");
+                            let cash = get_f64(item, "div_cash")?;
+                            let ex = to_date(&get_str(item, "ex_date"))?;
+                            if proc != "实施" || cash <= 0.0 {
+                                return None;
+                            }
+                            Some((
+                                get_str(item, "ts_code"),
+                                to_date(&get_str(item, "ann_date")),
+                                Some(ex),
+                                proc,
+                                to_date(&get_str(item, "record_date")),
+                                to_date(&get_str(item, "pay_date")),
+                                Some(cash),
+                            ))
+                        })
+                        .collect();
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if attempt == 0 && (err_str.contains("40203") || err_str.contains("4000")) {
+                        warn!("fund_div rate-limit, waiting 5s for {}: {}", symbol, err_str);
+                        tokio::time::sleep(StdDuration::from_secs(5)).await;
+                        continue;
+                    }
+                    last_err = Some(err_str);
+                    break;
+                }
+            }
+        }
+        match last_err {
+            None => {
+                if !rows.is_empty() {
+                    total += rows.len();
+                    upsert_fund_div_rows(pool, &rows).await?;
+                }
+                repository::upsert_sync_attempt(
+                    pool,
+                    "fund_div",
+                    symbol,
+                    today,
+                    today,
+                    &task_id,
+                    "completed",
+                    rows.len() as i64,
+                    None,
+                )
+                .await?;
+            }
+            Some(err) => {
+                error!("fund_div 同步失败 {}: {}", symbol, err);
+                repository::upsert_sync_attempt(
+                    pool,
+                    "fund_div",
+                    symbol,
+                    today,
+                    today,
+                    &task_id,
+                    "failed",
+                    0,
+                    Some(&err),
+                )
+                .await?;
+            }
+        }
+        tokio::time::sleep(StdDuration::from_millis(300)).await;
+    }
+    repository::update_sync_task(pool, &task_id, "completed", total as i32, total as i32, 0)
+        .await?;
+    info!("[fund_div] {} 标的同步完成, {} 条实施分红", symbols.len(), total);
+    Ok(total)
+}
+
+async fn upsert_fund_div_rows(
+    pool: &PgPool,
+    rows: &[(String, Option<NaiveDate>, Option<NaiveDate>, String, Option<NaiveDate>, Option<NaiveDate>, Option<f64>)],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    for (symbol, ann, ex, proc, record, pay, cash) in rows {
+        sqlx::query(
+            r#"INSERT INTO market_fund_div
+                 (symbol, ann_date, ex_date, div_proc, record_date, pay_date, div_cash, available_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($2, $3))
+               ON CONFLICT (symbol, ex_date, div_proc) DO UPDATE SET
+                 ann_date = EXCLUDED.ann_date,
+                 record_date = EXCLUDED.record_date,
+                 pay_date = EXCLUDED.pay_date,
+                 div_cash = EXCLUDED.div_cash,
+                 available_at = EXCLUDED.available_at"#,
+        )
+        .bind(symbol)
+        .bind(ann)
+        .bind(ex)
+        .bind(proc)
+        .bind(record)
+        .bind(pay)
+        .bind(cash.unwrap_or(0.0))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 
 // ─── sync_moneyflow ─────────────────────────────────────────────
 

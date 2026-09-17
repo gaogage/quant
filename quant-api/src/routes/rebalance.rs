@@ -1038,28 +1038,48 @@ pub async fn mark_to_market(
         .map_err(|e| format!("mtm tx begin: {}", e))?;
 
     // ── 步骤1: 现金分红入账(用送转调整前的份额, 除息日持股口径)──
+    // 双源: 股票 dividend.cash_div + ETF fund_div.div_cash(2026-09-17 P0-2 补 ETF 分红)
     let cash_div: rust_decimal::Decimal = sqlx::query_scalar(
         &format!(
-            r#"SELECT COALESCE(SUM(pp.quantity * d.cash_div), 0)
-               FROM paper_position pp
-               JOIN LATERAL (
-                   SELECT trade_date FROM {table}
-                   WHERE symbol = pp.symbol AND trade_date <= $1
-                   ORDER BY trade_date DESC LIMIT 1
-               ) t1 ON true
-               JOIN LATERAL (
-                   SELECT trade_date FROM {table}
-                   WHERE symbol = pp.symbol AND trade_date < t1.trade_date
-                   ORDER BY trade_date DESC LIMIT 1
-               ) t2 ON true
-               JOIN (SELECT DISTINCT ON (symbol, ex_date) symbol, ex_date, stk_div, cash_div
-                        FROM market_stock_dividend
-                        WHERE div_proc = '实施' AND ex_date IS NOT NULL
-                        ORDER BY symbol, ex_date, (stk_div IS NULL), imp_ann_date DESC NULLS LAST) d
-                 ON d.symbol = pp.symbol
-                AND d.cash_div > 0
-                AND d.ex_date > t2.trade_date AND d.ex_date <= t1.trade_date
-               WHERE pp.paper_account_id = $2 AND pp.quantity > 0"#
+            r#"SELECT COALESCE(SUM(div_total), 0) FROM (
+                   SELECT pp.quantity * d.cash_div AS div_total
+                   FROM paper_position pp
+                   JOIN LATERAL (
+                       SELECT trade_date FROM {table}
+                       WHERE symbol = pp.symbol AND trade_date <= $1
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) t1 ON true
+                   JOIN LATERAL (
+                       SELECT trade_date FROM {table}
+                       WHERE symbol = pp.symbol AND trade_date < t1.trade_date
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) t2 ON true
+                   JOIN (SELECT DISTINCT ON (symbol, ex_date) symbol, ex_date, stk_div, cash_div
+                            FROM market_stock_dividend
+                            WHERE div_proc = '实施' AND ex_date IS NOT NULL
+                            ORDER BY symbol, ex_date, (stk_div IS NULL), imp_ann_date DESC NULLS LAST) d
+                     ON d.symbol = pp.symbol
+                    AND d.cash_div > 0
+                    AND d.ex_date > t2.trade_date AND d.ex_date <= t1.trade_date
+                   WHERE pp.paper_account_id = $2 AND pp.quantity > 0
+                   UNION ALL
+                   SELECT pp.quantity * fd.div_cash
+                   FROM paper_position pp
+                   JOIN LATERAL (
+                       SELECT trade_date FROM {table}
+                       WHERE symbol = pp.symbol AND trade_date <= $1
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) t1 ON true
+                   JOIN LATERAL (
+                       SELECT trade_date FROM {table}
+                       WHERE symbol = pp.symbol AND trade_date < t1.trade_date
+                       ORDER BY trade_date DESC LIMIT 1
+                   ) t2 ON true
+                   JOIN market_fund_div fd
+                     ON fd.symbol = pp.symbol
+                    AND fd.ex_date > t2.trade_date AND fd.ex_date <= t1.trade_date
+                   WHERE pp.paper_account_id = $2 AND pp.quantity > 0
+               ) all_div"#
         ),
     )
     .bind(date)
@@ -1096,20 +1116,29 @@ pub async fn mark_to_market(
                    ) t1 ON true
                ),
                etf_mult AS (
+                   -- ETF 权威排除法(2026-09-17 P0-2 定版, 取代 10% 阈值猜测):
+                   -- 因子跳变日 = 公司行动日; 该日 fund_div 有分红记录 → 分红(不在此调
+                   -- 份额, div_cash 已入现金); 无分红记录 → 拆分/折算, 因子比=拆分比例。
                    SELECT b.symbol,
                           (f1.adj_factor / NULLIF(f2.adj_factor, 0)) AS mult
                    FROM bars b
                    JOIN LATERAL (
-                       SELECT adj_factor FROM market_adjustment_factor
+                       SELECT trade_date, adj_factor FROM market_adjustment_factor
                        WHERE symbol = b.symbol AND trade_date <= b.d1
                        ORDER BY trade_date DESC LIMIT 1
                    ) f1 ON true
                    JOIN LATERAL (
                        SELECT adj_factor FROM market_adjustment_factor
-                       WHERE symbol = b.symbol AND trade_date < b.d1
+                       WHERE symbol = b.symbol AND trade_date < f1.trade_date
                        ORDER BY trade_date DESC LIMIT 1
                    ) f2 ON true
-                   WHERE b.symbol ~ '^5[0-9]{{5}}\.SH$' OR b.symbol ~ '^1[0-9]{{5}}\.SZ$'
+                   WHERE (b.symbol ~ '^5[0-9]{{5}}\.SH$' OR b.symbol ~ '^1[0-9]{{5}}\.SZ$')
+                     AND f1.adj_factor / NULLIF(f2.adj_factor, 0) <> 1
+                     -- 排除法: 跳变日(f1.trade_date)恰为基金分红除息日 → 分红, 不调份额
+                     AND NOT EXISTS (
+                         SELECT 1 FROM market_fund_div fd
+                         WHERE fd.symbol = b.symbol AND fd.ex_date = f1.trade_date
+                     )
                ),
                stk_mult AS (
                    SELECT d.symbol, (1 + COALESCE(d.stk_div, 0)) AS mult
@@ -1127,7 +1156,7 @@ pub async fn mark_to_market(
                      AND d.ex_date > t2.trade_date AND d.ex_date <= b.d1
                ),
                final_mult AS (
-                   SELECT symbol, mult FROM etf_mult WHERE ABS(mult - 1) > 0.10
+                   SELECT symbol, mult FROM etf_mult
                    UNION ALL
                    SELECT symbol, mult FROM stk_mult WHERE ABS(mult - 1) > 0.001
                ),

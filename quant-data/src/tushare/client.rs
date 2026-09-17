@@ -623,6 +623,37 @@ impl TushareClient {
             .await
     }
 
+    /// 基金分红(tushare fund_div, 400 积分档)——ETF 分红权威定性数据。
+    /// 与因子跳变组合: 跳变日有分红记录=分红(div_cash 入现金), 无=拆分(调份额)。
+    pub async fn fund_div(
+        &self,
+        ts_code: Option<&str>,
+        ex_date: Option<&str>,
+    ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(code) = ts_code {
+            params.push(("ts_code", code));
+        }
+        if let Some(d) = ex_date {
+            params.push(("ex_date", d));
+        }
+        self.call_api::<Vec<serde_json::Value>>(
+            "fund_div",
+            params,
+            &[
+                "ts_code",
+                "ann_date",
+                "imp_anndate",
+                "div_proc",
+                "record_date",
+                "ex_date",
+                "pay_date",
+                "div_cash",
+            ],
+        )
+        .await
+    }
+
     /// 获取每日基础/估值数据，支持按交易日或按单只股票区间分页拉取。
     pub async fn daily_basic(
         &self,

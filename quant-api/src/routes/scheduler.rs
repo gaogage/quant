@@ -585,6 +585,10 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                         Ok(n) => info!("[夜间预备] fund_nav 净值同步 {} 行 累计{}s", n, t0.elapsed().as_secs()),
                         Err(e) => warn!("[夜间预备] fund_nav 净值同步失败(门禁将降级放行): {}", e),
                     }
+                    match quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await {
+                        Ok(n) => info!("[夜间预备] fund_div 分红同步 {} 条 累计{}s", n, t0.elapsed().as_secs()),
+                        Err(e) => warn!("[夜间预备] fund_div 分红同步失败(ETF分红不入账): {}", e),
+                    }
                 });
             }
             "ptrade_signal_export" => {
@@ -601,6 +605,9 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     let etf_syms = load_active_etf_symbols_union(&db2).await;
                     if let Err(e) = quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
                         warn!("[PTrade信号] fund_nav 兜底同步失败(门禁降级放行): {}", e);
+                    }
+                    if let Err(e) = quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await {
+                        warn!("[PTrade信号] fund_div 兜底同步失败: {}", e);
                     }
                     crate::routes::signal_export::run_ptrade_signal_export(&db2, &params2).await;
                 });

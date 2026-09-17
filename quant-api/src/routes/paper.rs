@@ -341,6 +341,9 @@ pub async fn compute_paper_nav(
     }
 }
 
+// [价格空间标注 2026-09-17] 本函数属信号层模拟: bar_adj 后复权(总回报)价格序列,
+// 不做现金分红/送转的公司行为处理(复权已含)。禁止用于账户资金/持仓口径(那是
+// rebalance+mark_to_market 的 raw 空间职责), 防两空间混用。
 async fn compute_paper_nav_inner(
     db: &sqlx::PgPool,
     req: ComputePaperNavRequest,
@@ -620,6 +623,7 @@ pub struct SimulatePaperNavRequest {
     pub commission_pct: Option<f64>,
 }
 
+// [价格空间标注 2026-09-17] 同 compute_paper_nav: 后复权总回报模拟口径(信号层)。
 pub async fn simulate_paper_nav(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SimulatePaperNavRequest>,

@@ -603,14 +603,15 @@ pub async fn sync_composite_equity_curve(
         return Err("A 股曲线首日 portfolio_value <= 0".into());
     }
 
-    // 2. 取各 ETF raw close(非复权价),按 (symbol, date) 聚合。
-    // 用 raw 而非 adj 视图:ETF 的 adj_factor 在数据层有质量问题(如 513100 adj=5.002 错误,
-    // 511010 国债ETF adj 在 7/17/7/21 跳变 140↔146),会扭曲复利合成。ETF 非除权日 adj_factor
-    // 恒定,用 raw close 算日收益率 r=close(t)/close(t-1)-1 与 adj 等价,但规避 adj 数据错误。
+    // 2. 取各 ETF 后复权收盘(bar_adj 总回报口径),按 (symbol, date) 聚合。
+    // [2026-09-17 P0-1 修正] 原用 raw close 规避"adj 数据质量问题"——该判断系误判:
+    // 513100 adj=5.002 是真实份额拆分(1:5.002), 511010 的跳变是季度分红除息。
+    // raw close 在拆分日产生 -80% 假跳(v24 基准 2022-01-14 实测 -20%), 分红日持续低估。
+    // 复权体系定版: 曲线合成属信号层, 用后复权(总回报连续, 分红再投语义)。
     let mut etf_prices: HashMap<String, HashMap<chrono::NaiveDate, f64>> = HashMap::new();
     for sym in etf_syms.iter() {
         let prices: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as::<_, (chrono::NaiveDate, rust_decimal::Decimal)>(
-            "SELECT trade_date, close FROM market_stock_daily_bar \
+            "SELECT trade_date, close FROM market_stock_daily_bar_adj \
              WHERE symbol = $1 AND trade_date BETWEEN $2 AND $3 ORDER BY trade_date ASC",
         )
         .bind(sym)
