@@ -610,15 +610,13 @@ pub async fn rebalance_account(
         let side_now = if pass == 0 { "sell" } else { "buy" };
         if let Some(p) = etf_premium_map.get(etf_symbol.as_str()) {
             if p.blocks_side(side_now) {
-                if pass == 0 {
-                    warn!(
-                        "[rebalance] 溢价门禁: 跳过 ETF {} {}向调仓(溢价 {:+.1}%, 阈值 {:.0}%)",
-                        etf_symbol,
-                        side_now,
-                        p.premium_pct.unwrap_or(0.0) * 100.0,
-                        sc.etf_premium_gate * 100.0
-                    );
-                }
+                warn!(
+                    "[rebalance] 溢价门禁: 跳过 ETF {} {}向调仓(溢价 {:+.1}%, 阈值 {:.0}%)",
+                    etf_symbol,
+                    side_now,
+                    p.premium_pct.unwrap_or(0.0) * 100.0,
+                    sc.etf_premium_gate * 100.0
+                );
                 continue;
             }
         }
