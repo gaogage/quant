@@ -235,6 +235,22 @@ async fn sync_mirror_account(
             }
             let qty = dec(filled.abs());
             let amt = dec(filled.abs() * px);
+            // FK 约束(fk_paper_fill_order): fill 须先有对应 order 行
+            sqlx::query(
+                "INSERT INTO paper_order (order_id, paper_account_id, symbol, side, order_type,
+                   quantity, limit_price, status, created_at)
+                 VALUES ($1,$2,$3,$4,'market',$5,$6,'filled',now())
+                 ON CONFLICT (order_id) DO NOTHING",
+            )
+            .bind(format!("po-{}", entrust))
+            .bind(&account_id)
+            .bind(norm_sym(sym))
+            .bind(if filled > 0.0 { "buy" } else { "sell" })
+            .bind(qty)
+            .bind(o.get("limit_price").and_then(|x| x.as_f64).map(dec))
+            .execute(db)
+            .await
+            .map_err(|e| format!("mirror order {}: {}", sym, e))?;
             sqlx::query(
                 "INSERT INTO paper_fill (fill_id, order_id, paper_account_id, symbol, fill_time,
                    side, quantity, price, amount, commission, tax, slippage)
