@@ -327,6 +327,62 @@ pub async fn sync_eod_data(
             }
         }
     }
+    // ── 回购增量同步（repurchase 族因子数据源，2026-09-18 接入）──
+    // 2026-09-18 发现 market_stock_repurchase 停更于 06-18(三个月): sync_repurchase
+    // 此前只有手动 HTTP 端点(bounded_raw dataset=repurchase), 未接任何调度链——
+    // 同 forecast 当初的缺口同款。repurchase_*_latest_std 因子每日重写但吃的是旧公告
+    // 快照, data_quality 无源表检查故从未告警(P2-2b 已补源表新鲜度检测)。
+    // 接口 2000 积分门槛, 走 ALT token + 官方域名(forecast 同款凭证配对)。
+    // 增量窗口 = MAX(ann_date)+1 ~ today(断更期自动补齐), 后台不阻塞主链。
+    if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
+        if !tok.trim().is_empty() {
+            let mut rp_cfg = quant_data::tushare::client::TushareConfig::default();
+            rp_cfg.token = tok.trim().to_string();
+            rp_cfg.rate_limit_per_minute = 60;
+            // 凭证配对铁律(同 forecast 段): ALT token 必须走官方域名
+            rp_cfg.base_url = std::env::var("TUSHARE_API_URL_ALT")
+                .unwrap_or_else(|_| "http://api.tushare.pro".to_string());
+            rp_cfg.fallback_token = None;
+            rp_cfg.fallback_base_url = None;
+            match quant_data::tushare::client::TushareClient::new(rp_cfg) {
+                Ok(rp_client) => {
+                    let db3 = db.clone();
+                    let ds3 = date_str.clone();
+                    tokio::spawn(async move {
+                        let start: String = match sqlx::query_as::<_, (Option<chrono::NaiveDate>,)>(
+                            "SELECT MAX(ann_date) FROM market_stock_repurchase",
+                        )
+                        .fetch_optional(&db3)
+                        .await
+                        {
+                            Ok(Some((Some(max_d),))) => {
+                                (max_d + chrono::Duration::days(1)).format("%Y%m%d").to_string()
+                            }
+                            // 表空: 回补近 90 天
+                            _ => (chrono::Utc::now().date_naive()
+                                - chrono::Duration::days(90))
+                                .format("%Y%m%d")
+                                .to_string(),
+                        };
+                        match quant_data::sync::sync_repurchase(
+                            &db3,
+                            &rp_client,
+                            &[],
+                            &start,
+                            &ds3,
+                            &format!("rp-eod-{}", ds3),
+                        )
+                        .await
+                        {
+                            Ok(n) => info!("[EOD] 回购增量(后台, {}~{}): {} 条", start, ds3, n),
+                            Err(e) => warn!("[EOD] 回购增量失败(后台, 次日重试): {}", e),
+                        }
+                    });
+                }
+                Err(e) => warn!("[EOD] repurchase client 初始化失败(不阻塞): {}", e),
+            }
+        }
+    }
     // fund_daily 当日缺失时不做运行时兜底(运行时零 Python 依赖铁律,见 quant/AGENTS.md):
     // Tushare fund_daily 就绪率不稳定属数据源现实。缺失时日报当日收益显示 --
     // (snapshot.daily_return 置 NULL),次日 9:00 T+1 补齐后补盯市并补发昨日绩效。

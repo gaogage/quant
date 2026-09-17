@@ -23,8 +23,11 @@ use crate::routes::shared::{
 };
 use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 
-/// 因子回填窗口（天）：覆盖 T+1 延迟 + 周末缺口，确保幂等刷新最近数据。
-const BACKFILL_WINDOW_DAYS: chrono::Duration = chrono::Duration::days(7);
+/// 因子回填窗口（天）：覆盖 T+1 延迟 + 周末缺口 + 断档自愈余量。
+/// 2026-09-18 7→14: 7-01~07-08 管道断档 6 个交易日(8 自然日)恰好滑出 7 天窗口,
+/// 之后每晚回填永远刷不到断档期(永久留洞)。14 天让两周内断档可自愈;
+/// 更长断档靠 data_quality 滞缓告警 + 手动区间回填(warmup 已修复必成功)。
+const BACKFILL_WINDOW_DAYS: chrono::Duration = chrono::Duration::days(14);
 
 /// v24 因子全量回填路由清单（覆盖白名单全部 14 活跃因子）。
 /// 新增因子类别时只需在此处添加一行，factor_backfill 任务和 T+1 补偿同步共用。

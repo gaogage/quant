@@ -9045,6 +9045,18 @@ async fn run_segmented_set_based_factor_backfill(
             update_factor_backfill_progress(db, task_id, completed_steps, total_steps, factor_rows)
                 .await?;
         }
+        // 0 行告警(2026-09-18 事故防复发): warmup 不足或源表缺口会让 raw_filter
+        // 全过滤, 任务显示 completed 但目标因子零写入(静默留洞)。区间内应有数据
+        // 时该 warn 是唯一暴露口。
+        if spec_rows == 0 {
+            tracing::warn!(
+                task_id = %task_id,
+                factor_code = %spec.factor_code,
+                start = %plan.start_date,
+                end = %plan.end_date,
+                "set-based 回填 0 行写入: 区间含交易日时提示 warmup 窗口不足或上游源表缺口"
+            );
+        }
         factor_rows_by_code.push((spec.factor_code.to_string(), spec_rows));
     }
 
@@ -11916,7 +11928,12 @@ pub(crate) fn phase7_liquidity_quality_backfill_sql(
     let long_window = long_window.max(short_window + 1);
     let short_preceding = short_window - 1;
     let long_preceding = long_window - 1;
-    let warmup_days = ((long_window * 3) / 2).max(180);
+    // warmup 必须 > 120 个交易日的自然日长度(≈168 天, 含春节等长假可达 175+)。
+    // 2026-09-18 事故: 原 max(180) 临界不足, 7-01 回看仅 ~118 交易日, 叠加
+    // daily_basic 个股零星缺行后 obs_count_120 恒差 1~6 行 → raw_filter 全过滤,
+    // 回填 completed 但 0 行写入(静默), 断档永久无法补回。240 天 ≈ 172 交易日,
+    // 余量 43%, 覆盖长假与个股缺行。
+    let warmup_days = (long_window * 2).max(240);
     let raw_value_expression = match signal {
         LiquidityQualitySignal::ImpactImprovement => {
             "LN((long_illiq + 1e-12) / (short_illiq + 1e-12)) AS raw_value".to_string()

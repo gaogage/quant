@@ -14,6 +14,15 @@ use tracing::{info, warn};
 use crate::routes::shared::send_quality_alert;
 use crate::routes::scheduler::{V24_FACTOR_CODES, check_task_dependency_order};
 
+/// 事件驱动因子 → 上游稀疏公告源表映射(P2-2b 健康指标用)。
+/// 此类因子的覆盖率随披露季节脉冲波动, 不适用覆盖率骤降检测, 改查源表新鲜度。
+/// (factor_code 前缀, 源表, 日期列, 允许最大滞后自然日)
+const EVENT_DRIVEN_FACTOR_SOURCES: &[(&str, &str, &str, i64)] = &[
+    ("forecast_", "market_stock_forecast", "ann_date", 60),
+    ("repurchase_", "market_stock_repurchase", "ann_date", 90),
+    ("block_trade_", "market_stock_block_trade", "trade_date", 14),
+];
+
 /// 盘后数据质量校验：扫描全量数据缺口并告警。
 ///
 /// 检查项：
@@ -155,6 +164,22 @@ pub async fn run_data_quality_check(db: &PgPool) {
             // 否则天天误报。改用"该因子自身近 30 日单日最大覆盖数"做基准——覆盖率 =
             // 最新日覆盖数 / 近期最大覆盖数，<80% 说明相对自身正常水平出现骤降(真实数据缺口)，
             // 而非因子设计上的稀疏性。
+            //
+            // 事件驱动因子豁免(2026-09-18): forecast/repurchase 族的数据来自稀疏公告源表,
+            // 覆盖率随披露季节脉冲波动(业绩预告集中 1/4/7/10 月, 9 月真空期 + 120d 窗口
+            // 出窗衰减属正常机制), "最新日/近30日最高"口径在季节转换期必然误报
+            // (2026-09-17 实锤: forecast_type_upgrade_120d_std 8/21=38% 连续两周误报,
+            // 而 Tushare 上游对账一致)。此类因子改用上游源表最新公告日期滞后天数做健康
+            // 指标——公告断更才是真故障, 覆盖率季节波动是常态。
+            let coverage_codes: Vec<&str> = V24_FACTOR_CODES
+                .iter()
+                .filter(|c| {
+                    !EVENT_DRIVEN_FACTOR_SOURCES
+                        .iter()
+                        .any(|(prefix, _, _, _)| c.starts_with(prefix))
+                })
+                .copied()
+                .collect();
             let window_start = latest_td - chrono::Duration::days(30);
             let coverage_rows: Vec<(String, chrono::NaiveDate, i64, i64)> = sqlx::query_as(
                 "WITH per_day AS (
@@ -173,7 +198,7 @@ pub async fn run_data_quality_check(db: &PgPool) {
                  FROM latest l JOIN per_day p USING (factor_code)
                  GROUP BY l.factor_code, l.trade_date, l.day_cnt",
             )
-            .bind(V24_FACTOR_CODES)
+            .bind(&coverage_codes)
             .bind(window_start)
             .fetch_all(db)
             .await
@@ -201,6 +226,54 @@ pub async fn run_data_quality_check(db: &PgPool) {
                     "v24因子覆盖率骤降({}/14, 较近30日最高<80%): {}",
                     low_coverage.len(),
                     low_coverage.join(", ")
+                ));
+            }
+
+            // ── P2-2b: 事件驱动因子上游源表新鲜度检测 ──
+            // 对 forecast_/repurchase_/block_trade_ 族: 覆盖率季节波动是常态, 真正的
+            // 健康指标是上游源表最新日期的滞后天数(公告断更=因子在吃旧快照)。
+            // 阈值为自然日: forecast 60(最长真空 9月至10月中旬约 6 周),
+            // repurchase 90(公告驱动无固定节奏), block_trade 14(日频同步)。
+            let mut event_stale: Vec<String> = Vec::new();
+            for (prefix, table, date_col, max_lag) in EVENT_DRIVEN_FACTOR_SOURCES {
+                let matched: Vec<&str> = V24_FACTOR_CODES
+                    .iter()
+                    .filter(|c| c.starts_with(prefix))
+                    .copied()
+                    .collect();
+                if matched.is_empty() {
+                    continue;
+                }
+                let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(&format!(
+                    "SELECT MAX({}) FROM {}",
+                    date_col, table
+                ))
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+                match max_row {
+                    Some((max_d,)) => {
+                        let lag = (today - max_d).num_days();
+                        if lag > *max_lag {
+                            event_stale.push(format!(
+                                "{}族[{}: 最新={}, 滞后{}天>{}]",
+                                prefix.trim_end_matches('_'),
+                                table,
+                                max_d,
+                                lag,
+                                max_lag
+                            ));
+                        }
+                    }
+                    None => event_stale.push(format!("{}族[{}: 无数据]", prefix.trim_end_matches('_'), table)),
+                }
+            }
+            if !event_stale.is_empty() {
+                gaps.push(format!(
+                    "事件因子上游停更({}): {}",
+                    event_stale.len(),
+                    event_stale.join(", ")
                 ));
             }
         }
