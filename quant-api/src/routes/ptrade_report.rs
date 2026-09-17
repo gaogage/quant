@@ -209,7 +209,9 @@ async fn sync_mirror_account(
     // ── 交易明细回写(2026-09-17 v2: orders→paper_fill, 镜像账户与 PTrade 全量一致) ──
     // 成交价优先级: 执行器 avg_price(新版) > limit_price > 当日收盘价兜底。
     let mut missing_px = 0i32;
-    if let (Some(orders), Some(td)) = (v.get("orders").and_then(|x| x.as_array()), trade_date) {
+    // (2026-09-18: 原元组解构绑定 td 仅作存在性门禁, 成交价改宁缺毋假后无实际
+    // 依赖——fill_time 用回报处理时刻, 明细回写不需要交易日。)
+    if let Some(orders) = v.get("orders").and_then(|x| x.as_array()) {
         for o in orders {
             let sym = o.get("symbol").and_then(|x| x.as_str()).unwrap_or("");
             let filled = o.get("filled").and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -291,7 +293,7 @@ async fn sync_mirror_account(
         .flatten();
         let daily_ret = prev_nav
             .and_then(|p| p.to_string().parse::<f64>().ok().filter(|p| *p > 0.0))
-            .map(|p| (nav_v / p - 1.0) as f64);
+            .map(|p| nav_v / p - 1.0);
         let mv = positions_value(v);
         sqlx::query(
             "INSERT INTO paper_nav_snapshot (nav_snapshot_id, paper_account_id, snapshot_date,
@@ -349,8 +351,7 @@ async fn ingest_one(db: &PgPool, path: &str, subject: &str) -> Result<String, St
     let num = |k: &str| {
         v.get(k)
             .and_then(|x| x.as_f64())
-            .map(|f| rust_decimal::Decimal::from_f64_retain(f))
-            .flatten()
+            .and_then(rust_decimal::Decimal::from_f64_retain)
     };
     let orders = v.get("orders").cloned().unwrap_or(serde_json::json!([]));
     let positions = v.get("positions").cloned().unwrap_or(serde_json::json!([]));

@@ -23,9 +23,9 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
-/// 默认溢价门禁阈值(|溢价| 超过此值触发单边阻断)。
-/// 策略层配置: strategy_config.etf_premium_gate 列(每策略可独立调整)。
-pub const DEFAULT_ETF_PREMIUM_GATE: f64 = 0.10;
+/// (2026-09-18: 删除未引用的 DEFAULT_ETF_PREMIUM_GATE——阈值已收敛到
+/// strategy_config.etf_premium_gate 列, 信号导出/调仓均读策略配置, 常量无消费方;
+/// 新策略未配置该列时的 DB 默认值即 0.10。)
 /// 净值新鲜度上限(天): nav_date 距截面日超过此值视为数据陈旧, 门禁降级放行。
 /// QDII 净值 T+1 公布, 正常滞后 1-3 天; 7 天覆盖长假场景。
 pub const ETF_NAV_FRESH_DAYS: i64 = 7;

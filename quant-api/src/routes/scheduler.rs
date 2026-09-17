@@ -67,10 +67,6 @@ fn self_api_base() -> String {
 /// P4-1: 路由清单从 `factor_backfill_route` 表读取（按 priority 升序，仅 enabled=true）。
 /// 表为空时回退到 `V24_BACKFILL_ROUTES_FALLBACK` 常量，保证 DB 异常时链路不中断。
 /// 新增因子类别只需 INSERT 一行到 factor_backfill_route，无需改代码。
-pub(crate) async fn trigger_v24_backfill_routes_pub(db: &PgPool, start_date: &str, end_date: &str) {
-    trigger_v24_backfill_routes(db, start_date, end_date).await
-}
-
 async fn trigger_v24_backfill_routes(db: &PgPool, start_date: &str, end_date: &str) {
     let api_base = self_api_base();
     let client = reqwest::Client::new();
@@ -571,16 +567,19 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                         Ok(rows) => info!("[夜间预备] PIT 物化 {} 行 累计{}s", rows, t0.elapsed().as_secs()),
                         Err(e) => { error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e); }
                     }
+                    // 2026-09-18: 原写法 `results => for r in results` 实为迭代
+                    // Result<SyncResult,String> —— Err 分支零次迭代被静默吞掉,
+                    // 曲线同步异常时只打"更新完成"。改为显式三分支。
                     match crate::routes::equity_curve_sync::sync_strategy_equity_curve(
                         &db2, "v24", date - chrono::Duration::days(10), date, false,
                     ).await {
-                        results => {
-                            for r in results { if r.status != "success" {
-                                warn!("[夜间预备] 曲线同步失败 {}: {:?}", r.strategy_id, r.error);
-                            } }
-                            info!("[夜间预备] sleeve 曲线更新完成 累计{}s", t0.elapsed().as_secs());
+                        Ok(r) if r.status != "success" => {
+                            warn!("[夜间预备] 曲线同步未成功 {} {}: {:?}", r.strategy_id, r.status, r.error);
                         }
+                        Ok(_) => {}
+                        Err(e) => warn!("[夜间预备] 曲线同步异常: {}", e),
                     }
+                    info!("[夜间预备] sleeve 曲线更新完成 累计{}s", t0.elapsed().as_secs());
                     // 基金净值增量(2026-09-17, ETF 溢价门禁数据源): 每标的增量秒级完成。
                     // 门禁对缺数据降级放行, 此处失败不阻断 23:30 信号(告警留痕)。
                     let etf_syms = load_active_etf_symbols_union(&db2).await;
@@ -1607,7 +1606,7 @@ pub async fn validate_pre_trade_data(
             let n = quant_data::sync::sync_fund_daily(
                 db,
                 tushare,
-                &[symbol.clone()],
+                std::slice::from_ref(symbol),
                 &today_str,
                 &today_str,
                 &dv_id,
@@ -1624,7 +1623,7 @@ pub async fn validate_pre_trade_data(
                 let n2 = quant_data::sync::sync_fund_daily(
                     db,
                     tushare,
-                    &[symbol.clone()],
+                    std::slice::from_ref(symbol),
                     &week_ago,
                     &today_str,
                     &dv2,
@@ -1857,8 +1856,6 @@ pub(crate) const V24_FACTOR_CODES: &[&str] = &[
     "repurchase_volume_log_latest_std",
 ];
 
-/// 数据完整性检查: 从配置的起始日期到今天, 检查所有核心表是否有缺口
-
 /// 检查定时任务 CRON 配置的依赖顺序。
 ///
 /// 规则：
@@ -1975,7 +1972,7 @@ pub(crate) async fn sync_limit_with_retry(
     match quant_data::sync::sync_limit_list(db, tushare, date_str).await {
         Ok(n) => {
             info!("[scheduler] 涨跌停重试成功 ({} 条)", n);
-            return true;
+            true
         }
         Err(e) => {
             warn!("[scheduler] 涨跌停重试仍失败: {}", e);

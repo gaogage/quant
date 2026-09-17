@@ -13,7 +13,7 @@ use ndarray::Array2;
 use quant_common::mvo;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::routes::shared::strategy_config::StrategyConfig;
 
@@ -268,15 +268,10 @@ pub(crate) async fn compute_lw_mvo_weights(
 
     // 构建8资产训练数据
     let mut all_monthly: Vec<Vec<f64>> = Vec::new();
-    let n_months = a_monthly.len();
-    for i in 0..n_months {
-        let mut row = vec![a_monthly[i]];
-        for j in 0..etf_symbols.len() {
-            if i < etf_monthly_data[j].len() {
-                row.push(etf_monthly_data[j][i]);
-            } else {
-                row.push(0.0);
-            }
+    for (i, a) in a_monthly.iter().enumerate() {
+        let mut row = vec![*a];
+        for etf in &etf_monthly_data {
+            row.push(etf.get(i).copied().unwrap_or(0.0));
         }
         if row.iter().all(|r| r.abs() < 1.0) {
             all_monthly.push(row);
@@ -287,7 +282,7 @@ pub(crate) async fn compute_lw_mvo_weights(
         let n_rows = all_monthly.len();
         let flat: Vec<f64> = all_monthly.iter().flatten().copied().collect();
 
-        if let Some(arr) = Array2::from_shape_vec((n_rows, n_total_assets), flat).ok() {
+        if let Ok(arr) = Array2::from_shape_vec((n_rows, n_total_assets), flat) {
             // v19: momentum-adjusted μ (50/50) + GA MinVariance + adaptive max_single
             // dynamic_target 上限 0.06：高 target(0.18) 会把 MinVariance 逼向单资产集中、
             // DD 翻倍(13%→25%)。0.06 与 ROADMAP 验证 v19 22.6% 时的原始配置一致，保持跨资产分散。

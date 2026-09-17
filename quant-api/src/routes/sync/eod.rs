@@ -293,17 +293,19 @@ pub async fn sync_eod_data(
     // 用充值 token（现行 token 无此接口权限）。同步失败不阻塞 EOD 主链路。
     if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
         if !tok.trim().is_empty() {
-            let mut fc_cfg = quant_data::tushare::client::TushareConfig::default();
-            fc_cfg.token = tok.trim().to_string();
-            fc_cfg.rate_limit_per_minute = 60;
             // 凭证配对铁律: 充值 token(ALT)必须走官方域名——TUSHARE_API_URL 是私有
             // 直连端点(专属 token), default 读到的主 URL 与 ALT 不匹配会 40101
             // (2026-09-15 事故: 逐股全失败一周的根因)。fallback_base_url 也清空——
             // 该 client 的主备 token 相同(都是 ALT), 无 fallback 意义。
-            fc_cfg.base_url = std::env::var("TUSHARE_API_URL_ALT")
-                .unwrap_or_else(|_| "http://api.tushare.pro".to_string());
-            fc_cfg.fallback_token = None;
-            fc_cfg.fallback_base_url = None;
+            let fc_cfg = quant_data::tushare::client::TushareConfig {
+                token: tok.trim().to_string(),
+                base_url: std::env::var("TUSHARE_API_URL_ALT")
+                    .unwrap_or_else(|_| "http://api.tushare.pro".to_string()),
+                rate_limit_per_minute: 60,
+                fallback_token: None,
+                fallback_base_url: None,
+                ..Default::default()
+            };
             match quant_data::tushare::client::TushareClient::new(fc_cfg) {
                 Ok(fc_client) => {
                     // 2026-09-11 后台化: 原串行 await 阻塞主链 2 小时(22:00→00:00),
@@ -336,14 +338,16 @@ pub async fn sync_eod_data(
     // 增量窗口 = MAX(ann_date)+1 ~ today(断更期自动补齐), 后台不阻塞主链。
     if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
         if !tok.trim().is_empty() {
-            let mut rp_cfg = quant_data::tushare::client::TushareConfig::default();
-            rp_cfg.token = tok.trim().to_string();
-            rp_cfg.rate_limit_per_minute = 60;
             // 凭证配对铁律(同 forecast 段): ALT token 必须走官方域名
-            rp_cfg.base_url = std::env::var("TUSHARE_API_URL_ALT")
-                .unwrap_or_else(|_| "http://api.tushare.pro".to_string());
-            rp_cfg.fallback_token = None;
-            rp_cfg.fallback_base_url = None;
+            let rp_cfg = quant_data::tushare::client::TushareConfig {
+                token: tok.trim().to_string(),
+                base_url: std::env::var("TUSHARE_API_URL_ALT")
+                    .unwrap_or_else(|_| "http://api.tushare.pro".to_string()),
+                rate_limit_per_minute: 60,
+                fallback_token: None,
+                fallback_base_url: None,
+                ..Default::default()
+            };
             match quant_data::tushare::client::TushareClient::new(rp_cfg) {
                 Ok(rp_client) => {
                     let db3 = db.clone();

@@ -28,13 +28,12 @@ use std::path::PathBuf;
 
 /// PTrade 执行通道配置(DB 表 ptrade_channel_config, 未来页面化管理)。
 /// quant 账户 → Windows 信号目录映射: 生产账号 D:/ptrade_sync, 仿真账号 D:/ptrade_sync_test。
+/// (2026-09-18: 去掉未读的 account_id/is_production 字段, 查询列同步收窄——
+/// 生产/仿真差异化处理需求出现时再随用例加回。)
 #[derive(sqlx::FromRow)]
 pub struct PtradeChannel {
-    #[sqlx(rename = "paper_account_id")]
-    pub account_id: String,
     pub channel_name: String,
     pub scp_target: String,
-    pub is_production: bool,
     pub enabled: bool,
 }
 
@@ -47,7 +46,7 @@ fn local_signal_dir(account_id: &str) -> PathBuf {
 
 async fn load_channel(db: &PgPool, account_id: &str) -> Result<PtradeChannel, String> {
     let ch: Option<PtradeChannel> = sqlx::query_as(
-        "SELECT paper_account_id, channel_name, scp_target, is_production, enabled
+        "SELECT channel_name, scp_target, enabled
          FROM ptrade_channel_config WHERE paper_account_id = $1",
     )
     .bind(account_id)
@@ -390,7 +389,7 @@ async fn latest_trading_day(db: &PgPool) -> Result<chrono::NaiveDate, String> {
     row.map(|d| d.0).ok_or_else(|| "交易日历无数据".to_string())
 }
 
-async fn scp_push(local: &PathBuf, scp_target: &str) -> Result<(), String> {
+async fn scp_push(local: &std::path::Path, scp_target: &str) -> Result<(), String> {
     let arg = local.to_string_lossy().to_string();
     for attempt in 0..2 {
         let st = tokio::process::Command::new("scp")
