@@ -590,4 +590,27 @@ mod tests {
         }
         assert_eq!(latest.len(), etfs.len(), "部分标的无净值");
     }
+
+    /// 溢价门禁查询实测(2026-09-17 回放零触发排障):
+    /// 2020-04-20 南方原油溢价 63% 应命中 block_buy。
+    /// 运行: cargo test --release -p quant-api premium_gate_probe -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn premium_gate_probe() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        let date = chrono::NaiveDate::from_ymd_opt(2020, 4, 20).unwrap();
+        let etfs = vec!["501018.SH".to_string()];
+        let m = load_etf_premium_map(&db, date, &etfs, 0.10).await;
+        println!("[premium_gate_probe] map = {:?}", m);
+        assert!(m.contains_key("501018.SH"), "map 缺 501018(查询失败或数据缺)");
+        let p = &m["501018.SH"];
+        println!("[premium_gate_probe] premium={:?} block_buy={} block_sell={}",
+                 p.premium_pct, p.block_buy, p.block_sell);
+        assert!(p.block_buy, "63% 溢价未触发 block_buy");
+    }
 }

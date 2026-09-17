@@ -336,7 +336,9 @@ pub async fn load_resolved_strategy(
                 dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step,
                 leverage_regime_threshold, slippage_pct, mvo_objective, allocation_mode, mu_estimation,
                 kelly_fraction, score_candidate_pool_size, regime_policy, regime_bear_return_threshold,
-                etf_premium_gate
+                -- NUMERIC 列必须 cast float8: Row 映射 Option<f64> 对 NUMERIC 解码不匹配
+                -- (2026-09-17 实测: 未 cast 时 load_resolved_strategy 全崩, 回放/调仓全挂)
+                etf_premium_gate::float8 AS etf_premium_gate
          FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
     )
     .bind(strategy_id)

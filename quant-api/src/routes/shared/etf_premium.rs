@@ -88,9 +88,8 @@ pub async fn load_etf_premium_map(
         return map;
     }
     // 最近净值(每标的一条, DISTINCT ON) + 截面日收盘价, 单次联查
-    let rows: Vec<(String, Option<chrono::NaiveDate>, Option<f64>, Option<f64>)> =
-        sqlx::query_as(
-            r#"SELECT b.symbol,
+    let rows = sqlx::query_as::<_, (String, Option<chrono::NaiveDate>, Option<f64>, Option<f64>)>(
+        r#"SELECT b.symbol,
                       n.nav_date,
                       n.unit_nav::float8,
                       b.close::float8
@@ -112,8 +111,17 @@ pub async fn load_etf_premium_map(
         .bind(etf_symbols)
         .bind(ETF_NAV_FRESH_DAYS as i32)
         .fetch_all(db)
-        .await
-        .unwrap_or_default();
+        .await;
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            // 勿静默吞错(2026-09-17 实测疑点: 执行错误被 unwrap_or_default 吞掉时
+            // map 恒空 → 门禁形同虚设; 降级放行指"数据缺失", 不包括"查询故障")
+            tracing::error!("[etf_premium] 溢价查询失败(门禁降级放行): {}", e);
+            return map;
+        }
+    };
 
     for (sym, nav_date, unit_nav, close) in rows {
         let (Some(nav), Some(px)) = (unit_nav, close) else {
