@@ -659,4 +659,38 @@ mod tests {
         println!("[dividend_backfill] stk_div 非空实施记录 {} 条", filled);
         assert!(filled > 1000, "送转字段回填异常");
     }
+
+    /// fund_div 基金分红回填(一次性, 2026-09-17 复权体系 P0-2):
+    /// 活跃策略 ETF 并集全历史分红(fund_div 数据量小)。
+    /// 运行: set -a; source .env; source .env.quant; set +a;
+    ///   cargo test --release -p quant-api fund_div_backfill -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn fund_div_backfill() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        let mut cfg = quant_data::tushare::client::TushareConfig::default();
+        cfg.token = std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN");
+        cfg.rate_limit_per_minute = 60;
+        let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
+        let etfs = crate::routes::strategy_query::load_active_etf_symbols_union(&db).await;
+        println!("[fund_div_backfill] 标的: {:?}", etfs);
+        let n = quant_data::sync::sync_fund_div(&db, &client, &etfs)
+            .await
+            .expect("sync_fund_div");
+        println!("[fund_div_backfill] 完成 {} 条", n);
+        for (s, e, c) in sqlx::query_as::<_, (String, chrono::NaiveDate, rust_decimal::Decimal)>(
+            "SELECT symbol, ex_date, div_cash FROM market_fund_div ORDER BY ex_date DESC LIMIT 8",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("验证查询")
+        {
+            println!("[fund_div_backfill] {} ex={} div_cash={}", s, e, c);
+        }
+    }
 }
