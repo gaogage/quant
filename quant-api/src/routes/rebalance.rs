@@ -1052,8 +1052,11 @@ pub async fn mark_to_market(
                    WHERE symbol = pp.symbol AND trade_date < t1.trade_date
                    ORDER BY trade_date DESC LIMIT 1
                ) t2 ON true
-               JOIN market_stock_dividend d
-                 ON d.symbol = pp.symbol AND d.div_proc = '实施'
+               JOIN (SELECT DISTINCT ON (symbol, ex_date) symbol, ex_date, stk_div, cash_div
+                        FROM market_stock_dividend
+                        WHERE div_proc = '实施' AND ex_date IS NOT NULL
+                        ORDER BY symbol, ex_date, (stk_div IS NULL), imp_ann_date DESC NULLS LAST) d
+                 ON d.symbol = pp.symbol
                 AND d.cash_div > 0
                 AND d.ex_date > t2.trade_date AND d.ex_date <= t1.trade_date
                WHERE pp.paper_account_id = $2 AND pp.quantity > 0"#
@@ -1110,14 +1113,17 @@ pub async fn mark_to_market(
                ),
                stk_mult AS (
                    SELECT d.symbol, (1 + COALESCE(d.stk_div, 0)) AS mult
-                   FROM market_stock_dividend d
+                   FROM (SELECT DISTINCT ON (symbol, ex_date) symbol, ex_date, stk_div, cash_div
+                        FROM market_stock_dividend
+                        WHERE div_proc = '实施' AND ex_date IS NOT NULL
+                        ORDER BY symbol, ex_date, (stk_div IS NULL), imp_ann_date DESC NULLS LAST) d
                    JOIN bars b ON b.symbol = d.symbol
                    JOIN LATERAL (
                        SELECT trade_date FROM {table}
                        WHERE symbol = b.symbol AND trade_date < b.d1
                        ORDER BY trade_date DESC LIMIT 1
                    ) t2 ON true
-                   WHERE d.div_proc = '实施'
+                   WHERE d.stk_div > 0
                      AND d.ex_date > t2.trade_date AND d.ex_date <= b.d1
                ),
                final_mult AS (
