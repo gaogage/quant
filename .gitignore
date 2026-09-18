@@ -33,3 +33,4 @@ bin/
 
 CLAUDE.md
 .env.quant
+scripts/__pycache__/
