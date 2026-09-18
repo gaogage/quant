@@ -26,6 +26,11 @@ use tracing::{error, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// 信号最小权重(占 NAV): 低于此值的 A股目标不进信号。
+/// 执行端一手价格上界按 ~5000 元覆盖(0.1% × 500 万 NAV), 消除不足一手的
+/// 确定性碎单(2026-09-18: 002955 目标 1001 元被引擎拒单计入"失败"的源头治理)。
+pub(crate) const MIN_SIGNAL_WEIGHT: f64 = 0.001;
+
 /// PTrade 执行通道配置(DB 表 ptrade_channel_config, 未来页面化管理)。
 /// quant 账户 → Windows 信号目录映射: 生产账号 D:/ptrade_sync, 仿真账号 D:/ptrade_sync_test。
 /// (2026-09-18: 去掉未读的 account_id/is_production 字段, 查询列同步收窄——
@@ -185,6 +190,11 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         .map(|p| p.market_value.to_string().parse::<f64>().unwrap_or(0.0))
         .sum();
     let lev = leverage_d_f64(&leverage_d);
+    // 最小权重过滤(2026-09-18 碎单治理): 占 NAV 低于 0.1%(50 万账户即 500 元)的
+    // 目标在执行端必然不足一手(引擎确定性不委托, 0918 实例 002955 目标 1001 元),
+    // 只产生 failed 噪音与碎股残留。从信号源头剔除; 已持仓标的被剔除=目标 0 全卖,
+    // 忠实于"目标≈0"的策略意图且清掉碎股残留, 差异上限 0.1%×NAV 可忽略。
+    let mut n_filtered = 0usize;
     for p in &positions {
         let w_pct = p.weight.to_string().parse::<f64>().unwrap_or(0.0);
         let mv_pct = p.market_value.to_string().parse::<f64>().unwrap_or(0.0);
@@ -195,7 +205,19 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         } else {
             0.0
         };
-        targets.push((p.symbol.clone(), mvo_a_pct * weight_d * lev));
+        let w_final = mvo_a_pct * weight_d * lev;
+        if w_final.abs() < MIN_SIGNAL_WEIGHT {
+            n_filtered += 1;
+            continue;
+        }
+        targets.push((p.symbol.clone(), w_final));
+    }
+    if n_filtered > 0 {
+        warn!(
+            "[PTrade信号] 最小权重过滤: {} 只 A股标的权重 < {:.1}% 未入信号(碎单源头治理)",
+            n_filtered,
+            MIN_SIGNAL_WEIGHT * 100.0
+        );
     }
     // ETF sleeve: build_etf_allocations 输出已含 regime 缩放与现金段(511880), 再乘 lev
     // (与 rebalance_account §8 alloc_amount = nav × alloc_pct × leverage_d 同口径)
@@ -501,6 +523,18 @@ fn leverage_d_f64(d: &rust_decimal::Decimal) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 最小权重过滤语义(2026-09-18 碎单源头治理): 0.1% 边界恰在阈值上保留,
+    /// 0.02%(0918 实例 002955 的实际权重)被剔除——执行端不足一手的确定性碎单
+    /// 从信号源头消除, 权重和只含幸存标的(checksum 随之自洽)。
+    #[test]
+    fn min_signal_weight_threshold_semantics() {
+        assert!(MIN_SIGNAL_WEIGHT == 0.001, "阈值 0.1% 定版, 改动需评审碎单边界");
+        // 0918 实例复刻: 0.0002 权重(目标 ~1001 元/500 万 NAV)必被过滤
+        assert!(0.0002_f64 < MIN_SIGNAL_WEIGHT);
+        // 正常最小持仓权重(等权 1/50 = 2%)远在阈值之上不受影响
+        assert!(0.02_f64 > MIN_SIGNAL_WEIGHT);
+    }
 
     /// checksum 三方对齐(Python 生成端 make_test_signal.py / 执行端 file_executor_v1.py):
     /// 基准值由 Python json.dumps(sort_keys, ensure_ascii=False, separators) 预计算。
