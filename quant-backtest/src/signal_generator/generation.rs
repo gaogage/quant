@@ -1070,7 +1070,12 @@ pub(crate) fn apply_event_gate_scores_when<F>(
 
         match gate.mode {
             EventGateMode::BoostPositive => {
-                let event_stats = score_stats(event_by_symbol.values().copied());
+                // z 加成统计仅按因子池内票(2026-09-18 定版): event 分数表覆盖面
+                // 远大于因子池时, 全市场口径的均值/标准差会把池内票的 z 压向 0、
+                // 稀释加成。池内无 event 分数的票不参与统计(其本身不加成)。
+                let event_stats = score_stats(rows.iter().filter_map(|(symbol, _)| {
+                    event_by_symbol.get(symbol.as_str()).copied()
+                }));
                 for (symbol, factor_score) in rows.iter_mut() {
                     let Some(event_score) = event_by_symbol.get(symbol.as_str()).copied() else {
                         continue;

@@ -570,6 +570,45 @@ fn event_gate_boost_positive_adds_weighted_z_for_above_min_event_scores() {
 }
 
 #[test]
+fn event_gate_boost_positive_stats_exclude_out_of_pool_symbols() {
+    // 回归锁定(2026-09-18 定版): z 加成的截面统计仅按因子池内票计算。
+    // event 表加入 3 只池外中性票(不在因子池, 无 factor row):
+    //   池内口径 [10,-5] -> mean 2.5, std 7.5 -> z(10)=+1 -> AAA=1.5;
+    //   全市场口径 [10,-5,0.5,0.5,0.5] -> mean 1.3, std≈4.06 -> z≈2.14 -> AAA≈2.07(稀释性放大)。
+    // 断言 1.5 即证明池外票未参与统计——event 覆盖面远大于因子池时加成不被扭曲。
+    let day = d(2026, 1, 5);
+    let mut factor_scores = HashMap::from([(
+        day,
+        rows(&[("AAA", 1.0), ("BBB", 1.0), ("CCC", 1.0)]),
+    )]);
+    let event_scores = HashMap::from([(
+        day,
+        rows(&[
+            ("AAA", 10.0),
+            ("BBB", -5.0),
+            ("OUT1", 0.5),
+            ("OUT2", 0.5),
+            ("OUT3", 0.5),
+        ]),
+    )]);
+    apply_event_gate_scores(
+        &mut factor_scores,
+        &event_scores,
+        &event_gate(EventGateMode::BoostPositive, 0.0, 0.5),
+    );
+    let gated = factor_scores.get(&day).expect("day retained");
+    let by_symbol: HashMap<&str, f64> = gated
+        .iter()
+        .map(|(symbol, score)| (symbol.as_str(), *score))
+        .collect();
+    assert_close(by_symbol["AAA"], 1.5);
+    assert_close(by_symbol["BBB"], 1.0);
+    assert_close(by_symbol["CCC"], 1.0);
+    // 池外票不应被加入因子池
+    assert_eq!(gated.len(), 3);
+}
+
+#[test]
 fn event_gate_boost_positive_zero_boost_weight_is_noop() {
     // 边界:boost_weight = 0 时 BoostPositive 不改任何分数,日期保留。
     let day = d(2026, 1, 5);
