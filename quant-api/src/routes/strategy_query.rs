@@ -73,12 +73,24 @@ pub async fn load_active_factor_combos(db: &PgPool) -> Vec<String> {
 }
 
 /// 活跃 combo 的物化配置(include_fundamentals + factor_whitelist)。
+/// active 复合策略声明的 PIT combo 物化配置。
+/// 从 strategy_config 读取; 同名 combo 多策略声明时合并:
+/// include_fundamentals 任一 true 则 true, factor_whitelist 取首个非空(同 combo 应一致)。
+#[derive(Debug, Clone)]
+pub struct ComboMaterializeConfig {
+    pub combo_name: String,
+    pub include_fundamentals: bool,
+    /// 去冗余因子白名单; None 用黑名单全量。
+    pub factor_whitelist: Option<Vec<String>>,
+    /// 显式 horizon(strategy_config.combo_horizon 列); None 按名字推断。
+    pub combo_horizon: Option<i16>,
+}
+
 /// 从 strategy_config 读取:含基本面因子的 combo(如 v24 fund_v2)需 include_fundamentals=true
 /// + factor_whitelist 去冗余白名单,否则用默认黑名单物化会丢失基本面因子。
-/// 返回 (combo_name, include_fundamentals, factor_whitelist) 列表。
 pub async fn load_active_combo_materialize_configs(
     db: &PgPool,
-) -> Vec<(String, bool, Option<Vec<String>>, Option<i16>)> {
+) -> Vec<ComboMaterializeConfig> {
     let rows: Vec<(Option<String>, Option<bool>, Option<serde_json::Value>, Option<i16>)> = sqlx::query_as(
         "SELECT combo_name, include_fundamentals, factor_whitelist, combo_horizon
          FROM strategy_config
@@ -87,7 +99,7 @@ pub async fn load_active_combo_materialize_configs(
     .fetch_all(db)
     .await
     .unwrap_or_default();
-    let mut map: std::collections::BTreeMap<String, (bool, Option<Vec<String>>, Option<i16>)> =
+    let mut map: std::collections::BTreeMap<String, ComboMaterializeConfig> =
         std::collections::BTreeMap::new();
     for (combo, inc_fund, whitelist, horizon) in rows {
         if let Some(c) = combo {
@@ -102,21 +114,26 @@ pub async fn load_active_combo_materialize_configs(
                 v.as_array()
                     .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             });
-            let entry = map.entry(c).or_insert((false, None, None));
+            let entry = map
+                .entry(c)
+                .or_insert_with(|| ComboMaterializeConfig {
+                    combo_name: String::new(),
+                    include_fundamentals: false,
+                    factor_whitelist: None,
+                    combo_horizon: None,
+                });
             if inc {
-                entry.0 = true;
+                entry.include_fundamentals = true;
             }
-            if entry.1.is_none() && wl.is_some() {
-                entry.1 = wl;
+            if entry.factor_whitelist.is_none() && wl.is_some() {
+                entry.factor_whitelist = wl;
             }
-            if entry.2.is_none() {
-                entry.2 = horizon;
+            if entry.combo_horizon.is_none() {
+                entry.combo_horizon = horizon;
             }
         }
     }
-    map.into_iter()
-        .map(|(combo, (inc, wl, h))| (combo, inc, wl, h))
-        .collect()
+    map.into_values().collect()
 }
 
 

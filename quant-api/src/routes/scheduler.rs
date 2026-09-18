@@ -561,8 +561,18 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     .flatten()
                     .unwrap_or(false);
                     match crate::routes::factors::materialize_pit_combo_ext(
-                        &db2, "full_pit_icir_indneutral_val_v1", "1.0.0", 20,
-                        date - chrono::Duration::days(120), date, true, None, wl.as_deref(), ind_neut,
+                        &db2,
+                        &crate::routes::factors::PitComboMaterializeParams {
+                            combo_name: "full_pit_icir_indneutral_val_v1",
+                            factor_version: "1.0.0",
+                            horizon: 20,
+                            start_date: date - chrono::Duration::days(120),
+                            end_date: date,
+                            include_fundamentals: true,
+                            min_abs_ic_ir: None,
+                            factor_whitelist: wl.as_deref(),
+                            ind_neutral: ind_neut,
+                        },
                     ).await {
                         Ok(rows) => info!("[夜间预备] PIT 物化 {} 行 累计{}s", rows, t0.elapsed().as_secs()),
                         Err(e) => { error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e); }
@@ -646,40 +656,47 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                 // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
                 let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
                 let refresh_end = chrono::Utc::now().date_naive();
-                let combos = load_active_combo_materialize_configs(db).await;
-                let pit_combos: Vec<(String, bool, Option<Vec<String>>, Option<i16>)> = combos
+                let pit_combos: Vec<_> = load_active_combo_materialize_configs(db)
+                    .await
                     .into_iter()
-                    .filter(|(c, _, _, _)| c.starts_with("full_pit_icir"))
+                    .filter(|c| c.combo_name.starts_with("full_pit_icir"))
                     .collect();
                 if pit_combos.is_empty() {
                     warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
                 }
-                for (combo, include_fund, whitelist, horizon_col) in &pit_combos {
+                for cfg in &pit_combos {
                     // 显式 combo_horizon 列优先（2026-09-05：indneutral_val_v1 名字无
                     // _h{N} 后缀曾被推断为 1，而实际物化口径是 20——三段拼接根源）
-                    let horizon = horizon_col.unwrap_or_else(|| combo_horizon_from_name(combo));
+                    let horizon = cfg
+                        .combo_horizon
+                        .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
                     info!(
                         "[scheduler] PIT combo 保鲜: combo={} horizon={} include_fund={} whitelist={} 区间 {}~{}",
-                        combo, horizon, include_fund, whitelist.as_ref().map(|w| w.len()).unwrap_or(0), refresh_start, refresh_end
+                        cfg.combo_name, horizon, cfg.include_fundamentals,
+                        cfg.factor_whitelist.as_ref().map(|w| w.len()).unwrap_or(0), refresh_start, refresh_end
                     );
                     // 含基本面因子的 combo(如 v24 fund_v2)用 ext + include_fundamentals + factor_whitelist,
                     // 否则用默认黑名单物化会丢失 fin_/mf_/north_ 因子。
                     match crate::routes::factors::materialize_pit_combo_ext(
                         db,
-                        combo,
-                        ver,
-                        horizon,
-                        refresh_start,
-                        refresh_end,
-                        *include_fund,
-                        None, // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
-                        whitelist.as_deref(),
-                        false, // ind_neutral: scheduler 保鲜不做行业中性化(仅手动物化新 combo 时启用)
+                        &crate::routes::factors::PitComboMaterializeParams {
+                            combo_name: &cfg.combo_name,
+                            factor_version: ver,
+                            horizon,
+                            start_date: refresh_start,
+                            end_date: refresh_end,
+                            include_fundamentals: cfg.include_fundamentals,
+                            // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
+                            min_abs_ic_ir: None,
+                            factor_whitelist: cfg.factor_whitelist.as_deref(),
+                            // ind_neutral: scheduler 保鲜不做行业中性化(仅手动物化新 combo 时启用)
+                            ind_neutral: false,
+                        },
                     )
                     .await
                     {
-                        Ok(rows) => info!("[scheduler] PIT combo {} 保鲜完成: {} 行", combo, rows),
-                        Err(e) => warn!("[scheduler] PIT combo {} 保鲜失败: {}", combo, e),
+                        Ok(rows) => info!("[scheduler] PIT combo {} 保鲜完成: {} 行", cfg.combo_name, rows),
+                        Err(e) => warn!("[scheduler] PIT combo {} 保鲜失败: {}", cfg.combo_name, e),
                     }
                 }
             }
@@ -1291,15 +1308,18 @@ async fn run_tick(
                     .unwrap_or(false);
                     match crate::routes::factors::materialize_pit_combo_ext(
                         db,
-                        &combo,
-                        "1.0.0",
-                        horizon_col.unwrap_or_else(|| combo_horizon_from_name(&combo)),
-                        sync_date - chrono::Duration::days(7),
-                        sync_date,
-                        inc_fund,
-                        None, // min_abs_ic_ir: T+1 保鲜不加阈值(白名单已筛)
-                        whitelist.as_deref(),
-                        ind_neut,
+                        &crate::routes::factors::PitComboMaterializeParams {
+                            combo_name: &combo,
+                            factor_version: "1.0.0",
+                            horizon: horizon_col.unwrap_or_else(|| combo_horizon_from_name(&combo)),
+                            start_date: sync_date - chrono::Duration::days(7),
+                            end_date: sync_date,
+                            include_fundamentals: inc_fund,
+                            // min_abs_ic_ir: T+1 保鲜不加阈值(白名单已筛)
+                            min_abs_ic_ir: None,
+                            factor_whitelist: whitelist.as_deref(),
+                            ind_neutral: ind_neut,
+                        },
                     )
                     .await
                     {
@@ -2690,8 +2710,6 @@ mod stale_factor_recompute_tests {
 
 #[cfg(test)]
 mod forecast_backfill_byday_tests {
-    use super::*;
-
     /// forecast 断档回补(2026-09-15): 8-26 起每日按 ann_date 单次拉取回补至 9-14。
     /// 运行: set -a; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api forecast_backfill_byday -- --ignored --nocapture
@@ -2729,8 +2747,6 @@ mod forecast_backfill_byday_tests {
 
 #[cfg(test)]
 mod forecast_daily_tests {
-    use super::*;
-
     /// forecast 表补同步（2026-09-05：数据断在 4-29，充值 token 有权限）。
     /// 运行：TUSHARE_TOKEN_ALT=<token> cargo test --release -p quant-api forecast_backfill -- --ignored --nocapture
     #[tokio::test]

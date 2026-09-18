@@ -16,6 +16,26 @@ use crate::AppState;
 use super::*;
 use super::{background_factor_task_id, parse_phase7_backfill_date, usize_to_i32};
 
+/// PIT combo 物化用例参数(2026-09-18 参数对象化, 原 10 位置参数 bool/Option
+/// 语义不可读, 调用点易错位)。字段全部 Copy, 可按值传递。
+#[derive(Debug, Clone, Copy)]
+pub struct PitComboMaterializeParams<'a> {
+    pub combo_name: &'a str,
+    pub factor_version: &'a str,
+    /// 前瞻期(天), 语义见 factor_evaluation.horizon。
+    pub horizon: i16,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    /// true 时黑名单移除基本面前缀(fin_/mf_/north_ 等)。
+    pub include_fundamentals: bool,
+    /// PIT 因子 ic_ir 绝对值下限; None 不加阈值。
+    pub min_abs_ic_ir: Option<f64>,
+    /// 因子白名单(去冗余代表因子); None 用黑名单全量。
+    pub factor_whitelist: Option<&'a [String]>,
+    /// true 时做行业内减均值(行业中性化打分)。
+    pub ind_neutral: bool,
+}
+
 /// PIT 滚动 ICIR combo 物化入口（可复用，供未来实盘调度器增量触发保鲜）。
 ///
 /// 对 `[start, end]` 区间内每个交易日，用其所属季度调仓点（季度首个交易日）的
@@ -32,7 +52,21 @@ pub async fn materialize_pit_combo(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<u64, String> {
-    materialize_pit_combo_ext(db, combo_name, factor_version, horizon, start_date, end_date, false, None, None, false).await
+    materialize_pit_combo_ext(
+        db,
+        &PitComboMaterializeParams {
+            combo_name,
+            factor_version,
+            horizon,
+            start_date,
+            end_date,
+            include_fundamentals: false,
+            min_abs_ic_ir: None,
+            factor_whitelist: None,
+            ind_neutral: false,
+        },
+    )
+    .await
 }
 
 /// 扩展版物化:支持纳入基本面因子(fin_/mf_/north_)与 IC 强度阈值筛选。
@@ -42,16 +76,20 @@ pub async fn materialize_pit_combo(
 ///   None 时不加阈值(保留原行为,兼容现有 combo)。
 pub async fn materialize_pit_combo_ext(
     db: &sqlx::PgPool,
-    combo_name: &str,
-    factor_version: &str,
-    horizon: i16,
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-    include_fundamentals: bool,
-    min_abs_ic_ir: Option<f64>,
-    factor_whitelist: Option<&[String]>,
-    ind_neutral: bool,
+    params: &PitComboMaterializeParams<'_>,
 ) -> Result<u64, String> {
+    let params = *params;
+    let PitComboMaterializeParams {
+        combo_name,
+        factor_version,
+        horizon,
+        start_date,
+        end_date,
+        include_fundamentals,
+        min_abs_ic_ir,
+        factor_whitelist,
+        ind_neutral,
+    } = params;
     // 黑名单正则:include_fundamentals=true 时移除 fin_|margin_|mf_|north_|val_,让基本面+估值因子进 combo。
     // block_/ar_ 原本不在黑名单。cf_/div_/event_ 等始终排除(数据口径/事件类未纳入)。
     // val_ 解除排除(2026-08-13 阶段2):价值因子(PS/PB/PE/股息率) ICIR 最强(5-38),是 A 股核心 alpha 源,
@@ -952,7 +990,18 @@ pub async fn materialize_pit_combo_background(
     let state = state.clone();
     let tid = task_id.clone();
     tokio::spawn(async move {
-        match materialize_pit_combo_ext(&state.db, &combo_name, &version, horizon, start, end, include_fund, min_ic_ir, whitelist.as_deref(), ind_neutral).await {
+        let params = PitComboMaterializeParams {
+            combo_name: &combo_name,
+            factor_version: &version,
+            horizon,
+            start_date: start,
+            end_date: end,
+            include_fundamentals: include_fund,
+            min_abs_ic_ir: min_ic_ir,
+            factor_whitelist: whitelist.as_deref(),
+            ind_neutral,
+        };
+        match materialize_pit_combo_ext(&state.db, &params).await {
             Ok(rows) => {
                 let _ = sqlx::query(
                     "UPDATE data_sync_task SET status='completed', total_count=$2, success_count=$2,
@@ -1100,9 +1149,18 @@ mod f1_combo_tests {
             let q_end = (q_start + chrono::Months::new(3)).min(final_end);
             // 生产 combo 全历史重建（消除三段拼接）：48 活跃白名单 / h20 / 中性化
             let rows = materialize_pit_combo_ext(
-                &db, "full_pit_icir_indneutral_val_v1", "1.0.0", 20, q_start, q_end,
-                true, None, Some(whitelist_21.as_slice()),
-                true,
+                &db,
+                &PitComboMaterializeParams {
+                    combo_name: "full_pit_icir_indneutral_val_v1",
+                    factor_version: "1.0.0",
+                    horizon: 20,
+                    start_date: q_start,
+                    end_date: q_end,
+                    include_fundamentals: true,
+                    min_abs_ic_ir: None,
+                    factor_whitelist: Some(whitelist_21.as_slice()),
+                    ind_neutral: true,
+                },
             ).await.expect("materialize quarter");
             total += rows;
             q_start = q_end;

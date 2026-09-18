@@ -124,6 +124,7 @@ pub struct BacktestConfig {
 
 /// Per-position risk management
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct RiskControlConfig {
     /// Hard stop-loss: sell if loss exceeds this % from buy price (e.g. 0.10 = 10%)
     #[serde(default)]
@@ -188,32 +189,6 @@ pub struct RiskControlConfig {
     pub portfolio_sharpe_min_exposure: Option<Decimal>,
 }
 
-impl Default for RiskControlConfig {
-    fn default() -> Self {
-        Self {
-            stop_loss_pct: None,
-            take_profit_pct: None,
-            trailing_stop_pct: None,
-            time_stop_days: None,
-            reentry_cooldown_days: None,
-            portfolio_drawdown_reduce_start_pct: None,
-            portfolio_drawdown_reduce_full_pct: None,
-            portfolio_drawdown_min_exposure: None,
-            portfolio_drawdown_peak_lookback_days: None,
-            portfolio_drawdown_recovery_start_pct: None,
-            portfolio_drawdown_recovery_full_pct: None,
-            portfolio_drawdown_recovery_boost: None,
-            portfolio_volatility_target_pct: None,
-            portfolio_volatility_lookback_days: None,
-            portfolio_volatility_min_exposure: None,
-            portfolio_volatility_max_exposure: None,
-            portfolio_sharpe_reduce_start: None,
-            portfolio_sharpe_reduce_full: None,
-            portfolio_sharpe_lookback_days: None,
-            portfolio_sharpe_min_exposure: None,
-        }
-    }
-}
 
 impl Default for BacktestConfig {
     fn default() -> Self {
@@ -257,16 +232,13 @@ pub enum BacktestMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BacktestPersistenceMode {
+    #[default]
     Full,
     SummaryOnly,
 }
 
-impl Default for BacktestPersistenceMode {
-    fn default() -> Self {
-        Self::Full
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,7 +256,9 @@ pub enum ExecutionPrice {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ExecutionScheduleProfile {
+    #[default]
     Immediate,
     Twap3dV1,
     Twap5dV1,
@@ -293,11 +267,6 @@ pub enum ExecutionScheduleProfile {
     Twap20dV1,
 }
 
-impl Default for ExecutionScheduleProfile {
-    fn default() -> Self {
-        Self::Immediate
-    }
-}
 
 impl ExecutionScheduleProfile {
     pub fn parse(value: &str) -> Result<Self, String> {
@@ -341,16 +310,13 @@ impl ExecutionScheduleProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ExecutionCarryPolicy {
+    #[default]
     Expire,
     RollForwardV1,
 }
 
-impl Default for ExecutionCarryPolicy {
-    fn default() -> Self {
-        Self::Expire
-    }
-}
 
 impl ExecutionCarryPolicy {
     pub fn parse(value: &str) -> Result<Self, String> {
@@ -1357,7 +1323,7 @@ impl BacktestEngine {
 
         // Phase 2: 按目标权重计算买卖
         let mut signal_targets = signal.target_weights.iter().collect::<Vec<_>>();
-        signal_targets.sort_by(|(left, _), (right, _)| left.cmp(right));
+        signal_targets.sort_by_key(|(left, _)| *left);
         let mut target_gross_exposure = Decimal::zero();
         for (sym, raw_target_w) in signal_targets {
             let target_w = (*raw_target_w * exposure_scale).clamp(Decimal::zero(), Decimal::ONE);

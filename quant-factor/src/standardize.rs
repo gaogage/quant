@@ -195,8 +195,7 @@ mod tests {
             name: name.to_string(),
             values: values
                 .iter()
-                .enumerate()
-                .map(|(i, (v, s))| FactorValue {
+                .map(|(v, s)| FactorValue {
                     symbol: s.to_string(),
                     date,
                     value: *v,

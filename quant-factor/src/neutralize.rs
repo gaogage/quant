@@ -96,7 +96,7 @@ pub fn neutralize(
         }
 
         // Per-date OLS: factor_residual = factor - (alpha + beta * size)
-        for (_date, indices) in &date_groups {
+        for indices in date_groups.values() {
             if indices.len() < 20 {
                 continue;
             }

@@ -1677,7 +1677,7 @@ pub async fn create_data_version(
         .await
         .map_err(|e| match e {
             crate::versioning::DataVersionRegistryError::Database(sqlx_err) => sqlx_err,
-            other => sqlx::Error::Protocol(format!("{other}").into()),
+            other => sqlx::Error::Protocol(format!("{other}")),
         })
 }
 

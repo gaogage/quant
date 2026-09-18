@@ -698,7 +698,7 @@ where
         if i < min_idx {
             continue;
         }
-        if (i - min_idx) % active_config.rebalance_freq_days.max(1) != 0 {
+        if !(i - min_idx).is_multiple_of(active_config.rebalance_freq_days.max(1)) {
             continue;
         }
 
@@ -845,11 +845,10 @@ where
 
     let portfolio_config = PortfolioConstructionConfig::from(config);
     let target_weights = if prefer_return_risk_stats_matrices {
-        return_risk_stats_matrices_cover_required_lookbacks(
+        if return_risk_stats_matrices_cover_required_lookbacks(
             return_risk_stats_matrices,
             &portfolio_config,
-        )
-        .then(|| {
+        ) { {
             build_portfolio_weights_with_return_risk_stats_matrices(
                 score_day,
                 &candidates,
@@ -858,8 +857,7 @@ where
                 industry_by_symbol,
                 &portfolio_config,
             )
-        })
-        .unwrap_or_else(|| {
+        } } else { {
             build_portfolio_weights_with_return_risk_matrices(
                 score_day,
                 &candidates,
@@ -869,7 +867,7 @@ where
                 &portfolio_config,
                 Some(return_risk_matrices),
             )
-        })
+        } }
     } else {
         build_portfolio_weights_with_return_risk_matrices(
             score_day,
@@ -1103,7 +1101,7 @@ pub(crate) fn build_rebalance_prediction_signals(
     let mut previous_target_weights: Option<HashMap<String, Decimal>> = None;
 
     for (i, &day) in trading_days.iter().enumerate() {
-        if i < min_idx || (i - min_idx) % config.rebalance_freq_days.max(1) != 0 {
+        if i < min_idx || !(i - min_idx).is_multiple_of(config.rebalance_freq_days.max(1)) {
             continue;
         }
         let score_day = match prediction_score_day_for_signal(trading_days, i, config) {
@@ -1468,7 +1466,7 @@ where
         if i < min_idx {
             continue;
         }
-        if (i - min_idx) % active_config.rebalance_freq_days.max(1) != 0 {
+        if !(i - min_idx).is_multiple_of(active_config.rebalance_freq_days.max(1)) {
             continue;
         }
         if let Some(score_day) = score_day_for_signal(trading_days, i, &active_config) {
@@ -2729,7 +2727,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
         });
     let correlation_matrix_ref = correlation_matrix.as_ref().or_else(|| {
         (config.correlation_lookback_days == config.risk_budget_lookback_days)
-            .then(|| risk_matrix.as_ref())
+            .then_some(risk_matrix.as_ref())
             .flatten()
     });
     let selection_limit =
@@ -2763,11 +2761,11 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
 
     let kelly_matrix_ref = kelly_matrix.as_ref().or_else(|| {
         (config.kelly_lookback_days == config.risk_budget_lookback_days)
-            .then(|| risk_matrix.as_ref())
+            .then_some(risk_matrix.as_ref())
             .flatten()
             .or_else(|| {
                 (config.kelly_lookback_days == config.correlation_lookback_days)
-                    .then(|| correlation_matrix.as_ref())
+                    .then_some(correlation_matrix.as_ref())
                     .flatten()
             })
     });
@@ -3040,7 +3038,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
         cash_utilization_selection_limit(&risk_filtered_candidates, average_amounts, config);
     let correlation_matrix_ref = correlation_matrix.as_ref().or_else(|| {
         (config.correlation_lookback_days == config.risk_budget_lookback_days)
-            .then(|| risk_matrix.as_ref())
+            .then_some(risk_matrix.as_ref())
             .flatten()
     });
     let selected = if let Some(matrix) = correlation_matrix_ref {
@@ -3064,11 +3062,11 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
 
     let kelly_matrix_ref = kelly_matrix.as_ref().or_else(|| {
         (config.kelly_lookback_days == config.risk_budget_lookback_days)
-            .then(|| risk_matrix.as_ref())
+            .then_some(risk_matrix.as_ref())
             .flatten()
             .or_else(|| {
                 (config.kelly_lookback_days == config.correlation_lookback_days)
-                    .then(|| correlation_matrix.as_ref())
+                    .then_some(correlation_matrix.as_ref())
                     .flatten()
             })
     });
@@ -3531,7 +3529,7 @@ fn detect_market_regime_from_returns(
     // Use the average trailing return across all symbols as a proxy for market regime
     let mut total_return: f64 = 0.0;
     let mut count: usize = 0;
-    for (_symbol, closes) in return_history {
+    for closes in return_history.values() {
         if let Some(current_idx) = closes
             .iter()
             .position(|(date, close)| *date == score_day && close.is_finite() && *close > 0.0)
@@ -3897,8 +3895,7 @@ pub(crate) fn stress_fill_confidence_lookup_for_direction(
     let stats = score_stats(candidates.iter().map(|(_, score)| *score));
     let finite = candidates
         .iter()
-        .filter_map(|(symbol, score)| {
-            score.is_finite().then(|| {
+        .filter(|&(symbol, score)| score.is_finite()).map(|(symbol, score)| {
                 let z_score = standard_score(*score, stats);
                 let z_score = match score_direction {
                     ScoreDirection::Descending => z_score,
@@ -3906,7 +3903,6 @@ pub(crate) fn stress_fill_confidence_lookup_for_direction(
                 };
                 (symbol.clone(), z_score)
             })
-        })
         .collect::<Vec<_>>();
     if finite.is_empty() {
         return HashMap::new();
@@ -5811,9 +5807,7 @@ pub(crate) fn return_risk_stats_feature_matrix_payload_profile(
 ) -> ReturnRiskStatsFeatureMatrixPayloadProfile {
     let score_day_count = normalized_dates(score_days).len();
     let symbol_count = normalized_symbol_key(symbols).len();
-    let stats_rows = score_day_count
-        .checked_mul(symbol_count)
-        .unwrap_or(usize::MAX);
+    let stats_rows = score_day_count.saturating_mul(symbol_count);
     let dense_pair_capacity =
         return_risk_stats_feature_matrix_dense_pair_capacity(score_days, symbols);
     let pair_rows_per_stats_row = if stats_rows == 0 || stats_rows == usize::MAX {

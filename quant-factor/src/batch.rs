@@ -58,7 +58,7 @@ pub async fn batch_compute_factors(
     let mut errors: Vec<String> = Vec::new();
 
     let (factor_type, period) = parse_factor(&config.factor);
-    let n_chunks = (config.symbols.len() + config.chunk_size - 1) / config.chunk_size;
+    let n_chunks = config.symbols.len().div_ceil(config.chunk_size);
 
     for (chunk_idx, chunk) in config.symbols.chunks(config.chunk_size).enumerate() {
         let syms: Vec<String> = chunk.to_vec();

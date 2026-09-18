@@ -162,9 +162,8 @@ async fn generate_signals_with_cache_internal(
             config,
         )
         .await
-        .map(|matrices| {
+        .inspect(|matrices| {
             return_history = Some(loaded_return_history);
-            matrices
         })?
     } else {
         HashMap::new()
@@ -409,9 +408,8 @@ async fn generate_regime_signals_with_cache_internal(
             config,
         )
         .await
-        .map(|matrices| {
+        .inspect(|matrices| {
             return_history = Some(loaded_return_history);
-            matrices
         })?
     } else {
         HashMap::new()

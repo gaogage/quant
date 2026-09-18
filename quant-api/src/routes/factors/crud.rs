@@ -1836,7 +1836,6 @@ pub async fn neutralize_factors(
 
 #[cfg(test)]
 mod stale_pv_recompute_tests {
-    use super::*;
     use quant_factor::batch::{batch_compute_factors, BatchConfig};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1868,19 +1867,6 @@ mod stale_pv_recompute_tests {
         use std::sync::Mutex;
         let cache: Arc<Mutex<HashMap<(String, chrono::NaiveDate, chrono::NaiveDate), HashMap<String, Vec<quant_factor::types::DailyBar>>>>> = Arc::new(Mutex::new(HashMap::new()));
         let collected: Arc<Mutex<Vec<(String, Vec<(String, chrono::NaiveDate, f64, bool)>)>>> = Arc::new(Mutex::new(Vec::new()));
-        let db_loader = db.clone();
-        let loader: Arc<
-            dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
-                + Send + Sync,
-        > = {
-            let cache = cache.clone();
-            Arc::new(move |syms, s, e| {
-                let key = (syms.first().cloned().unwrap_or_default(), s, e);
-                if let Some(m) = cache.lock().unwrap().get(&key) { return Ok(m.clone()); }
-                // 预载由外层 async 完成（见下方 PRELOAD）
-                Err(format!("bars not preloaded for {:?}", key))
-            })
-        };
         let saver: Arc<
             dyn Fn(&str, &str, &[(String, chrono::NaiveDate, f64, bool)]) -> Result<usize, String>
                 + Send + Sync,
@@ -1891,7 +1877,6 @@ mod stale_pv_recompute_tests {
                 Ok(vals.len())
             })
         };
-        let _ = &db_loader;
 
         // PRELOAD：一次性加载全部窗口 bar 进缓存（batch_compute 内部按 chunk 取）
         {
@@ -1955,7 +1940,6 @@ mod stale_pv_recompute_tests {
             .map_err(|e| e.to_string())?;
         let mut m: HashMap<String, Vec<quant_factor::types::DailyBar>> = HashMap::new();
         for (sym, d, o, h, l, c, v, pc) in rows {
-            use rust_decimal::prelude::ToPrimitive;
             m.entry(sym.clone()).or_default().push(quant_factor::types::DailyBar {
                 symbol: sym, trade_date: d,
                 open: o, high: h, low: l, close: c, volume: v,

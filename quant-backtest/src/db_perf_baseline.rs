@@ -234,7 +234,7 @@ pub fn hash_signals(signals: &HashMap<NaiveDate, StrategySignal>) -> String {
             (*date, weights)
         })
         .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by_key(|a| a.0);
 
     let mut hasher = Sha256::new();
     for (date, weights) in entries {

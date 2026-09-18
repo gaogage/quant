@@ -798,8 +798,8 @@ pub fn ledoit_wolf_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
     let rho = (n_assets as f64 / n_periods as f64).clamp(0.0, 1.0);
 
     // Shrunk covariance
-    let shrunk = (1.0 - rho) * &sample_cov + rho * &target;
-    shrunk
+    
+    (1.0 - rho) * &sample_cov + rho * &target
 }
 
 /// Compute EWMA (exponentially weighted) covariance matrix.

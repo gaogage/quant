@@ -43,7 +43,7 @@ fn get_i64(m: &Map<String, Value>, key: &str) -> Option<i64> {
     m.get(key).and_then(|v| v.as_i64())
 }
 fn to_decimal(v: Option<f64>) -> Decimal {
-    v.and_then(|v| Decimal::from_f64_retain(v))
+    v.and_then(Decimal::from_f64_retain)
         .unwrap_or_default()
 }
 fn to_opt_decimal(v: Option<f64>) -> Option<Decimal> {
@@ -297,7 +297,7 @@ pub async fn sync_daily_bars(
     // Iterate by month — Tushare batch returns one day when ts_codes are specified.
     // Monthly chunks avoid the single-day limitation while staying within API limits.
     let months = months_in_range(s, e);
-    let chunk_count = if total == 0 { 0 } else { (total + 499) / 500 };
+    let chunk_count = if total == 0 { 0 } else { total.div_ceil(500) };
     let total_work = months.len().saturating_mul(chunk_count).max(1);
     let mut processed_work = 0usize;
     info!("Syncing {} symbols across {} months", total, months.len());
@@ -345,7 +345,7 @@ pub async fn sync_daily_bars(
                                                 low: to_decimal(get_f64(item, "low")),
                                                 close: to_decimal(get_f64(item, "close")),
                                                 pre_close: get_f64(item, "pre_close")
-                                                    .and_then(|v| Decimal::from_f64_retain(v)),
+                                                    .and_then(Decimal::from_f64_retain),
                                                 change_pct: get_f64(item, "pct_chg").and_then(
                                                     |v| Decimal::from_f64_retain(v / 100.0),
                                                 ),
@@ -410,7 +410,7 @@ pub async fn sync_daily_bars(
             )
             .await?;
         }
-        if total_rows % 50000 == 0 {
+        if total_rows.is_multiple_of(50000) {
             info!("Daily sync: {} rows", total_rows);
         }
     }
@@ -780,7 +780,7 @@ pub async fn sync_daily_basic(
             if total_rows % 500_000 < page_limit {
                 info!("daily_basic range sync: {} rows", total_rows);
             }
-            if ok % 12 == 0 {
+            if ok.is_multiple_of(12) {
                 repository::update_sync_task(
                     pool,
                     &task_id,
@@ -865,7 +865,7 @@ pub async fn sync_daily_basic(
             if !symbol_failed {
                 ok += 1;
             }
-            if ok % 100 == 0 {
+            if ok.is_multiple_of(100) {
                 repository::update_sync_task(
                     pool,
                     &task_id,
@@ -1059,7 +1059,7 @@ fn fund_daily_bars_from_maps(maps: &[Map<String, Value>]) -> Vec<MarketStockDail
                 high: to_decimal(get_f64(item, "high")),
                 low: to_decimal(get_f64(item, "low")),
                 close: to_decimal(get_f64(item, "close")),
-                pre_close: get_f64(item, "pre_close").and_then(|v| Decimal::from_f64_retain(v)),
+                pre_close: get_f64(item, "pre_close").and_then(Decimal::from_f64_retain),
                 change_pct: get_f64(item, "pct_chg")
                     .and_then(|v| Decimal::from_f64_retain(v / 100.0)),
                 volume: to_decimal(get_f64(item, "vol")),
@@ -1327,7 +1327,7 @@ fn fund_navs_from_maps(maps: &[Map<String, Value>]) -> Vec<crate::model::entitie
                 ann_date: get_str(item, "ann_date").parse::<NaiveDate>().ok(),
                 unit_nav: Decimal::from_f64_retain(unit_nav)?,
                 accum_nav: get_f64(item, "accum_nav").and_then(Decimal::from_f64_retain),
-                adj_nav: get_f64(item, "adj_nav").and_then(|v| Decimal::from_f64_retain(v)),
+                adj_nav: get_f64(item, "adj_nav").and_then(Decimal::from_f64_retain),
             })
         })
         .collect()
@@ -1776,7 +1776,7 @@ pub async fn sync_moneyflow(
             if !symbol_failed {
                 ok += 1;
             }
-            if ok % 100 == 0 {
+            if ok.is_multiple_of(100) {
                 repository::update_sync_task(
                     pool,
                     &task_id,
@@ -2758,7 +2758,7 @@ pub async fn sync_equity_pledge_pressure(
                 None,
             )
             .await?;
-            if completed_units % progress_interval == 0 || completed_units == total_units {
+            if completed_units.is_multiple_of(progress_interval) || completed_units == total_units {
                 let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
                 repository::heartbeat_sync_task(
                     pool,
@@ -3757,7 +3757,7 @@ pub async fn sync_shareholder_structure(
             .await?;
         }
 
-        if completed_units % progress_interval == 0 || completed_units == total_units {
+        if completed_units.is_multiple_of(progress_interval) || completed_units == total_units {
             let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
             repository::heartbeat_sync_task(
                 pool,
@@ -3853,7 +3853,7 @@ pub async fn sync_shareholder_structure(
                 )
                 .await?;
 
-                if completed_units % progress_interval == 0 || completed_units == total_units {
+                if completed_units.is_multiple_of(progress_interval) || completed_units == total_units {
                     let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
                     repository::heartbeat_sync_task(
                         pool,
@@ -3992,7 +3992,7 @@ async fn sync_checkpoint(
     index: usize,
     check_every: usize,
 ) -> bool {
-    if index == 0 || index % check_every != 0 {
+    if index == 0 || !index.is_multiple_of(check_every) {
         return false;
     }
     if sync_task_cancelled(db, task_id).await {
@@ -4090,7 +4090,7 @@ pub async fn sync_adj_factor(
                         if !factors.is_empty() {
                             total_rows += factors.len();
                             if let Err(e) =
-                                repository::upsert_adj_factors_batch(pool, &factors, &dv_id, "tushare")
+                                repository::upsert_adj_factors_batch(pool, &factors, dv_id, "tushare")
                                     .await
                             {
                                 warn!("{} 复权因子批量 upsert 失败: {}", td, e);
@@ -4409,7 +4409,7 @@ pub async fn sync_index_daily(
                                 low: to_decimal(get_f64(item, "low")),
                                 close: to_decimal(get_f64(item, "close")),
                                 pre_close: get_f64(item, "pre_close")
-                                    .and_then(|v| Decimal::from_f64_retain(v)),
+                                    .and_then(Decimal::from_f64_retain),
                                 change_pct: get_f64(item, "pct_chg")
                                     .and_then(|v| Decimal::from_f64_retain(v / 100.0)),
                                 volume: to_decimal(get_f64(item, "vol")),
@@ -5050,7 +5050,7 @@ pub async fn sync_forecast(
             ok += 1;
         }
         let completed = ok + failed;
-        if completed % progress_interval == 0 || completed == total {
+        if completed.is_multiple_of(progress_interval) || completed == total {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -5206,7 +5206,7 @@ pub async fn sync_express(
             ok += 1;
         }
         let completed = ok + failed;
-        if completed % progress_interval == 0 || completed == total {
+        if completed.is_multiple_of(progress_interval) || completed == total {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -5386,7 +5386,7 @@ pub async fn sync_disclosure_date(
             ok += 1;
         }
         let completed = ok + failed;
-        if completed % progress_interval == 0 || completed == total {
+        if completed.is_multiple_of(progress_interval) || completed == total {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -5561,7 +5561,7 @@ pub async fn sync_cashflow(
         if !symbol_failed {
             ok += 1;
         }
-        if ok % 100 == 0 {
+        if ok.is_multiple_of(100) {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -5732,7 +5732,7 @@ pub async fn sync_dividend(
         if !symbol_failed {
             ok += 1;
         }
-        if ok % 100 == 0 {
+        if ok.is_multiple_of(100) {
             repository::update_sync_task(
                 pool,
                 &task_id,
@@ -6457,7 +6457,7 @@ pub async fn sync_futures_price_chain(
                 )
                 .await?;
 
-                if completed_units % progress_interval == 0 || completed_units == total_units {
+                if completed_units.is_multiple_of(progress_interval) || completed_units == total_units {
                     let progress = if total_units > 0 {
                         ((completed_units * 100) / total_units).min(99) as i32
                     } else {

@@ -74,16 +74,13 @@ pub(crate) struct FactorSignalFeaturePrewarmGroup {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ReturnRiskFeatureCacheMode {
+    #[default]
     RawMatrix,
     StatsMatrixExperimental,
 }
 
-impl Default for ReturnRiskFeatureCacheMode {
-    fn default() -> Self {
-        Self::RawMatrix
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct MarketFeatureSnapshotScope {
@@ -320,7 +317,7 @@ pub(crate) fn persistent_market_feature_grouped_rows_to_history(
         }
 
         let mut rows = Vec::with_capacity(trade_dates.len());
-        for (trade_date, value) in trade_dates.into_iter().zip(values.into_iter()) {
+        for (trade_date, value) in trade_dates.into_iter().zip(values) {
             if !value.is_finite() {
                 return None;
             }
@@ -991,7 +988,7 @@ async fn load_factor_signal_feature_prewarm_candidate(
         }
         let symbols = score_sources
             .values()
-            .flat_map(|scores_by_date| symbols_from_factor_scores(scores_by_date))
+            .flat_map(symbols_from_factor_scores)
             .collect::<Vec<_>>();
         (symbols, max_lookback, score_days)
     } else {
@@ -1055,8 +1052,8 @@ pub(crate) fn merge_factor_signal_feature_prewarm_groups(
             return_risk_feature_cache_mode: candidate.return_risk_feature_cache_mode,
         };
         let group = groups.entry(key).or_default();
-        group.0.extend(candidate.symbols.into_iter());
-        group.1.extend(candidate.score_days.into_iter());
+        group.0.extend(candidate.symbols);
+        group.1.extend(candidate.score_days);
     }
 
     groups
