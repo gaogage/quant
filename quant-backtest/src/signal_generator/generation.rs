@@ -162,7 +162,7 @@ async fn generate_signals_with_cache_internal(
             config,
         )
         .await
-        .inspect(|matrices| {
+        .inspect(|_| {
             return_history = Some(loaded_return_history);
         })?
     } else {
@@ -408,7 +408,7 @@ async fn generate_regime_signals_with_cache_internal(
             config,
         )
         .await
-        .inspect(|matrices| {
+        .inspect(|_| {
             return_history = Some(loaded_return_history);
         })?
     } else {
@@ -1141,3 +1141,6 @@ pub(crate) fn score_stats(values: impl Iterator<Item = f64>) -> (f64, f64) {
 pub(crate) fn standard_score(value: f64, (mean, std_dev): (f64, f64)) -> f64 {
     (value - mean) / std_dev
 }
+
+#[cfg(test)]
+mod generation_tests;

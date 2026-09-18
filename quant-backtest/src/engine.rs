@@ -1747,6 +1747,56 @@ mod tests {
         Decimal::from_str(s).unwrap()
     }
 
+    // ─── ExecutionScheduleProfile 解析(纯函数) ──────────────────
+
+    #[test]
+    fn execution_schedule_profile_parse_aliases_and_default() {
+        use ExecutionScheduleProfile::*;
+        // off/空串/immediate → Immediate
+        for s in ["", "off", "immediate"] {
+            assert_eq!(ExecutionScheduleProfile::parse(s).unwrap(), Immediate, "{}", s);
+        }
+        // 带与不带 _v1 后缀的别名等价
+        for (a, b) in [
+            ("twap_3d_v1", "twap3d_v1"),
+            ("twap_5d_v1", "twap5d_v1"),
+            ("twap_10d_v1", "twap10d_v1"),
+            ("twap_15d_v1", "twap15d_v1"),
+            ("twap_20d_v1", "twap20d_v1"),
+        ] {
+            assert_eq!(
+                ExecutionScheduleProfile::parse(a).unwrap(),
+                ExecutionScheduleProfile::parse(b).unwrap(),
+                "{} 与 {} 应等价",
+                a,
+                b
+            );
+        }
+        // 未知值 → Err(防配置静默降级)
+        assert!(ExecutionScheduleProfile::parse("twap_7d").is_err());
+        assert!(ExecutionScheduleProfile::parse("TWAP_3D_V1").is_err(), "大小写敏感");
+    }
+
+    #[test]
+    fn execution_schedule_profile_roundtrip_and_days() {
+        // as_str 输出可再次 parse 回自身(配置序列化往返)
+        for p in [
+            ExecutionScheduleProfile::Immediate,
+            ExecutionScheduleProfile::Twap3dV1,
+            ExecutionScheduleProfile::Twap5dV1,
+            ExecutionScheduleProfile::Twap10dV1,
+            ExecutionScheduleProfile::Twap15dV1,
+            ExecutionScheduleProfile::Twap20dV1,
+        ] {
+            assert_eq!(ExecutionScheduleProfile::parse(p.as_str()).unwrap(), p);
+            assert_eq!(p.execution_days() >= 1, true);
+        }
+        assert_eq!(ExecutionScheduleProfile::Immediate.execution_days(), 1);
+        assert_eq!(ExecutionScheduleProfile::Twap20dV1.execution_days(), 20);
+        assert!(ExecutionScheduleProfile::Immediate.is_immediate());
+        assert!(!ExecutionScheduleProfile::Twap3dV1.is_immediate());
+    }
+
     fn market(date: &str, close: (&str, &str), pre_close: (&str, &str)) -> MarketDay {
         let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
         let mut m = MarketDay {

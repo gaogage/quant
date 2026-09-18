@@ -3895,7 +3895,7 @@ pub(crate) fn stress_fill_confidence_lookup_for_direction(
     let stats = score_stats(candidates.iter().map(|(_, score)| *score));
     let finite = candidates
         .iter()
-        .filter(|&(symbol, score)| score.is_finite()).map(|(symbol, score)| {
+        .filter(|&(_, score)| score.is_finite()).map(|(symbol, score)| {
                 let z_score = standard_score(*score, stats);
                 let z_score = match score_direction {
                     ScoreDirection::Descending => z_score,
