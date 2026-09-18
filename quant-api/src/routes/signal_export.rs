@@ -261,7 +261,27 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
             detail
         );
     }
-    for (sym, w) in build_etf_allocations(&mvo_weights, regime, &listed) {
+    // 溢价存量退出 overlay(2026-09-18 回测定版, 与 rebalance_account 同源组件):
+    // 持有 + 溢价>gate → 目标置 0(清仓, 高溢价持有负期望); 未持有 + >=gate/2 →
+    // 滞回不买回; <gate/2 恢复; 折价豁免(正期望, 禁卖门禁已保护)。
+    // 状态由 mirror 账户持仓承载(live 账户未激活时持仓空集=按未持有处理, 天然安全)。
+    let etf_holding: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT symbol FROM paper_position WHERE paper_account_id = $1 AND quantity > 0",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
+    let etf_allocs = build_etf_allocations(&mvo_weights, regime, &listed);
+    let etf_allocs = crate::routes::shared::apply_premium_exit_overlay(
+        &etf_allocs,
+        &premium_map,
+        &etf_holding,
+        premium_gate,
+    );
+    for (sym, w) in etf_allocs {
         targets.push((sym, w * lev));
     }
 

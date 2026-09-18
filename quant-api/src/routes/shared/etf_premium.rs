@@ -139,9 +139,108 @@ pub async fn load_etf_premium_map(
     map
 }
 
+/// ETF 溢价存量退出 overlay(2026-09-18 回测定版: 6.8 年回测全指标最优档)。
+///
+/// 规则(滞回两档, 状态由持仓本身承载——无需额外存储, 信号端/模拟盘天然一致):
+/// - 持有 + 溢价 > gate      → 目标置 0(清仓: 高溢价持有负期望, 501018 溢价>10%
+///   的 183 个持有日次日期望 -0.35%/中位 -0.32%; 全周期 Sharpe 1.266→1.370,
+///   MaxDD -15.4%→-13.6%, 代价=常态溢价年约 -6pp 保费)
+/// - 未持有 + 溢价 >= gate/2 → 保持 0(滞回中间态不买回, 防止 5~10% 区间反复进出)
+/// - 未持有 + 溢价 < gate/2  → 恢复正常目标
+/// - 折价方向豁免: 深折价持有为正期望(等净值回归, 全历史折价<-5% 仅 17 天且次日
+///   期望 +0.4%~+4.0%), 禁卖门禁(blocked_side=sell)已保护, 不做退出。
+/// - 溢价数据缺失(premium=None/不在 map): 放行(降级取向, 与门禁一致)。
+///
+/// 返回调整后的 allocations; 触发退出的标的以 warn 日志留痕(回放审计)。
+pub fn apply_premium_exit_overlay(
+    allocations: &[(String, f64)],
+    premium_map: &HashMap<String, EtfPremium>,
+    holding: &std::collections::HashSet<String>,
+    gate: f64,
+) -> Vec<(String, f64)> {
+    allocations
+        .iter()
+        .map(|(sym, w)| {
+            let adjusted = premium_map
+                .get(sym)
+                .and_then(|p| p.premium_pct)
+                .and_then(|prem| {
+                    if holding.contains(sym) {
+                        // 持有: 仅高溢价退出(折价与中间态不动)
+                        (prem > gate).then_some(0.0)
+                    } else if prem >= gate / 2.0 {
+                        // 滞回: 中间态/高溢价不买回
+                        Some(0.0)
+                    } else {
+                        None // 溢价已回落: 恢复
+                    }
+                });
+            match adjusted {
+                Some(0.0) => {
+                    let prem = premium_map[sym].premium_pct.unwrap_or(0.0);
+                    tracing::warn!(
+                        "[溢价退出] {} 目标置 0(溢价 {:+.1}%, gate {:.0}%, {})",
+                        sym,
+                        prem * 100.0,
+                        gate * 100.0,
+                        if holding.contains(sym) { "持有清仓" } else { "滞回不买回" }
+                    );
+                    (sym.clone(), 0.0)
+                }
+                _ => (sym.clone(), *w),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prem_map(entries: &[(&str, f64)]) -> HashMap<String, EtfPremium> {
+        entries
+            .iter()
+            .map(|(s, p)| (s.to_string(), EtfPremium::from_parts(Some(*p), 0.10)))
+            .collect()
+    }
+
+    fn holding(syms: &[&str]) -> std::collections::HashSet<String> {
+        syms.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn premium_exit_overlay_full_ruleset() {
+        let allocs = vec![
+            ("513100.SH".to_string(), 0.12),
+            ("501018.SH".to_string(), 0.12),
+            ("518880.SH".to_string(), 0.12),
+            ("511010.SH".to_string(), 0.12),
+        ];
+        let pm = prem_map(&[
+            ("513100.SH", 0.26),  // 高溢价
+            ("501018.SH", 0.07),  // 滞回中间态(gate/2 ~ gate)
+            ("518880.SH", -0.12), // 深折价
+        ]);
+        // 511010 不在 map = 数据缺失
+        // 持有态: 513100 清仓; 501018 中间态持有不动; 518880 折价豁免; 511010 放行
+        let hold = holding(&["513100.SH", "501018.SH", "518880.SH", "511010.SH"]);
+        let out = apply_premium_exit_overlay(&allocs, &pm, &hold, 0.10);
+        assert_eq!(out[0].1, 0.0, "持有+高溢价26%→清仓");
+        assert_eq!(out[1].1, 0.12, "持有+中间态7%→不动(滞回只管买回)");
+        assert_eq!(out[2].1, 0.12, "持有+深折价→豁免(正期望)");
+        assert_eq!(out[3].1, 0.12, "数据缺失→放行");
+
+        // 未持有态: 513100/501018 都不买回; 518880 折价正常配置(禁卖门禁另有保护)
+        let empty = holding(&[]);
+        let out2 = apply_premium_exit_overlay(&allocs, &pm, &empty, 0.10);
+        assert_eq!(out2[0].1, 0.0, "未持有+高溢价→不买回");
+        assert_eq!(out2[1].1, 0.0, "未持有+中间态→滞回不买回");
+
+        // 恢复: 溢价回落 < gate/2(5%) 后未持有标的恢复配置
+        let pm2 = prem_map(&[("513100.SH", 0.04)]);
+        let out3 = apply_premium_exit_overlay(&allocs, &pm2, &empty, 0.10);
+        assert_eq!(out3[0].1, 0.12, "溢价回落 4% < 5% → 恢复");
+    }
 
     #[test]
     fn gate_is_directional_only_with_complete_data() {

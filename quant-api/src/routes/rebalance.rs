@@ -604,6 +604,17 @@ pub async fn rebalance_account(
         sc.etf_premium_gate,
     )
     .await;
+    // 溢价存量退出 overlay(2026-09-18 回测定版, 与 signal_export 同源): 持有标的
+    // 溢价 > gate 清仓、未持有且 >= gate/2 滞回不买回、< gate/2 恢复; 折价豁免。
+    // 依赖下方 pass 0 放行 alloc=0 的清仓路径(本批修复: 原 alloc<=0 双 pass
+    // continue 使目标 0 无卖出路径, overlay 无法生效)。
+    let etf_holding: std::collections::HashSet<String> = current_positions.keys().cloned().collect();
+    let etf_allocations = crate::routes::shared::apply_premium_exit_overlay(
+        &etf_allocations,
+        &etf_premium_map,
+        &etf_holding,
+        sc.etf_premium_gate,
+    );
     for pass in 0..2 {
     for (etf_symbol, alloc_pct) in &etf_allocations {
         // pass 0=卖出, pass 1=买入; 门禁按方向单边拦截(双 pass 各查一次同方向)
@@ -623,7 +634,9 @@ pub async fn rebalance_account(
         if warn_no_buy {
             continue; // 警戒禁买:不建仓 ETF(减仓由增量 delta 自然处理)
         }
-        if *alloc_pct <= 0.0 {
+        // alloc=0 仅在买入 pass 跳过; 卖出 pass 放行使 target_qty=0 → 全仓卖出
+        // (溢价退出 overlay 的清仓路径, 2026-09-18 修复: 原双 pass continue 堵死清仓)
+        if *alloc_pct <= 0.0 && pass == 1 {
             continue;
         }
         // ETF 目标市值也应用 leverage_mult(与 A 股段 scale 口径一致)。
@@ -632,7 +645,9 @@ pub async fn rebalance_account(
         let alloc_amount = current_nav
             * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO)
             * leverage_d;
-        if alloc_amount <= Decimal::ZERO {
+        // alloc=0 仅买入 pass 跳过(与上方 alloc<=0 检查同语义; 卖出 pass 放行
+        // 使 target_qty=0 → delta=-cur_qty 走全仓卖出——溢价退出 overlay 清仓路径)
+        if alloc_amount <= Decimal::ZERO && pass == 1 {
             continue;
         }
         // P2-C:EodClose 模式优先用预加载的 etf_eod_prices,Intraday 模式用 intraday_prices
