@@ -234,6 +234,67 @@ mod tests {
         let corr = pearson_corr(&rank_fs, &rank_rs).unwrap();
         assert!((corr - 1.0).abs() < 0.001);
     }
+
+    #[test]
+    fn test_pearson_length_mismatch_and_too_short_rejected() {
+        // 长度不等 → None
+        assert!(pearson_corr(&[1.0, 2.0, 3.0], &[1.0, 2.0]).is_none());
+        // 样本 <3 → None(两点相关无意义)
+        assert!(pearson_corr(&[1.0, 2.0], &[2.0, 1.0]).is_none());
+        assert!(pearson_corr(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn test_pearson_zero_variance_returns_none() {
+        // 一侧恒定(零方差) → 分母为 0 → None, 不产生 NaN
+        let x = vec![1.0, 2.0, 3.0, 4.0];
+        let flat = vec![5.0, 5.0, 5.0, 5.0];
+        assert!(pearson_corr(&x, &flat).is_none());
+        assert!(pearson_corr(&flat, &x).is_none());
+    }
+
+    #[test]
+    fn test_pearson_partial_negative_correlation() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let y = vec![6.0, 5.0, 5.0, 3.0, 2.0, 2.0];
+        let corr = pearson_corr(&x, &y).unwrap();
+        assert!(corr < -0.9 && corr > -1.0, "强负相关应在 (-1, -0.9), 实际 {}", corr);
+    }
+
+    #[test]
+    fn test_to_ranks_single_and_empty_degrade_to_neutral() {
+        // n<2 → 全部 0.5(中性秩, 避免除零)
+        assert_eq!(to_ranks(&[42.0]), vec![0.5]);
+        assert_eq!(to_ranks(&[]), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_to_ranks_maps_to_zero_one_with_ties_ordered() {
+        let ranks = to_ranks(&[30.0, 10.0, 20.0]);
+        // 最小值→0.0, 最大值→1.0, 中位→0.5
+        assert!((ranks[0] - 1.0).abs() < 1e-9);
+        assert!((ranks[1] - 0.0).abs() < 1e-9);
+        assert!((ranks[2] - 0.5).abs() < 1e-9);
+        // 重复值按 stable 排序获得相邻的不同秩(非平均秩——记录行为):
+        // [1.0,1.0,2.0] → 先出现的 1.0 得秩 0/2, 后出现的得 1/2, 2.0 得 2/2
+        let tied = to_ranks(&[1.0, 1.0, 2.0]);
+        assert!((tied[0] - 0.0).abs() < 1e-9);
+        assert!((tied[1] - 0.5).abs() < 1e-9);
+        assert!((tied[2] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_mean_and_std_edge_cases() {
+        // 空集 → 0(防除零约定)
+        assert_eq!(mean_of(&[]), 0.0);
+        assert_eq!(std_of(&[]), 0.0);
+        // 单元素 → std 0(无离散)
+        assert_eq!(mean_of(&[7.0]), 7.0);
+        assert_eq!(std_of(&[7.0]), 0.0);
+        // 样本标准差(n-1 分母): [1,2,3] 均值 2, 方差 = (1+0+1)/2 = 1
+        assert!((mean_of(&[1.0, 2.0, 3.0]) - 2.0).abs() < 1e-12);
+        assert!((std_of(&[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-12);
+    }
 }
 
 #[cfg(test)]
