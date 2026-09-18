@@ -43,10 +43,11 @@ pub async fn sync_eod_data(
     if let Err(e) = quant_data::sync::sync_suspension(db, tushare, &date_str).await {
         warn!("[scheduler] EOD 停牌数据同步失败: {}", e);
     }
-    let limit_ok = sync_limit_with_retry(db, tushare, &date_str).await;
-    if !limit_ok {
-        warn!("[scheduler] ⚠ 涨跌停数据同步失败 (已重试)");
-    }
+    // 2026-09-19 调序: 涨跌停同步(含 derive 方向补全)移到当日日线落库之后——
+    // 原先排在日线前, derive 重建依赖日线, 当日行缺失致方向补不出(limit_type
+    // 挂 NULL 至次日 09:00 T+1 自愈)。日线在先后 derive 当晚即补全方向。
+    // 停牌同步(suspension)不依赖日线, 保持事件优先段。日线同步有 30 分钟
+    // timeout 但超时仅 warn 继续, 涨跌停同步不受其成败影响(独立执行)。
 
     // ── 当日日线 + ETF日线（收盘后通常已可获取）──
     // P0 EOD 隔离:日线/ETF/指数/daily_basic/moneyflow/block_trade 均为"非关键路径",
@@ -78,6 +79,13 @@ pub async fn sync_eod_data(
             }
             Err(_) => warn!("[scheduler] ⚠ EOD 日线同步超时({}秒),跳过", EOD_STEP_TIMEOUT_SECS),
         }
+    }
+    // 涨跌停同步(Tushare 名单 + derive 方向补全, 2026-09-19 调序至日线后):
+    // derive 用当日 close/pre_close 推 U/D, 日线已落库时当晚补全方向。
+    // 日线超时/失败时照常执行(名单仍写入, 方向留 NULL 次日 09:00 T+1 补)。
+    let limit_ok = sync_limit_with_retry(db, tushare, &date_str).await;
+    if !limit_ok {
+        warn!("[scheduler] ⚠ 涨跌停数据同步失败 (已重试)");
     }
     let _ = quant_data::sync::sync_fund_daily(
         db,

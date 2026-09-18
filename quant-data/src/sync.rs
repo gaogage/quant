@@ -7816,17 +7816,12 @@ pub async fn derive_limit_list_from_daily_bars(
             .await
             .map_err(|e| format!("启动派生涨跌停事务失败: {}", e))?;
 
-        sqlx::query("DELETE FROM market_stock_limit WHERE trade_date >= $1 AND trade_date <= $2")
-            .bind(chunk_start)
-            .bind(chunk_end)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                format!(
-                    "清除派生涨跌停旧数据({}~{})失败: {}",
-                    chunk_start, chunk_end, e
-                )
-            })?;
+        // 2026-09-19 修复: 移除 DELETE 全范围再重建——INSERT 已带 ON CONFLICT DO
+        // UPDATE SET limit_type, 幂等由 upsert 保证, DELETE 有害无益:
+        // sync_limit_list 内嵌调用 derive 补方向时, 若当日日线尚未落库(EOD 中
+        // 涨跌停同步排在日线前), DELETE 整年(年份分块)会吞掉刚写入的 Tushare
+        // 行而重建出 0 条(0918 事故: 103 条自清零, 次日 09:00 T+1 才自愈)。
+        // derive 语义从此与 sync_limit_list 注释一致: 只补/更新方向, 不删原始行。
 
         let chunk_inserted = sqlx::query(
             "WITH open_calendar AS MATERIALIZED (
