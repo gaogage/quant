@@ -212,11 +212,19 @@ pub async fn sync_strategy_equity_curve(
                 .map_err(|e| format!("parse resp: {}", e))?;
             if let Some(tid) = result["data"]["task_id"].as_str() {
                 // UPDATE 共用该 combo 的所有 active 策略(composite 行 + a_share 子行)
+                // 只升不降(2026-09-19 修复): 本函数跑 10 天窗口刷新, 生成的短 task
+                // 覆盖远小于全历史曲线——无条件覆盖会使 equity_curve_task_id 从长
+                // 曲线(3093天)退化为短 task(10天), 重放门禁(要求区间覆盖)误红、
+                // run_daily_simulation 交易日序列随之截断(0918 重放只跑 9 天事故)。
+                // 消费方(门禁/重放/偏离基准/blueprint)全部要求长历史覆盖, 无一需要
+                // 短 task; 新 task 覆盖 >= 现值覆盖才替换。
                 for sid in &sharing {
                     // composite 行
                     let _ = sqlx::query(
-                        "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() \
-                         WHERE strategy_id = $2 AND status = 'active'",
+                        "UPDATE strategy_config sc SET equity_curve_task_id = $1, updated_at = NOW() \
+                         WHERE strategy_id = $2 AND status = 'active' \
+                           AND (SELECT COUNT(*) FROM backtest_equity_curve WHERE task_id = sc.equity_curve_task_id) \
+                             <= (SELECT COUNT(*) FROM backtest_equity_curve WHERE task_id = $1)",
                     )
                     .bind(tid)
                     .bind(sid)
@@ -224,8 +232,10 @@ pub async fn sync_strategy_equity_curve(
                     .await;
                     // a_share 子行(保持与 composite 行一致)
                     let _ = sqlx::query(
-                        "UPDATE strategy_config SET equity_curve_task_id = $1, updated_at = NOW() \
-                         WHERE parent_strategy_id = $2 AND asset_class = 'a_share' AND status = 'active'",
+                        "UPDATE strategy_config sc SET equity_curve_task_id = $1, updated_at = NOW() \
+                         WHERE parent_strategy_id = $2 AND asset_class = 'a_share' AND status = 'active' \
+                           AND (SELECT COUNT(*) FROM backtest_equity_curve WHERE task_id = sc.equity_curve_task_id) \
+                             <= (SELECT COUNT(*) FROM backtest_equity_curve WHERE task_id = $1)",
                     )
                     .bind(tid)
                     .bind(sid)
