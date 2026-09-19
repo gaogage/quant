@@ -181,27 +181,49 @@ impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
 
     /// 查询版本状态（调仓前 PIT 校验）。
     ///
-    /// 当前 data_version 表无显式 state 列，存在即视为 Active。
-    /// 后续可加 state 列支持 Deprecated。
+    /// state 列已落地（2026-09-19 P3 DDL）：active/deprecated 两态，
+    /// 存量行迁移时全量默认 active（与旧行为"存在即 Active"零差异）。
     async fn resolve_state(
         &self,
         version_id: &DataVersionId,
     ) -> Result<DataVersionState, DataVersionRegistryError> {
-        let row: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM data_version WHERE data_version_id = $1")
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT state FROM data_version WHERE data_version_id = $1")
                 .bind(version_id.as_str())
                 .fetch_optional(self.pool)
                 .await?;
-        row.map(|_| DataVersionState::Active)
-            .ok_or_else(|| DataVersionRegistryError::NotFound(version_id.as_str().to_string()))
+        match row {
+            Some((state,)) if state == "deprecated" => Ok(DataVersionState::Deprecated),
+            Some(_) => Ok(DataVersionState::Active),
+            None => Err(DataVersionRegistryError::NotFound(
+                version_id.as_str().to_string(),
+            )),
+        }
     }
 
     /// 标记版本废弃（数据发现问题后阻断新引用）。
     ///
-    /// 当前表无 state 列，此方法为预留骨架（Step 5 加列后实现）。
-    async fn deprecate(&self, _version_id: &DataVersionId) -> Result<(), DataVersionRegistryError> {
-        // TODO(R11 后续): data_version 表加 state 列后实现 UPDATE。
-        // 当前 noop，保留 trait 契约完整性。
+    /// 幂等：重复 deprecate 同一版本不报错；未注册的 dv_id 报 NotFound。
+    async fn deprecate(&self, version_id: &DataVersionId) -> Result<(), DataVersionRegistryError> {
+        let result = sqlx::query(
+            "UPDATE data_version SET state = 'deprecated'
+             WHERE data_version_id = $1 AND state = 'active'",
+        )
+        .bind(version_id.as_str())
+        .execute(self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            let exists: Option<(i64,)> =
+                sqlx::query_as("SELECT 1 FROM data_version WHERE data_version_id = $1")
+                    .bind(version_id.as_str())
+                    .fetch_optional(self.pool)
+                    .await?;
+            if exists.is_none() {
+                return Err(DataVersionRegistryError::NotFound(
+                    version_id.as_str().to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -209,9 +231,9 @@ impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
 impl PgDataVersionRegistry<'_> {
     /// 批量校验 dv_id 注册状态（Step 4a：VerifiedBar 构造前置校验的单次查询）。
     ///
-    /// 返回已注册的 dv_id 集合；未出现在集合中的 dv_id 即未注册脏数据。
-    /// 批量语义对齐 quant-backtest types.rs 注释（`WHERE data_version_id = ANY($1)`，
-    /// 避免逐条 EXISTS 的 N+1）。data_version 加 state 列后此处同步过滤非 Active。
+    /// 返回**可引用**（active）的 dv_id 集合；deprecated 或未注册的 dv_id
+    /// 不在集合中。批量语义对齐 quant-backtest types.rs 注释
+    /// （`WHERE data_version_id = ANY($1)`，避免逐条 EXISTS 的 N+1）。
     pub async fn verify_registered(
         &self,
         dv_ids: &[String],
@@ -220,7 +242,8 @@ impl PgDataVersionRegistry<'_> {
             return Ok(std::collections::HashSet::new());
         }
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT data_version_id FROM data_version WHERE data_version_id = ANY($1)",
+            "SELECT data_version_id FROM data_version
+             WHERE data_version_id = ANY($1) AND state = 'active'",
         )
         .bind(dv_ids)
         .fetch_all(self.pool)
