@@ -14,7 +14,7 @@
 use chrono::NaiveDate;
 use quant_common::identifiers::{DataVersionId, Symbol};
 use rust_decimal::Decimal;
-use sqlx::PgPool;
+use std::collections::HashSet;
 
 /// DB 加载的原始行情 bar，尚未做 PIT 校验。
 ///
@@ -58,28 +58,21 @@ pub enum VerifiedBarError {
     /// `data_version_id` 在 `data_version` 表中不存在（未注册的脏数据）。
     #[error("data version not registered: {0}")]
     NotRegistered(String),
-    /// 数据库查询错误。
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
 }
 
 impl RawBar {
-    /// 唯一公开出口：把原始 bar 升级为 PIT 校验通过的 bar。
+    /// 唯一公开出口：把原始 bar 升级为 PIT 校验通过的 bar（Step 4a 纯函数化）。
     ///
-    /// 校验逻辑：查 `data_version` 表确认 `data_version_id` 存在（方案 C，不依赖
-    /// 完整 `PgDataVersionRegistry`）。`data_version` 表无 state 列，只校验存在性；
-    /// 完整的状态校验（Active/Deprecated）留给后续 Step 4a 补做。
-    ///
-    /// 注意：此方法为 async（查 DB）。批量校验场景应避免逐条调用，
-    /// 可先收集 dv_id 集合一次性查 `WHERE data_version_id = ANY($1)`。
-    pub async fn try_from_raw(self, db: &PgPool) -> Result<VerifiedBar, VerifiedBarError> {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM data_version WHERE data_version_id = $1)",
-        )
-        .bind(&self.data_version_id)
-        .fetch_one(db)
-        .await?;
-        if !exists {
+    /// 校验依据由调用方注入：先用 quant-data 的
+    /// `PgDataVersionRegistry::verify_registered` 批量拉取已注册 dv_id 集合
+    /// （单次 `WHERE data_version_id = ANY($1)`，无 N+1），再把集合喂给本方法——
+    /// 领域类型零 DB 依赖。data_version 加 state 列后，
+    /// verify_registered 侧同步过滤非 Active（本方法签名不变）。
+    pub fn try_from_raw(
+        self,
+        registered: &HashSet<String>,
+    ) -> Result<VerifiedBar, VerifiedBarError> {
+        if !registered.contains(&self.data_version_id) {
             return Err(VerifiedBarError::NotRegistered(
                 self.data_version_id.clone(),
             ));
@@ -268,7 +261,15 @@ mod tests {
             Decimal::from(1_000_000),
             &real_dv_id,
         );
-        let verified = raw_ok.try_from_raw(&db).await.expect("已注册 dv_id 应通过");
+        // Step 4a：经 registry 批量拉取已注册集合（单次 ANY 查询），领域纯函数校验
+        let registry = quant_data::versioning::PgDataVersionRegistry::new(&db);
+        let registered = registry
+            .verify_registered(&[real_dv_id.clone(), "dv-nonexistent-9999".to_string()])
+            .await
+            .expect("批量注册校验应成功");
+        let verified = raw_ok
+            .try_from_raw(&registered)
+            .expect("已注册 dv_id 应通过");
         assert_eq!(verified.data_version_id.as_str(), real_dv_id);
 
         // 未注册的 dv_id 应被拒
@@ -282,7 +283,7 @@ mod tests {
             Decimal::from(1_000_000),
             "dv-nonexistent-9999",
         );
-        let err = raw_bad.try_from_raw(&db).await.unwrap_err();
+        let err = raw_bad.try_from_raw(&registered).unwrap_err();
         assert!(matches!(err, VerifiedBarError::NotRegistered(_)));
     }
 }

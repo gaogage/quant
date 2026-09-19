@@ -205,3 +205,26 @@ impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
         Ok(())
     }
 }
+
+impl PgDataVersionRegistry<'_> {
+    /// 批量校验 dv_id 注册状态（Step 4a：VerifiedBar 构造前置校验的单次查询）。
+    ///
+    /// 返回已注册的 dv_id 集合；未出现在集合中的 dv_id 即未注册脏数据。
+    /// 批量语义对齐 quant-backtest types.rs 注释（`WHERE data_version_id = ANY($1)`，
+    /// 避免逐条 EXISTS 的 N+1）。data_version 加 state 列后此处同步过滤非 Active。
+    pub async fn verify_registered(
+        &self,
+        dv_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>, DataVersionRegistryError> {
+        if dv_ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT data_version_id FROM data_version WHERE data_version_id = ANY($1)",
+        )
+        .bind(dv_ids)
+        .fetch_all(self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+}
