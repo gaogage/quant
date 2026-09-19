@@ -1072,3 +1072,35 @@ pub(crate) fn merge_factor_signal_feature_prewarm_groups(
         )
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 私有辅助：从打分数据收集股票池（排序 + 去重），供预热候选归集复用。
+    #[test]
+    fn symbols_from_factor_scores_deduplicates_and_sorts() {
+        let day1 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let scores: FactorScoresByDate = HashMap::from([
+            (
+                day1,
+                vec![
+                    ("CCC".to_string(), 1.0),
+                    ("AAA".to_string(), 2.0),
+                    // 同日重复打分（不同因子行）只贡献一次股票
+                    ("CCC".to_string(), 3.0),
+                ],
+            ),
+            (day2, vec![("BBB".to_string(), 1.5)]),
+        ]);
+
+        assert_eq!(
+            symbols_from_factor_scores(&scores),
+            vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()]
+        );
+
+        // 空打分数据 → 空股票池（候选被上游判定为 skipped_empty_specs）
+        assert!(symbols_from_factor_scores(&HashMap::new()).is_empty());
+    }
+}

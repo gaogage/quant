@@ -305,4 +305,181 @@ mod tests {
         assert!(o1.abs() <= 6.0, "outlier1 {} > 6σ", o1);
         assert!(o2.abs() <= 6.0, "outlier2 {} > 6σ", o2);
     }
+
+    // ─── 分支与边界补充 ─────────────────────────────────────────
+
+    fn fv(symbol: &str, date: NaiveDate, value: f64) -> FactorValue {
+        FactorValue {
+            symbol: symbol.to_string(),
+            date,
+            value,
+            available_at: None,
+        }
+    }
+
+    fn multi_date_output(values: Vec<FactorValue>) -> FactorOutput {
+        FactorOutput {
+            name: "multi".to_string(),
+            values,
+            metadata: FactorMetadata {
+                factor_name: "multi".to_string(),
+                category: FactorCategory::PriceVolume,
+                version: "1.0.0".to_string(),
+                params: serde_json::json!({}),
+                computed_at: chrono::Utc::now(),
+                symbol_count: 0,
+                date_count: 0,
+                coverage_ratio: 0.0,
+                mean: 0.0,
+                std: 0.0,
+                min: 0.0,
+                max: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn test_zscore_zero_std_cross_section_left_unchanged() {
+        // 同日 3 个等值 → std=0 → 不做除法，值保持原样（防除零）
+        let output = make_output("flat", vec![(5.0, "A"), (5.0, "B"), (5.0, "C")]);
+        let result = standardize(&output, StandardizeMethod::ZScore);
+        for v in &result.values {
+            assert!(
+                (v.value - 5.0).abs() < 1e-12,
+                "零方差截面应保持原值，实际 {}",
+                v.value
+            );
+        }
+        assert_eq!(result.name, "flat_std", "标准化后因子名应带 _std 后缀");
+    }
+
+    #[test]
+    fn test_standardize_skips_dates_with_fewer_than_three_symbols() {
+        // d1 有 3 个符号（正常 z-score）；d2 仅 2 个（不足 3，跳过保持原值）
+        let d1 = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
+        let output = multi_date_output(vec![
+            fv("A", d1, 1.0),
+            fv("B", d1, 2.0),
+            fv("C", d1, 3.0),
+            fv("D", d2, 7.0),
+            fv("E", d2, 9.0),
+        ]);
+        let result = standardize(&output, StandardizeMethod::ZScore);
+
+        let d1_vals: Vec<f64> = result
+            .values
+            .iter()
+            .filter(|v| v.date == d1)
+            .map(|v| v.value)
+            .collect();
+        let d1_mean = d1_vals.iter().sum::<f64>() / 3.0;
+        assert!(
+            d1_mean.abs() < 1e-9,
+            "3 符号截面应被标准化（均值≈0），实际 {}",
+            d1_mean
+        );
+        for v in result.values.iter().filter(|v| v.date == d2) {
+            assert!(
+                (v.value - 7.0).abs() < 1e-12 || (v.value - 9.0).abs() < 1e-12,
+                "不足 3 符号的日期应保持原值，实际 {}",
+                v.value
+            );
+        }
+    }
+
+    #[test]
+    fn test_standardize_excludes_nonfinite_values_from_groups() {
+        // NaN 值不参与截面统计（不拉偏均值/方差），且自身保持 NaN
+        let output = make_output(
+            "mixed",
+            vec![(1.0, "A"), (2.0, "B"), (3.0, "C"), (f64::NAN, "N")],
+        );
+        let result = standardize(&output, StandardizeMethod::ZScore);
+
+        let nan_row = result.values.iter().find(|v| v.symbol == "N").unwrap();
+        assert!(nan_row.value.is_nan(), "NaN 输入应保持 NaN");
+        // 有效 3 值 [1,2,3] 标准化后：z(2)=0
+        let b = result.values.iter().find(|v| v.symbol == "B").unwrap();
+        assert!(
+            b.value.abs() < 1e-9,
+            "B 的 z 值应为 0（等于有效值均值），实际 {}",
+            b.value
+        );
+        // metadata 的 coverage_ratio 应只计有效值
+        assert!(
+            (result.metadata.coverage_ratio - 0.75).abs() < 1e-12,
+            "覆盖率 3/4，实际 {}",
+            result.metadata.coverage_ratio
+        );
+    }
+
+    #[test]
+    fn test_winsorized_zero_std_breaks_early_without_change() {
+        // 3 个等值 → 首轮 s<=0 即 break，cs=0 不做 z-score，值保持原样
+        let output = make_output("wflat", vec![(4.2, "A"), (4.2, "B"), (4.2, "C")]);
+        let result = standardize(&output, StandardizeMethod::Winsorized(2.0));
+        for v in &result.values {
+            assert!(
+                (v.value - 4.2).abs() < 1e-12,
+                "零方差截面 winsorize 应保持原值，实际 {}",
+                v.value
+            );
+        }
+    }
+
+    #[test]
+    fn test_mean_std_single_element_returns_value_with_zero_std() {
+        // 单元素截面：均值为自身，std 记 0（无离散）
+        let (m, s) = mean_std(&[4.2]);
+        assert!((m - 4.2).abs() < 1e-12);
+        assert_eq!(s, 0.0);
+    }
+
+    #[test]
+    fn test_build_metadata_inner_empty_values_returns_nan_metadata() {
+        let meta = helpers::build_metadata_inner(
+            &[],
+            "none",
+            FactorCategory::Sentiment,
+            "1.0.0",
+            serde_json::json!({}),
+        );
+        assert_eq!(meta.factor_name, "none");
+        assert_eq!(meta.symbol_count, 0);
+        assert_eq!(meta.date_count, 0);
+        assert_eq!(meta.coverage_ratio, 0.0);
+        assert!(meta.mean.is_nan(), "空序列统计量应为 NaN");
+        assert!(meta.std.is_nan());
+        assert!(meta.min.is_nan());
+        assert!(meta.max.is_nan());
+    }
+
+    #[test]
+    fn test_build_metadata_inner_stats_exclude_nonfinite() {
+        let d = NaiveDate::from_ymd_opt(2025, 6, 1).unwrap();
+        let values = vec![
+            fv("A", d, 1.0),
+            fv("B", d, f64::NAN),
+            fv("C", d, 2.0),
+            fv("A", NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(), 4.0),
+        ];
+        let meta = helpers::build_metadata_inner(
+            &values,
+            "stats",
+            FactorCategory::PriceVolume,
+            "1.0.0",
+            serde_json::json!({}),
+        );
+        assert_eq!(meta.symbol_count, 3, "A/B/C 三个标的");
+        assert_eq!(meta.date_count, 2, "两个交易日");
+        assert!(
+            (meta.coverage_ratio - 0.75).abs() < 1e-12,
+            "有效值 3/4，实际 {}",
+            meta.coverage_ratio
+        );
+        assert!((meta.min - 1.0).abs() < 1e-12, "min 只计有效值");
+        assert!((meta.max - 4.0).abs() < 1e-12);
+        assert!((meta.mean - 7.0 / 3.0).abs() < 1e-12);
+    }
 }

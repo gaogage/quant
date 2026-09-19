@@ -1611,6 +1611,11 @@ impl BacktestEngine {
                 if let Some(queue) = buy_queue.get_mut(&trade.symbol) {
                     while !remaining.is_zero() && !queue.is_empty() {
                         let (bought_qty, bought_cost, bought_comm) = queue[0];
+                        // 本段开始前的剩余卖出股数：sell 侧金额分摊须与 buy 侧对称
+                        // （剩余金额 × matched/剩余股数）。此前误用总 trade.quantity 做
+                        // 分母，跨多 lot 卖出从第二段起 sell_gross 已被递减、再按总量
+                        // 折减 = 双重折减，P&L 系统性偏低（win_rate/profit_factor 失真）。
+                        let remaining_before = remaining;
                         let matched_qty = if remaining >= bought_qty {
                             bought_qty
                         } else {
@@ -1627,20 +1632,20 @@ impl BacktestEngine {
                         } else {
                             bought_comm * matched_qty / bought_qty
                         };
-                        let sell_gross_alloc = if trade.quantity.is_zero() {
+                        let sell_gross_alloc = if remaining_before.is_zero() {
                             Decimal::zero()
                         } else {
-                            sell_gross * matched_qty / trade.quantity
+                            sell_gross * matched_qty / remaining_before
                         };
-                        let sell_comm_alloc = if trade.quantity.is_zero() {
+                        let sell_comm_alloc = if remaining_before.is_zero() {
                             Decimal::zero()
                         } else {
-                            sell_comm * matched_qty / trade.quantity
+                            sell_comm * matched_qty / remaining_before
                         };
-                        let sell_tax_alloc = if trade.quantity.is_zero() {
+                        let sell_tax_alloc = if remaining_before.is_zero() {
                             Decimal::zero()
                         } else {
-                            sell_tax * matched_qty / trade.quantity
+                            sell_tax * matched_qty / remaining_before
                         };
                         // P&L = sell net - buy total
                         let pnl = sell_gross_alloc
@@ -2761,5 +2766,541 @@ mod tests {
             .violations
             .iter()
             .any(|v| v.constraint_name == "participation_rate"));
+    }
+
+    // ─── ExecutionCarryPolicy 解析(纯函数) ─────────────────────
+
+    #[test]
+    fn execution_carry_policy_parse_aliases_and_unknown() {
+        // 空串/expire 族别名 → Expire（TTL 到期丢弃残余目标）
+        for s in ["", "expire", "expire_v1", "drop", "drop_on_ttl"] {
+            assert_eq!(
+                ExecutionCarryPolicy::parse(s).unwrap(),
+                ExecutionCarryPolicy::Expire,
+                "{} 应解析为 Expire",
+                s
+            );
+        }
+        // roll forward 族别名 → 到期后延续未完成目标
+        for s in [
+            "roll_forward_v1",
+            "roll-forward-v1",
+            "rolling_carry_v1",
+            "continue_v1",
+        ] {
+            assert_eq!(
+                ExecutionCarryPolicy::parse(s).unwrap(),
+                ExecutionCarryPolicy::RollForwardV1,
+                "{} 应解析为 RollForwardV1",
+                s
+            );
+        }
+        // 前后空白应被 trim 掉
+        assert_eq!(
+            ExecutionCarryPolicy::parse(" expire ").unwrap(),
+            ExecutionCarryPolicy::Expire
+        );
+        assert_eq!(
+            ExecutionCarryPolicy::parse(" roll_forward_v1 ").unwrap(),
+            ExecutionCarryPolicy::RollForwardV1
+        );
+        // 未知值 → Err（防配置静默降级），且大小写敏感
+        assert!(ExecutionCarryPolicy::parse("expire_v2").is_err());
+        assert!(ExecutionCarryPolicy::parse("ROLL_FORWARD_V1").is_err());
+    }
+
+    // ─── adj_factor 复权跳变黑名单 ─────────────────────────────
+
+    #[test]
+    fn adj_factor_price_jump_blacklists_symbol_from_valuation() {
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+
+        // day1: 10 元建仓，作为后续跳变检测的 warm prev close 基准
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+        let equity_after_buy = e.portfolio.total_value();
+
+        // day2: 非停牌期价格 +150%（>50% 阈值）→ 判定复权数据异常，加入黑名单
+        e.process_day(&market("2024-01-03", ("A", "25"), ("A", "10")), None);
+
+        assert!(
+            e.adj_blacklisted.contains("A"),
+            "跳变超 50% 的标的应进入 adj_factor 黑名单"
+        );
+        // 黑名单标的从 mark_to_market 剔除：净值维持买入日水平，不被异常价污染
+        assert_eq!(
+            e.equity_curve.last().unwrap().1,
+            equity_after_buy,
+            "被拉黑标的的异常天价不应影响组合估值"
+        );
+    }
+
+    // ─── 持仓级风控: take_profit / time_stop ─────────────────────
+
+    #[test]
+    fn position_take_profit_sells_without_rebalance_signal() {
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                take_profit_pct: Some(d("0.10")),
+                ..Default::default()
+            },
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+        // day2: +16%（开盘 11.6 >= 成本 10 * 1.10）触发止盈卖出（无调仓信号）
+        e.process_day(&market("2024-01-03", ("A", "11.6"), ("A", "10")), None);
+        let o = e.finalize();
+
+        assert!(o.trades.iter().any(|trade| {
+            trade.side == crate::portfolio::TradeSide::Sell
+                && trade.symbol == "A"
+                && trade.event_reason.as_deref() == Some("risk_take_profit")
+        }));
+        // 止盈应清空全部持仓：买入总量与卖出总量对平
+        let bought: Decimal = o
+            .trades
+            .iter()
+            .filter(|t| matches!(t.side, crate::portfolio::TradeSide::Buy))
+            .map(|t| t.quantity)
+            .sum();
+        let sold: Decimal = o
+            .trades
+            .iter()
+            .filter(|t| matches!(t.side, crate::portfolio::TradeSide::Sell))
+            .map(|t| t.quantity)
+            .sum();
+        assert_eq!(bought, sold, "止盈卖出应清空全部持仓");
+    }
+
+    #[test]
+    fn position_time_stop_exits_after_holding_threshold() {
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                time_stop_days: Some(2),
+                ..Default::default()
+            },
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+        // 持有 1 个自然日：未达阈值不触发
+        e.process_day(&market("2024-01-03", ("A", "10.2"), ("A", "10")), None);
+        assert!(
+            e.portfolio.holdings.contains_key("A"),
+            "持有 1 天未到 time_stop 阈值不应卖出"
+        );
+
+        // 持有满 2 个自然日：触发时间止损
+        e.process_day(&market("2024-01-04", ("A", "10.1"), ("A", "10.2")), None);
+        let o = e.finalize();
+
+        assert!(o.trades.iter().any(|trade| {
+            trade.side == crate::portfolio::TradeSide::Sell
+                && trade.symbol == "A"
+                && trade.event_reason.as_deref() == Some("risk_time_stop")
+        }));
+    }
+
+    #[test]
+    fn position_risk_reentry_cooldown_zero_days_allows_immediate_reentry() {
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                stop_loss_pct: Some(d("0.05")),
+                reentry_cooldown_days: Some(0),
+                ..Default::default()
+            },
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal_dated("2024-01-02", "A", "0.50")),
+        );
+        // day2: 触发止损，但 cooldown=0 不建立冷却映射 → 同日调仓信号可立即回补
+        e.process_day(
+            &market("2024-01-03", ("A", "9.4"), ("A", "10")),
+            Some(&signal_dated("2024-01-03", "A", "0.50")),
+        );
+        let o = e.finalize();
+
+        assert!(o
+            .trades
+            .iter()
+            .any(|trade| { trade.event_reason.as_deref() == Some("risk_stop_loss") }));
+        assert!(
+            o.trades.iter().any(|trade| {
+                trade.side == crate::portfolio::TradeSide::Buy
+                    && trade.trade_date == NaiveDate::from_ymd_opt(2024, 1, 3).unwrap()
+            }),
+            "cooldown=0 时止损当日即可回补"
+        );
+        assert!(o
+            .violations
+            .iter()
+            .all(|v| v.constraint_name != "position_risk_reentry_cooldown"));
+    }
+
+    // ─── 流动性/现金约束边界 ──────────────────────────────────
+
+    #[test]
+    fn participation_cap_without_liquidity_amount_warns_and_allows_full_order() {
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            max_participation_rate: Some(d("0.10")),
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        let mut m = market("2024-01-02", ("A", "10"), ("A", "10"));
+        // 成交额字段缺失：无法核算参与率上限
+        m.amount.remove("A");
+
+        e.process_day(&m, Some(&signal("A", "0.95")));
+        let o = e.finalize();
+
+        assert_eq!(
+            o.trades.len(),
+            1,
+            "缺 liquidity amount 时应降级为全量下单而非拒单"
+        );
+        // 95% 目标权重按 100 万本金全额成交（未被参与率截断）
+        assert_eq!(o.trades[0].quantity, d("95000"));
+        assert!(o
+            .violations
+            .iter()
+            .any(|v| v.constraint_name == "liquidity_amount_missing" && v.severity == "warning"));
+    }
+
+    #[test]
+    fn insufficient_cash_records_violation_and_skips_buy() {
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+
+        // day1: 半仓买入 A，锁定持仓市值
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+        // 模拟大额赎回：现金仅剩 1000 元
+        e.portfolio.cash = d("1000");
+
+        // day2: A 维持 0.99 + 新买 B 0.45 —— B 目标金额约 22.5 万远超现金
+        let mut m = market("2024-01-03", ("B", "10"), ("B", "10"));
+        m.open.insert("A".into(), d("10"));
+        m.close.insert("A".into(), d("10"));
+        m.pre_close.insert("A".into(), d("10"));
+        m.amount.insert("A".into(), d("100000000"));
+        m.up_limit.insert("A".into(), d("11"));
+        m.down_limit.insert("A".into(), d("9"));
+        let sig = StrategySignal {
+            date: NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+            target_weights: HashMap::from([("A".into(), d("0.99")), ("B".into(), d("0.45"))]),
+        };
+        e.process_day(&m, Some(&sig));
+        let o = e.finalize();
+
+        assert_eq!(
+            o.trades
+                .iter()
+                .filter(|t| t.side == crate::portfolio::TradeSide::Buy && t.symbol == "B")
+                .count(),
+            0,
+            "现金不足的买单应被跳过"
+        );
+        assert!(o
+            .violations
+            .iter()
+            .any(|v| v.constraint_name == "cash_insufficient" && v.severity == "hard"));
+    }
+
+    // ─── 基准曲线边界 ────────────────────────────────────────
+
+    #[test]
+    fn benchmark_curve_carries_previous_value_when_pre_close_is_zero() {
+        let mut e = eng();
+        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "9.9")), None);
+
+        // day2: 基准 pre_close 缺失（0）→ 无法计算涨跌，曲线沿用前值
+        let mut m = market("2024-01-03", ("A", "10"), ("A", "10"));
+        m.benchmark_close = d("1.2");
+        m.benchmark_pre_close = Decimal::ZERO;
+        e.process_day(&m, None);
+
+        let o = e.finalize();
+        assert_eq!(o.benchmark_curve.len(), 2);
+        assert_eq!(
+            o.benchmark_curve[1].1, o.benchmark_curve[0].1,
+            "基准前收盘缺失时曲线应保持前值而非除零"
+        );
+    }
+
+    // ─── 组合级风控边界条件 ──────────────────────────────────
+
+    #[test]
+    fn portfolio_volatility_control_returns_max_exposure_for_flat_equity() {
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_volatility_target_pct: Some(d("0.15")),
+                portfolio_volatility_lookback_days: Some(3),
+                portfolio_volatility_max_exposure: Some(d("0.90")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        for (day, value) in [
+            ("2024-01-01", "100"),
+            ("2024-01-02", "100"),
+            ("2024-01-03", "100"),
+        ] {
+            e.equity_curve.push((
+                NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap(),
+                d(value),
+            ));
+        }
+
+        // 已实现波动率为 0（净值纹丝不动）：目标波动率无从缩放，直接放开到上限
+        assert_eq!(
+            e.portfolio_volatility_exposure_scale(d("100")),
+            d("0.90"),
+            "零波动应返回 max_exposure 而非放大杠杆"
+        );
+    }
+
+    #[test]
+    fn portfolio_sharpe_control_uses_mean_sign_for_zero_variance_returns() {
+        let base = RiskControlConfig {
+            portfolio_sharpe_reduce_start: Some(d("0.60")),
+            portfolio_sharpe_reduce_full: Some(d("0.00")),
+            portfolio_sharpe_lookback_days: Some(3),
+            portfolio_sharpe_min_exposure: Some(d("0.40")),
+            ..Default::default()
+        };
+
+        // 恒定 +1% 收益（零方差 + 正均值）→ Sharpe = +∞ → 维持满仓
+        let up_config = BacktestConfig {
+            risk_control: base.clone(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(up_config);
+        for (day, value) in [
+            ("2024-01-01", "100"),
+            ("2024-01-02", "101"),
+            ("2024-01-03", "102.01"),
+        ] {
+            e.equity_curve.push((
+                NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap(),
+                d(value),
+            ));
+        }
+        assert_eq!(
+            e.portfolio_sharpe_exposure_scale(d("103.0301")),
+            Decimal::ONE,
+            "零方差正收益视为无限 Sharpe，不降杠杆"
+        );
+
+        // 恒定 -1% 收益（零方差 + 负均值）→ Sharpe = -∞ → 压到下限
+        let down_config = BacktestConfig {
+            risk_control: base,
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(down_config);
+        for (day, value) in [
+            ("2024-01-01", "100"),
+            ("2024-01-02", "99"),
+            ("2024-01-03", "98.01"),
+        ] {
+            e.equity_curve.push((
+                NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap(),
+                d(value),
+            ));
+        }
+        assert_eq!(
+            e.portfolio_sharpe_exposure_scale(d("97.0299")),
+            d("0.40"),
+            "零方差负收益视为负无限 Sharpe，压到 min_exposure"
+        );
+    }
+
+    #[test]
+    fn portfolio_sharpe_control_rejects_inverted_thresholds() {
+        // full(0.60) >= start(0.00) 属无效配置：直接放行 100%，不做缩放
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_sharpe_reduce_start: Some(d("0.00")),
+                portfolio_sharpe_reduce_full: Some(d("0.60")),
+                portfolio_sharpe_lookback_days: Some(3),
+                portfolio_sharpe_min_exposure: Some(d("0.40")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        for (day, value) in [
+            ("2024-01-01", "100"),
+            ("2024-01-02", "99"),
+            ("2024-01-03", "98"),
+        ] {
+            e.equity_curve.push((
+                NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap(),
+                d(value),
+            ));
+        }
+
+        assert_eq!(
+            e.portfolio_sharpe_exposure_scale(d("97")),
+            Decimal::ONE,
+            "阈值倒挂时不应触发任何缩放"
+        );
+    }
+
+    #[test]
+    fn portfolio_drawdown_control_keeps_full_exposure_on_invalid_floor_or_window() {
+        // 下限抬到 100%：控制形同虚设，任何回撤都保持满仓
+        let floored = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.05")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.15")),
+                portfolio_drawdown_min_exposure: Some(Decimal::ONE),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let e = BacktestEngine::new(floored);
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("80"), d("100")),
+            Decimal::ONE,
+            "min_exposure >= 1 时应直接放行"
+        );
+
+        // full <= start 同属无效窗口：直接放行
+        let inverted = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.15")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.05")),
+                portfolio_drawdown_min_exposure: Some(d("0.40")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let e = BacktestEngine::new(inverted);
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("80"), d("100")),
+            Decimal::ONE,
+            "full <= start 时应直接放行"
+        );
+    }
+
+    #[test]
+    fn portfolio_drawdown_recovery_waits_until_recovery_start_threshold() {
+        // 回撤修复未过 start 阈值（recovery = 0.1 <= 0.30）：不提前恢复暴露
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.05")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.15")),
+                portfolio_drawdown_min_exposure: Some(d("0.40")),
+                portfolio_drawdown_recovery_start_pct: Some(d("0.30")),
+                portfolio_drawdown_recovery_full_pct: Some(d("0.70")),
+                portfolio_drawdown_recovery_boost: Some(Decimal::ONE),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("80")));
+
+        // 回撤 18% 已越过 reduce_full(15%) → 基础 scale 压到 0.40；
+        // 自谷底仅反弹 10%（recovery 0.1 < start 0.3）→ 无恢复加成
+        assert_eq!(
+            e.portfolio_drawdown_exposure_scale(d("82"), d("100")),
+            d("0.40")
+        );
+    }
+
+    #[test]
+    fn portfolio_recent_returns_skips_zero_equity_points() {
+        let mut e = eng();
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), Decimal::ZERO));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("110")));
+
+        // 首个净值点为 0：其收益率(除零)被跳过，只保留有效区间的收益
+        let returns = e.portfolio_recent_returns(d("121"), 3);
+        assert_eq!(returns, vec![d("0.10"), d("0.1")]);
+    }
+
+    // ─── finalize 指标: FIFO 分批匹配 ─────────────────────────
+
+    #[test]
+    fn finalize_win_rate_uses_fifo_lots_across_partial_sells() {
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+
+        // 两批不同成本建仓：50,000 股 @10 + 32,500 股 @12
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+        e.process_day(
+            &market("2024-01-03", ("A", "12"), ("A", "12")),
+            Some(&signal("A", "0.90")),
+        );
+        // day3: 目标降回 0.50 → 部分卖出 37,019 股 @13（只吃掉第一批 lot 的一部分）
+        e.process_day(
+            &market("2024-01-04", ("A", "13"), ("A", "13")),
+            Some(&signal("A", "0.50")),
+        );
+        // day4: 清仓卖出剩余两段 lot（第一批残余 + 第二批全部）
+        e.process_day(
+            &market("2024-01-05", ("A", "13"), ("A", "13")),
+            Some(&signal_empty()),
+        );
+        let o = e.finalize();
+
+        // 三段 FIFO 匹配（37,019 + 12,981 + 32,500）全部盈利（13 > 10/12）
+        assert_eq!(
+            o.metrics.win_rate_pct,
+            Decimal::ONE,
+            "三段 FIFO 匹配应全部计入 win_rate"
+        );
+        // 无亏损交易：profit_factor 走 999 哨兵值
+        assert_eq!(o.metrics.profit_factor, Decimal::new(999, 0));
     }
 }

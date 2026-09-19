@@ -215,6 +215,69 @@ mod tests {
         assert_ne!(bar, other_dv);
     }
 
+    /// `try_from_raw` 的纯函数分支（Step 4a 后注册集合由调用方注入，
+    /// 无需连库即可覆盖 Ok/Err 两条路径；DB 版本另见下方 ignored 测试）。
+    #[test]
+    fn raw_bar_try_from_raw_upgrades_registered_bar_without_db() {
+        let raw = RawBar::new(
+            "000001",
+            NaiveDate::from_ymd_opt(2026, 7, 24).unwrap(),
+            Decimal::new(12, 1),
+            Decimal::new(125, 1),
+            Decimal::new(118, 1),
+            Decimal::new(122, 1),
+            Decimal::from(1_000_000),
+            "dv_20260724_v1",
+        );
+        let registered: HashSet<String> = ["dv_20260724_v1".to_string(), "dv_other".to_string()]
+            .into_iter()
+            .collect();
+
+        let verified = raw
+            .try_from_raw(&registered)
+            .expect("已注册 dv_id 应通过 PIT 校验");
+
+        assert_eq!(verified.symbol.as_str(), "000001");
+        assert_eq!(
+            verified.trade_date,
+            NaiveDate::from_ymd_opt(2026, 7, 24).unwrap()
+        );
+        assert_eq!(verified.open, Decimal::new(12, 1));
+        assert_eq!(verified.close, Decimal::new(122, 1));
+        assert_eq!(verified.volume, Decimal::from(1_000_000));
+        // 裸 String 升级为强类型 DataVersionId，保留原 id 文本
+        assert_eq!(verified.data_version_id.as_str(), "dv_20260724_v1");
+    }
+
+    #[test]
+    fn raw_bar_try_from_raw_rejects_unregistered_bar_with_clear_error() {
+        let raw = RawBar::new(
+            "000001",
+            NaiveDate::from_ymd_opt(2026, 7, 24).unwrap(),
+            Decimal::new(12, 1),
+            Decimal::new(125, 1),
+            Decimal::new(118, 1),
+            Decimal::new(122, 1),
+            Decimal::from(1_000_000),
+            "dv-dirty-9999",
+        );
+        let registered: HashSet<String> = ["dv_registered".to_string()].into_iter().collect();
+
+        let err = raw
+            .try_from_raw(&registered)
+            .expect_err("未注册 dv_id 必须被类型门禁拒绝");
+
+        // 错误携带脏 dv_id 且 Display 文案可供日志定位
+        assert!(matches!(
+            &err,
+            VerifiedBarError::NotRegistered(dv_id) if dv_id == "dv-dirty-9999"
+        ));
+        assert_eq!(
+            err.to_string(),
+            "data version not registered: dv-dirty-9999"
+        );
+    }
+
     #[test]
     fn strategy_state_markers_are_distinct_types() {
         // 状态标记类型可实例化且 Debug（类型门禁的基石；非法转换由缺失 From 实现

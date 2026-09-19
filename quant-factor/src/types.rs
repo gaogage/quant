@@ -281,4 +281,40 @@ mod pit_tests {
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0].symbol, "000001");
     }
+
+    #[test]
+    fn raw_series_as_slice_and_into_inner_roundtrip() {
+        // RawSeries 的只读视图与转移出口应保序保量
+        let raw = RawSeries::new(vec![10, 20, 30]);
+        assert_eq!(raw.as_slice(), &[10, 20, 30]);
+        let inner = raw.into_inner();
+        assert_eq!(inner, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pit_series_as_slice_len_and_into_inner_roundtrip() {
+        let pit = RawSeries::new(vec!["a", "b"]).from_pit_with_available_at(None);
+        assert_eq!(pit.as_slice(), &["a", "b"]);
+        assert_eq!(pit.len(), 2);
+        assert!(!pit.is_empty());
+        let inner = pit.into_inner();
+        assert_eq!(inner, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn pit_series_empty_len_zero() {
+        let pit: PitSeries<i32> = RawSeries::new(vec![]).from_pit_with_available_at(None);
+        assert_eq!(pit.len(), 0);
+        assert!(pit.is_empty());
+        assert!(pit.as_slice().is_empty());
+    }
+
+    #[test]
+    fn factor_category_display_strings() {
+        // Display 输出是序列化键（API/DB 落库口径），锁定四个变体的文案
+        assert_eq!(FactorCategory::PriceVolume.to_string(), "price_volume");
+        assert_eq!(FactorCategory::Fundamental.to_string(), "fundamental");
+        assert_eq!(FactorCategory::Sentiment.to_string(), "sentiment");
+        assert_eq!(FactorCategory::Alternative.to_string(), "alternative");
+    }
 }

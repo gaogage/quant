@@ -1478,4 +1478,267 @@ mod tests {
         assert!(dd < -0.35, "崩盘回撤应≈-40%，实际 {}", dd);
         assert!(dd > -0.45);
     }
+
+    // ─── 分发与防御分支补充 ──────────────────────────────────────
+
+    #[test]
+    fn test_compute_price_volume_factor_dispatch_table() {
+        // 14 种已注册因子类型全部可分发；未知类型返回 None
+        let kinds = [
+            "momentum",
+            "volatility",
+            "turnover",
+            "rsi",
+            "bb_position",
+            "atr",
+            "amplitude",
+            "vol_price_corr",
+            "skewness",
+            "max_drawdown",
+            "reversal",
+            "downside_volatility",
+            "amihud_illiquidity",
+            "amount_intensity",
+        ];
+        let input = make_input(make_bars(
+            "D1",
+            &[10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5],
+            &[100.0; 8],
+        ));
+        for k in kinds {
+            assert!(
+                compute_price_volume_factor(k, 5, &input).is_some(),
+                "{} 应可分发",
+                k
+            );
+        }
+        assert!(
+            compute_price_volume_factor("no_such_kind", 5, &input).is_none(),
+            "未注册类型应返回 None"
+        );
+    }
+
+    #[test]
+    fn test_momentum_skips_zero_base_close() {
+        // 基期收盘为 0（除零防御）：对应输出点被跳过，其余正常
+        let factor = MomentumFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "Z1",
+            &[10.0, 0.0, 11.0, 12.0, 13.0],
+            &[100.0; 5],
+        )));
+        assert_eq!(out.name, "mom_3d");
+        assert_eq!(out.values.len(), 1, "仅基价为 0 的点被跳过");
+        assert!((out.values[0].value - 0.2).abs() < 1e-9, "(12-10)/10 = 0.2");
+    }
+
+    #[test]
+    fn test_reversal_skips_zero_base_close() {
+        let factor = ReversalFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "Z2",
+            &[10.0, 0.0, 11.0, 12.0, 13.0],
+            &[100.0; 5],
+        )));
+        assert_eq!(out.values.len(), 1, "仅基价为 0 的点被跳过");
+    }
+
+    #[test]
+    fn test_volatility_period_one_window_too_short_for_std() {
+        // period=1 → 单样本窗口无离散（n<2 防御）→ 不产出
+        let factor = VolatilityFactor::new(1);
+        let out = factor.compute(&make_input(make_bars(
+            "V1",
+            &[10.0, 10.5, 11.0, 11.5],
+            &[100.0; 4],
+        )));
+        assert!(
+            out.values.is_empty(),
+            "单样本窗口无法计算样本标准差，应无输出"
+        );
+    }
+
+    #[test]
+    fn test_bband_position_flat_prices_zero_std_no_output() {
+        // 恒定价格 → 窗口 σ=0 → 无法定位布林带位置 → 不产出
+        let factor = BBandPositionFactor::new(3);
+        let out = factor.compute(&make_input(make_bars("B3", &[10.0; 5], &[100.0; 5])));
+        assert!(out.values.is_empty(), "零方差窗口应跳过");
+    }
+
+    #[test]
+    fn test_rsi_zero_prev_close_recorded_as_zero_change() {
+        // 首日 close=0 → 该日涨跌记 0（不除零），后续正常参与 Wilder 平滑
+        let factor = RSIFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "R9",
+            &[0.0, 10.0, 9.5, 10.2, 9.8, 10.5],
+            &[100.0; 6],
+        )));
+        assert_eq!(out.name, "rsi_3d");
+        assert!(!out.values.is_empty(), "含 0 起点序列仍应有 RSI 输出");
+        assert!(
+            out.values.iter().all(|v| (0.0..1.0).contains(&v.value)),
+            "归一化 RSI 应在 (0,1)"
+        );
+    }
+
+    #[test]
+    fn test_atr_nonpositive_close_no_output() {
+        // 全程 close<=0 → ATR/close 比率无意义，不产出任何点
+        let factor = ATRFactor::new(3);
+        let out = factor.compute(&make_input(make_bars("T9", &[0.0; 6], &[0.0; 6])));
+        assert!(out.values.is_empty(), "非正收盘价不应产出 ATR 比率");
+    }
+
+    #[test]
+    fn test_amihud_zero_amount_window_skipped() {
+        // amount 全 0（零成交）→ 无有效观测 → 整段不产出
+        let factor = AmihudIlliquidityFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "A9",
+            &[10.0, 10.5, 11.0, 10.8, 11.2, 11.5],
+            &[0.0; 6],
+        )));
+        assert!(out.values.is_empty(), "零成交窗口应跳过");
+    }
+
+    #[test]
+    fn test_amount_intensity_zero_trailing_average_skips() {
+        // 前 3 日成交额全 0 → 均值为 0 的点跳过；窗口滑入有效额后正常
+        let factor = AmountIntensityFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "AI9",
+            &[10.0; 5],
+            &[0.0, 0.0, 0.0, 500.0, 500.0],
+        )));
+        assert_eq!(out.values.len(), 1, "仅尾随均值>0 的点产出");
+        // i=4: trailing amounts (0,0,5000) 均值 5000/3, 当日 5000 → 3.0
+        assert!(
+            (out.values[0].value - 3.0).abs() < 0.01,
+            "强度应为 3.0，实际 {}",
+            out.values[0].value
+        );
+    }
+
+    #[test]
+    fn test_turnover_zero_average_volume_marks_nan() {
+        // 尾随均量为 0 → 周转率显式记 NaN（不除零），滑入有效量后恢复数值
+        let factor = TurnoverFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "TO9",
+            &[10.0; 5],
+            &[0.0, 0.0, 0.0, 300.0, 300.0],
+        )));
+        assert_eq!(out.name, "turn_3d");
+        assert!(
+            out.values[0].value.is_nan(),
+            "零均量窗口应产出 NaN 标记而非 panic"
+        );
+        assert!(
+            (out.values[1].value - 3.0).abs() < 0.01,
+            "300/mean(0,0,300)=3.0，实际 {}",
+            out.values[1].value
+        );
+    }
+
+    #[test]
+    fn test_amplitude_zero_open_bar_contributes_zero() {
+        // close=0 的 bar（open=0）在窗口内贡献 0 振幅而非 NaN
+        let factor = AmplitudeFactor::new(3);
+        let normal = factor.compute(&make_input(make_bars(
+            "AM1",
+            &[10.0, 10.0, 10.0, 10.0],
+            &[100.0; 4],
+        )));
+        let with_zero = factor.compute(&make_input(make_bars(
+            "AM2",
+            &[0.0, 10.0, 10.0, 10.0],
+            &[100.0; 4],
+        )));
+        let n = normal.values[0].value;
+        let z = with_zero.values[0].value;
+        assert!(n > 0.0, "正常窗口振幅为正");
+        assert!(
+            z > 0.0 && z < n,
+            "含 0-open bar 的窗口平均振幅应更小: {} vs {}",
+            z,
+            n
+        );
+    }
+
+    #[test]
+    fn test_vol_price_corr_constant_volume_gives_zero() {
+        // 量恒定 → 零方差 → 相关性记 0（防御，不产 NaN）
+        let factor = VolPriceCorrFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "C9",
+            &[10.0, 10.5, 11.0, 11.5, 12.0],
+            &[500.0; 5],
+        )));
+        assert_eq!(out.name, "vp_corr_3d");
+        assert!(
+            out.values.last().unwrap().value == 0.0,
+            "零方差侧应记 0 相关"
+        );
+    }
+
+    #[test]
+    fn test_skewness_flat_prices_zero_variance_gives_zero() {
+        // 恒定价格 → 收益全 0 → m2≈0 → 偏度记 0
+        let factor = SkewnessFactor::new(3);
+        let out = factor.compute(&make_input(make_bars("K9", &[10.0; 6], &[100.0; 6])));
+        assert_eq!(out.name, "skew_3d");
+        assert!(
+            out.values.last().unwrap().value == 0.0,
+            "零方差收益应记 0 偏度"
+        );
+    }
+
+    #[test]
+    fn test_downside_volatility_mixed_between_pure_trends() {
+        // 有涨有跌的下侧波动应介于纯涨（0）与纯跌之间
+        let factor = DownsideVolatilityFactor::new(3);
+        let up = factor.compute(&make_input(make_bars(
+            "DV1",
+            &[10.0, 10.5, 11.0, 11.5, 12.0],
+            &[100.0; 5],
+        )));
+        let down = factor.compute(&make_input(make_bars(
+            "DV2",
+            &[12.0, 11.5, 11.0, 10.5, 10.0],
+            &[100.0; 5],
+        )));
+        let mixed = factor.compute(&make_input(make_bars(
+            "DV3",
+            &[10.0, 10.5, 10.2, 10.8, 10.4],
+            &[100.0; 5],
+        )));
+        let u = up.values.last().unwrap().value;
+        let d = down.values.last().unwrap().value;
+        let m = mixed.values.last().unwrap().value;
+        assert!(u == 0.0, "纯涨窗口无下侧风险");
+        assert!(
+            d > m && m > u,
+            "混合窗口应介于两者之间: d={}, m={}, u={}",
+            d,
+            m,
+            u
+        );
+    }
+
+    #[test]
+    fn test_max_drawdown_zero_initial_peak_treated_as_no_drawdown() {
+        // 窗口含 close=0 起点：peak<=0 时回撤按 0 处理（防除零/防假回撤）
+        let factor = MaxDrawdownFactor::new(3);
+        let out = factor.compute(&make_input(make_bars(
+            "MZ",
+            &[0.0, 10.0, 10.5, 11.0, 11.5],
+            &[100.0; 5],
+        )));
+        assert!(
+            out.values.last().unwrap().value == 0.0,
+            "0 起点后续单边上涨应无回撤"
+        );
+    }
 }

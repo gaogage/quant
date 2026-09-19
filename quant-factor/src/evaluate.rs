@@ -378,4 +378,283 @@ mod pit_tests {
 
         assert_eq!(evaluation.period_count, 0);
     }
+
+    /// 对齐样本 < 10 → 整体判无效，返回全零评估（防小样本噪声）
+    #[test]
+    fn evaluate_below_ten_aligned_pairs_returns_zero_evaluation() {
+        let mut vals = Vec::new();
+        let mut rets = HashMap::new();
+        for i in 0..9 {
+            let sym = format!("S{}", i);
+            vals.push(factor_value(&sym, "2024-01-02", i as f64, None));
+            rets.insert(
+                (sym, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()),
+                0.01 * (i + 1) as f64,
+            );
+        }
+
+        let ev = evaluate(&output(vals), &rets, 3);
+
+        assert_eq!(ev.period_count, 0, "不足 10 对直接短路");
+        assert_eq!(ev.mean_ic, 0.0);
+        assert_eq!(ev.ic_ir, 0.0);
+        assert_eq!(ev.mean_rank_ic, 0.0);
+        assert_eq!(ev.rank_ic_ir, 0.0);
+        assert!(ev.ic_series.is_empty());
+        assert!(ev.rank_ic_series.is_empty());
+        assert_eq!(
+            ev.quantile_returns,
+            vec![0.0; 3],
+            "quantile_returns 用 n_quantiles 个 0 占位"
+        );
+        assert_eq!(ev.quantile_spread, 0.0);
+    }
+
+    /// 主路径手算：2 日 × 5 标的，因子值与前瞻收益完全正相关 → 每日 IC/rankIC = 1；
+    /// 排序后 2 分位：低组收益均值 0.03、高组 0.08，spread = 0.05
+    #[test]
+    fn evaluate_perfect_correlation_computes_ic_and_quantiles_by_hand() {
+        let mut vals = Vec::new();
+        let mut rets = HashMap::new();
+        for (day, base) in [("2024-01-02", 1.0f64), ("2024-01-03", 6.0f64)] {
+            for i in 0..5usize {
+                let sym = format!("S{}", i);
+                let f = base + i as f64; // 1..5 / 6..10
+                let r = f / 100.0; // 0.01..0.05 / 0.06..0.10
+                vals.push(factor_value(&sym, day, f, None));
+                rets.insert(
+                    (sym, NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap()),
+                    r,
+                );
+            }
+        }
+
+        let ev = evaluate(&output(vals), &rets, 2);
+
+        assert_eq!(ev.period_count, 2, "2 个交易日截面");
+        assert_eq!(ev.ic_series.len(), 2);
+        assert_eq!(ev.rank_ic_series.len(), 2);
+        assert!(
+            (ev.mean_ic - 1.0).abs() < 1e-9,
+            "完全正相关 IC=1，实际 {}",
+            ev.mean_ic
+        );
+        assert!(
+            (ev.mean_rank_ic - 1.0).abs() < 1e-9,
+            "秩相关同为 1，实际 {}",
+            ev.mean_rank_ic
+        );
+        // 分位手算：因子 1..5 → 收益均值 0.03；因子 6..10 → 均值 0.08
+        assert_eq!(ev.quantile_returns.len(), 2);
+        assert!(
+            (ev.quantile_returns[0] - 0.03).abs() < 1e-12,
+            "底组收益均值应 0.03，实际 {}",
+            ev.quantile_returns[0]
+        );
+        assert!(
+            (ev.quantile_returns[1] - 0.08).abs() < 1e-12,
+            "顶组收益均值应 0.08，实际 {}",
+            ev.quantile_returns[1]
+        );
+        assert!(
+            (ev.quantile_spread - 0.05).abs() < 1e-12,
+            "顶组-底组收益差应 0.05，实际 {}",
+            ev.quantile_spread
+        );
+        // date_range 取因子值首末日期
+        assert_eq!(
+            ev.date_range.0,
+            NaiveDate::parse_from_str("2024-01-02", "%Y-%m-%d").unwrap()
+        );
+        assert_eq!(
+            ev.date_range.1,
+            NaiveDate::parse_from_str("2024-01-03", "%Y-%m-%d").unwrap()
+        );
+    }
+
+    /// 混合 IC 符号：两日完全正相关、一日完全反相关 → mean_ic=1/3、std>0 → ic_ir≠0
+    #[test]
+    fn evaluate_mixed_ic_signs_produce_nonzero_ir() {
+        let mut vals = Vec::new();
+        let mut rets = HashMap::new();
+        let days = ["2024-01-02", "2024-01-03", "2024-01-04"];
+        for (di, day) in days.iter().enumerate() {
+            for i in 0..5usize {
+                let sym = format!("S{}", i);
+                let f = 1.0 + i as f64;
+                // 前两日收益与因子同序，第三日反序
+                let r = if di < 2 {
+                    0.01 * (i + 1) as f64
+                } else {
+                    0.01 * (5 - i) as f64
+                };
+                vals.push(factor_value(&sym, day, f, None));
+                rets.insert(
+                    (sym, NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap()),
+                    r,
+                );
+            }
+        }
+
+        let ev = evaluate(&output(vals), &rets, 2);
+
+        // mean = (1 + 1 - 1)/3
+        assert!(
+            (ev.mean_ic - 1.0 / 3.0).abs() < 1e-9,
+            "混合三日 mean_ic 应 1/3，实际 {}",
+            ev.mean_ic
+        );
+        // 样本 std = 2/√3 → IR = (1/3)/(2/√3) = √3/6
+        let expected_ir = (1.0f64 / 3.0) / (2.0f64 / 3.0f64.sqrt());
+        assert!(
+            (ev.ic_ir - expected_ir).abs() < 1e-9,
+            "ic_ir 应 {}，实际 {}",
+            expected_ir,
+            ev.ic_ir
+        );
+        assert!(
+            (ev.mean_rank_ic - 1.0 / 3.0).abs() < 1e-9,
+            "rank_ic 同构造应 1/3，实际 {}",
+            ev.mean_rank_ic
+        );
+        // 正相关占优 → 顶组收益高于底组
+        assert!(
+            ev.quantile_spread > 0.0,
+            "正相关主导下 spread 应为正，实际 {}",
+            ev.quantile_spread
+        );
+    }
+
+    /// 单日截面 pairs < 3 跳过该日 IC，但 period_count 仍按 by_date 口径计数
+    #[test]
+    fn evaluate_skips_dates_with_fewer_than_three_pairs() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let mut vals = Vec::new();
+        let mut rets = HashMap::new();
+        // d1：8 对（>=3，正常计算 IC）
+        for i in 0..8usize {
+            let sym = format!("A{}", i);
+            let f = 1.0 + i as f64;
+            vals.push(factor_value(&sym, "2024-01-02", f, None));
+            rets.insert((sym, d1), f / 100.0);
+        }
+        // d2：仅 2 对（<3，跳过）→ aligned 合计 10 恰好过门槛
+        for i in 0..2usize {
+            let sym = format!("B{}", i);
+            vals.push(factor_value(&sym, "2024-01-03", i as f64, None));
+            rets.insert((sym, d2), 0.5 * i as f64);
+        }
+
+        let ev = evaluate(&output(vals), &rets, 2);
+
+        assert_eq!(ev.ic_series.len(), 1, "仅 d1 产出截面 IC");
+        assert_eq!(ev.ic_series[0].0, d1);
+        assert!(
+            ev.rank_ic_series.iter().all(|(d, _)| *d == d1),
+            "rank_ic 也应只有 d1"
+        );
+        // period_count = by_date.len()（含被跳过的 d2）——记录当前口径
+        assert_eq!(ev.period_count, 2);
+    }
+
+    /// 脏数据过滤：NaN 因子值 / NaN 前瞻收益 / 缺失前瞻收益 / PIT 违规（available_at > date）
+    /// 全部剔除后，干净样本仍走主路径且不受污染
+    #[test]
+    fn evaluate_drops_nonfinite_and_missing_and_future_available_pairs() {
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let mut vals = Vec::new();
+        let mut rets = HashMap::new();
+        // d1：5 个干净对
+        for i in 0..5usize {
+            let sym = format!("A{}", i);
+            vals.push(factor_value(&sym, "2024-01-02", 1.0 + i as f64, None));
+            rets.insert(
+                (sym, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()),
+                0.01 + 0.01 * i as f64,
+            );
+        }
+        // d2：5 个干净对 + 4 类脏数据各 1
+        for i in 0..5usize {
+            let sym = format!("B{}", i);
+            vals.push(factor_value(&sym, "2024-01-03", 10.0 + i as f64, None));
+            rets.insert((sym, d2), 0.10 + 0.01 * i as f64);
+        }
+        // 脏 1：因子值 NaN
+        vals.push(factor_value("DX", "2024-01-03", f64::NAN, None));
+        rets.insert(("DX".to_string(), d2), 0.99);
+        // 脏 2：前瞻收益 NaN
+        vals.push(factor_value("DY", "2024-01-03", 20.0, None));
+        rets.insert(("DY".to_string(), d2), f64::NAN);
+        // 脏 3：缺失前瞻收益（rets 无该键）
+        vals.push(factor_value("DZ", "2024-01-03", 21.0, None));
+        // 脏 4：PIT 违规——available_at > date 视为未来函数
+        vals.push(factor_value("DP", "2024-01-03", 22.0, Some("2024-01-10")));
+        rets.insert(("DP".to_string(), d2), 0.55);
+
+        let ev = evaluate(&output(vals), &rets, 2);
+
+        assert_eq!(ev.period_count, 2);
+        assert_eq!(ev.ic_series.len(), 2, "两天各 5 个干净对（>=3）");
+        // d2 干净对完全正相关 → IC=1，脏数据若混入会偏离
+        assert!(
+            (ev.ic_series[1].1 - 1.0).abs() < 1e-9,
+            "脏数据过滤后 d2 截面应完全正相关，实际 {}",
+            ev.ic_series[1].1
+        );
+        assert!(
+            (ev.rank_ic_series[1].1 - 1.0).abs() < 1e-9,
+            "rank IC 同样不受脏数据影响"
+        );
+    }
+
+    /// 单日截面：ic_series 仅 1 个值 → std_of 单元素返回 0 → ic_ir/rank_ic_ir 记 0
+    /// （std=0 防除零分支的精确覆盖——单元素序列无离散，std 恰为 0.0）
+    #[test]
+    fn evaluate_single_period_zero_ic_std_yields_zero_ir() {
+        let mut vals = Vec::new();
+        let mut rets = HashMap::new();
+        for i in 0..10usize {
+            let sym = format!("S{}", i);
+            let f = 1.0 + i as f64;
+            vals.push(factor_value(&sym, "2024-01-02", f, None));
+            rets.insert(
+                (sym, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()),
+                f / 100.0,
+            );
+        }
+
+        let ev = evaluate(&output(vals), &rets, 2);
+
+        assert_eq!(ev.ic_series.len(), 1, "单日只有一个截面 IC");
+        assert_eq!(ev.ic_ir, 0.0, "std(IC) 对单元素恒为 0 → IR 记 0");
+        assert_eq!(ev.rank_ic_ir, 0.0);
+        assert_eq!(ev.period_count, 1);
+        // 5 分位 × 10 对：每分位恰 2 个 → 分位收益手算
+        assert_eq!(ev.quantile_returns.len(), 2);
+    }
+
+    /// rank IC 与 Pearson IC 的分离场景：单调但非线性关系 → rank IC=1 而 IC<1
+    #[test]
+    fn evaluate_rank_ic_survives_nonlinear_monotone_relation() {
+        let mut vals = Vec::new();
+        let mut rets = HashMap::new();
+        for i in 0..10usize {
+            let sym = format!("S{}", i);
+            let f = i as f64;
+            // 指数型收益：单调但非线性 → Pearson IC < 1，Spearman rank IC = 1
+            let r = (f * f) / 1000.0;
+            vals.push(factor_value(&sym, "2024-01-02", f, None));
+            rets.insert((sym, NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()), r);
+        }
+
+        let ev = evaluate(&output(vals), &rets, 2);
+
+        assert!((ev.mean_rank_ic - 1.0).abs() < 1e-9, "单调关系 rank IC=1");
+        assert!(
+            ev.mean_ic < 0.999 && ev.mean_ic > 0.9,
+            "非线性关系 Pearson IC 应 <1 但仍强正相关，实际 {}",
+            ev.mean_ic
+        );
+    }
 }

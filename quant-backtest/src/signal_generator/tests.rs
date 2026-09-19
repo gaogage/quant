@@ -8164,3 +8164,448 @@ fn dated_returns(values: &[f64]) -> Vec<(NaiveDate, f64)> {
         .map(|(idx, value)| (start + chrono::Duration::days(idx as i64), *value))
         .collect()
 }
+
+// ═══ 本轮补测: market_feature 纯函数 + signal_data_cache 未覆盖缓存族 ═══
+
+#[test]
+fn market_feature_snapshot_scope_trims_data_version_and_builds_universe_scoped_snapshot_key() {
+    let train_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let train_end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+    let test_start = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+    let test_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+
+    // data_version_id 前后空白应被 trim，避免派生出"看似不同"的缓存 key
+    let scope = MarketFeatureSnapshotScope::new(
+        "  full-market-2016-v1 \t",
+        train_start,
+        train_end,
+        test_start,
+        test_end,
+    );
+    assert_eq!(scope.data_version_id, "full-market-2016-v1");
+    // 默认走 RawMatrix 原始矩阵缓存
+    assert!(!scope.prefer_return_risk_stats_cache());
+
+    // snapshot_key 派生：窗口 + lookback + 归一化股票池 hash 全量透传
+    let key = scope.snapshot_key(
+        60,
+        &["BBB".to_string(), "AAA".to_string(), "BBB".to_string()],
+    );
+    assert_eq!(key.data_version_id, "full-market-2016-v1");
+    assert_eq!(key.train_start, train_start);
+    assert_eq!(key.train_end, train_end);
+    assert_eq!(key.test_start, test_start);
+    assert_eq!(key.test_end, test_end);
+    assert_eq!(key.lookback_days, 60);
+    assert_eq!(
+        key.universe_hash,
+        symbol_universe_hash(&["AAA".to_string(), "BBB".to_string()])
+    );
+
+    // 乱序/去重股票池派生同一 key；lookback 不同则 key 不同
+    assert_eq!(
+        scope.snapshot_key(60, &["AAA".to_string(), "BBB".to_string()]),
+        key
+    );
+    assert_ne!(
+        scope.snapshot_key(120, &["AAA".to_string(), "BBB".to_string()]),
+        key
+    );
+
+    // builder 显式切换缓存模式（与 with_return_risk_stats_cache_experiment 等价入口）
+    let stats_scope = scope
+        .clone()
+        .with_return_risk_feature_cache_mode(ReturnRiskFeatureCacheMode::StatsMatrixExperimental);
+    assert!(stats_scope.prefer_return_risk_stats_cache());
+    // 枚举默认值：RawMatrix 是未实验开启时的基线
+    assert_eq!(
+        ReturnRiskFeatureCacheMode::default(),
+        ReturnRiskFeatureCacheMode::RawMatrix
+    );
+}
+
+#[test]
+fn market_feature_snapshot_window_dates_follow_query_start_conventions() {
+    let train_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let train_end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+    let test_end = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+    let symbols = vec!["AAA".to_string()];
+    let mut cache = SignalDataCache::default();
+    let key = MarketFeatureSnapshotKey::new(
+        "full-market-2016-v1",
+        train_start,
+        train_end,
+        train_start,
+        test_end,
+        10,
+        &symbols,
+    );
+
+    cache.insert_market_feature_snapshot(
+        key.clone(),
+        10,
+        20,
+        HashMap::from([("AAA".to_string(), vec![(train_start, 0.01)])]),
+        HashMap::from([("AAA".to_string(), vec![(train_start, 100.0)])]),
+    );
+
+    let snapshot = cache
+        .market_feature_snapshots
+        .get(&key)
+        .expect("快照应已按 key 插入");
+    // 收益历史查询起点 = train_start - lookback*3 天（10*3=30，覆盖停牌缺口的 3 倍冗余）
+    assert_eq!(
+        snapshot.return_feature_start(),
+        train_start - chrono::Duration::days(30)
+    );
+    // 均额历史查询起点同理（20*3=60）
+    assert_eq!(
+        snapshot.amount_feature_start(),
+        train_start - chrono::Duration::days(60)
+    );
+    // 特征终点锚定 OOS 测试窗末
+    assert_eq!(snapshot.feature_end(), test_end);
+
+    // lookback 下限 1：0 会被抬到 1 → 特征起点仅回看 3 天
+    let floored_key = MarketFeatureSnapshotKey::new(
+        "full-market-2016-v1",
+        train_start,
+        train_end,
+        train_start,
+        test_end,
+        0,
+        &symbols,
+    );
+    assert_eq!(floored_key.lookback_days, 1, "lookback 0 应被抬到下限 1");
+    assert_eq!(
+        floored_key.feature_start(),
+        train_start - chrono::Duration::days(3)
+    );
+}
+
+#[test]
+fn symbol_universe_hash_is_stable_order_insensitive_and_case_sensitive() {
+    // 排序去重后相同股票池 → 相同 hash（调用顺序无关）
+    let once = symbol_universe_hash(&["BBB".to_string(), "AAA".to_string(), "BBB".to_string()]);
+    let twice = symbol_universe_hash(&["AAA".to_string(), "BBB".to_string()]);
+    assert_eq!(once, twice, "排序去重后相同股票池应派生相同 hash");
+
+    // 输出为 16 位小写十六进制（64 位 DefaultHasher 摘要）
+    assert_eq!(once.len(), 16);
+    assert!(once
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+    // 空池跨调用稳定；与单标的池可区分
+    let empty: Vec<String> = Vec::new();
+    assert_eq!(symbol_universe_hash(&empty), symbol_universe_hash(&empty));
+    assert_ne!(symbol_universe_hash(&empty), once);
+    // 大小写敏感：小写代码是不同标的
+    assert_ne!(
+        symbol_universe_hash(&["aaa".to_string()]),
+        symbol_universe_hash(&["AAA".to_string()])
+    );
+}
+
+#[test]
+fn persistent_market_feature_universe_and_date_hashes_are_stable_and_order_insensitive() {
+    let d1 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+    let d2 = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+
+    // FNV-1a 派生股票池 hash：顺序无关、去重、跨调用稳定
+    assert_eq!(
+        persistent_market_feature_universe_hash(&[
+            "BBB".to_string(),
+            "AAA".to_string(),
+            "AAA".to_string(),
+        ]),
+        persistent_market_feature_universe_hash(&["AAA".to_string(), "BBB".to_string()])
+    );
+    let empty: Vec<String> = Vec::new();
+    let empty_hash = persistent_market_feature_universe_hash(&empty);
+    assert_eq!(empty_hash, persistent_market_feature_universe_hash(&empty));
+    assert_eq!(empty_hash.len(), 16, "摘要应为 16 位十六进制");
+    assert_ne!(
+        persistent_market_feature_universe_hash(&["AAA".to_string()]),
+        empty_hash
+    );
+
+    // 日期 hash：排序去重后稳定，不同日期可区分
+    assert_eq!(
+        persistent_market_feature_date_hash(&[d2, d1, d2]),
+        persistent_market_feature_date_hash(&[d1, d2])
+    );
+    assert_ne!(
+        persistent_market_feature_date_hash(&[d1]),
+        persistent_market_feature_date_hash(&[d2])
+    );
+    assert_eq!(
+        persistent_market_feature_date_hash(&[]),
+        persistent_market_feature_date_hash(&[])
+    );
+}
+
+#[test]
+fn signal_cache_stats_delta_saturates_at_zero_when_counters_decrease() {
+    // stats 可能因 fork/重置回退：delta 不允许出现负数（usize 下溢防护）
+    let before = SignalDataCacheStats {
+        combo_score_hits: 10,
+        combo_score_misses: 8,
+        trading_day_hits: 6,
+        return_history_hits: 4,
+        average_amount_misses: 2,
+        benchmark_return_misses: 1,
+        ..SignalDataCacheStats::default()
+    };
+    let after = SignalDataCacheStats {
+        combo_score_hits: 3,
+        trading_day_hits: 6,
+        return_history_hits: 9,
+        ..SignalDataCacheStats::default()
+    };
+
+    let delta = signal_cache_stats_delta(before, after);
+
+    assert_eq!(delta.combo_score_hits, 0, "回退计数应饱和到 0 而非下溢");
+    assert_eq!(delta.combo_score_misses, 0);
+    assert_eq!(delta.trading_day_hits, 0, "持平计数差值为 0");
+    assert_eq!(delta.return_history_hits, 5, "增长计数保留正向差值");
+    assert_eq!(delta.average_amount_misses, 0);
+    assert_eq!(delta.benchmark_return_misses, 0);
+}
+
+#[test]
+fn persistent_market_feature_grouped_rows_reject_negative_row_count() {
+    let d1 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+
+    // 行数为负说明 manifest 与 value 表不一致（payload 损坏）→ 拒绝重建
+    assert!(
+        persistent_market_feature_grouped_rows_to_history(
+            &["AAA".to_string()],
+            -1,
+            vec![("AAA".to_string(), vec![d1], vec![0.01])],
+        )
+        .is_none(),
+        "负 row_count 应返回 None 触发缓存重建"
+    );
+}
+
+#[test]
+fn factor_signal_prewarm_groups_skip_empty_candidates_and_floor_zero_lookback() {
+    let train_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let train_end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+    let base = FactorSignalFeaturePrewarmCandidate {
+        data_version_id: "full-market-2016-v1".to_string(),
+        train_start,
+        train_end,
+        test_start: train_start,
+        test_end: train_end,
+        feature_start: train_start,
+        feature_end: train_end,
+        lookback_days: 60,
+        return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
+        symbols: vec![],
+        score_days: vec![train_start],
+    };
+
+    // 空股票池候选（如该 spec 无任何打分标的）不产生预热分组
+    let zero_lookback = FactorSignalFeaturePrewarmCandidate {
+        lookback_days: 0,
+        symbols: vec!["AAA".to_string()],
+        ..base.clone()
+    };
+    let groups = merge_factor_signal_feature_prewarm_groups(vec![base, zero_lookback]);
+
+    assert_eq!(groups.len(), 1, "空股票池候选应被跳过");
+    assert_eq!(groups[0].key.lookback_days, 1, "lookback 0 应抬升到下限 1");
+    assert_eq!(groups[0].symbols, vec!["AAA".to_string()]);
+    assert_eq!(groups[0].score_days, vec![train_start]);
+}
+
+#[test]
+fn signal_data_cache_trading_day_cache_tracks_hits_and_misses() {
+    let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+    let mut cache = SignalDataCache::default();
+    let key = SignalDataCacheKey::trading_days(start, end);
+
+    assert!(cache.cached_trading_days(&key).is_none(), "空缓存应未命中");
+    assert_eq!(cache.stats().trading_day_misses, 1);
+
+    let inserted = cache.insert_trading_days(key.clone(), vec![start, end]);
+    assert_eq!(inserted.as_ref(), &vec![start, end]);
+
+    let cached = cache.cached_trading_days(&key).expect("插入后应命中");
+    assert_eq!(cached.as_ref(), &vec![start, end]);
+    assert_eq!(cache.stats().trading_day_hits, 1);
+
+    // 不同窗口 key 互不串味
+    let other =
+        SignalDataCacheKey::trading_days(start, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap());
+    assert!(cache.cached_trading_days(&other).is_none());
+    assert_eq!(cache.stats().trading_day_misses, 2);
+}
+
+#[test]
+fn signal_data_cache_industry_classification_cache_tracks_hits_and_misses() {
+    let mut cache = SignalDataCache::default();
+    let key = SignalDataCacheKey::industry_classifications(&[
+        "BBB".to_string(),
+        "AAA".to_string(),
+        "BBB".to_string(),
+    ]);
+
+    assert!(
+        cache.cached_industry_classifications(&key).is_none(),
+        "空缓存应未命中"
+    );
+    assert_eq!(cache.stats().industry_classification_misses, 1);
+
+    cache.insert_industry_classifications(
+        key.clone(),
+        HashMap::from([
+            ("AAA".to_string(), "银行".to_string()),
+            ("BBB".to_string(), "白酒".to_string()),
+        ]),
+    );
+    let cached = cache
+        .cached_industry_classifications(&key)
+        .expect("插入后应命中");
+    assert_eq!(cached["AAA"], "银行");
+    assert_eq!(cached["BBB"], "白酒");
+    assert_eq!(cache.stats().industry_classification_hits, 1);
+
+    // 构造器内部归一化股票池：乱序请求命中同一 key
+    let reordered =
+        SignalDataCacheKey::industry_classifications(&["AAA".to_string(), "BBB".to_string()]);
+    assert!(cache.cached_industry_classifications(&reordered).is_some());
+    assert_eq!(cache.stats().industry_classification_hits, 2);
+}
+
+#[test]
+fn signal_data_cache_benchmark_return_cache_tracks_hits_and_misses() {
+    let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+    let mut cache = SignalDataCache::default();
+    let key = SignalDataCacheKey::benchmark_returns("000300.SH", start, end, 60);
+
+    assert!(
+        cache.cached_benchmark_returns(&key).is_none(),
+        "空缓存应未命中"
+    );
+    assert_eq!(cache.stats().benchmark_return_misses, 1);
+
+    cache.insert_benchmark_returns(key.clone(), vec![(start, 0.01)]);
+    let cached = cache.cached_benchmark_returns(&key).expect("插入后应命中");
+    assert_eq!(cached.as_ref(), &vec![(start, 0.01)]);
+    assert_eq!(cache.stats().benchmark_return_hits, 1);
+
+    // 不同基准/回看窗口 key 互不串味
+    let other = SignalDataCacheKey::benchmark_returns("000905.SH", start, end, 60);
+    assert!(cache.cached_benchmark_returns(&other).is_none());
+    assert_eq!(cache.stats().benchmark_return_misses, 2);
+}
+
+/// 构造稳态 stats 矩阵侧的统计快照：有命中、无 miss/write（预热已完成）。
+fn steady_stats_matrix_stats(stats_rows: usize) -> SignalDataCacheStats {
+    SignalDataCacheStats {
+        persistent_return_risk_stats_feature_matrix_hits: 3,
+        persistent_return_risk_stats_feature_matrix_misses: 0,
+        persistent_return_risk_stats_feature_matrix_writes: 0,
+        persistent_return_risk_stats_feature_matrix_stats_rows_loaded: stats_rows,
+        ..Default::default()
+    }
+}
+
+fn raw_matrix_stats_with_payload(hits: usize, return_values: usize) -> SignalDataCacheStats {
+    SignalDataCacheStats {
+        persistent_return_risk_feature_matrix_hits: hits,
+        persistent_return_risk_feature_matrix_return_values_loaded: return_values,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn return_risk_cache_economics_inconclusive_without_raw_matrix_payload() {
+    // raw 侧零命中：无从比较 → inconclusive
+    let profile = compare_return_risk_cache_economics(
+        SignalDataCacheStats::default(),
+        steady_stats_matrix_stats(40),
+    );
+    assert_eq!(
+        profile.recommendation,
+        ReturnRiskCacheEconomicsRecommendation::Inconclusive
+    );
+    assert_eq!(profile.reason, "raw_matrix_payload_missing");
+    assert_eq!(
+        profile.stats_to_raw_return_value_ratio, None,
+        "分母为 0 时比值应为 None 而非除零"
+    );
+
+    // 有命中但回传值为 0：同样视为 payload 缺失
+    let profile = compare_return_risk_cache_economics(
+        raw_matrix_stats_with_payload(5, 0),
+        steady_stats_matrix_stats(40),
+    );
+    assert_eq!(
+        profile.recommendation,
+        ReturnRiskCacheEconomicsRecommendation::Inconclusive
+    );
+    assert_eq!(profile.reason, "raw_matrix_payload_missing");
+}
+
+#[test]
+fn return_risk_cache_economics_inconclusive_without_stats_matrix_hits() {
+    // stats 侧零命中（实验未跑/未预热）：缺少对比样本 → inconclusive
+    let profile = compare_return_risk_cache_economics(
+        raw_matrix_stats_with_payload(2, 1000),
+        SignalDataCacheStats::default(),
+    );
+
+    assert_eq!(
+        profile.recommendation,
+        ReturnRiskCacheEconomicsRecommendation::Inconclusive
+    );
+    assert_eq!(profile.reason, "stats_matrix_hits_missing");
+    // 比值仍可计算（raw 分母有效）
+    assert_eq!(profile.stats_to_raw_return_value_ratio, Some(0.0));
+}
+
+#[test]
+fn return_risk_cache_economics_inconclusive_when_steady_state_payload_missing() {
+    // stats 侧已稳态（有 hits、无 miss/write）但 payload 行数为 0：
+    // 实验没加载任何数据 → 不足以得出省流结论
+    let profile = compare_return_risk_cache_economics(
+        raw_matrix_stats_with_payload(2, 1000),
+        steady_stats_matrix_stats(0),
+    );
+
+    assert_eq!(
+        profile.recommendation,
+        ReturnRiskCacheEconomicsRecommendation::Inconclusive
+    );
+    assert_eq!(profile.reason, "stats_matrix_payload_missing");
+    assert!(profile.stats_matrix_steady_state);
+}
+
+#[test]
+fn return_risk_cache_economics_inconclusive_when_savings_too_small() {
+    // stats payload / raw = 0.9：落在偏好阈值 (0.80, 1.0) 开区间内，
+    // 省流幅度不足 → inconclusive
+    let profile = compare_return_risk_cache_economics(
+        raw_matrix_stats_with_payload(2, 1000),
+        steady_stats_matrix_stats(900),
+    );
+
+    assert_eq!(
+        profile.recommendation,
+        ReturnRiskCacheEconomicsRecommendation::Inconclusive
+    );
+    assert_eq!(profile.reason, "stats_payload_savings_too_small");
+    assert_eq!(profile.stats_to_raw_return_value_ratio, Some(0.9));
+    // 调整后 payload（含 raw 回退量）同步暴露在 profile 上
+    assert_eq!(
+        profile.stats_matrix_adjusted_payload_rows_loaded,
+        profile.stats_matrix_payload_rows_loaded
+    );
+}
