@@ -254,6 +254,9 @@ async fn report_for_accounts(
         .flatten();
         let (strategy_version_id, leverage_multiplier) = acct_meta.unwrap_or((None, 1.0));
         let mut backtest_deviation: Option<f64> = None;
+        // 绩效视角补充（2026-09-19 用户定版）：同 10 日窗口的实盘 vs 沪深300 超额——
+        // 与回测偏离互补（偏离=执行保真度监控抓执行/数据事故，超额=策略 alpha 视角）。
+        let mut benchmark_excess: Option<f64> = None;
         if let Some(ref sv_id) = strategy_version_id {
             // 优先读 composite 合成曲线(偏离监控正确对标);缺失则回退 A 股曲线
             let window_start = date - chrono::Duration::days(10);
@@ -317,6 +320,31 @@ async fn report_for_accounts(
                             // composite 曲线本身无杠杆,按账号 leverage_multiplier 放大回测收益
                             let bt_ret = (bt_end_f / bt_start_f - 1.0) * leverage_multiplier;
                             backtest_deviation = Some(live_ret - bt_ret);
+
+                            // 同窗口沪深300 超额（绩效视角；指数日线经 EOD 同步入库，
+                            // 窗口首尾取最近可用交易日，不强制当日就绪——与 composite 的
+                            // 当日就绪检测语义不同：超额是展示信息非告警，允许口径微滞后）
+                            let bench_row: Option<
+                                (rust_decimal::Decimal, rust_decimal::Decimal),
+                            > = sqlx::query_as(
+                                "SELECT
+                                    (SELECT close FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date >= $1 ORDER BY trade_date ASC LIMIT 1),
+                                    (SELECT close FROM market_index_daily_bar WHERE symbol='000300.SH' AND trade_date <= $2 ORDER BY trade_date DESC LIMIT 1)",
+                            )
+                            .bind(window_start)
+                            .bind(date)
+                            .fetch_optional(db)
+                            .await
+                            .ok()
+                            .flatten();
+                            if let Some((b_start, b_end)) = bench_row {
+                                let b_start_f = b_start.to_string().parse::<f64>().unwrap_or(0.0);
+                                let b_end_f = b_end.to_string().parse::<f64>().unwrap_or(0.0);
+                                if b_start_f > 0.0 {
+                                    let bench_ret = b_end_f / b_start_f - 1.0;
+                                    benchmark_excess = Some(live_ret - bench_ret);
+                                }
+                            }
                         }
                     }
                 }
@@ -439,6 +467,7 @@ async fn report_for_accounts(
              **当日调仓**: 买入 {} 笔(¥{:.0}) / 卖出 {} 笔(¥{:.0})  \n\
              **累计成交**: {} 笔  \n\
              {}\
+             {}\
              {}\n\n\
              > 自动生成于 {}",
             daily_arrow,
@@ -463,6 +492,14 @@ async fn report_for_accounts(
                 }
                 Some(dev) => format!("**回测偏离**: {:.2}%（正常范围）  \n", dev * 100.0),
                 None => "**回测偏离**: 当日行情同步中，次日 9:00 T+1 补齐  \n".to_string(),
+            },
+            match benchmark_excess {
+                Some(ex) => format!(
+                    "**超额(vs 沪深300·10日)**: {}{:.2}%  \n",
+                    if ex >= 0.0 { "+" } else { "" },
+                    ex * 100.0
+                ),
+                None => String::new(),
             },
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         );
