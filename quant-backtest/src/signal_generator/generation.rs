@@ -172,12 +172,13 @@ async fn generate_signals_with_cache_internal(
         &return_risk_stats_matrices,
         &portfolio_config,
     );
-    let return_risk_matrices = if snapshot_scope.is_some()
-        && should_load_raw_return_risk_matrices(
+    let return_risk_matrices = if let (Some(snapshot_scope), true) = (
+        snapshot_scope,
+        should_load_raw_return_risk_matrices(
             prefer_return_risk_stats_matrices,
             return_risk_stats_matrices_loaded,
-        ) {
-        let snapshot_scope = snapshot_scope.expect("snapshot scope checked");
+        ),
+    ) {
         load_portfolio_return_risk_feature_matrices_cached(
             pool,
             cache,
@@ -418,12 +419,13 @@ async fn generate_regime_signals_with_cache_internal(
         &return_risk_stats_matrices,
         &portfolio_config,
     );
-    let return_risk_matrices = if snapshot_scope.is_some()
-        && should_load_raw_return_risk_matrices(
+    let return_risk_matrices = if let (Some(snapshot_scope), true) = (
+        snapshot_scope,
+        should_load_raw_return_risk_matrices(
             prefer_return_risk_stats_matrices,
             return_risk_stats_matrices_loaded,
-        ) {
-        let snapshot_scope = snapshot_scope.expect("snapshot scope checked");
+        ),
+    ) {
         load_portfolio_return_risk_feature_matrices_cached(
             pool,
             cache,
@@ -844,10 +846,7 @@ async fn build_prediction_signals_from_rows(
     )
 }
 
-pub(crate) fn sort_prediction_scores(
-    scores_by_date: &mut HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
-    direction: ScoreDirection,
-) {
+pub(crate) fn sort_prediction_scores(scores_by_date: &mut ScoresByDate, direction: ScoreDirection) {
     for items in scores_by_date.values_mut() {
         items.sort_by(|left, right| {
             let score_order = match direction {

@@ -1,6 +1,8 @@
 //! Combo score reuse plan and candidate pool filtering.
 use super::*;
 
+// 枚举变体统一 Pool 后缀是刻意的语义命名（区分候选池类型），显式豁免。
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComboScoreReusePlan {
     RankedPool {

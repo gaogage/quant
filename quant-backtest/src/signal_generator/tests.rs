@@ -5776,7 +5776,7 @@ fn pit_average_amount_matrix_round_trips_through_symbol_history_shape() {
     assert_eq!(restored[&d1]["AAA"], 10.0);
     assert_eq!(restored[&d1]["BBB"], 20.0);
     assert_eq!(restored[&d2]["AAA"], 30.0);
-    assert!(restored[&d2].get("BBB").is_none());
+    assert!(!restored[&d2].contains_key("BBB"));
     assert!(restored[&d3].is_empty());
 }
 
@@ -5859,7 +5859,7 @@ fn pit_average_amount_matrix_cache_reuses_covering_symbol_and_date_scope() {
     assert_eq!(subset.len(), 1);
     assert_eq!(subset[&d2]["AAA"], 40.0);
     assert_eq!(subset[&d2]["CCC"], 60.0);
-    assert!(subset[&d2].get("BBB").is_none());
+    assert!(!subset[&d2].contains_key("BBB"));
     assert!(subset.get(&d1).is_none());
 }
 

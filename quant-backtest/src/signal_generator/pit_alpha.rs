@@ -1,6 +1,20 @@
 //! PIT alpha derivation, combo score loading, liquidity filtering, and return-risk matrices.
 use super::*;
 
+/// 逐评分日因子分序列：(symbol, score, rank?)。
+pub(crate) type ScoresByDate = HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>;
+
+/// return-risk 统计原始行：(score_day, symbol, return_count, 4 个可空指标)。
+pub(crate) type ReturnRiskStatsRows = Vec<(
+    NaiveDate,
+    String,
+    i64,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+)>;
+
 #[derive(Debug, Clone, Copy)]
 struct DerivedPitAlphaSpec {
     source_combo_name: &'static str,
@@ -590,6 +604,8 @@ where
 }
 
 #[cfg(test)]
+// TODO(DDD Step 2): 信号管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_rebalance_factor_signals_with_return_risk_matrices<F>(
     trading_days: &[NaiveDate],
     scores_by_date: &HashMap<NaiveDate, Vec<(String, f64)>>,
@@ -618,6 +634,8 @@ where
 }
 
 #[cfg(test)]
+// TODO(DDD Step 2): 信号管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_rebalance_factor_signals_with_return_risk_stats_matrices<F>(
     trading_days: &[NaiveDate],
     scores_by_date: &HashMap<NaiveDate, Vec<(String, f64)>>,
@@ -673,6 +691,8 @@ where
     )
 }
 
+// TODO(DDD Step 2): 信号管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_rebalance_factor_signals_with_score_selector_and_return_risk_matrices<F, S>(
     trading_days: &[NaiveDate],
     base_config: &SignalConfig,
@@ -754,6 +774,8 @@ where
     Ok(signals)
 }
 
+// TODO(DDD Step 2): 信号管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 fn build_portfolio_sleeve_target_weights<S>(
     score_day: NaiveDate,
     active_config: &SignalConfig,
@@ -812,6 +834,8 @@ where
     ))
 }
 
+// TODO(DDD Step 2): 信号管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 fn build_single_sleeve_target_weights<S>(
     score_day: NaiveDate,
     config: &SignalConfig,
@@ -921,7 +945,7 @@ fn decimal_from_unit_f64(value: f64) -> Decimal {
 
 pub(crate) async fn apply_prediction_liquidity_filter(
     pool: &PgPool,
-    scores_by_date: &mut HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
+    scores_by_date: &mut ScoresByDate,
     config: &PredictionSignalConfig,
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -1094,7 +1118,7 @@ fn drawdown_from_return_path(returns: &[f64]) -> f64 {
 
 pub(crate) fn build_rebalance_prediction_signals(
     trading_days: &[NaiveDate],
-    scores_by_date: &HashMap<NaiveDate, Vec<(String, f64, Option<i32>)>>,
+    scores_by_date: &ScoresByDate,
     config: &PredictionSignalConfig,
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     average_amounts_by_date: &AverageAmountsByDate,
@@ -1700,6 +1724,8 @@ pub(crate) async fn load_symbol_return_history_persistent_cached(
     Ok(Arc::new(history))
 }
 
+// TODO(DDD Step 2): 矩阵加载管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_return_risk_feature_matrix_persistent_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
@@ -1838,6 +1864,8 @@ pub(crate) async fn load_return_risk_feature_matrix_persistent_cached(
     Ok(cache.insert_return_risk_feature_matrix(matrix_key, matrix))
 }
 
+// TODO(DDD Step 2): 矩阵加载管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_portfolio_return_risk_feature_matrices_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
@@ -1912,6 +1940,8 @@ pub(crate) fn should_prewarm_raw_return_risk_matrix(
         )
 }
 
+// TODO(DDD Step 2): 矩阵加载管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 async fn load_return_risk_stats_feature_matrix_persistent_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
@@ -2015,6 +2045,8 @@ async fn load_return_risk_stats_feature_matrix_persistent_cached(
     Ok(Arc::new(matrix))
 }
 
+// TODO(DDD Step 2): 矩阵加载管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_portfolio_return_risk_stats_feature_matrices_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
@@ -2273,6 +2305,8 @@ pub(crate) async fn load_average_amount_history_persistent_cached(
     Ok(Arc::new(history))
 }
 
+// TODO(DDD Step 2): 矩阵加载管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_pit_average_amount_matrix_persistent_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
@@ -2436,6 +2470,8 @@ pub(crate) async fn load_portfolio_capacity_inputs(
     }
 }
 
+// TODO(DDD Step 2): 矩阵加载管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_portfolio_capacity_inputs_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
@@ -5376,7 +5412,7 @@ pub(crate) fn return_risk_stats_pairwise_scope_for_factor_scores(
     let symbol_scope = symbols.iter().cloned().collect::<HashSet<_>>();
     let score_candidate_pool_size =
         normalize_score_candidate_pool_size(config.score_candidate_pool_size);
-    let min_candidates = config.top_n.min(5).max(2);
+    let min_candidates = config.top_n.clamp(2, 5);
     let mut pair_keys = BTreeSet::new();
 
     for score_day in &score_days {
@@ -5887,15 +5923,7 @@ pub(crate) fn persistent_return_risk_stats_feature_matrix_rows_to_matrix(
     symbols: &[String],
     stats_row_count: i64,
     pair_row_count: i64,
-    stats_rows: Vec<(
-        NaiveDate,
-        String,
-        i64,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )>,
+    stats_rows: ReturnRiskStatsRows,
     pair_rows: Vec<(NaiveDate, String, String, f64)>,
 ) -> Option<ScoreDateReturnRiskStatsMatrix> {
     if stats_row_count < 0
@@ -6308,15 +6336,7 @@ async fn load_persistent_return_risk_stats_feature_matrix_cache(
         return Ok(None);
     }
 
-    let stats_rows: Vec<(
-        NaiveDate,
-        String,
-        i64,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    )> = match sqlx::query_as(
+    let stats_rows: ReturnRiskStatsRows = match sqlx::query_as(
         "SELECT score_day,
                 symbol,
                 return_count,

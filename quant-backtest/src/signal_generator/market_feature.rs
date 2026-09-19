@@ -769,6 +769,8 @@ pub fn signal_cache_stats_delta(
     }
 }
 
+// TODO(DDD Step 2): 缓存预热参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub async fn prewarm_market_feature_cache(
     pool: &PgPool,
     cache: &mut SignalDataCache,

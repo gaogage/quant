@@ -40,7 +40,7 @@ fn next_open_executes_signal_on_next_trading_day() {
 
     let scheduled = schedule_signals_for_execution(&days, &signals);
 
-    assert!(scheduled.get(&signal_day).is_none());
+    assert!(!scheduled.contains_key(&signal_day));
     assert_eq!(scheduled.get(&days[1]).unwrap().date, signal_day);
 }
 
@@ -131,8 +131,10 @@ use std::collections::HashSet;
 
 #[test]
 fn default_execution_uses_execution_day_open_price() {
-    let mut config = BacktestConfig::default();
-    config.max_position_pct = Decimal::new(101, 2);
+    let config = BacktestConfig {
+        max_position_pct: Decimal::new(101, 2),
+        ..Default::default()
+    };
     let mut engine = BacktestEngine::new(config);
     let execution_day = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
     let mut weights = HashMap::new();

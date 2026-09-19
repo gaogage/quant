@@ -57,6 +57,37 @@ struct TradingProfile {
 
 type DailyBarsByDate = HashMap<NaiveDate, HashMap<String, (Decimal, Decimal, Decimal, Decimal)>>;
 
+/// 基准行情缓存：键 (symbol, start, end)，值为日期→(close, pre_close)。
+type BenchmarkCache =
+    HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>;
+
+/// 日线记录缓存：键 (dv_key, start, end)，值为 symbol→DailyBarRecord 列表。
+type DailyBarsCache =
+    HashMap<(String, NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>;
+
+/// market_stock 交易特征原始行：(symbol, exchange, market, is_st, instrument_type)。
+type TradingProfileRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+    Option<String>,
+);
+
+/// 日线行情原始行：(trade_date, symbol, open, close, pre_close, amount, data_version_id)。
+type DailyBarRow = (
+    NaiveDate,
+    String,
+    Option<Decimal>,
+    Decimal,
+    Option<Decimal>,
+    Option<Decimal>,
+    String,
+);
+
+/// 价格映射：键 (trade_date, symbol)。
+type PriceMapByDateSymbol = HashMap<(NaiveDate, String), Decimal>;
+
 #[derive(Debug, Clone)]
 struct DailyBarRecord {
     trade_date: NaiveDate,
@@ -175,12 +206,11 @@ impl BacktestMarketDataSnapshotKey {
 #[derive(Debug, Default)]
 pub struct BacktestDataCache {
     trading_days: HashMap<(NaiveDate, NaiveDate), Arc<Vec<NaiveDate>>>,
-    benchmark_data:
-        HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
+    benchmark_data: BenchmarkCache,
     /// 行情缓存键：(data_version_id, start, end) —— Step 5b 纳入 dv_id 维度，
     /// 防止不同 dv_id 的回测共享缓存（snapshot_key 声称按 dv_id 区分，底层
     /// 缓存键须与之一致，否则跨版本命中污染数据）。
-    daily_bars: HashMap<(String, NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    daily_bars: DailyBarsCache,
     market_data_snapshots: HashMap<BacktestMarketDataSnapshotKey, Arc<BacktestMarketDataSnapshot>>,
     trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
     stats: BacktestDataCacheStats,
@@ -189,9 +219,8 @@ pub struct BacktestDataCache {
 #[derive(Debug, Clone, Default)]
 pub struct BacktestDataCacheSnapshot {
     trading_days: HashMap<(NaiveDate, NaiveDate), Arc<Vec<NaiveDate>>>,
-    benchmark_data:
-        HashMap<(String, NaiveDate, NaiveDate), Arc<HashMap<NaiveDate, (Decimal, Decimal)>>>,
-    daily_bars: HashMap<(String, NaiveDate, NaiveDate), HashMap<String, Arc<Vec<DailyBarRecord>>>>,
+    benchmark_data: BenchmarkCache,
+    daily_bars: DailyBarsCache,
     market_data_snapshots: HashMap<BacktestMarketDataSnapshotKey, Arc<BacktestMarketDataSnapshot>>,
     trading_profiles: HashMap<String, Arc<Option<TradingProfile>>>,
 }
@@ -577,13 +606,7 @@ impl BacktestDataCache {
     fn insert_trading_profiles(
         &mut self,
         requested_symbols: &[String],
-        rows: Vec<(
-            String,
-            Option<String>,
-            Option<String>,
-            Option<bool>,
-            Option<String>,
-        )>,
+        rows: Vec<TradingProfileRow>,
     ) -> HashMap<String, TradingProfile> {
         let requested_symbols = normalized_symbol_key(requested_symbols);
         let mut by_symbol: HashMap<String, Option<TradingProfile>> = requested_symbols
@@ -976,15 +999,7 @@ impl BacktestRunner {
         // `_data_version_id` 当前仅用于与 cached 版签名对称（cached 版用它做
         // 缓存键隔离）。裸版返回 DailyBarsByDate 不含 dv_id，待下游（build_market_day）
         // 消费 dv_id 时再启用。
-        let rows: Vec<(
-            NaiveDate,
-            String,
-            Option<Decimal>,
-            Decimal,
-            Option<Decimal>,
-            Option<Decimal>,
-            String,
-        )> = sqlx::query_as(
+        let rows: Vec<DailyBarRow> = sqlx::query_as(
             "SELECT trade_date, symbol, open, close, pre_close, amount, data_version_id
              FROM market_stock_daily_bar_adj
              WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
@@ -1025,15 +1040,7 @@ impl BacktestRunner {
             return Ok(result);
         }
 
-        let rows: Vec<(
-            NaiveDate,
-            String,
-            Option<Decimal>,
-            Decimal,
-            Option<Decimal>,
-            Option<Decimal>,
-            String,
-        )> = sqlx::query_as(
+        let rows: Vec<DailyBarRow> = sqlx::query_as(
             "SELECT trade_date, symbol, open, close, pre_close, amount, data_version_id
              FROM market_stock_daily_bar_adj
              WHERE symbol = ANY($1) AND trade_date >= $2 AND trade_date <= $3
@@ -1069,7 +1076,7 @@ impl BacktestRunner {
         &self,
         symbols: &[String],
     ) -> Result<HashMap<String, TradingProfile>, sqlx::Error> {
-        let rows: Vec<(String, Option<String>, Option<String>, Option<bool>, Option<String>)> = sqlx::query_as(
+        let rows: Vec<TradingProfileRow> = sqlx::query_as(
             "SELECT symbol, exchange, market, is_st, instrument_type FROM market_stock WHERE symbol = ANY($1)",
         )
         .bind(symbols)
@@ -1102,7 +1109,7 @@ impl BacktestRunner {
             return Ok(result);
         }
 
-        let rows: Vec<(String, Option<String>, Option<String>, Option<bool>, Option<String>)> = sqlx::query_as(
+        let rows: Vec<TradingProfileRow> = sqlx::query_as(
             "SELECT symbol, exchange, market, is_st, instrument_type FROM market_stock WHERE symbol = ANY($1)",
         )
         .bind(&missing_symbols)
@@ -1118,7 +1125,7 @@ impl BacktestRunner {
         &self,
         date: NaiveDate,
         prev_trading_day: Option<NaiveDate>,
-        daily_data: &HashMap<NaiveDate, HashMap<String, (Decimal, Decimal, Decimal, Decimal)>>,
+        daily_data: &DailyBarsByDate,
         benchmark_data: &HashMap<NaiveDate, (Decimal, Decimal)>,
         trading_profiles: &HashMap<String, TradingProfile>,
     ) -> MarketDay {
@@ -1398,10 +1405,7 @@ impl BacktestRunner {
         // adj_factor 取 trade_date <= position_date 的最近值（复权因子在除权日跳变后
         // 保持稳定，向前取最近即可）。已验证：adj_close / adj_factor = raw_close
         // （002014.SZ 8/10: 158.6543 / 14.5421 = 10.9100 ✓）。
-        let (raw_close_map, adj_factor_map): (
-            HashMap<(NaiveDate, String), Decimal>,
-            HashMap<(NaiveDate, String), Decimal>,
-        ) = {
+        let (raw_close_map, adj_factor_map): (PriceMapByDateSymbol, PriceMapByDateSymbol) = {
             let symbols: Vec<String> = output
                 .daily_positions
                 .iter()
@@ -1665,8 +1669,10 @@ mod tests {
 
     #[test]
     fn summary_only_persistence_skips_detail_tables() {
-        let mut config = BacktestConfig::default();
-        config.persistence_mode = BacktestPersistenceMode::SummaryOnly;
+        let config = BacktestConfig {
+            persistence_mode: BacktestPersistenceMode::SummaryOnly,
+            ..Default::default()
+        };
 
         assert!(!BacktestRunner::should_persist_detail_tables(&config));
     }

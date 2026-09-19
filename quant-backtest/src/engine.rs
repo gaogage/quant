@@ -1793,7 +1793,7 @@ mod tests {
             ExecutionScheduleProfile::Twap20dV1,
         ] {
             assert_eq!(ExecutionScheduleProfile::parse(p.as_str()).unwrap(), p);
-            assert_eq!(p.execution_days() >= 1, true);
+            assert!(p.execution_days() >= 1);
         }
         assert_eq!(ExecutionScheduleProfile::Immediate.execution_days(), 1);
         assert_eq!(ExecutionScheduleProfile::Twap20dV1.execution_days(), 20);
@@ -1850,9 +1850,22 @@ mod tests {
     }
 
     fn eng() -> BacktestEngine {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01"); // 101% — allow full buy with slippage
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"), // 101% — allow full buy with slippage
+            ..Default::default()
+        };
         BacktestEngine::new(c)
+    }
+
+    /// 四费全零（佣金/最低佣金/印花税/滑点）——隔离费用影响的测试配置。
+    fn zero_fee_config() -> FeeConfig {
+        FeeConfig {
+            min_commission: Decimal::zero(),
+            commission_rate: Decimal::zero(),
+            tax_rate: Decimal::zero(),
+            slippage_bps: Decimal::zero(),
+            ..Default::default()
+        }
     }
 
     // ─── Basic ────────────────────────────────────────────────
@@ -1892,9 +1905,11 @@ mod tests {
 
     #[test]
     fn execution_schedule_splits_rebalance_and_continues_without_new_signal() {
-        let mut config = BacktestConfig::default();
-        config.max_position_pct = d("1.01");
-        config.execution_schedule_profile = ExecutionScheduleProfile::Twap5dV1;
+        let config = BacktestConfig {
+            max_position_pct: d("1.01"),
+            execution_schedule_profile: ExecutionScheduleProfile::Twap5dV1,
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(config);
 
         e.process_day(
@@ -1923,9 +1938,11 @@ mod tests {
 
     #[test]
     fn patient_execution_schedule_uses_smaller_initial_twap_slice() {
-        let mut config = BacktestConfig::default();
-        config.max_position_pct = d("1.01");
-        config.execution_schedule_profile = ExecutionScheduleProfile::Twap15dV1;
+        let config = BacktestConfig {
+            max_position_pct: d("1.01"),
+            execution_schedule_profile: ExecutionScheduleProfile::Twap15dV1,
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(config);
 
         e.process_day(
@@ -1947,11 +1964,13 @@ mod tests {
 
     #[test]
     fn execution_schedule_caps_daily_target_move_and_expires_carry() {
-        let mut config = BacktestConfig::default();
-        config.max_position_pct = d("1.01");
-        config.execution_schedule_profile = ExecutionScheduleProfile::Twap5dV1;
-        config.execution_daily_target_move_limit_pct = Some(d("0.05"));
-        config.execution_max_carry_days = Some(2);
+        let config = BacktestConfig {
+            max_position_pct: d("1.01"),
+            execution_schedule_profile: ExecutionScheduleProfile::Twap5dV1,
+            execution_daily_target_move_limit_pct: Some(d("0.05")),
+            execution_max_carry_days: Some(2),
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(config);
 
         e.process_day(
@@ -1980,12 +1999,14 @@ mod tests {
 
     #[test]
     fn execution_schedule_roll_forward_policy_continues_pending_target_after_carry_ttl() {
-        let mut config = BacktestConfig::default();
-        config.max_position_pct = d("1.01");
-        config.execution_schedule_profile = ExecutionScheduleProfile::Twap5dV1;
-        config.execution_daily_target_move_limit_pct = Some(d("0.05"));
-        config.execution_max_carry_days = Some(2);
-        config.execution_carry_policy = ExecutionCarryPolicy::RollForwardV1;
+        let config = BacktestConfig {
+            max_position_pct: d("1.01"),
+            execution_schedule_profile: ExecutionScheduleProfile::Twap5dV1,
+            execution_daily_target_move_limit_pct: Some(d("0.05")),
+            execution_max_carry_days: Some(2),
+            execution_carry_policy: ExecutionCarryPolicy::RollForwardV1,
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(config);
 
         e.process_day(
@@ -2028,9 +2049,11 @@ mod tests {
         );
         assert!(intended_cash_output.metrics.final_execution_fill_ratio > d("0.97"));
 
-        let mut capacity_config = BacktestConfig::default();
-        capacity_config.max_position_pct = d("1.01");
-        capacity_config.max_participation_rate = Some(d("0.10"));
+        let capacity_config = BacktestConfig {
+            max_position_pct: d("1.01"),
+            max_participation_rate: Some(d("0.10")),
+            ..Default::default()
+        };
         let mut capacity_limited = BacktestEngine::new(capacity_config);
         let mut thin_market = market("2024-01-02", ("A", "10"), ("A", "9.9"));
         // bar amount 为 Tushare 千元单位：100 千元 = 10 万元成交额，10% cap = 1 万元，
@@ -2178,8 +2201,10 @@ mod tests {
 
     #[test]
     fn test_audit_hash() {
-        let mut c = BacktestConfig::default();
-        c.mode = BacktestMode::Audit;
+        let c = BacktestConfig {
+            mode: BacktestMode::Audit,
+            ..Default::default()
+        };
         let mut e1 = BacktestEngine::new(c.clone());
         let mut e2 = BacktestEngine::new(c);
         let m = market("2024-01-02", ("A", "10"), ("A", "9.9"));
@@ -2194,8 +2219,10 @@ mod tests {
 
     #[test]
     fn test_standard_no_hash() {
-        let mut c = BacktestConfig::default();
-        c.mode = BacktestMode::Standard;
+        let c = BacktestConfig {
+            mode: BacktestMode::Standard,
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.process_day(
             &market("2024-01-02", ("A", "10"), ("A", "10")),
@@ -2206,8 +2233,10 @@ mod tests {
 
     #[test]
     fn test_fast_mode_no_positions() {
-        let mut c = BacktestConfig::default();
-        c.mode = BacktestMode::Fast;
+        let c = BacktestConfig {
+            mode: BacktestMode::Fast,
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.process_day(
             &market("2024-01-02", ("A", "10"), ("A", "10")),
@@ -2225,8 +2254,10 @@ mod tests {
 
     #[test]
     fn test_position_limit_blocks() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("0.20");
+        let c = BacktestConfig {
+            max_position_pct: d("0.20"),
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.process_day(
             &market("2024-01-02", ("A", "10"), ("A", "10")),
@@ -2243,10 +2274,15 @@ mod tests {
 
     #[test]
     fn portfolio_drawdown_control_scales_exposure_between_thresholds() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
-        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
-        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.05")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.15")),
+                portfolio_drawdown_min_exposure: Some(d("0.40")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let e = BacktestEngine::new(c);
 
         assert_eq!(
@@ -2265,11 +2301,16 @@ mod tests {
 
     #[test]
     fn portfolio_drawdown_control_can_use_rolling_peak_to_restore_exposure() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
-        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
-        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
-        c.risk_control.portfolio_drawdown_peak_lookback_days = Some(2);
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.05")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.15")),
+                portfolio_drawdown_min_exposure: Some(d("0.40")),
+                portfolio_drawdown_peak_lookback_days: Some(2),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2289,14 +2330,19 @@ mod tests {
 
     #[test]
     fn portfolio_drawdown_control_recovers_exposure_after_trough() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
-        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
-        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
-        c.risk_control.portfolio_drawdown_recovery_start_pct = Some(d("0.30"));
-        c.risk_control.portfolio_drawdown_recovery_full_pct = Some(d("0.70"));
-        c.risk_control.portfolio_drawdown_recovery_boost = Some(Decimal::ONE);
-        c.risk_control.portfolio_drawdown_peak_lookback_days = Some(252);
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.05")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.15")),
+                portfolio_drawdown_min_exposure: Some(d("0.40")),
+                portfolio_drawdown_recovery_start_pct: Some(d("0.30")),
+                portfolio_drawdown_recovery_full_pct: Some(d("0.70")),
+                portfolio_drawdown_recovery_boost: Some(Decimal::ONE),
+                portfolio_drawdown_peak_lookback_days: Some(252),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2311,14 +2357,22 @@ mod tests {
 
     #[test]
     fn portfolio_drawdown_control_reduces_rebalance_targets() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01");
-        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
-        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
-        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
-        c.fee_config.min_commission = Decimal::zero();
-        c.fee_config.commission_rate = Decimal::zero();
-        c.fee_config.slippage_bps = Decimal::zero();
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.05")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.15")),
+                portfolio_drawdown_min_exposure: Some(d("0.40")),
+                ..Default::default()
+            },
+            fee_config: FeeConfig {
+                min_commission: Decimal::zero(),
+                commission_rate: Decimal::zero(),
+                slippage_bps: Decimal::zero(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("1000000")));
@@ -2337,13 +2391,15 @@ mod tests {
 
     #[test]
     fn position_stop_loss_sells_without_rebalance_signal() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01");
-        c.risk_control.stop_loss_pct = Some(d("0.05"));
-        c.fee_config.min_commission = Decimal::zero();
-        c.fee_config.commission_rate = Decimal::zero();
-        c.fee_config.tax_rate = Decimal::zero();
-        c.fee_config.slippage_bps = Decimal::zero();
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                stop_loss_pct: Some(d("0.05")),
+                ..Default::default()
+            },
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
 
         e.process_day(
@@ -2365,14 +2421,16 @@ mod tests {
 
     #[test]
     fn position_risk_reentry_cooldown_blocks_buy_until_cooldown_expires() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01");
-        c.risk_control.stop_loss_pct = Some(d("0.05"));
-        c.risk_control.reentry_cooldown_days = Some(1);
-        c.fee_config.min_commission = Decimal::zero();
-        c.fee_config.commission_rate = Decimal::zero();
-        c.fee_config.tax_rate = Decimal::zero();
-        c.fee_config.slippage_bps = Decimal::zero();
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                stop_loss_pct: Some(d("0.05")),
+                reentry_cooldown_days: Some(1),
+                ..Default::default()
+            },
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
 
         e.process_day(
@@ -2426,13 +2484,15 @@ mod tests {
 
     #[test]
     fn position_trailing_stop_uses_peak_price_since_buy() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01");
-        c.risk_control.trailing_stop_pct = Some(d("0.08"));
-        c.fee_config.min_commission = Decimal::zero();
-        c.fee_config.commission_rate = Decimal::zero();
-        c.fee_config.tax_rate = Decimal::zero();
-        c.fee_config.slippage_bps = Decimal::zero();
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                trailing_stop_pct: Some(d("0.08")),
+                ..Default::default()
+            },
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
 
         e.process_day(
@@ -2454,9 +2514,14 @@ mod tests {
 
     #[test]
     fn portfolio_volatility_control_waits_for_full_lookback() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_volatility_target_pct = Some(d("0.15"));
-        c.risk_control.portfolio_volatility_lookback_days = Some(3);
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_volatility_target_pct: Some(d("0.15")),
+                portfolio_volatility_lookback_days: Some(3),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2471,10 +2536,15 @@ mod tests {
 
     #[test]
     fn portfolio_volatility_control_reduces_high_realized_volatility() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_volatility_target_pct = Some(d("0.10"));
-        c.risk_control.portfolio_volatility_lookback_days = Some(3);
-        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.30"));
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_volatility_target_pct: Some(d("0.10")),
+                portfolio_volatility_lookback_days: Some(3),
+                portfolio_volatility_min_exposure: Some(d("0.30")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2488,11 +2558,16 @@ mod tests {
 
     #[test]
     fn portfolio_sharpe_control_reduces_weak_rolling_return_quality() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_sharpe_reduce_start = Some(d("0.60"));
-        c.risk_control.portfolio_sharpe_reduce_full = Some(d("0.00"));
-        c.risk_control.portfolio_sharpe_lookback_days = Some(3);
-        c.risk_control.portfolio_sharpe_min_exposure = Some(d("0.40"));
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_sharpe_reduce_start: Some(d("0.60")),
+                portfolio_sharpe_reduce_full: Some(d("0.00")),
+                portfolio_sharpe_lookback_days: Some(3),
+                portfolio_sharpe_min_exposure: Some(d("0.40")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2506,11 +2581,16 @@ mod tests {
 
     #[test]
     fn portfolio_sharpe_control_waits_for_full_lookback() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_sharpe_reduce_start = Some(d("0.60"));
-        c.risk_control.portfolio_sharpe_reduce_full = Some(d("0.00"));
-        c.risk_control.portfolio_sharpe_lookback_days = Some(3);
-        c.risk_control.portfolio_sharpe_min_exposure = Some(d("0.40"));
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_sharpe_reduce_start: Some(d("0.60")),
+                portfolio_sharpe_reduce_full: Some(d("0.00")),
+                portfolio_sharpe_lookback_days: Some(3),
+                portfolio_sharpe_min_exposure: Some(d("0.40")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2522,11 +2602,16 @@ mod tests {
 
     #[test]
     fn portfolio_volatility_control_respects_max_exposure_without_leverage() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_volatility_target_pct = Some(d("0.20"));
-        c.risk_control.portfolio_volatility_lookback_days = Some(3);
-        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.20"));
-        c.risk_control.portfolio_volatility_max_exposure = Some(d("0.80"));
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_volatility_target_pct: Some(d("0.20")),
+                portfolio_volatility_lookback_days: Some(3),
+                portfolio_volatility_min_exposure: Some(d("0.20")),
+                portfolio_volatility_max_exposure: Some(d("0.80")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2540,17 +2625,22 @@ mod tests {
 
     #[test]
     fn portfolio_risk_control_uses_more_conservative_scale() {
-        let mut c = BacktestConfig::default();
-        c.risk_control.portfolio_drawdown_reduce_start_pct = Some(d("0.05"));
-        c.risk_control.portfolio_drawdown_reduce_full_pct = Some(d("0.15"));
-        c.risk_control.portfolio_drawdown_min_exposure = Some(d("0.40"));
-        c.risk_control.portfolio_volatility_target_pct = Some(d("0.10"));
-        c.risk_control.portfolio_volatility_lookback_days = Some(3);
-        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.50"));
-        c.risk_control.portfolio_sharpe_reduce_start = Some(d("0.60"));
-        c.risk_control.portfolio_sharpe_reduce_full = Some(d("0.00"));
-        c.risk_control.portfolio_sharpe_lookback_days = Some(3);
-        c.risk_control.portfolio_sharpe_min_exposure = Some(d("0.30"));
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_reduce_start_pct: Some(d("0.05")),
+                portfolio_drawdown_reduce_full_pct: Some(d("0.15")),
+                portfolio_drawdown_min_exposure: Some(d("0.40")),
+                portfolio_volatility_target_pct: Some(d("0.10")),
+                portfolio_volatility_lookback_days: Some(3),
+                portfolio_volatility_min_exposure: Some(d("0.50")),
+                portfolio_sharpe_reduce_start: Some(d("0.60")),
+                portfolio_sharpe_reduce_full: Some(d("0.00")),
+                portfolio_sharpe_lookback_days: Some(3),
+                portfolio_sharpe_min_exposure: Some(d("0.30")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
@@ -2570,14 +2660,22 @@ mod tests {
 
     #[test]
     fn portfolio_volatility_control_reduces_rebalance_targets() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01");
-        c.risk_control.portfolio_volatility_target_pct = Some(d("0.10"));
-        c.risk_control.portfolio_volatility_lookback_days = Some(3);
-        c.risk_control.portfolio_volatility_min_exposure = Some(d("0.50"));
-        c.fee_config.min_commission = Decimal::zero();
-        c.fee_config.commission_rate = Decimal::zero();
-        c.fee_config.slippage_bps = Decimal::zero();
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                portfolio_volatility_target_pct: Some(d("0.10")),
+                portfolio_volatility_lookback_days: Some(3),
+                portfolio_volatility_min_exposure: Some(d("0.50")),
+                ..Default::default()
+            },
+            fee_config: FeeConfig {
+                min_commission: Decimal::zero(),
+                commission_rate: Decimal::zero(),
+                slippage_bps: Decimal::zero(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         e.equity_curve
             .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("1000000")));
@@ -2603,11 +2701,16 @@ mod tests {
 
     #[test]
     fn rebalance_targets_are_recorded_in_deterministic_symbol_order() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01");
-        c.fee_config.min_commission = Decimal::zero();
-        c.fee_config.commission_rate = Decimal::zero();
-        c.fee_config.slippage_bps = Decimal::zero();
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            fee_config: FeeConfig {
+                min_commission: Decimal::zero(),
+                commission_rate: Decimal::zero(),
+                slippage_bps: Decimal::zero(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         let mut m = market("2024-01-02", ("B", "10"), ("B", "10"));
         m.open.insert("A".into(), d("10"));
@@ -2630,12 +2733,17 @@ mod tests {
 
     #[test]
     fn test_participation_rate_caps_buy_order() {
-        let mut c = BacktestConfig::default();
-        c.max_position_pct = d("1.01");
-        c.max_participation_rate = Some(d("0.10"));
-        c.fee_config.min_commission = Decimal::zero();
-        c.fee_config.commission_rate = Decimal::zero();
-        c.fee_config.slippage_bps = Decimal::zero();
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            max_participation_rate: Some(d("0.10")),
+            fee_config: FeeConfig {
+                min_commission: Decimal::zero(),
+                commission_rate: Decimal::zero(),
+                slippage_bps: Decimal::zero(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut e = BacktestEngine::new(c);
         let mut m = market("2024-01-02", ("A", "10"), ("A", "10"));
         // bar 表 amount 为 Tushare 千元单位：1000 千元 = 100 万元成交额，
