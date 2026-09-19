@@ -1695,6 +1695,8 @@ pub async fn create_sync_task(
     .await
 }
 
+// TODO(DDD Step 2): 同步任务上下文字段建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub async fn create_sync_task_with_context(
     pool: &PgPool,
     task_id: &str,
@@ -1871,6 +1873,8 @@ pub fn sync_attempt_success_filter_sql() -> &'static str {
          AND attempt.status = 'completed'"#
 }
 
+// TODO(DDD Step 2): 同步尝试审计字段建模债，参数对象化待 Step 2 统一推进；显式豁免。
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_sync_attempt(
     pool: &PgPool,
     source: &str,

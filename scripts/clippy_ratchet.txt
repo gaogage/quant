@@ -1,9 +1,9 @@
 # quant clippy ratchet 基线（2026-09-19 建立，路线图 70 号 P1）
 # 规则：各 crate 告警数只许降不许升；归零后该 crate 进入 strict(-D warnings) 轨道。
-# 清偿顺序：quant-backtest(核心域) → quant-data → quant-api(量大风险低)；quant-factor 已于 2026-09-19 清零进 strict 轨道。
+# 清偿顺序：quant-backtest(核心域) → quant-api(量大风险低)；quant-factor/quant-data 已于 2026-09-19 清零进 strict 轨道。
 # 建模类告警(complex type 73 / too many arguments ~75)登记 DDD Step 2 参数对象化轨道，不机械修。
 quant-common 0
 quant-backtest 56
-quant-data 19
+quant-data 0
 quant-factor 0
 quant-api 317

@@ -1473,15 +1473,7 @@ pub async fn sync_fund_div(
     .await?;
     let mut total = 0usize;
     for symbol in symbols {
-        let mut rows: Vec<(
-            String,
-            Option<NaiveDate>,
-            Option<NaiveDate>,
-            String,
-            Option<NaiveDate>,
-            Option<NaiveDate>,
-            Option<f64>,
-        )> = Vec::new();
+        let mut rows: Vec<FundDivRawRow> = Vec::new();
         let mut last_err: Option<String> = None;
         for attempt in 0..2 {
             match client.fund_div(Some(symbol), None).await {
@@ -1573,18 +1565,18 @@ pub async fn sync_fund_div(
     Ok(total)
 }
 
-async fn upsert_fund_div_rows(
-    pool: &PgPool,
-    rows: &[(
-        String,
-        Option<NaiveDate>,
-        Option<NaiveDate>,
-        String,
-        Option<NaiveDate>,
-        Option<NaiveDate>,
-        Option<f64>,
-    )],
-) -> Result<(), sqlx::Error> {
+/// fund_div 原始行：(ts_code, ann_date, ex_date, div_proc, record_date, pay_date, cash_div_tax)。
+type FundDivRawRow = (
+    String,
+    Option<NaiveDate>,
+    Option<NaiveDate>,
+    String,
+    Option<NaiveDate>,
+    Option<NaiveDate>,
+    Option<f64>,
+);
+
+async fn upsert_fund_div_rows(pool: &PgPool, rows: &[FundDivRawRow]) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     for (symbol, ann, ex, proc, record, pay, cash) in rows {
         sqlx::query(
@@ -2345,11 +2337,10 @@ pub async fn sync_block_trade(
         info!(?trade_date, batch_rows = total, "Block trade 同步进度");
         let completed_days = day_idx + 1;
         if completed_days % progress_interval == 0 || completed_days == total_days {
-            let progress = if total_days > 0 {
-                ((completed_days * 100) / total_days).min(99) as i32
-            } else {
-                0
-            };
+            let progress = (completed_days * 100)
+                .checked_div(total_days)
+                .unwrap_or(0)
+                .min(99) as i32;
             repository::heartbeat_sync_task(
                 pool,
                 task_id,
@@ -6531,11 +6522,10 @@ pub async fn sync_futures_price_chain(
                 if completed_units.is_multiple_of(progress_interval)
                     || completed_units == total_units
                 {
-                    let progress = if total_units > 0 {
-                        ((completed_units * 100) / total_units).min(99) as i32
-                    } else {
-                        0
-                    };
+                    let progress = (completed_units * 100)
+                        .checked_div(total_units)
+                        .unwrap_or(0)
+                        .min(99) as i32;
                     repository::heartbeat_sync_task(
                         pool,
                         task_id,
@@ -6996,11 +6986,10 @@ pub async fn sync_main_business(
 
         let completed_periods = period_idx + 1;
         if completed_periods % progress_interval == 0 || completed_periods == total_periods {
-            let progress = if total_periods > 0 {
-                ((completed_periods * 100) / total_periods).min(99) as i32
-            } else {
-                0
-            };
+            let progress = (completed_periods * 100)
+                .checked_div(total_periods)
+                .unwrap_or(0)
+                .min(99) as i32;
             repository::heartbeat_sync_task(
                 pool,
                 task_id,
@@ -9127,9 +9116,11 @@ async fn backfill_stale_sources() {
     .expect("db");
     // 充值 token（ab9f...）——现行 token 无这三接口权限
     let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
-    let mut cfg = crate::tushare::client::TushareConfig::default();
-    cfg.token = tok;
-    cfg.rate_limit_per_minute = 240; // 8000 积分档
+    let cfg = crate::tushare::client::TushareConfig {
+        token: tok,
+        rate_limit_per_minute: 240, // 8000 积分档
+        ..Default::default()
+    };
     let tushare = crate::tushare::client::TushareClient::new(cfg).expect("client");
 
     // 全市场活跃股票
@@ -9186,9 +9177,11 @@ async fn share_float_monthly_backfill() {
     .await
     .expect("db");
     let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
-    let mut cfg = crate::tushare::client::TushareConfig::default();
-    cfg.token = tok;
-    cfg.rate_limit_per_minute = 240;
+    let cfg = crate::tushare::client::TushareConfig {
+        token: tok,
+        rate_limit_per_minute: 240,
+        ..Default::default()
+    };
     let tushare = crate::tushare::client::TushareClient::new(cfg).expect("client");
 
     let empty: Vec<String> = vec![];
@@ -9216,9 +9209,11 @@ async fn share_float_by_anndate() {
     .await
     .expect("db");
     let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
-    let mut cfg = crate::tushare::client::TushareConfig::default();
-    cfg.token = tok;
-    cfg.rate_limit_per_minute = 240;
+    let cfg = crate::tushare::client::TushareConfig {
+        token: tok,
+        rate_limit_per_minute: 240,
+        ..Default::default()
+    };
     let client = crate::tushare::client::TushareClient::new(cfg).expect("client");
     use chrono::NaiveDate;
     let d0 = NaiveDate::from_ymd_opt(2026, 6, 23).unwrap();

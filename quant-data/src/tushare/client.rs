@@ -8,7 +8,7 @@ use governor::{
 };
 use quant_common::{QuantError, QuantResult};
 use reqwest::Client as HttpClient;
-use serde::de::DeserializeOwned;
+
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -385,14 +385,14 @@ impl TushareClient {
     /// 凭证配对切换(2026-09-15): 主对(base_url+token)失败 → 备对(fallback_base_url+fallback_token)
     /// 成对切换重试一次——两套凭证系统(私有直连/官方充值)地址与 token 必须匹配,
     /// 只换 token 不换 URL 会打错端点(私有 token 打官方域名、充值 token 打私有 IP 均 40101)。
-    async fn call_api<T: DeserializeOwned>(
+    async fn call_api(
         &self,
         api_name: &str,
         params: Vec<(&str, &str)>,
         fields: &[&str],
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
         let primary = self
-            .call_api_with_source::<Vec<serde_json::Value>>(
+            .call_api_with_source(
                 api_name,
                 &params,
                 fields,
@@ -420,7 +420,7 @@ impl TushareClient {
                             "主 Tushare 数据源失败, 配对切换到备用数据源(URL+token)"
                         );
                         // 限流键按凭证拆分: 两套账号额度独立, 不共用一个桶
-                        self.call_api_with_source::<Vec<serde_json::Value>>(
+                        self.call_api_with_source(
                             api_name,
                             &params,
                             fields,
@@ -437,7 +437,7 @@ impl TushareClient {
     }
 
     /// 按指定端点+token 发送 API 请求(限流键按凭证源拆分)
-    async fn call_api_with_source<T: DeserializeOwned>(
+    async fn call_api_with_source(
         &self,
         api_name: &str,
         params: &[(&str, &str)],
@@ -493,8 +493,7 @@ impl TushareClient {
         if let Some(ls) = list_status {
             params.push(("list_status", ls));
         }
-        self.call_api::<Vec<serde_json::Value>>("stock_basic", params, &[])
-            .await
+        self.call_api("stock_basic", params, &[]).await
     }
 
     /// 获取日线行情（批量，支持逗号分隔多只股票，支持分页）
@@ -530,8 +529,7 @@ impl TushareClient {
             let idx = if limit.is_some() { 2 } else { 1 };
             params.push(("offset", owned[idx].as_str()));
         }
-        self.call_api::<Vec<serde_json::Value>>("daily", params, &[])
-            .await
+        self.call_api("daily", params, &[]).await
     }
 
     /// 获取基金/ETF 日线数据，支持按代码 + 交易日期区间拉取。
@@ -545,7 +543,7 @@ impl TushareClient {
         if let Some(m) = market {
             params.push(("market", m));
         }
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "fund_basic",
             params,
             &[
@@ -599,8 +597,7 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("fund_daily", params, &[])
-            .await
+        self.call_api("fund_daily", params, &[]).await
     }
 
     /// 公募基金净值(tushare fund_nav, 2000 积分档)——ETF 溢价门禁数据源。
@@ -625,8 +622,7 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("fund_nav", params, &[])
-            .await
+        self.call_api("fund_nav", params, &[]).await
     }
 
     /// 基金分红(tushare fund_div, 400 积分档)——ETF 分红权威定性数据。
@@ -643,7 +639,7 @@ impl TushareClient {
         if let Some(d) = ex_date {
             params.push(("ex_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "fund_div",
             params,
             &[
@@ -699,7 +695,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "daily_basic",
             params,
             &[
@@ -758,7 +754,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "moneyflow",
             params,
             &[
@@ -788,6 +784,8 @@ impl TushareClient {
     }
 
     /// 获取业绩预告。
+    // TODO(DDD Step 2): tushare 接口参数透传建模债，参数对象化待 Step 2 统一推进；显式豁免。
+    #[allow(clippy::too_many_arguments)]
     pub async fn forecast(
         &self,
         ts_code: Option<&str>,
@@ -834,7 +832,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "forecast",
             params,
             &[
@@ -855,6 +853,8 @@ impl TushareClient {
     }
 
     /// 获取业绩快报。
+    // TODO(DDD Step 2): tushare 接口参数透传建模债，参数对象化待 Step 2 统一推进；显式豁免。
+    #[allow(clippy::too_many_arguments)]
     pub async fn express(
         &self,
         ts_code: &str,
@@ -894,7 +894,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "express",
             params,
             &[
@@ -918,6 +918,8 @@ impl TushareClient {
     }
 
     /// 获取财报披露计划日期。
+    // TODO(DDD Step 2): tushare 接口参数透传建模债，参数对象化待 Step 2 统一推进；显式豁免。
+    #[allow(clippy::too_many_arguments)]
     pub async fn disclosure_date(
         &self,
         ts_code: Option<&str>,
@@ -960,7 +962,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "disclosure_date",
             params,
             &[
@@ -989,8 +991,7 @@ impl TushareClient {
         if let Some(ed) = end_date {
             params.push(("end_date", ed));
         }
-        self.call_api::<Vec<serde_json::Value>>("trade_cal", params, &[])
-            .await
+        self.call_api("trade_cal", params, &[]).await
     }
 
     /// 获取复权因子
@@ -1031,8 +1032,7 @@ impl TushareClient {
             let idx = if limit.is_some() { 1 } else { 0 };
             params.push(("offset", owned[idx].as_str()));
         }
-        self.call_api::<Vec<serde_json::Value>>("adj_factor", params, &[])
-            .await
+        self.call_api("adj_factor", params, &[]).await
     }
 
     /// 获取基金(ETF/LOF)复权因子 — Tushare `fund_adj` 接口（股票用 adj_factor，基金必须用此接口）
@@ -1049,8 +1049,7 @@ impl TushareClient {
         if let Some(ed) = end_date {
             params.push(("end_date", ed));
         }
-        self.call_api::<Vec<serde_json::Value>>("fund_adj", params, &[])
-            .await
+        self.call_api("fund_adj", params, &[]).await
     }
 
     /// 获取指数日线
@@ -1067,8 +1066,7 @@ impl TushareClient {
         if let Some(ed) = end_date {
             params.push(("end_date", ed));
         }
-        self.call_api::<Vec<serde_json::Value>>("index_daily", params, &[])
-            .await
+        self.call_api("index_daily", params, &[]).await
     }
 
     /// 申万行业分类。用于 PIT 行业成员源接入前的权限与字段探针。
@@ -1093,7 +1091,7 @@ impl TushareClient {
             params.push(("src", value));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("index_classify", params, INDEX_CLASSIFY_FIELDS)
+        self.call_api("index_classify", params, INDEX_CLASSIFY_FIELDS)
             .await
     }
 
@@ -1131,7 +1129,7 @@ impl TushareClient {
             params.push(("is_new", value));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("index_member_all", params, INDEX_MEMBER_FIELDS)
+        self.call_api("index_member_all", params, INDEX_MEMBER_FIELDS)
             .await
     }
 
@@ -1151,8 +1149,7 @@ impl TushareClient {
         if let Some(e) = end_date {
             params.push(("end_date", e));
         }
-        self.call_api::<Vec<serde_json::Value>>("income", params, &[])
-            .await
+        self.call_api("income", params, &[]).await
     }
 
     /// 资产负债表
@@ -1169,8 +1166,7 @@ impl TushareClient {
         if let Some(e) = end_date {
             params.push(("end_date", e));
         }
-        self.call_api::<Vec<serde_json::Value>>("balancesheet", params, &[])
-            .await
+        self.call_api("balancesheet", params, &[]).await
     }
 
     /// 财务指标
@@ -1187,8 +1183,7 @@ impl TushareClient {
         if let Some(e) = end_date {
             params.push(("end_date", e));
         }
-        self.call_api::<Vec<serde_json::Value>>("fina_indicator", params, &[])
-            .await
+        self.call_api("fina_indicator", params, &[]).await
     }
 
     /// 主营业务构成。该接口没有公告日字段，任何 PIT 特征都必须先用财报公告/披露链路补 available_at。
@@ -1214,7 +1209,7 @@ impl TushareClient {
             params.push(("end_date", value));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("fina_mainbz", params, FINA_MAINBZ_FIELDS)
+        self.call_api("fina_mainbz", params, FINA_MAINBZ_FIELDS)
             .await
     }
 
@@ -1241,7 +1236,7 @@ impl TushareClient {
             params.push(("offset", offset_s.as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("fina_mainbz_vip", params, FINA_MAINBZ_VIP_FIELDS)
+        self.call_api("fina_mainbz_vip", params, FINA_MAINBZ_VIP_FIELDS)
             .await
     }
 
@@ -1279,11 +1274,12 @@ impl TushareClient {
             params.push(("offset", offset_s.as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("report_rc", params, REPORT_RC_FIELDS)
-            .await
+        self.call_api("report_rc", params, REPORT_RC_FIELDS).await
     }
 
     /// 期货日线行情。用于 P3.19 产业链/价格链高频代理的只读权限探针。
+    // TODO(DDD Step 2): tushare 接口参数透传建模债，参数对象化待 Step 2 统一推进；显式豁免。
+    #[allow(clippy::too_many_arguments)]
     pub async fn fut_daily(
         &self,
         ts_code: Option<&str>,
@@ -1321,11 +1317,12 @@ impl TushareClient {
             params.push(("offset", offset_s.as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("fut_daily", params, FUT_DAILY_FIELDS)
-            .await
+        self.call_api("fut_daily", params, FUT_DAILY_FIELDS).await
     }
 
     /// 期货仓单日报。用于 P3.19 产业链/价格链高频代理的只读权限探针。
+    // TODO(DDD Step 2): tushare 接口参数透传建模债，参数对象化待 Step 2 统一推进；显式豁免。
+    #[allow(clippy::too_many_arguments)]
     pub async fn fut_wsr(
         &self,
         trade_date: Option<&str>,
@@ -1363,11 +1360,12 @@ impl TushareClient {
             params.push(("offset", offset_s.as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("fut_wsr", params, FUT_WSR_FIELDS)
-            .await
+        self.call_api("fut_wsr", params, FUT_WSR_FIELDS).await
     }
 
     /// 期货每日成交持仓排名。用于 P3.19 产业链/价格链高频代理的只读权限探针。
+    // TODO(DDD Step 2): tushare 接口参数透传建模债，参数对象化待 Step 2 统一推进；显式豁免。
+    #[allow(clippy::too_many_arguments)]
     pub async fn fut_holding(
         &self,
         trade_date: Option<&str>,
@@ -1405,7 +1403,7 @@ impl TushareClient {
             params.push(("offset", offset_s.as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("fut_holding", params, FUT_HOLDING_FIELDS)
+        self.call_api("fut_holding", params, FUT_HOLDING_FIELDS)
             .await
     }
 
@@ -1435,7 +1433,7 @@ impl TushareClient {
             params.push(("offset", offset_s.as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("pledge_stat", params, PLEDGE_STAT_FIELDS)
+        self.call_api("pledge_stat", params, PLEDGE_STAT_FIELDS)
             .await
     }
 
@@ -1473,7 +1471,7 @@ impl TushareClient {
             params.push(("offset", offset_s.as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("pledge_detail", params, PLEDGE_DETAIL_FIELDS)
+        self.call_api("pledge_detail", params, PLEDGE_DETAIL_FIELDS)
             .await
     }
 
@@ -1509,7 +1507,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "cashflow",
             params,
             &[
@@ -1526,6 +1524,8 @@ impl TushareClient {
     }
 
     /// 分红送股，用于 Phase 7 数据权限 smoke 与后续股息质量特征。
+    // TODO(DDD Step 2): tushare 接口参数透传建模债，参数对象化待 Step 2 统一推进；显式豁免。
+    #[allow(clippy::too_many_arguments)]
     pub async fn dividend(
         &self,
         ts_code: &str,
@@ -1565,7 +1565,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "dividend",
             params,
             &[
@@ -1625,7 +1625,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "repurchase",
             params,
             &[
@@ -1682,7 +1682,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "share_float",
             params,
             &[
@@ -1737,12 +1737,8 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
-            "stk_holdernumber",
-            params,
-            STK_HOLDER_NUMBER_FIELDS,
-        )
-        .await
+        self.call_api("stk_holdernumber", params, STK_HOLDER_NUMBER_FIELDS)
+            .await
     }
 
     /// 前十大股东。`ann_date` 是披露日，不能用 `end_date` 提前可得性。
@@ -1784,7 +1780,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("top10_holders", params, TOP10_HOLDERS_FIELDS)
+        self.call_api("top10_holders", params, TOP10_HOLDERS_FIELDS)
             .await
     }
 
@@ -1827,12 +1823,8 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
-            "top10_floatholders",
-            params,
-            TOP10_FLOAT_HOLDERS_FIELDS,
-        )
-        .await
+        self.call_api("top10_floatholders", params, TOP10_FLOAT_HOLDERS_FIELDS)
+            .await
     }
 
     /// 股东增减持。事件型数据，只能作为 shareholder_structure 的辅助审计源。
@@ -1874,7 +1866,7 @@ impl TushareClient {
             params.push(("offset", owned[idx].as_str()));
         }
 
-        self.call_api::<Vec<serde_json::Value>>("stk_holdertrade", params, STK_HOLDER_TRADE_FIELDS)
+        self.call_api("stk_holdertrade", params, STK_HOLDER_TRADE_FIELDS)
             .await
     }
 
@@ -1900,7 +1892,7 @@ impl TushareClient {
             params.push(("end_date", e));
         }
 
-        self.call_api::<Vec<serde_json::Value>>(
+        self.call_api(
             "block_trade",
             params,
             &[
@@ -1933,8 +1925,7 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("moneyflow_hsgt", params, &[])
-            .await
+        self.call_api("moneyflow_hsgt", params, &[]).await
     }
 
     /// 融资融券交易汇总（市场整体，按日）
@@ -1955,8 +1946,7 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("margin", params, &[])
-            .await
+        self.call_api("margin", params, &[]).await
     }
 
     /// 个股融资融券交易明细（证券级，按日）
@@ -1992,7 +1982,7 @@ impl TushareClient {
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect();
-        self.call_api::<Vec<serde_json::Value>>("margin_detail", borrowed, MARGIN_DETAIL_FIELDS)
+        self.call_api("margin_detail", borrowed, MARGIN_DETAIL_FIELDS)
             .await
     }
 
@@ -2014,8 +2004,7 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("namechange", params, &[])
-            .await
+        self.call_api("namechange", params, &[]).await
     }
 
     /// 股票停牌信息
@@ -2040,8 +2029,7 @@ impl TushareClient {
         if let Some(d) = end_date {
             params.push(("end_date", d));
         }
-        self.call_api::<Vec<serde_json::Value>>("suspend_d", params, &[])
-            .await
+        self.call_api("suspend_d", params, &[]).await
     }
 
     /// 涨跌停列表
@@ -2067,7 +2055,6 @@ impl TushareClient {
         if let Some(e) = end_date {
             params.push(("end_date", e));
         }
-        self.call_api::<Vec<serde_json::Value>>("limit_list_d", params, &[])
-            .await
+        self.call_api("limit_list_d", params, &[]).await
     }
 }
