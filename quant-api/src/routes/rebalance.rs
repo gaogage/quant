@@ -1373,16 +1373,10 @@ async fn apply_fill_common_buy(
         return false;
     }
     // 资金:扣 cash,不足自动融资(margin += 缺口)。单 SQL 保证原子。
-    if let Err(e) = sqlx::query(
-        "UPDATE paper_account SET
-             cash = CASE WHEN COALESCE(cash,0) >= $2 THEN cash - $2 ELSE 0 END,
-             margin_amount = COALESCE(margin_amount,0) + GREATEST($2 - COALESCE(cash,0), 0)
-         WHERE paper_account_id = $1",
-    )
-    .bind(account_id)
-    .bind(fill_amount)
-    .execute(db)
-    .await
+    // R5b 批次4:收敛为 AccountRepository::debit_cash_with_margin(SQL 逐字搬移)。
+    if let Err(e) = PgPaperAccountRepo::new(db)
+        .debit_cash_with_margin(account_id, fill_amount)
+        .await
     {
         warn!("[rebalance] 资金扣减失败 {} {}: {}", account_id, sym, e);
         return false;
@@ -1436,13 +1430,10 @@ async fn apply_fill_common_sell(
         warn!("[rebalance] 清零持仓删除失败 {}: {}", account_id, e);
     }
     // 资金回流:cash += fill_amount(末尾 try_auto_repay 会把超出 reserve 的部分还给 margin)
-    if let Err(e) = sqlx::query(
-        "UPDATE paper_account SET cash = COALESCE(cash,0) + $2 WHERE paper_account_id = $1",
-    )
-    .bind(account_id)
-    .bind(fill_amount)
-    .execute(db)
-    .await
+    // R5b 批次4:收敛为 AccountRepository::credit_cash(与 paper.rs 现金入账同语义统一)。
+    if let Err(e) = PgPaperAccountRepo::new(db)
+        .credit_cash(account_id, fill_amount)
+        .await
     {
         warn!("[rebalance] 卖出资金回流失败 {} {}: {}", account_id, sym, e);
         return false;

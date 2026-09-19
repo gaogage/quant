@@ -139,6 +139,49 @@ pub trait PaperAccountRepository {
         &self,
         id: &str,
     ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
+
+    /// 买入成交资金扣款：现金足够则直扣，不足自动融资（margin += 缺口）（单点，资金核心）。
+    ///
+    /// 单 SQL 原子保证：cash = CASE WHEN 够 THEN cash-$2 ELSE 0 END，
+    /// margin_amount += GREATEST($2 - cash, 0)。
+    fn debit_cash_with_margin(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
+
+    /// 现金入账（卖出回流，cash += amount）。
+    ///
+    /// paper.rs fill_paper_order 内的同语义变体在事务内（`&mut *tx`），跟随其事务
+    /// 编排保留原处（与 mark_to_market 内分红入账同策略：事务内 SQL 不拆出 pool 版仓储）。
+    fn credit_cash(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
+
+    /// 费用扣减（佣金+印花税）：LEAST 截断到现金余额，防无杠杆账户满仓时意外融资（单点）。
+    ///
+    /// 截断差额每笔 < 5 元可忽略；扣减失败不回滚成交（调用方仅留痕对账）。
+    fn debit_fee_capped(
+        &self,
+        id: &str,
+        fee: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
+
+    /// 融资借款入账：cash += amount 且 margin_amount += amount（margin_borrow 单点）。
+    fn apply_margin_borrow(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
+
+    /// 融资还款：cash -= amount 且 margin_amount -= amount（margin_repay 单点）。
+    fn apply_margin_repay(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
 }
 
 /// PostgreSQL 实现的 paper 账号仓储。
@@ -366,6 +409,102 @@ impl<'a> PaperAccountRepository for PgPaperAccountRepo<'a> {
                 .await
                 .map_err(|e| PaperRepositoryError::Wipe { table, source: e })?;
             }
+            Ok(())
+        }
+    }
+
+    /// 买入扣款+自动融资（原 rebalance.rs apply_fill_common_buy，SQL 逐字搬移）。
+    fn debit_cash_with_margin(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+        async move {
+            sqlx::query(
+                "UPDATE paper_account SET
+                     cash = CASE WHEN COALESCE(cash,0) >= $2 THEN cash - $2 ELSE 0 END,
+                     margin_amount = COALESCE(margin_amount,0) + GREATEST($2 - COALESCE(cash,0), 0)
+                 WHERE paper_account_id = $1",
+            )
+            .bind(id)
+            .bind(amount)
+            .execute(self.pool)
+            .await?;
+            Ok(())
+        }
+    }
+
+    /// 现金入账（统一 rebalance 卖出回流 + paper 现金调整，cash += amount）。
+    ///
+    /// COALESCE 防御形态（cash 列 NOT NULL 下与裸加等价，保留防 schema 演化）。
+    fn credit_cash(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+        async move {
+            sqlx::query(
+                "UPDATE paper_account SET cash = COALESCE(cash,0) + $2 WHERE paper_account_id = $1",
+            )
+            .bind(id)
+            .bind(amount)
+            .execute(self.pool)
+            .await?;
+            Ok(())
+        }
+    }
+
+    /// 费用扣减（LEAST 截断防负现金，原 trading.rs，SQL 逐字搬移）。
+    fn debit_fee_capped(
+        &self,
+        id: &str,
+        fee: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+        async move {
+            sqlx::query(
+                "UPDATE paper_account SET cash = cash - LEAST($2, COALESCE(cash,0)) \
+                 WHERE paper_account_id = $1",
+            )
+            .bind(id)
+            .bind(fee)
+            .execute(self.pool)
+            .await?;
+            Ok(())
+        }
+    }
+
+    /// 融资借款入账（原 trading.rs margin_borrow，SQL 逐字搬移）。
+    fn apply_margin_borrow(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+        async move {
+            sqlx::query(
+                "UPDATE paper_account SET cash = cash + $1, margin_amount = COALESCE(margin_amount,0) + $1 WHERE paper_account_id = $2",
+            )
+            .bind(amount)
+            .bind(id)
+            .execute(self.pool)
+            .await?;
+            Ok(())
+        }
+    }
+
+    /// 融资还款（原 trading.rs margin_repay，SQL 逐字搬移）。
+    fn apply_margin_repay(
+        &self,
+        id: &str,
+        amount: Decimal,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+        async move {
+            sqlx::query(
+                "UPDATE paper_account SET cash = cash - $1, margin_amount = margin_amount - $1 WHERE paper_account_id = $2",
+            )
+            .bind(amount)
+            .bind(id)
+            .execute(self.pool)
+            .await?;
             Ok(())
         }
     }

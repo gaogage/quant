@@ -11,6 +11,8 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
+
 fn short_id() -> String {
     Uuid::new_v4()
         .to_string()
@@ -265,14 +267,9 @@ pub async fn execute_simulated_trade(
     // 时不因 5 元佣金意外产生 margin(严格不融资), 截断差额每笔 < 5 元可忽略。
     let fee_total = commission + tax;
     if fee_total > Decimal::ZERO {
-        if let Err(e) = sqlx::query(
-            "UPDATE paper_account SET cash = cash - LEAST($2, COALESCE(cash,0)) \
-             WHERE paper_account_id = $1",
-        )
-        .bind(&trade.account_id)
-        .bind(fee_total)
-        .execute(db)
-        .await
+        if let Err(e) = PgPaperAccountRepo::new(db)
+            .debit_fee_capped(&trade.account_id, fee_total)
+            .await
         {
             // 费用扣减失败不回滚成交(成交已落库); 留痕供对账
             tracing::warn!(
@@ -314,11 +311,11 @@ pub async fn execute_margin_borrow(
     .map_err(|e| format!("margin_borrow: {}", e))?;
 
     // 更新账户：现金增加，融资金额增加
-    sqlx::query(
-        "UPDATE paper_account SET cash = cash + $1, margin_amount = COALESCE(margin_amount,0) + $1 WHERE paper_account_id = $2"
-    )
-    .bind(amount).bind(account_id)
-    .execute(db).await.map_err(|e| format!("margin_borrow update: {}", e))?;
+    // R5b 批次4:收敛为 AccountRepository::apply_margin_borrow(SQL 逐字搬移)。
+    PgPaperAccountRepo::new(db)
+        .apply_margin_borrow(account_id, amount)
+        .await
+        .map_err(|e| format!("margin_borrow update: {}", e))?;
 
     Ok(trade_id)
 }
@@ -365,11 +362,11 @@ pub async fn execute_margin_repay(
     .map_err(|e| format!("margin_repay: {}", e))?;
 
     // 更新账户：现金减少，融资金额减少
-    sqlx::query(
-        "UPDATE paper_account SET cash = cash - $1, margin_amount = margin_amount - $1 WHERE paper_account_id = $2"
-    )
-    .bind(amount).bind(account_id)
-    .execute(db).await.map_err(|e| format!("margin_repay update: {}", e))?;
+    // R5b 批次4:收敛为 AccountRepository::apply_margin_repay(SQL 逐字搬移)。
+    PgPaperAccountRepo::new(db)
+        .apply_margin_repay(account_id, amount)
+        .await
+        .map_err(|e| format!("margin_repay update: {}", e))?;
 
     Ok(trade_id)
 }
