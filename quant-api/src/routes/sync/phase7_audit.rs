@@ -3654,31 +3654,26 @@ pub async fn phase7_feasibility_audit(State(state): State<Arc<AppState>>) -> imp
 }
 
 /// GET /api/v1/quant/data/futures-price-chain/schema-contract
-
 pub async fn futures_price_chain_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_futures_price_chain_schema_contract()}))
 }
 
 /// GET /api/v1/quant/data/equity-pledge-pressure/schema-contract
-
 pub async fn equity_pledge_pressure_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_equity_pledge_schema_contract()}))
 }
 
 /// GET /api/v1/quant/data/margin-detail/schema-contract
-
 pub async fn margin_detail_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_margin_detail_schema_contract()}))
 }
 
 /// GET /api/v1/quant/data/shareholder-structure/schema-contract
-
 pub async fn shareholder_structure_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_shareholder_structure_schema_contract()}))
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/schema-contract
-
 pub async fn futures_price_chain_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3689,7 +3684,6 @@ pub async fn futures_price_chain_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/futures-price-chain/mapping-audit
-
 pub async fn futures_price_chain_mapping_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3700,7 +3694,6 @@ pub async fn futures_price_chain_mapping_audit(
 }
 
 /// GET /api/v1/quant/data/futures-price-chain/coverage-audit
-
 pub async fn futures_price_chain_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<FuturesPriceChainCoverageAuditReq>,
@@ -3712,7 +3705,6 @@ pub async fn futures_price_chain_coverage_audit(
 }
 
 /// GET /api/v1/quant/data/futures-price-chain/mapping-template
-
 pub async fn futures_price_chain_mapping_template(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3723,7 +3715,6 @@ pub async fn futures_price_chain_mapping_template(
 }
 
 /// POST /api/v1/quant/data/futures-price-chain/mapping-validate
-
 pub async fn futures_price_chain_mapping_validate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FuturesPriceChainMappingValidateReq>,
@@ -3735,7 +3726,6 @@ pub async fn futures_price_chain_mapping_validate(
 }
 
 /// POST /api/v1/quant/data/futures-price-chain/sync
-
 pub async fn futures_price_chain_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FuturesPriceChainSyncReq>,
@@ -3795,7 +3785,6 @@ pub async fn futures_price_chain_sync(
 }
 
 /// GET /api/v1/quant/data/shareholder-structure/readiness-audit
-
 pub async fn shareholder_structure_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3806,7 +3795,6 @@ pub async fn shareholder_structure_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/margin-detail/readiness-audit
-
 pub async fn margin_detail_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3817,7 +3805,6 @@ pub async fn margin_detail_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/margin-detail/coverage-audit
-
 pub async fn margin_detail_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<MarginDetailCoverageAuditReq>,
@@ -3829,7 +3816,6 @@ pub async fn margin_detail_coverage_audit(
 }
 
 /// GET /api/v1/quant/data/margin-detail/sync-plan
-
 pub async fn margin_detail_sync_plan(
     State(state): State<Arc<AppState>>,
     Query(req): Query<MarginDetailSyncPlanReq>,
@@ -3841,7 +3827,6 @@ pub async fn margin_detail_sync_plan(
 }
 
 /// POST /api/v1/quant/data/margin-detail/sync
-
 pub async fn margin_detail_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MarginDetailSyncReq>,
@@ -3901,7 +3886,6 @@ pub async fn margin_detail_sync(
 }
 
 /// GET /api/v1/quant/data/shareholder-structure/coverage-audit
-
 pub async fn shareholder_structure_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ShareholderStructureCoverageAuditReq>,
@@ -3913,7 +3897,6 @@ pub async fn shareholder_structure_coverage_audit(
 }
 
 /// GET /api/v1/quant/data/shareholder-structure/sync-plan
-
 pub async fn shareholder_structure_sync_plan(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ShareholderStructureSyncPlanReq>,
@@ -3925,7 +3908,6 @@ pub async fn shareholder_structure_sync_plan(
 }
 
 /// POST /api/v1/quant/data/shareholder-structure/sync
-
 pub async fn shareholder_structure_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ShareholderStructureSyncReq>,
@@ -3985,7 +3967,6 @@ pub async fn shareholder_structure_sync(
 }
 
 /// GET /api/v1/quant/data/equity-pledge-pressure/readiness-audit
-
 pub async fn equity_pledge_pressure_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3996,7 +3977,6 @@ pub async fn equity_pledge_pressure_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/equity-pledge-pressure/coverage-audit
-
 pub async fn equity_pledge_pressure_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<EquityPledgeCoverageAuditReq>,
@@ -4008,7 +3988,6 @@ pub async fn equity_pledge_pressure_coverage_audit(
 }
 
 /// POST /api/v1/quant/data/equity-pledge-pressure/sync
-
 pub async fn equity_pledge_pressure_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EquityPledgePressureSyncReq>,
@@ -4068,7 +4047,6 @@ pub async fn equity_pledge_pressure_sync(
 }
 
 /// POST /api/v1/quant/data/tushare/permission-smoke
-
 pub async fn tushare_permission_smoke(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TusharePermissionSmokeReq>,
@@ -4080,7 +4058,6 @@ pub async fn tushare_permission_smoke(
 }
 
 /// POST /api/v1/quant/data/main-business/available-at-audit
-
 pub async fn main_business_available_at_audit(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MainBusinessAvailableAtAuditReq>,
@@ -4092,7 +4069,6 @@ pub async fn main_business_available_at_audit(
 }
 
 /// GET /api/v1/quant/data/main-business/readiness-audit
-
 pub async fn main_business_readiness_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<MainBusinessReadinessAuditReq>,
@@ -4104,7 +4080,6 @@ pub async fn main_business_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/broad-analyst-revision/audit
-
 pub async fn phase7_optional_source_coverage_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7OptionalSourceCoverageSyncReq>,
@@ -4116,7 +4091,6 @@ pub async fn phase7_optional_source_coverage_sync(
 }
 
 /// POST /api/v1/quant/data/phase7-optional-source-coverage-batches
-
 pub async fn phase7_optional_source_coverage_batches(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7OptionalSourceCoverageBatchReq>,
@@ -4128,7 +4102,6 @@ pub async fn phase7_optional_source_coverage_batches(
 }
 
 /// POST /api/v1/quant/data/phase7-coverage-expansion-runner
-
 pub async fn phase7_coverage_expansion_runner(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7CoverageExpansionRunnerReq>,
@@ -4140,7 +4113,6 @@ pub async fn phase7_coverage_expansion_runner(
 }
 
 /// POST /api/v1/quant/data/phase7-share-float-coverage-batches
-
 pub async fn phase7_share_float_coverage_batches(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7ShareFloatCoverageReq>,
@@ -4152,7 +4124,6 @@ pub async fn phase7_share_float_coverage_batches(
 }
 
 /// POST /api/v1/quant/data/phase7-share-float-readiness-audit
-
 pub async fn phase7_share_float_readiness_audit(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7ShareFloatReadinessAuditReq>,
@@ -4164,7 +4135,6 @@ pub async fn phase7_share_float_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/phase7-industry-membership-coverage-audit
-
 pub async fn phase7_industry_membership_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<Phase7IndustryMembershipCoverageAuditReq>,

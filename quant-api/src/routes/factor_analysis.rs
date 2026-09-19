@@ -48,14 +48,14 @@ pub fn compute_ic(
     // 2. 逐日算 rank IC(Spearman),收集序列
     let mut rank_ic_series: Vec<f64> = Vec::new();
     let mut n_total: usize = 0;
-    for (_date, rows) in &by_date {
+    for rows in by_date.values() {
         if rows.len() < 5 {
             continue; // 截面样本太少,跳过
         }
         let ic = spearman_rank_ic(
             &rows
                 .iter()
-                .map(|(_s, fv, fr)| (fv.clone(), fr.clone()))
+                .map(|(_s, fv, fr)| (*fv, *fr))
                 .collect::<Vec<_>>(),
         );
         if ic.is_finite() {
@@ -81,14 +81,14 @@ pub fn compute_ic(
 
     // mean_ic 用 Pearson IC(同样逐日算)
     let mut pearson_series: Vec<f64> = Vec::new();
-    for (_date, rows) in &by_date {
+    for rows in by_date.values() {
         if rows.len() < 5 {
             continue;
         }
         let ic = pearson_ic(
             &rows
                 .iter()
-                .map(|(_, fv, fr)| (fv.clone(), fr.clone()))
+                .map(|(_, fv, fr)| (*fv, *fr))
                 .collect::<Vec<_>>(),
         );
         if ic.is_finite() {

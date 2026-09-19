@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[allow(clippy::too_many_arguments)]
-
 fn professional_v14_sharpe_return_lift_seed_trials() -> Vec<Value> {
     let Some(boundary) = phase7_high_sharpe_boundary_base_seed() else {
         return Vec::new();
@@ -1324,23 +1323,7 @@ fn professional_v14_corr70_annual_edge_seed_trials() -> Vec<Value> {
     seeds
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayeredSearchConfig {
     pub market_regime_policies: Vec<String>,

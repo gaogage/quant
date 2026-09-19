@@ -2126,7 +2126,6 @@ fn build_portfolio_risk_control(req: &RunFactorBacktestReq) -> Result<RiskContro
         portfolio_sharpe_reduce_full: sharpe_full,
         portfolio_sharpe_lookback_days: sharpe_lookback_days,
         portfolio_sharpe_min_exposure: sharpe_min_exposure,
-        ..RiskControlConfig::default()
     })
 }
 
@@ -2674,7 +2673,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         Ok(value) => value,
         Err(message) => return Err(message),
     };
-    let sig_config = build_factor_signal_config(&req, reb_freq, max_participation_rate.clone())?;
+    let sig_config = build_factor_signal_config(&req, reb_freq, max_participation_rate)?;
 
     info!(
         task_id,
@@ -2747,7 +2746,7 @@ pub(crate) async fn execute_factor_backtest_with_caches(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let market_feature_prewarm_report = if let Some(cache) = signal_cache.as_deref_mut() {
+    let market_feature_prewarm_report = if let Some(cache) = signal_cache {
         let lookback_days = req
             .correlation_lookback_days
             .max(req.kelly_lookback_days)
@@ -3023,17 +3022,17 @@ pub(crate) async fn execute_prediction_backtest(
         max_participation_rate,
         persistence_mode,
         risk_control: RiskControlConfig {
-            trailing_stop_pct: req.trailing_stop_pct.and_then(|v| Decimal::from_f64(v)),
+            trailing_stop_pct: req.trailing_stop_pct.and_then(Decimal::from_f64),
             portfolio_volatility_target_pct: req
                 .portfolio_volatility_target_pct
-                .and_then(|v| Decimal::from_f64(v)),
+                .and_then(Decimal::from_f64),
             portfolio_volatility_lookback_days: req.portfolio_volatility_lookback_days,
             portfolio_volatility_min_exposure: req
                 .portfolio_volatility_min_exposure
-                .and_then(|v| Decimal::from_f64(v)),
+                .and_then(Decimal::from_f64),
             portfolio_volatility_max_exposure: req
                 .portfolio_volatility_max_exposure
-                .and_then(|v| Decimal::from_f64(v)),
+                .and_then(Decimal::from_f64),
             ..RiskControlConfig::default()
         },
     };
@@ -4580,7 +4579,7 @@ mod f1_quarterly_rerun {
                 "universe_profile": "main_board_non_st", "benchmark": "000300.SH"
             }))
             .expect("req");
-            let out = execute_factor_backtest(&db, &task, req).await.expect("bt");
+            let out = execute_factor_backtest(&db, task, req).await.expect("bt");
             println!(
                 "[{}] trades={} turnover={:.1}",
                 label, out.metrics.num_trades, out.metrics.turnover

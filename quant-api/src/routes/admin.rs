@@ -562,7 +562,7 @@ pub async fn sync_status(
 
     // ── ML预测：检查调度器实际会选中的预测集（PIT 最新）──
     {
-        let pid: Option<String> = cfg.prediction_set_id.clone().or_else(|| None);
+        let pid: Option<String> = cfg.prediction_set_id.clone();
         let pid = match pid {
             Some(pid) => Some(pid),
             None => sqlx::query_scalar(

@@ -376,7 +376,6 @@ pub async fn cleanup_stale_optimization_tasks(
 /// 清理 started_at/created_at 超时的 experiment_run 元数据。
 /// 默认 dry_run=true；actual update 会把 pending/running 标记为 failed，
 /// 并在 metrics 中写入 stale_cleanup 审计字段。
-
 pub async fn cleanup_stale_experiment_runs(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CleanupStaleBackgroundTasksReq>,

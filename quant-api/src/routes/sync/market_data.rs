@@ -107,7 +107,6 @@ pub async fn sync_adj_factor(
 }
 
 /// POST /api/v1/quant/data/sync/fund-adj — 同步 ETF/基金复权因子（Tushare fund_adj）
-
 pub async fn sync_fund_adj(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncAdjFactorReq>,
@@ -136,7 +135,6 @@ pub async fn sync_fund_adj(
 /// POST /api/v1/quant/data/sync/adj-factor/background
 ///
 /// 大批量后台同步复权因子，立即返回 task_id。
-
 pub async fn sync_adj_factor_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncAdjFactorReq>,
@@ -373,7 +371,6 @@ pub async fn sync_index_daily(
 }
 
 /// POST /api/v1/quant/data/sync/trade-cal
-
 pub async fn sync_trade_cal(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     info!("同步交易日历");
     let mut count = 0usize;
@@ -414,7 +411,6 @@ pub async fn quality_check(
 }
 
 /// GET /api/v1/quant/data/stats
-
 pub async fn data_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let stock_count = quant_data::repository::count_stocks(&state.db)
         .await
@@ -442,7 +438,6 @@ pub async fn data_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 /// GET /api/v1/quant/data/phase7-feasibility-audit
-
 pub async fn sync_daily_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncDailyReq>,
@@ -510,7 +505,6 @@ pub async fn sync_daily_background(
 /// GET /api/v1/quant/data/sync/tasks/:task_id
 ///
 /// 查询数据同步任务状态（同步/后台均适用）。
-
 pub async fn sync_fund_basic(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match quant_data::sync::sync_fund_basic(&state.db, &state.tushare).await {
         Ok(count) => Json(json!({"code": 0, "data": {"count": count}})),

@@ -21,39 +21,17 @@ faild() { echo -e "${RED}FAIL${NC} $1"; fail=1; }
 echo "=== [1/4] cargo fmt --check ==="
 if cargo fmt --all -- --check; then pass "fmt"; else faild "fmt (cargo fmt --all 修复后重跑)"; fi
 
-# ---------- [2] clippy ratchet ----------
-echo "=== [2/4] clippy ratchet (基线 scripts/clippy_ratchet.txt) ==="
-declare -A RATCHET
-if [ -f scripts/clippy_ratchet.txt ]; then
-  while read -r crate count; do
-    case "$crate" in ''|'#'*) continue ;; esac
-    RATCHET[$crate]=$count
-  done < scripts/clippy_ratchet.txt
+# ---------- [2] clippy strict ----------
+# 2026-09-19 P1 收官：五 crate 告警全部清零，ratchet 基线归零退役（历史见
+# scripts/clippy_ratchet.txt），门禁升级为全 workspace strict(-D warnings)。
+# 建模债两类（too_many_arguments/type_complexity）经 quant-api Cargo.toml
+# [lints.clippy] 显式豁免并登记 DDD Step 2，不影响 strict 判定。
+echo "=== [2/4] clippy strict (-D warnings, workspace) ==="
+if cargo clippy --workspace --all-targets -- -D warnings > /tmp/quant_gate_clippy.log 2>&1; then
+  pass "clippy strict"
 else
-  echo -e "${YELLOW}WARN${NC} 基线文件缺失,clippy ratchet 跳过"
+  faild "clippy strict (详见 /tmp/quant_gate_clippy.log)"
 fi
-
-declare -A ACTUAL
-while IFS= read -r line; do
-  crate=${line%%:*}; crate=${crate%%/*}
-  [ -n "$crate" ] && ACTUAL[$crate]=$(( ${ACTUAL[$crate]:-0} + 1 ))
-done < <(cargo clippy --workspace --all-targets --message-format short 2>&1 \
-         | grep 'warning:' | grep -v 'generated')
-
-viol=0
-for crate in "${!ACTUAL[@]}"; do
-  cap=${RATCHET[$crate]:-0}
-  n=${ACTUAL[$crate]}
-  if [ "$n" -gt "$cap" ]; then
-    echo -e "${RED}FAIL${NC} $crate: $n > 基线 $cap (修复新增告警或更新基线)"
-    viol=1
-  elif [ "$n" -lt "$cap" ]; then
-    echo -e "${YELLOW}改善${NC} $crate: $n < 基线 $cap (可收紧基线: sed 更新 clippy_ratchet.txt)"
-  else
-    echo "  持平 $crate: $n"
-  fi
-done
-[ "$viol" -eq 0 ] && pass "clippy ratchet" || { faild "clippy ratchet"; }
 
 [ "$FAST" = "--fast" ] && { echo; [ "$fail" -eq 0 ] && pass "快门禁全绿" || faild "快门禁有红灯"; exit "$fail"; }
 

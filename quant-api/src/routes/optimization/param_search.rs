@@ -123,6 +123,9 @@ pub(crate) struct DiscoveryCandidate {
     pub(crate) parameters: Value,
 }
 
+// 两变体均为大型请求结构（含参数 JSON），Box 化波及全部构造/匹配点，收益仅
+// 栈内存优化；P2 拆分本文件时顺带处理。显式豁免。
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum OptimizationTrialBacktestRequest {
     Factor(RunFactorBacktestReq),
     Prediction(RunPredictionBacktestReq),

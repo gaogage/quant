@@ -113,7 +113,6 @@ pub async fn sync_suspension_backfill(
 /// POST /api/v1/quant/data/sync/suspension/derive-from-daily
 ///
 /// 基于已同步 A 股日线缺失派生历史停牌事实；不补价格。
-
 pub async fn derive_suspension_from_daily(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BackfillRequest>,
@@ -138,7 +137,6 @@ pub async fn derive_suspension_from_daily(
 }
 
 /// POST /api/v1/quant/data/sync/limit/backfill
-
 pub async fn sync_limit_backfill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BackfillRequest>,

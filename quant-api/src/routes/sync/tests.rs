@@ -1230,7 +1230,7 @@ fn phase7_coverage_runner_profile_is_bounded_and_plan_only_by_default() {
     assert_eq!(phase7_coverage_runner_batch_size(Some(10_000)), 100);
     assert_eq!(phase7_coverage_runner_batch_count(None), 4);
     assert_eq!(phase7_coverage_runner_batch_count(Some(10_000)), 10);
-    assert_eq!(phase7_coverage_runner_plan_only(None), true);
+    assert!(phase7_coverage_runner_plan_only(None));
     assert_eq!(
         phase7_coverage_runner_sources(&[]).unwrap(),
         vec!["cashflow", "dividend", "financial"]

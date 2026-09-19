@@ -843,7 +843,6 @@ pub async fn broad_analyst_revision_audit(
 }
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/schema-contract
-
 pub async fn akshare_analyst_revision_schema_contract() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -852,7 +851,6 @@ pub async fn akshare_analyst_revision_schema_contract() -> impl IntoResponse {
 }
 
 /// POST /api/v1/quant/data/akshare/analyst-revision/permission-smoke
-
 pub async fn akshare_analyst_revision_permission_smoke(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AkshareAnalystRevisionSmokeReq>,
@@ -864,7 +862,6 @@ pub async fn akshare_analyst_revision_permission_smoke(
 }
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/available-at-audit
-
 pub async fn akshare_analyst_revision_available_at_audit() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -873,7 +870,6 @@ pub async fn akshare_analyst_revision_available_at_audit() -> impl IntoResponse 
 }
 
 /// POST /api/v1/quant/data/akshare/analyst-revision/history-replay-audit
-
 pub async fn akshare_analyst_revision_history_replay_audit(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AkshareAnalystRevisionHistoryReplayAuditReq>,
@@ -885,7 +881,6 @@ pub async fn akshare_analyst_revision_history_replay_audit(
 }
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/sync-plan
-
 pub async fn akshare_analyst_revision_sync_plan(
     Query(req): Query<AkshareAnalystRevisionSyncPlanReq>,
 ) -> impl IntoResponse {
@@ -896,7 +891,6 @@ pub async fn akshare_analyst_revision_sync_plan(
 }
 
 /// POST /api/v1/quant/data/akshare/analyst-revision/sync
-
 pub async fn akshare_analyst_revision_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AkshareAnalystRevisionSyncReq>,
@@ -908,7 +902,6 @@ pub async fn akshare_analyst_revision_sync(
 }
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/readiness-audit
-
 pub async fn akshare_analyst_revision_readiness_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<AkshareAnalystRevisionReadinessAuditReq>,
@@ -920,7 +913,6 @@ pub async fn akshare_analyst_revision_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/coverage-audit
-
 pub async fn akshare_analyst_revision_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<AkshareAnalystRevisionCoverageAuditReq>,
@@ -932,7 +924,6 @@ pub async fn akshare_analyst_revision_coverage_audit(
 }
 
 /// POST /api/v1/quant/data/phase7-optional-source-coverage-sync
-
 async fn build_akshare_analyst_revision_permission_smoke(
     state: &AppState,
     req: AkshareAnalystRevisionSmokeReq,

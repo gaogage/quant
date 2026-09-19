@@ -96,6 +96,9 @@ impl<'a> PgPaperAccountRepo<'a> {
     }
 }
 
+// R5b 有意的"原生 impl Future" trait 形态（2026-08-01 设计），AFIT 迁移待 trait
+// 定义与全部调用方一并现代化；显式豁免 manual_async_fn。
+#[allow(clippy::manual_async_fn)]
 impl<'a> PaperAccountRepository for PgPaperAccountRepo<'a> {
     /// `SELECT user_id FROM paper_account WHERE paper_account_id = $1`
     ///

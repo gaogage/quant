@@ -1,9 +1,11 @@
-# quant clippy ratchet 基线（2026-09-19 建立，路线图 70 号 P1）
-# 规则：各 crate 告警数只许降不许升；归零后该 crate 进入 strict(-D warnings) 轨道。
-# 清偿顺序：仅剩 quant-api(317，量大风险低)；common/factor/data/backtest 已于 2026-09-19 全部清零进 strict 轨道。
-# 建模类告警(complex type 73 / too many arguments ~75)登记 DDD Step 2 参数对象化轨道，不机械修。
+# quant clippy ratchet 基线（2026-09-19 建立，同日全部归零退役）
+# P1 清偿全程：common 5→0 / factor 11→0 / data 19→0 / backtest 56→0 / api 317→0。
+# ratchet 机制完成历史使命，门禁已升级为全 workspace strict（quality_gate.sh [2] 段）。
+# 建模债豁免台账：too_many_arguments/type_complexity 共 114 条经 quant-api
+# Cargo.toml [lints.clippy] 显式豁免，登记 DDD Step 2（参数对象化 + newtype 化），
+# 届时删除豁免条目恢复全 strict。函数级豁免（带 TODO 注释）散见各 crate。
 quant-common 0
 quant-backtest 0
 quant-data 0
 quant-factor 0
-quant-api 317
+quant-api 0

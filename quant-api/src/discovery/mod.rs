@@ -5,6 +5,6 @@
 //! - profiles：搜索空间配置类型层
 //! - alpha_admission：alpha 源准入分级
 //! - candidate_screening：候选筛选门禁
-//! mod.rs 主体保留 LayeredSearchConfig / seeds / tests（后续批次拆分）。
+//!   mod.rs 主体保留 LayeredSearchConfig / seeds / tests（后续批次拆分）。
 
 pub mod strategy_discovery;

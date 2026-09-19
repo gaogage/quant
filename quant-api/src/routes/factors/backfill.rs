@@ -1403,7 +1403,6 @@ impl Phase7EventWindowAlphaBackfillRequest {
             return Err("combo_name must be <= 128 chars".to_string());
         }
 
-        let combo_name = combo_name;
         let bundle_name = event_window_bundle_name(&combo_name);
         let phase = event_window_phase(&combo_name);
         let dependencies = event_window_dependencies(&combo_name);
@@ -4412,7 +4411,6 @@ impl P42bLargeCapMomentumReversalBackfillRequest {
 /// interaction factor (`defensive_lowvol_quality_daily_std`): within the
 /// defensive industry pool, CUME_DIST(-volatility) x CUME_DIST(fin_roe)
 /// interaction, cross-sectional percent_rank normalization.
-
 pub async fn backfill_p42b_defensive_low_vol_quality_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<P42bDefensiveLowVolQualityBackfillRequest>,
@@ -4598,7 +4596,6 @@ impl P42bDefensiveLowVolQualityBackfillRequest {
 ///
 /// Set-based daily PIT carry-forward backfill for the Phase 7 financial
 /// quality alpha bundle and its equal-weight combo score.
-
 pub async fn backfill_phase7_financial_quality_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7FinancialQualityBackfillRequest>,
@@ -10070,7 +10067,7 @@ async fn execute_set_based_combo_backfill(
 
     set_local_combo_backfill_planner(&mut tx).await?;
 
-    let result = sqlx::query(&phase7_combo_backfill_sql())
+    let result = sqlx::query(phase7_combo_backfill_sql())
         .bind(&plan.combo_name)
         .bind(&plan.version)
         .bind(&weights_json)
@@ -10221,11 +10218,9 @@ async fn update_factor_backfill_progress(
     total_steps: usize,
     success_rows: usize,
 ) -> Result<(), String> {
-    let progress = if total_steps == 0 {
-        0
-    } else {
-        ((completed_steps.min(total_steps) * 100) / total_steps) as i32
-    };
+    let progress = (completed_steps.min(total_steps) * 100)
+        .checked_div(total_steps)
+        .unwrap_or(0) as i32;
     sqlx::query(
         "UPDATE data_sync_task
          SET progress=$2,

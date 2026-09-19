@@ -386,7 +386,7 @@ mod tests {
             &positions,
             0.125,
             -0.08,
-            &vec![],
+            &[],
         );
 
         assert!(text.contains("🟡 模拟"));

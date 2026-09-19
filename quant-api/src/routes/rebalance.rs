@@ -241,7 +241,7 @@ pub async fn rebalance_account(
     } else {
         detect_regime_exposure(db, date, sc.deep_bear_threshold, sc.deep_bear_exposure).await
     };
-    let mvo_a_pct = mvo_weights.get(0).copied().unwrap_or(0.0) * regime;
+    let mvo_a_pct = mvo_weights.first().copied().unwrap_or(0.0) * regime;
 
     // 3. 选股(读 task_id 的 backtest_position 当日截面)
     let positions = select_positions(db, task_id, date).await?;
@@ -805,7 +805,7 @@ pub async fn rebalance_account(
             rs.strategy_id
         );
         warn!("[rebalance] {}", msg);
-        crate::routes::shared::send_quality_alert(db, &[msg.clone()]).await;
+        crate::routes::shared::send_quality_alert(db, std::slice::from_ref(&msg)).await;
         return Err(msg);
     }
 
@@ -1048,7 +1048,7 @@ pub async fn check_maintenance_after_mark(
 /// - ETF 拆分/折算:market_adjustment_factor 因子跳变比 >10%(拆分级)→ quantity ×= 跳变比;
 ///   ≤10% 的跳变是分红除息(如 511010 季度分红 ~0.5%),份额不动,现金暂不入账(误差微小)。
 /// - 配股:dividend 表无记录,份额不动价格除权下跌——等同实盘不缴配股款的真实损失,维持现状。
-/// 事件窗口 = 最近两条 bar 之间 (t2, t1](逐日=昨日至今;隔日补跑=上次估值至今,均正确)。
+///   事件窗口 = 最近两条 bar 之间 (t2, t1](逐日=昨日至今;隔日补跑=上次估值至今,均正确)。
 pub async fn mark_to_market(
     db: &PgPool,
     account_id: &str,

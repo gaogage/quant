@@ -2062,7 +2062,6 @@ async fn build_exchange_announcement_order_capacity_coverage_quality_audit(
             failed_attempts,
             total_failed_attempts,
             excluded_unsupported_category_failed_attempts,
-            ..Default::default()
         },
     );
 
@@ -2437,7 +2436,7 @@ async fn build_exchange_announcement_order_capacity_manual_precision_sample_audi
         text_excerpt,
         announcement_url,
         pdf_final_url,
-    ) in target_rows.into_iter().chain(negative_rows.into_iter())
+    ) in target_rows.into_iter().chain(negative_rows)
     {
         review_items.push(json!({
             "sample_kind": sample_kind,
@@ -3778,19 +3777,17 @@ except Exception as error:
             "source_published_at_quality".to_string(),
             row.get("source_published_at_quality")
                 .cloned()
-                .unwrap_or_else(|| json!(null)),
+                .unwrap_or(json!(null)),
         );
         object.insert(
             "source_published_at".to_string(),
             row.get("source_published_at")
                 .cloned()
-                .unwrap_or_else(|| json!(null)),
+                .unwrap_or(json!(null)),
         );
         object.insert(
             "available_at".to_string(),
-            row.get("available_at")
-                .cloned()
-                .unwrap_or_else(|| json!(null)),
+            row.get("available_at").cloned().unwrap_or(json!(null)),
         );
         object.insert(
             "pit_policy".to_string(),
@@ -4048,7 +4045,6 @@ pub async fn exchange_announcement_order_capacity_schema_contract() -> impl Into
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/next-source-admission-plan
-
 pub async fn exchange_announcement_order_capacity_next_source_admission_plan() -> impl IntoResponse
 {
     Json(json!({
@@ -4058,7 +4054,6 @@ pub async fn exchange_announcement_order_capacity_next_source_admission_plan() -
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/source-contract
-
 pub async fn structured_order_capacity_price_chain_cninfo_access_smoke_contract(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4068,7 +4063,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_access_smoke_contract(
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-contract
-
 pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_contract(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4078,7 +4072,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_cont
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-audit
-
 pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_audit(
 ) -> impl IntoResponse {
     let manifest_path = env::var("QUANT_CNINFO_EVIDENCE_MANIFEST_PATH").ok();
@@ -4105,7 +4098,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_audi
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-permission-sample-smoke-plan
-
 pub async fn structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4115,7 +4107,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_permission_sample_smok
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-manifest-template
-
 pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4125,7 +4116,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_mani
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review
-
 pub async fn exchange_announcement_order_capacity_manual_schema_review() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -4134,7 +4124,6 @@ pub async fn exchange_announcement_order_capacity_manual_schema_review() -> impl
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/sync-plan
-
 pub async fn exchange_announcement_order_capacity_sync_plan(
     Query(req): Query<ExchangeAnnouncementOrderCapacitySyncPlanReq>,
 ) -> impl IntoResponse {
@@ -4145,7 +4134,6 @@ pub async fn exchange_announcement_order_capacity_sync_plan(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit-contract
-
 pub async fn exchange_announcement_order_capacity_coverage_quality_audit_contract(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4155,7 +4143,6 @@ pub async fn exchange_announcement_order_capacity_coverage_quality_audit_contrac
 }
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/permission-smoke
-
 pub async fn exchange_announcement_order_capacity_permission_smoke(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExchangeAnnouncementOrderCapacitySmokeReq>,
@@ -4167,7 +4154,6 @@ pub async fn exchange_announcement_order_capacity_permission_smoke(
 }
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/detail-audit
-
 pub async fn exchange_announcement_order_capacity_detail_audit(
     Json(req): Json<ExchangeAnnouncementOrderCapacityDetailAuditReq>,
 ) -> impl IntoResponse {
@@ -4178,7 +4164,6 @@ pub async fn exchange_announcement_order_capacity_detail_audit(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/pdf-parser-readiness
-
 pub async fn exchange_announcement_order_capacity_pdf_parser_readiness(
     Query(req): Query<ExchangeAnnouncementOrderCapacityPdfParserReadinessReq>,
 ) -> impl IntoResponse {
@@ -4191,7 +4176,6 @@ pub async fn exchange_announcement_order_capacity_pdf_parser_readiness(
 }
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/pdf-detail-audit
-
 pub async fn exchange_announcement_order_capacity_pdf_detail_audit(
     Json(req): Json<ExchangeAnnouncementOrderCapacityPdfDetailAuditReq>,
 ) -> impl IntoResponse {
@@ -4202,7 +4186,6 @@ pub async fn exchange_announcement_order_capacity_pdf_detail_audit(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/ocr-blocked-row-audit
-
 pub async fn exchange_announcement_order_capacity_ocr_blocked_row_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq>,
@@ -4214,7 +4197,6 @@ pub async fn exchange_announcement_order_capacity_ocr_blocked_row_audit(
 }
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/sync
-
 pub async fn exchange_announcement_order_capacity_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExchangeAnnouncementOrderCapacitySyncReq>,
@@ -4226,7 +4208,6 @@ pub async fn exchange_announcement_order_capacity_sync(
 }
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/bounded-sync
-
 pub async fn exchange_announcement_order_capacity_bounded_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExchangeAnnouncementOrderCapacityBoundedSyncReq>,
@@ -4238,7 +4219,6 @@ pub async fn exchange_announcement_order_capacity_bounded_sync(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit
-
 pub async fn exchange_announcement_order_capacity_coverage_quality_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq>,
@@ -4250,7 +4230,6 @@ pub async fn exchange_announcement_order_capacity_coverage_quality_audit(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/admission-readiness-audit
-
 pub async fn exchange_announcement_order_capacity_admission_readiness_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ExchangeAnnouncementOrderCapacityAdmissionReadinessAuditReq>,
@@ -4271,7 +4250,6 @@ pub async fn exchange_announcement_order_capacity_admission_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-precision-sample-audit
-
 pub async fn exchange_announcement_order_capacity_manual_precision_sample_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq>,
@@ -4285,7 +4263,6 @@ pub async fn exchange_announcement_order_capacity_manual_precision_sample_audit(
 }
 
 /// GET /api/v1/quant/data/futures-price-chain/readiness-audit
-
 async fn build_exchange_announcement_order_capacity_permission_smoke(
     state: &AppState,
     mut req: ExchangeAnnouncementOrderCapacitySmokeReq,

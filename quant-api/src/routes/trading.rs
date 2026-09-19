@@ -24,8 +24,8 @@ fn short_id() -> String {
 /// 绩效自含全成本要求: 模拟成交必须扣佣金/印花税(此前恒 0 使绩效虚高)。
 /// - 佣金: 成交额 × rate, 单笔最低 min(双边)
 /// - 印花税: 成交额 × rate, 卖出单边
-/// 可配置: env 覆盖(PAPER_FEE_*), 当前单渠道; 未来多券商/渠道时扩展为
-/// 账户级配置(paper_account 列或渠道表), 费率结构与计算口径不变。
+///   可配置: env 覆盖(PAPER_FEE_*), 当前单渠道; 未来多券商/渠道时扩展为
+///   账户级配置(paper_account 列或渠道表), 费率结构与计算口径不变。
 pub struct ExecutionFeeSchedule {
     pub commission_rate: Decimal, // 万 2.5
     pub commission_min: Decimal,  // 5 元/笔

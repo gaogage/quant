@@ -295,7 +295,7 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
             let missing: Vec<String> = factor_whitelist
                 .map(|wl| {
                     wl.iter()
-                        .filter(|c| list.as_deref().map_or(true, |l| !l.contains(c)))
+                        .filter(|c| list.as_deref().is_none_or(|l| !l.contains(c)))
                         .cloned()
                         .collect()
                 })
@@ -325,7 +325,7 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
             .bind(min_abs_ic_ir)
             .bind(factor_whitelist.map(|w| w.len() as i32))
             .bind(n_actual as i32)
-            .bind(serde_json::to_value(&list.unwrap_or_default()).unwrap_or_default())
+            .bind(serde_json::to_value(list.unwrap_or_default()).unwrap_or_default())
             .bind(serde_json::to_value(&missing).unwrap_or_default())
             .bind(res.rows_affected() as i64)
             .execute(db)
@@ -860,7 +860,6 @@ async fn run_rolling_pit_evaluation_backfill(
 /// Backfill PIT-safe rolling IC/ICIR evaluations by quarter. For each quarter
 /// as-of date in the requested range, labels are computed only from close
 /// prices available before that as-of date.
-
 pub async fn evaluate_rolling_pit_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EvaluateRollingPitRequest>,
@@ -946,7 +945,6 @@ pub async fn evaluate_rolling_pit_background(
 /// 后台物化 PIT 滚动 ICIR combo（供未来实盘调度器增量触发保鲜）。
 /// 默认区间 2014-01-01 ~ 今。若早期季度缺少 PIT IC/ICIR，应先运行
 /// `/api/v1/quant/factors/evaluate-rolling-pit/background`。
-
 pub async fn materialize_pit_combo_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MaterializePitComboRequest>,
@@ -1030,7 +1028,6 @@ pub async fn materialize_pit_combo_background(
 /// P4.2b overlay combo 物化:等权平均 large_cap_mom_rev_daily_std +
 /// defensive_lowvol_quality_daily_std,写入 multi_factor_value(combo_name 默认
 /// p42b_large_cap_alpha_overlay_v1)。两因子均正向 IC,等权起点,后续可升级 ICIR。
-
 pub async fn materialize_p42b_overlay_combo_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MaterializeP42bOverlayComboRequest>,

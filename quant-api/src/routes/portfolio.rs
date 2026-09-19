@@ -276,7 +276,7 @@ pub async fn mvo_backtest(
     use crate::routes::backtest::RunPredictionBacktestReq;
 
     let min_stock = req.min_stock.clamp(0.0, 1.0);
-    let lookback = req.mvo_lookback_months.max(12).min(60);
+    let lookback = req.mvo_lookback_months.clamp(12, 60);
 
     // Phase 1: Run stock backtests per year and collect daily NAV
     let mut stock_nav: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
@@ -743,7 +743,7 @@ pub async fn mvo_experiment_overlay(
     Json(req): Json<MvoOverlayRequest>,
 ) -> impl IntoResponse {
     let min_stock = req.min_stock.clamp(0.0, 1.0);
-    let lookback_years = req.lookback_years.max(2).min(10);
+    let lookback_years = req.lookback_years.clamp(2, 10);
     let etf_symbols = if req.etf_symbols.is_empty() {
         default_etf_symbols()
     } else {
@@ -804,7 +804,7 @@ pub async fn mvo_experiment_overlay(
             None => {
                 // Fallback: 100% A-share
                 let mut w = vec![1.0f64];
-                w.extend(std::iter::repeat(0.0f64).take(etf_symbols.len()));
+                w.extend(std::iter::repeat_n(0.0f64, etf_symbols.len()));
                 w
             }
         };
@@ -1093,7 +1093,7 @@ pub async fn blueprint_report(
 
     // Reuse the MVO overlay logic
     let min_stock = mvo_req.min_stock.clamp(0.0, 1.0);
-    let lookback_years = mvo_req.lookback_years.max(2).min(10);
+    let lookback_years = mvo_req.lookback_years.clamp(2, 10);
     let etf_symbols = if mvo_req.etf_symbols.is_empty() {
         default_etf_symbols()
     } else {
@@ -1128,7 +1128,7 @@ pub async fn blueprint_report(
     let mut all_stock_daily_rets: Vec<f64> = Vec::new();
     let mut all_blended_daily_rets: Vec<f64> = Vec::new();
 
-    for (_window_index, (test_start, _test_end, curve)) in oos_curves.iter().enumerate() {
+    for (test_start, _test_end, curve) in oos_curves.iter() {
         let test_start_date = match NaiveDate::parse_from_str(test_start, "%Y-%m-%d") {
             Ok(d) => d,
             Err(_) => continue,
@@ -1145,7 +1145,7 @@ pub async fn blueprint_report(
             Some(w) => w,
             None => {
                 let mut w = vec![1.0f64];
-                w.extend(std::iter::repeat(0.0f64).take(etf_symbols.len()));
+                w.extend(std::iter::repeat_n(0.0f64, etf_symbols.len()));
                 w
             }
         };
@@ -1946,10 +1946,7 @@ mod tests {
         // With constant positive returns, vol should be ~0, MaxDD = 0
         assert!(sharpe > 0.0, "Sharpe should be positive");
         assert_eq!(mdd, 0.0, "No drawdown with all-positive returns");
-        assert!(
-            sortino > 0.0 || sortino == 0.0,
-            "Sortino should be computable"
-        );
+        assert!(sortino >= 0.0, "Sortino should be computable");
         assert_eq!(calmar, 0.0, "Calmar is 0 when MaxDD is 0");
     }
 
@@ -1990,7 +1987,7 @@ mod tests {
         let mdd: f64 = -0.112; // -11.2%
         let calmar: f64 = 2.00;
 
-        let checks = vec![
+        let checks = [
             ("年化 ≥20%", ar >= 0.20, true),
             ("Sharpe >1.5", sharpe > 1.5, true),
             ("Sortino >1.8", sortino > 1.8, true),

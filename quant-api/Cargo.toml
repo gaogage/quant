@@ -5,6 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lints.clippy]
+# 建模债集中区豁免（路线图 70 号 P1 决策，2026-09-19）：路由层参数透传与
+# DTO 元组形态的 too_many_arguments/type_complexity 共 114 条，登记 DDD
+# Step 2（参数对象化 + newtype 化）统一清偿，届时删除本豁免恢复 strict。
+# 核心域 crate（common/factor/data/backtest）已 strict，不受此豁免影响。
+too_many_arguments = "allow"
+type_complexity = "allow"
+
 [dependencies]
 quant-common.workspace = true
 ndarray.workspace = true

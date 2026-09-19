@@ -222,7 +222,6 @@ pub async fn check_paper_account_data_readiness(
 
 /// POST /api/v1/quant/data/account-data-health
 /// 遍历激活账号(模拟+实盘) → 其策略依赖的加工数据(combo因子/PIT combo/权益曲线/滚动IC) → 红黄绿。
-
 pub async fn account_data_health(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AccountDataHealthReq>,
@@ -629,7 +628,6 @@ async fn rolling_pit_ic_quarter_coverage(
 }
 
 /// 检查单个账号策略依赖的数据。range=None 查新鲜度；range=Some 查区间覆盖率。
-
 async fn check_account_deps(
     db: &sqlx::PgPool,
     acct: &str,

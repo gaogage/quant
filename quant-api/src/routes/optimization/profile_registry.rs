@@ -1476,9 +1476,9 @@ pub(crate) fn phase7_simple_nlqr_feature_profile() -> &'static str {
 pub(crate) fn phase7_train_window_ml_label_config_for_search(
     search_profile: Option<&str>,
 ) -> (String, usize, usize, usize) {
-    if is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(search_profile) {
-        ("risk_adjusted_excess_return".to_string(), 120, 7, 50)
-    } else if is_v19_train_window_ml_event_sentiment_rebuild_profile(search_profile) {
+    if is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(search_profile)
+        || is_v19_train_window_ml_event_sentiment_rebuild_profile(search_profile)
+    {
         ("risk_adjusted_excess_return".to_string(), 120, 7, 50)
     } else if is_v19_train_window_ml_h120_low_impact_rebuild_profile(search_profile) {
         ("future_excess_return".to_string(), 120, 5, 50)

@@ -1019,8 +1019,7 @@ async fn simulate_multi_window_inner(
         let mut next_reb = 0usize;
         let mut w_trades = 0usize;
 
-        for day_idx in 0..trading_days.len() {
-            let today = trading_days[day_idx];
+        for (day_idx, &today) in trading_days.iter().enumerate() {
             if today < w_start || today > w_end {
                 continue;
             }

@@ -315,6 +315,8 @@ pub async fn list_accounts(
 
 /// 账号访问权限校验：admin 可访问任意账号；非 admin 只能访问自己拥有的账号(或无主账号)。
 /// account_detail / nav_history / rebalance_history 三个端点共用同一套校验规则。
+// Result<(), Response> 的 Err 为 axum Response（128B）是中间件惯用形态，显式豁免。
+#[allow(clippy::result_large_err)]
 async fn check_account_access(
     db: &sqlx::PgPool,
     user: &UserContext,
@@ -487,7 +489,7 @@ pub async fn account_detail(
             "leverage_enabled": le, "leverage_mode": lm,
             "leverage_multiplier": lmp, "signal_source": ss,
             "status": st, "owner": uid.unwrap_or_default(),
-            "created_at": fmt_datetime(created.map(|t| t)),
+            "created_at": fmt_datetime(created),
             "metrics": {
                 "annual_return_pct": annual_return,
                 "cumulative_return_pct": (cum_ret * 100.0).round() / 100.0,
@@ -769,7 +771,7 @@ async fn query_benchmark_curve(
 ///
 /// 按交易日分组汇总调仓记录。从 paper_order 表聚合，每交易日一组：
 /// - 交易日 / 买笔数+金额 / 卖笔数+金额 / 每笔交易明细（trades 数组）
-/// 点击日期可展开查看当日所有成交明细。
+///   点击日期可展开查看当日所有成交明细。
 pub async fn rebalance_history(
     State(state): State<Arc<AppState>>,
     user: UserContext,

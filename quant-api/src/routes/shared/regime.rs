@@ -71,7 +71,7 @@ pub fn detect_regime_exposure_cached(
     if recent.len() < 2 {
         return 1.00; // 数据不足,默认满仓(对齐 SQL 不足时返回 1.00)
     }
-    recent.sort_by(|a, b| b.0.cmp(&a.0)); // trade_date DESC
+    recent.sort_by_key(|row| std::cmp::Reverse(row.0)); // trade_date DESC
     recent.truncate(252);
     // 最新收盘 / 252日前收盘 - 1(对齐 SQL:DESC LIMIT 1 是最新,ASC LIMIT 1 是最早)
     let latest = recent.first().map(|(_, c)| *c).unwrap_or(0.0);
@@ -138,7 +138,7 @@ pub fn detect_regime_exposure_bwgv2(
     if recent.len() < 20 {
         return 1.00; // min_observations=20，不足默认满仓
     }
-    recent.sort_by(|a, b| a.0.cmp(&b.0)); // 升序（旧→新）
+    recent.sort_by_key(|row| row.0); // 升序（旧→新）
     let start = recent.len().saturating_sub(cfg.lookback_days);
     let window = &recent[start..];
     // 日收益序列

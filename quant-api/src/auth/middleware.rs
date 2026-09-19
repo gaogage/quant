@@ -52,6 +52,8 @@ where
 }
 
 /// Require admin role. Returns 403 if user is not admin.
+// Result<(), Response> 的 Err 为 axum Response（128B）是中间件惯用形态，显式豁免。
+#[allow(clippy::result_large_err)]
 pub fn require_admin(user: &UserContext) -> Result<(), Response> {
     if user.role == "admin" {
         Ok(())

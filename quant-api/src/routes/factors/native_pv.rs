@@ -206,7 +206,7 @@ async fn native_pv_increment_inner(db: &PgPool) -> Result<usize, String> {
         info!(
             "[native_pv] 批 {}/{}: 落库 {} 行 (累计 {})",
             bi + 1,
-            (symbols.len() + BATCH_SYMBOLS - 1) / BATCH_SYMBOLS,
+            symbols.len().div_ceil(BATCH_SYMBOLS),
             batch_saved,
             total_saved
         );

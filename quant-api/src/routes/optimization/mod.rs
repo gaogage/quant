@@ -1990,11 +1990,7 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2017, 1, 3).unwrap();
         let mut daily_rows = Vec::new();
         for offset in 0..100 {
-            let rows = if offset < 5 {
-                1_080 + offset as i64
-            } else {
-                1_200
-            };
+            let rows = if offset < 5 { 1_080 + offset } else { 1_200 };
             daily_rows.push((start + Duration::days(offset), rows));
         }
         let distribution = daily_count_distribution(
@@ -2024,7 +2020,7 @@ mod tests {
         let mut daily_rows = Vec::new();
         for offset in 0..100 {
             let rows = match offset {
-                0 | 1 | 3 | 5 => 1_080 + offset as i64,
+                0 | 1 | 3 | 5 => 1_080 + offset,
                 2 | 4 | 6 | 7 => 1_160,
                 _ => 1_200,
             };
@@ -2084,7 +2080,7 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2014, 4, 3).unwrap();
         let daily_rows = (0..120)
             .map(|offset| {
-                let eligible = 2_000 + offset as i64 * 5;
+                let eligible = 2_000 + offset * 5;
                 (
                     start + Duration::days(offset),
                     (eligible as f64 * 0.27) as i64,
@@ -2092,7 +2088,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let eligible_rows = (0..120)
-            .map(|offset| (start + Duration::days(offset), 2_000 + offset as i64 * 5))
+            .map(|offset| (start + Duration::days(offset), 2_000 + offset * 5))
             .collect::<Vec<_>>();
 
         let status = alpha_source_market_scope_breadth_status(&daily_rows, &eligible_rows);
@@ -4434,7 +4430,7 @@ mod tests {
             stress_summary: resilient_summary,
             train_cost_gate_passed: true,
         };
-        let mut evaluations = vec![fragile, resilient];
+        let mut evaluations = [fragile, resilient];
 
         evaluations.sort_by(train_candidate_evaluation_order);
 
@@ -15308,7 +15304,7 @@ mod tests {
             },
             parameters: json!({}),
         };
-        let mut candidates = vec![high_return_high_drawdown, lower_return_better_risk];
+        let mut candidates = [high_return_high_drawdown, lower_return_better_risk];
 
         candidates.sort_by(discovery_candidate_order);
 
@@ -15330,12 +15326,14 @@ mod tests {
 
     #[test]
     fn risk_adjusted_score_records_constraint_violations() {
-        let mut metrics = quant_backtest::metrics::BacktestMetrics::default();
-        metrics.information_ratio = Decimal::new(8, 1);
-        metrics.excess_return_pct = Decimal::new(12, 2);
-        metrics.max_drawdown_pct = Decimal::new(25, 2);
-        metrics.turnover = Decimal::new(12, 0);
-        metrics.num_trades = 3;
+        let metrics = quant_backtest::metrics::BacktestMetrics {
+            information_ratio: Decimal::new(8, 1),
+            excess_return_pct: Decimal::new(12, 2),
+            max_drawdown_pct: Decimal::new(25, 2),
+            turnover: Decimal::new(12, 0),
+            num_trades: 3,
+            ..Default::default()
+        };
 
         let scored = score_trial(
             &metrics,
@@ -15361,21 +15359,25 @@ mod tests {
 
     #[test]
     fn professional_candidate_score_prefers_sharpe_gap_after_annual_floor() {
-        let mut high_return_low_sharpe = quant_backtest::metrics::BacktestMetrics::default();
-        high_return_low_sharpe.annual_return_pct = Decimal::new(19, 2);
-        high_return_low_sharpe.excess_return_pct = Decimal::new(400, 2);
-        high_return_low_sharpe.sharpe_ratio = Decimal::new(82, 2);
-        high_return_low_sharpe.sortino_ratio = Decimal::new(20, 1);
-        high_return_low_sharpe.max_drawdown_pct = Decimal::new(24, 2);
-        high_return_low_sharpe.num_trades = 2000;
+        let high_return_low_sharpe = quant_backtest::metrics::BacktestMetrics {
+            annual_return_pct: Decimal::new(19, 2),
+            excess_return_pct: Decimal::new(400, 2),
+            sharpe_ratio: Decimal::new(82, 2),
+            sortino_ratio: Decimal::new(20, 1),
+            max_drawdown_pct: Decimal::new(24, 2),
+            num_trades: 2000,
+            ..Default::default()
+        };
 
-        let mut lower_return_better_sharpe = quant_backtest::metrics::BacktestMetrics::default();
-        lower_return_better_sharpe.annual_return_pct = Decimal::new(151, 3);
-        lower_return_better_sharpe.excess_return_pct = Decimal::new(220, 2);
-        lower_return_better_sharpe.sharpe_ratio = Decimal::new(95, 2);
-        lower_return_better_sharpe.sortino_ratio = Decimal::new(17, 1);
-        lower_return_better_sharpe.max_drawdown_pct = Decimal::new(23, 2);
-        lower_return_better_sharpe.num_trades = 1800;
+        let lower_return_better_sharpe = quant_backtest::metrics::BacktestMetrics {
+            annual_return_pct: Decimal::new(151, 3),
+            excess_return_pct: Decimal::new(220, 2),
+            sharpe_ratio: Decimal::new(95, 2),
+            sortino_ratio: Decimal::new(17, 1),
+            max_drawdown_pct: Decimal::new(23, 2),
+            num_trades: 1800,
+            ..Default::default()
+        };
 
         let objective = json!({"type": "professional_candidate"});
         let constraints = json!({
@@ -15400,16 +15402,18 @@ mod tests {
 
     #[test]
     fn scoring_and_robustness_preserve_effective_coverage_metadata() {
-        let mut metrics = quant_backtest::metrics::BacktestMetrics::default();
-        metrics.annual_return_pct = Decimal::new(18, 2);
-        metrics.excess_return_pct = Decimal::new(10, 2);
-        metrics.sharpe_ratio = Decimal::new(8, 1);
-        metrics.sortino_ratio = Decimal::new(18, 1);
-        metrics.max_drawdown_pct = Decimal::new(30, 2);
-        metrics.num_trades = 128;
-        metrics.execution_schedule_expired_count = 2;
-        metrics.max_execution_target_gap_pct = Decimal::new(12, 2);
-        metrics.final_cash_weight_pct = Decimal::new(18, 2);
+        let metrics = quant_backtest::metrics::BacktestMetrics {
+            annual_return_pct: Decimal::new(18, 2),
+            excess_return_pct: Decimal::new(10, 2),
+            sharpe_ratio: Decimal::new(8, 1),
+            sortino_ratio: Decimal::new(18, 1),
+            max_drawdown_pct: Decimal::new(30, 2),
+            num_trades: 128,
+            execution_schedule_expired_count: 2,
+            max_execution_target_gap_pct: Decimal::new(12, 2),
+            final_cash_weight_pct: Decimal::new(18, 2),
+            ..Default::default()
+        };
         let output = FactorBacktestRunOutput {
             signals_count: 10,
             metrics,

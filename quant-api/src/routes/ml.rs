@@ -1,4 +1,9 @@
 //! ML API routes — minimal Phase 5 prediction-set smoke path
+// 矩阵乘法索引循环（MLP 前向/反向传播、grid 分桶）保持索引形式：数值求和
+// 顺序敏感且迭代器化损害可读性（科学计算惯例），显式豁免。
+// 枚举变体统一 Return 后缀是标签目标语义命名，同样豁免。
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::enum_variant_names)]
 
 use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, NaiveDate};
@@ -4009,7 +4014,7 @@ fn training_samples_from_feature_matrix_rows(
         }
         let quality_features = label_objective
             .uses_fundamental_quality()
-            .then(|| row.features.as_slice());
+            .then_some(row.features.as_slice());
         let Some(label) = label_for_objective_with_features(
             label_objective,
             closes_by_symbol.get(&row.symbol),

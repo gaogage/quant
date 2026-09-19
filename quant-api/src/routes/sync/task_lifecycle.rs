@@ -114,7 +114,6 @@ pub async fn create_sync_task(
 }
 
 /// POST /api/v1/quant/data/sync/stock-basic
-
 pub async fn sync_task_status(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -195,7 +194,6 @@ pub async fn sync_task_status(
 /// 将 heartbeat 超时的 running 同步任务标记为 failed，将超时的 cancel_requested
 /// 任务收敛为 cancelled。默认 dry-run=false；可用 dry_run=true 先查看候选任务，
 /// 避免误伤仍在正常推进的后台任务。
-
 pub async fn cleanup_stale_sync_tasks(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CleanupStaleSyncTasksReq>,

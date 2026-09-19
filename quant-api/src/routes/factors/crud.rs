@@ -863,7 +863,6 @@ pub async fn batch_sync_factors(
 ///
 /// 后台批量计算单个因子，立即返回 task_id。
 /// 通过 GET /api/v1/quant/data/sync/tasks/:task_id 查询进度。
-
 pub async fn batch_sync_factors_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BatchSyncRequest>,
@@ -883,7 +882,7 @@ pub async fn batch_sync_factors_background(
         "INSERT INTO data_sync_task (task_id, task_type, source, status) VALUES ($1, $2, 'factor', 'running')"
     )
     .bind(&task_id)
-    .bind(&format!("factor:{}", factor_name))
+    .bind(format!("factor:{}", factor_name))
     .execute(&state.db)
     .await;
 
@@ -908,7 +907,7 @@ pub async fn batch_sync_factors_background(
             let mut errors: Vec<String> = Vec::new();
 
             for chunk in all_syms.chunks(chunk_size) {
-                let syms: Vec<String> = chunk.iter().map(|s| s.clone()).collect();
+                let syms: Vec<String> = chunk.to_vec();
                 let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
 
                 // Batch-load all bars for this chunk in ONE query
@@ -1014,7 +1013,6 @@ pub async fn batch_sync_factors_background(
 ///
 /// Set-based backfill for the Phase 7 price-volume alpha bundle and its
 /// equal-weight combo score. This is the Rust API path for full historical
-
 async fn upsert_factor_values(
     db: &sqlx::PgPool,
     output: &FactorOutput,
@@ -1270,7 +1268,6 @@ pub async fn evaluate_all_factors(
 /// POST /api/v1/quant/factors/evaluate-all/background
 ///
 /// 后台评估所有因子 IC/ICIR，立即返回 task_id。
-
 pub async fn evaluate_all_factors_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EvaluateAllRequest>,
@@ -1559,7 +1556,6 @@ pub async fn combine_factors(
 // ─── Helpers ──────────────────────────────────────────────────────
 
 /// Parse factor string like "mom_20d" → ("momentum", 20) or "turn_5d" → ("turnover", 5)
-
 pub(crate) fn parse_factor(name: &str) -> Option<(&'static str, usize)> {
     let name = name.strip_suffix("_std").unwrap_or(name);
     if let Some(rest) = name.strip_prefix("mom_") {
@@ -1610,7 +1606,6 @@ pub(crate) fn parse_factor(name: &str) -> Option<(&'static str, usize)> {
 }
 
 /// Load daily bars from PostgreSQL
-
 async fn load_bars(
     pool: &sqlx::PgPool,
     symbols: &[String],
@@ -1935,9 +1930,15 @@ mod stale_pv_recompute_tests {
             let r = batch_compute_factors(cfg, loader2.clone(), saver.clone()).await;
             println!("[pv-rc] {}_std: total={}", factor, r.total_values);
         }
-        // 统一落库
-        for (code, vals) in collected.lock().unwrap().iter() {
-            let n = save_factor_values(&db, code, "1.0.0", vals)
+        // 统一落库（let 语句结束即释放 guard，避免跨 await 持锁）
+        let snapshot: Vec<_> = collected
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(c, v)| (c.clone(), v.clone()))
+            .collect();
+        for (code, vals) in snapshot {
+            let n = save_factor_values(&db, &code, "1.0.0", &vals)
                 .await
                 .expect("save");
             println!("[pv-rc] {} 落库 {} 行", code, n);
@@ -2098,10 +2099,17 @@ mod stale_pv_recompute_tests {
             }
             // 落库本批（cutoff 后）
             let mut batch_saved = 0usize;
-            for (code, vals) in collected.lock().unwrap().iter() {
+            // let 语句结束即释放 guard，避免跨 await 持锁
+            let snapshot: Vec<_> = collected
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(c, v)| (c.clone(), v.clone()))
+                .collect();
+            for (code, vals) in snapshot {
                 let recent: Vec<&(String, chrono::NaiveDate, f64, bool)> =
                     vals.iter().filter(|(_, d, _, _)| *d >= cutoff).collect();
-                batch_saved += save_factor_values_ref(&db, code, &recent)
+                batch_saved += save_factor_values_ref(&db, &code, &recent)
                     .await
                     .expect("save");
             }
@@ -2109,7 +2117,7 @@ mod stale_pv_recompute_tests {
             println!(
                 "[pv-bf] batch {}/{}: saved {} rows (total {})",
                 bi + 1,
-                (symbols.len() + batch_n - 1) / batch_n,
+                symbols.len().div_ceil(batch_n),
                 batch_saved,
                 total_saved
             );

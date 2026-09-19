@@ -442,7 +442,6 @@ pub async fn launch_phase7_oos_profile_comparison_smoke(
 ///
 /// 清理 heartbeat/created_at 超时的 optimization_task 元数据。
 /// 默认 dry_run=true；实际清理必须显式传 dry_run=false。
-
 pub(crate) fn normalize_oos_execution_mode(mode: Option<&str>) -> Result<&'static str, String> {
     match mode
         .map(str::trim)
@@ -457,7 +456,7 @@ pub(crate) fn normalize_oos_execution_mode(mode: Option<&str>) -> Result<&'stati
 
 pub(crate) fn normalized_trial_concurrency(value: Option<usize>) -> usize {
     value
-        .unwrap_or_else(|| LocalResourcePlan::local_mac().batch_size.min(4).max(1))
+        .unwrap_or_else(|| LocalResourcePlan::local_mac().batch_size.clamp(1, 4))
         .clamp(1, 16)
 }
 
@@ -1129,7 +1128,6 @@ pub(crate) async fn execute_oos_discovery_window(
 
 /// PIT routing for ensemble: selects which NLQR model to train based on
 /// signals available at the window's test_start date (no future data).
-
 pub(crate) async fn ensemble_model_params_for_window(
     db: &sqlx::PgPool,
     window: &OosDiscoveryWindow,
@@ -2441,9 +2439,9 @@ pub(crate) fn prediction_confidence_stress_fill_quality_score_breakdown(
     let min_calmar = constraint_decimal(Some(train_gate_policy), "min_train_perturbed_calmar")
         .unwrap_or_else(|| Decimal::new(12, 1));
     let min_sharpe = constraint_decimal(Some(train_gate_policy), "min_train_avg_perturbed_sharpe")
-        .unwrap_or_else(|| Decimal::new(5, 1));
+        .unwrap_or(Decimal::new(5, 1));
     let min_sortino = constraint_decimal(Some(train_gate_policy), "min_train_perturbed_sortino")
-        .unwrap_or_else(|| Decimal::ONE);
+        .unwrap_or(Decimal::ONE);
 
     let pass_ratio_bonus = Decimal::from(summary.pass_ratio_ppm) * Decimal::from(2);
     let annual_quality_bonus = clamp_decimal(
@@ -4431,11 +4429,10 @@ pub(crate) fn oos_walk_forward_progress_metrics(
     cache_report: &Value,
 ) -> Value {
     let completed_windows = windows.len();
-    let progress_pct = if total_windows == 0 {
-        0
-    } else {
-        ((completed_windows * 100) / total_windows).min(100)
-    };
+    let progress_pct = ((completed_windows * 100)
+        .checked_div(total_windows)
+        .unwrap_or(0))
+    .min(100);
     json!({
         "status": "running",
         "completed_windows": completed_windows,

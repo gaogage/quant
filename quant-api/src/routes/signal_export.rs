@@ -575,9 +575,10 @@ mod tests {
     /// 0.02%(0918 实例 002955 的实际权重)被剔除——执行端不足一手的确定性碎单
     /// 从信号源头消除, 权重和只含幸存标的(checksum 随之自洽)。
     #[test]
+    #[allow(clippy::assertions_on_constants)] // 文档性常量断言：语义锁定阈值边界
     fn min_signal_weight_threshold_semantics() {
-        assert!(
-            MIN_SIGNAL_WEIGHT == 0.001,
+        assert_eq!(
+            MIN_SIGNAL_WEIGHT, 0.001,
             "阈值 0.1% 定版, 改动需评审碎单边界"
         );
         // 0918 实例复刻: 0.0002 权重(目标 ~1001 元/500 万 NAV)必被过滤
@@ -651,9 +652,11 @@ mod tests {
         )
         .await
         .expect("db");
-        let mut cfg = quant_data::tushare::client::TushareConfig::default();
-        cfg.token = std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN");
-        cfg.rate_limit_per_minute = 60;
+        let cfg = quant_data::tushare::client::TushareConfig {
+            token: std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN"),
+            rate_limit_per_minute: 60,
+            ..Default::default()
+        };
         let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
 
         let etfs = crate::routes::strategy_query::load_active_etf_symbols_union(&db).await;
@@ -715,9 +718,11 @@ mod tests {
         )
         .await
         .expect("db");
-        let mut cfg = quant_data::tushare::client::TushareConfig::default();
-        cfg.token = std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN");
-        cfg.rate_limit_per_minute = 60;
+        let cfg = quant_data::tushare::client::TushareConfig {
+            token: std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN"),
+            rate_limit_per_minute: 60,
+            ..Default::default()
+        };
         let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
 
         let symbols: Vec<String> = sqlx::query_scalar(
@@ -767,9 +772,11 @@ mod tests {
         )
         .await
         .expect("db");
-        let mut cfg = quant_data::tushare::client::TushareConfig::default();
-        cfg.token = std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN");
-        cfg.rate_limit_per_minute = 60;
+        let cfg = quant_data::tushare::client::TushareConfig {
+            token: std::env::var("TUSHARE_TOKEN").expect("TUSHARE_TOKEN"),
+            rate_limit_per_minute: 60,
+            ..Default::default()
+        };
         let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
         let etfs = crate::routes::strategy_query::load_active_etf_symbols_union(&db).await;
         println!("[fund_div_backfill] 标的: {:?}", etfs);

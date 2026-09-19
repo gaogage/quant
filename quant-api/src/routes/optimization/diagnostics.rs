@@ -3913,9 +3913,8 @@ pub(crate) fn daily_rank_ic_from_labeled_rows(
             })
         })
         .filter(|row| row.rank_ic.is_finite())
-        .map(|row| {
+        .inspect(|_| {
             let _ = horizon_days;
-            row
         })
         .collect()
 }

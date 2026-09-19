@@ -2943,8 +2943,8 @@ pub(crate) fn normalize_akshare_analyst_revision_full_fetch_payload(payload: Val
         "fields": [],
         "records": [],
         "normalized_from_error": {
-            "error_type": payload.get("error_type").cloned().unwrap_or_else(|| json!(null)),
-            "error": payload.get("error").cloned().unwrap_or_else(|| json!(null)),
+            "error_type": payload.get("error_type").cloned().unwrap_or(json!(null)),
+            "error": payload.get("error").cloned().unwrap_or(json!(null)),
             "reason": "akshare_empty_dataframe_length_mismatch"
         }
     })
@@ -6173,7 +6173,6 @@ pub(crate) fn decide_futures_price_chain_readiness(
 }
 
 #[cfg(test)]
-
 fn futures_price_chain_product_symbol_from_daily_ts_code(ts_code: &str) -> Option<String> {
     let value = ts_code.trim();
     let product = value
@@ -8074,7 +8073,6 @@ pub async fn structured_order_capacity_price_chain_source_contract() -> impl Int
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/vendor-admission-plan
-
 pub async fn structured_order_capacity_price_chain_vendor_admission_plan() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -8083,7 +8081,6 @@ pub async fn structured_order_capacity_price_chain_vendor_admission_plan() -> im
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/source-evidence-inventory
-
 pub async fn structured_order_capacity_price_chain_source_evidence_inventory() -> impl IntoResponse
 {
     Json(json!({
@@ -8093,7 +8090,6 @@ pub async fn structured_order_capacity_price_chain_source_evidence_inventory() -
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-access-smoke-contract
-
 pub(crate) fn akshare_analyst_revision_sync_plan_response(
     start: NaiveDate,
     end: NaiveDate,
@@ -10696,7 +10692,6 @@ pub(crate) async fn build_phase7_feasibility_audit(state: &AppState) -> Result<V
 ///
 /// 大批量后台同步日线行情，立即返回 task_id。
 /// 通过 GET /api/v1/quant/data/sync/tasks/:task_id 查询进度。
-
 pub(crate) fn sync_task_cancel_transition(status: &str) -> Option<&'static str> {
     match status {
         "pending" => Some("cancelled"),
@@ -10897,10 +10892,10 @@ fn data_readiness_required(check: &Value) -> bool {
         .unwrap_or(true)
 }
 
-pub(crate) fn data_readiness_blocking_checks<'a>(
-    checks: &'a [Value],
+pub(crate) fn data_readiness_blocking_checks(
+    checks: &[Value],
     gate: DataReadinessGate,
-) -> Vec<&'a Value> {
+) -> Vec<&Value> {
     checks
         .iter()
         .filter(|check| data_readiness_required(check))

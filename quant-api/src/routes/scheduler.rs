@@ -2770,13 +2770,15 @@ mod forecast_backfill_byday_tests {
         .await
         .expect("db");
         let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
-        let mut cfg = quant_data::tushare::client::TushareConfig::default();
-        cfg.token = tok;
-        cfg.rate_limit_per_minute = 60;
-        // 凭证配对: 充值 token 走官方域名(私有直连 IP 只认专属 token)
-        cfg.base_url = std::env::var("TUSHARE_API_URL_ALT")
-            .unwrap_or_else(|_| "http://api.tushare.pro".to_string());
-        cfg.fallback_token = None;
+        let cfg = quant_data::tushare::client::TushareConfig {
+            token: tok,
+            rate_limit_per_minute: 60,
+            // 凭证配对: 充值 token 走官方域名(私有直连 IP 只认专属 token)
+            base_url: std::env::var("TUSHARE_API_URL_ALT")
+                .unwrap_or_else(|_| "http://api.tushare.pro".to_string()),
+            fallback_token: None,
+            ..Default::default()
+        };
         let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
         let mut d = chrono::NaiveDate::from_ymd_opt(2026, 8, 26).unwrap();
         let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
@@ -2813,9 +2815,11 @@ mod forecast_daily_tests {
         .await
         .expect("db");
         let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT（充值 token）");
-        let mut cfg = quant_data::tushare::client::TushareConfig::default();
-        cfg.token = tok;
-        cfg.rate_limit_per_minute = 240;
+        let cfg = quant_data::tushare::client::TushareConfig {
+            token: tok,
+            rate_limit_per_minute: 240,
+            ..Default::default()
+        };
         let tushare = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
         let empty: Vec<String> = vec![];
         // 按月分块（forecast 单次上限同量级）

@@ -762,7 +762,7 @@ async fn fetch_today_trades(
             quantity,
             amount,
             reason: reason.unwrap_or_default(),
-            name: name.unwrap_or_else(|| String::new()),
+            name: name.unwrap_or_default(),
         })
         .collect())
 }
