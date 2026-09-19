@@ -8,12 +8,10 @@ pub mod trading_rules;
 
 #[derive(Error, Debug)]
 pub enum QuantError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
-
+    // P3 瘦身（2026-09-19）：删除 Http/Database 两个 #[from] 桥接变体——全仓
+    // 零使用（tushare client 用 Auth/Api 装载错误），却让共享内核携带
+    // sqlx/reqwest 依赖传递给全部下游（含纯计算 crate）。HTTP/DB 错误由
+    // 各 crate 在边界处 map_err 到 Api/Validation 等语义变体。
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

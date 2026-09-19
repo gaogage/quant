@@ -356,7 +356,8 @@ impl TushareClient {
             .pool_max_idle_per_host(20)
             .tcp_keepalive(Some(Duration::from_secs(60)))
             .user_agent("Quant/0.1.0")
-            .build()?;
+            .build()
+            .map_err(|e| QuantError::Other(format!("http client build: {}", e)))?;
 
         // 令牌桶：每分钟 replenish N 次，允许 10 次突发
         let quota = Quota::per_minute(
@@ -461,7 +462,16 @@ impl TushareClient {
 
         debug!(api = %api_name, "Tushare API 调用");
 
-        let resp = self.http.post(base_url).json(&request).send().await?;
+        let resp = self
+            .http
+            .post(base_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| QuantError::Api {
+                code: -1,
+                message: format!("send: {}", e),
+            })?;
 
         if !resp.status().is_success() {
             return Err(QuantError::Api {
@@ -470,7 +480,11 @@ impl TushareClient {
             });
         }
 
-        let body: TushareResponse<Vec<serde_json::Value>> = resp.json().await?;
+        let body: TushareResponse<Vec<serde_json::Value>> =
+            resp.json().await.map_err(|e| QuantError::Api {
+                code: -2,
+                message: format!("decode: {}", e),
+            })?;
         if body.code != 0 {
             return Err(QuantError::Api {
                 code: body.code,
