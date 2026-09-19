@@ -47,14 +47,11 @@ pub fn compute_metrics(rets: &[f64], risk_free_rate: f64) -> Metrics {
     let mean = rets.iter().sum::<f64>() / n;
     let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let std = var.sqrt();
-    let ann_ret = (1.0 + mean).powf(252.0) - 1.0;
-    let ann_vol = std * (252.0_f64).sqrt();
-    let sharpe = if ann_vol > 0.0 {
-        (ann_ret - risk_free_rate) / ann_vol
-    } else {
-        0.0
-    };
-
+    // 年化口径纪律(2026-09-19 定版): 永远几何 CAGR, 禁用算术外推。
+    // 原 (1+mean)^252 是算术日均外推, 波动越大越虚高(lev 6.8 年虚高 ~2.6pp,
+    // 26.8% vs 真实 24.2%)。几何口径: (1+累计收益)^(252/n)-1, 用实际样本数
+    // 外推, 与"按实际天数复利"的独立审计一致(交易日基数 252 与日历年差 ~0.3pp,
+    // 业界约定基数, 可接受)。
     let mut nav = 1.0_f64;
     let mut peak = 1.0_f64;
     let mut max_dd = 0.0_f64;
@@ -64,6 +61,13 @@ pub fn compute_metrics(rets: &[f64], risk_free_rate: f64) -> Metrics {
         max_dd = max_dd.max((peak - nav) / peak);
     }
     let cumulative = nav - 1.0;
+    let ann_ret = (1.0 + cumulative).powf(252.0 / n) - 1.0;
+    let ann_vol = std * (252.0_f64).sqrt();
+    let sharpe = if ann_vol > 0.0 {
+        (ann_ret - risk_free_rate) / ann_vol
+    } else {
+        0.0
+    };
     let calmar = if max_dd > 0.0 { ann_ret / max_dd } else { 0.0 };
 
     let downside: Vec<f64> = rets.iter().filter(|&&r| r < 0.0).copied().collect();
