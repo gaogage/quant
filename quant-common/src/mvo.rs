@@ -221,8 +221,8 @@ pub fn nonlinear_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
 
         // Kernel density estimate at λ_k
         let mut f_hat = 0.0;
-        for j in 0..n_assets {
-            let x = (lambda[j] - lk) / h;
+        for &lj in lambda {
+            let x = (lj - lk) / h;
             f_hat += epanechnikov_kernel(x);
         }
         f_hat /= n * h;
@@ -232,9 +232,9 @@ pub fn nonlinear_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
         // Kernel-smoothed version: Ĥ(λ_k) ≈ (1/N) Σ_{j≠k} (λ_k - λ_j)/((λ_k - λ_j)² + ε²)
         let eps = h * 0.01; // regularization to avoid singularity
         let mut h_hat = 0.0;
-        for j in 0..n_assets {
+        for (j, &lj) in lambda.iter().enumerate() {
             if j != k {
-                let diff = lk - lambda[j];
+                let diff = lk - lj;
                 h_hat += diff / (diff * diff + eps * eps);
             }
         }
@@ -444,11 +444,11 @@ fn sbx_crossover(
 /// Gaussian mutation with simplex re-normalization.
 fn mutate(weights: &mut [f64], scale: f64, rng: &mut impl Rng) {
     let n = weights.len();
-    for i in 0..n {
+    for w in weights.iter_mut() {
         if rng.gen::<f64>() < 1.0 / n as f64 {
             let delta = rng.sample::<f64, _>(rand_distr::StandardNormal) * scale;
-            let new_val = weights[i] + delta;
-            weights[i] = new_val.clamp(0.0, 0.75);
+            let new_val = *w + delta;
+            *w = new_val.clamp(0.0, 0.75);
         }
     }
     // Re-normalize to sum=1
@@ -830,9 +830,8 @@ pub fn ewma_covariance(returns: &Array2<f64>, lambda: f64) -> Array2<f64> {
     }
     // 归一化权重平方和（用于有限样本 bias correction）
     let w_sq_sum: f64 = weights.iter().map(|w| (w / w_sum).powi(2)).sum();
-    for t in 0..n_periods {
-        let row = centered.row(t);
-        let w = weights[t] / w_sum;
+    for (row, &wt) in centered.rows().into_iter().zip(weights.iter()) {
+        let w = wt / w_sum;
         for i in 0..n_assets {
             for j in 0..n_assets {
                 cov[(i, j)] += w * row[i] * row[j];
@@ -1212,6 +1211,9 @@ fn grid_search_n_asset_ext(
     let mut current = vec![0.0f64; n_assets];
 
     // Recursive search
+    // TODO(DDD Step 2): 16 参数是网格搜索建模债，应参数对象化（GridSearchContext +
+    // 最优解收集器）；P0 恢复 strict 门禁阶段显式豁免，避免波及递归调用方。
+    #[allow(clippy::too_many_arguments)]
     fn search_level(
         level: usize,
         n_assets: usize,
