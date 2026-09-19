@@ -1442,7 +1442,11 @@ mod tests {
         assert!(impact_sql.contains("market_stock_daily_bar_adj bar"));
         assert!(impact_sql.contains("JOIN market_stock_daily_basic basic"));
         assert!(impact_sql.contains("bar.trade_date <= $4"));
-        assert!(impact_sql.contains("bar.trade_date >= ($3::date - INTERVAL '180 days')"));
+        // warmup = (long_window * 2).max(240)（backfill.rs，2026-09-18 事故定版）：
+        // 240 天 ≈ 172 交易日，余量 43% 覆盖春节长假与 daily_basic 个股缺行；
+        // 原 180 天临界不足致 obs_count_120 恒差 1~6 行、回填 completed 但 0 行写入静默断档。
+        assert!(impact_sql.contains("bar.trade_date >= ($3::date - INTERVAL '240 days')"));
+        assert!(turnover_sql.contains("INTERVAL '240 days'"));
         assert!(impact_sql.contains("LAG(close::double precision)"));
         assert!(impact_sql.contains("ROWS BETWEEN 19 PRECEDING AND CURRENT ROW"));
         assert!(impact_sql.contains("ROWS BETWEEN 119 PRECEDING AND CURRENT ROW"));
